@@ -3,6 +3,7 @@ the version check, and how it reads a call's arguments and output."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -64,11 +65,54 @@ def test_options_add_to_env_and_servers_and_replace_the_rest() -> None:
         ACPAdapter().check_options({"mode": "auto"})
 
 
+def test_the_allow_rules_of_kimis_own_configuration_are_found_wherever_kimi_reads_them(
+    tmp_path: Path,
+) -> None:
+    """Kimi reads ``allow`` rules from its ``config.toml`` (``[[permission.rules]]`` with the
+    decision, ``[[permission.allow]]`` entries: a pattern, or a tool with what it matches) and
+    from a project's ``.kimi-code/local.toml``, at the working folder or above it. Its ``ask``
+    and ``deny`` rules let nothing run unasked."""
+    home, work = tmp_path / "home", tmp_path / "repo" / "pkg"
+    home.mkdir()
+    work.mkdir(parents=True)
+    env = {"KIMI_CODE_HOME": str(home)}
+    assert acp.kimi_allows(env, str(work)) == []
+    (home / "config.toml").write_text(
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Bash(ls *)"\n'
+        '[[permission.rules]]\ndecision = "ask"\npattern = "Write"\n'
+        '[[permission.rules]]\ndecision = "deny"\npattern = "Bash(rm *)"\n'
+        '[[permission.allow]]\ntool = "Bash"\nmatch = "git status"\n'
+        '[[permission.allow]]\ntool = "Edit"\n'
+    )
+    assert acp.kimi_allows(env, str(work)) == ["Bash(ls *)", "Bash(git status)", "Edit"]
+    local = tmp_path / "repo" / ".kimi-code"
+    local.mkdir()
+    (local / "local.toml").write_text(
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Write"\n'
+        '[[permission.rules]]\ndecision = "ask"\npattern = "Edit"\n'
+    )
+    # an ``ask`` rule of the same pattern stands before an ``allow`` rule: that call asks
+    assert acp.kimi_allows(env, str(work)) == ["Bash(ls *)", "Bash(git status)", "Write"]
+    (home / "config.toml").write_text("not = toml =")  # Kimi itself refuses to start on it
+    assert acp.kimi_allows(env, str(work)) == ["Write"]
+
+
+async def test_a_form_the_agent_sends_while_no_turn_is_served_is_left_unfilled() -> None:
+    """Nothing is there to ask a person: the agent's form is answered ``cancel``."""
+    from trellis.harness.bridges import acp_live
+    from trellis.harness.bridges.live import LiveSessions
+
+    session = acp_live.ACPSession("chat", "form", LiveSessions(), owner="u", keeps=False, model="m")
+    answer = await session.create_elicitation("Which?", SimpleNamespace(tool_call_id="0:x"))
+    assert answer.action == "cancel"
+
+
 def test_a_version_outside_the_range_is_refused_saying_how_to_install() -> None:
-    compat.require_binary("kimi-code", "2.1.1", command="kimi")
-    compat.require_binary("kimi-code", "2.1.9", command="kimi")
-    with pytest.raises(ConfigurationError, match=r"kimi-code 2\.2\.0 answers at 'kimi'"):
-        compat.require_binary("kimi-code", "2.2.0", command="kimi")
+    compat.require_binary("kimi-code", "2.6.2", command="kimi")
+    compat.require_binary("kimi-code", "2.6.9", command="kimi")
+    for outside in ("2.1.1", "2.6.1", "2.7.0"):  # below the tested range, and past it
+        with pytest.raises(ConfigurationError, match=f"kimi-code {outside} answers at 'kimi'"):
+            compat.require_binary("kimi-code", outside, command="kimi")
     with pytest.raises(ConfigurationError, match="reports no version"):
         compat.require_binary("kimi-code", "", command="kimi")
 
@@ -169,3 +213,19 @@ async def test_a_turns_end_logged_late_is_still_read(
     await writing
     assert attempt.usage.limited == 1  # the step limit was read: the run asks once more
     assert attempt.usage.ended
+
+
+async def test_a_prompt_waits_for_the_agent_to_be_free_and_fails_when_it_never_is() -> None:
+    """A prompt is sent once the agent runs no turn of its own (``Keeper.settled``): one that
+    never ends fails the turn — a prompt sent then would be queued behind it, unseen."""
+    from trellis.harness.bridges.acp_live import QUEUED
+
+    async def never() -> bool:
+        return False
+
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt.session = SimpleNamespace(settled=never)  # type: ignore[assignment]
+    with pytest.raises(acp.ACPRunError, match="queued the prompt"):
+        async for _ in attempt._turn("hi"):
+            pass
+    assert "queued the prompt" in QUEUED

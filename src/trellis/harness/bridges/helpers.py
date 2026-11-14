@@ -176,7 +176,7 @@ def ended(
     """A helper's end, said on the stream ``events`` of the run it worked for (its
     ``helper_finished``): the one place that says it, for a helper an attempt ends
     (:meth:`Helpers.finished`) and one that outlived its attempt
-    (``claude_live.Background``). ``began``: when it started (``time.monotonic()``)."""
+    (``live.Kept``). ``began``: when it started (``time.monotonic()``)."""
     events.helper(
         "finished",
         run_id=run_id,

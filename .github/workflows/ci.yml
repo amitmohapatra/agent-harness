@@ -70,10 +70,10 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.kimi-code-npm
-          key: kimi-code-2.1.1-node22-${{ runner.os }}
+          key: kimi-code-2.6.2-node22-${{ runner.os }}
       - name: Install Kimi Code
         run: |
-          [ -x ~/.kimi-code-npm/bin/kimi ] || npm install -g --prefix ~/.kimi-code-npm @moonshot-ai/kimi-code@2.1.1
+          [ -x ~/.kimi-code-npm/bin/kimi ] || npm install -g --prefix ~/.kimi-code-npm @moonshot-ai/kimi-code@2.6.2
           echo "$HOME/.kimi-code-npm/bin" >> "$GITHUB_PATH"
           ~/.kimi-code-npm/bin/kimi --version
       - name: Lint

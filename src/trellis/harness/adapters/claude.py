@@ -108,6 +108,7 @@ from trellis.harness.adapters.base import (
     unique,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
+from trellis.harness.bridges import live as shared
 from trellis.harness.bridges.claude import (
     JournalSessions,
     SessionCost,
@@ -121,15 +122,17 @@ from trellis.harness.bridges.claude import (
     with_context,
 )
 from trellis.harness.bridges.claude_live import (
+    CODE,
+    GONE,
+    GONE_SAID,
     WORKFLOW_AGENT,
     WORKFLOW_TOOL,
     Background,
     LiveSession,
-    LiveSessions,
-    Turn,
-    gone,
+    opened,
 )
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
+from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
@@ -403,10 +406,10 @@ class ClaudeInput:
     #: the person answered a question that call asked while it ran (not its approval)
     asked: bool = False
     #: the run paused before its prompt was sent — on the question of a background
-    #: subagent's run of its conversation (``claude_live.LiveSession.asks``): it is sent now
+    #: subagent's run of its conversation (``live.Keeper.asks``): it is sent now
     unsent: bool = False
     #: that question's answer — the subagent's run, its interrupt, the person's resolution —
-    #: for when its session is not on this server (``claude_live.gone``)
+    #: for when its session is not on this server (``live.gone``)
     background_answer: tuple[str, str, InterruptResolution] | None = None
 
 
@@ -511,11 +514,8 @@ class ClaudeAdapter:
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any:
-        from trellis.harness.subagents import asked_by
-
-        named = asked_by(pending.interrupt) or {}
-        if named.get("background"):
-            answered = (str(named["run_id"]), str(named["interrupt_id"]), resolution)
+        answered = shared.background_answer(pending, resolution)
+        if answered is not None:
             return dataclasses.replace(native_input, unsent=True, background_answer=answered)
         return dataclasses.replace(
             native_input,
@@ -574,7 +574,7 @@ class ClaudeAdapter:
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
         # a background subagent's run has no query of its own: its task works in a session
-        found = self.live.attended.get(run.runtime.run_id)
+        found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
         if found is not None:  # the calls its subagent makes are this run's own
             helpers.attribute(found.task_id, None)
         source = (
@@ -707,10 +707,10 @@ class ClaudeAdapter:
         # the run; an in-process MCP server of the team's, whose tools run in the context of
         # the process's first turn; a budget of the options' own, which the CLI counts for a
         # process) run in a process of their own, as ever
-        key = runtime.conversation if _converses(runtime) else None
+        key = runtime.conversation if shared.converses(runtime) else None
         # a session another worker's live session still holds (a background subagent of the
         # run at work there) is forked: the turn goes on here, in a process of its own
-        held = session is not None and await self._held_elsewhere(runtime)
+        held = session is not None and await shared.held_elsewhere(runtime, self.live)
         kept = key is not None and not written and not _own_process(target) and not held
         context = _dated(native_input.context, run, kept=kept)
         options = _options(target, context, run, session, steps, kept=kept)
@@ -730,7 +730,7 @@ class ClaudeAdapter:
                 live = await self._live(key, options, run, session, spending, unsent=first)
             elif key is not None:
                 await self.live.close(key, OWN_PROCESS)
-                _said(self.live, runtime)
+                shared.said(self.live, runtime, CODE)
             # closed as it is left (``aclosing``): a process of its own ends here, in this
             # loop; a live session's turn is interrupted when left before its result
             source = _queried(prompt, options) if live is None else live.served(turn, prompt)
@@ -759,27 +759,10 @@ class ClaudeAdapter:
         """The answer this turn brings to a background subagent's question
         (``background_answer``), when no live session here holds that subagent (a killed
         server's): nothing continues it, so its run records the answer and ends
-        (``claude_live.gone``)."""
+        (``live.gone``)."""
         answered = native_input.background_answer
         if answered is not None and answered[0] not in self.live.attended:
-            await gone(runtime, *answered)
-
-    async def _held_elsewhere(self, runtime: Runtime) -> bool:
-        """Whether the run's session is held by another process's live session: a background
-        subagent's run it handed on there (``Journal.handed_on``) is not one this process
-        keeps, and has not ended (its keeper ends it; a keeper that stopped leaves it to the
-        run store — its deadline, and a run store that ends a run whose holder stopped
-        heartbeating ends it then: the seam where that hold is read). Two processes do not
-        hold one session: a query that resumes it forks it (``fork_session``), and the
-        subagent works on in the session it has."""
-        runs = runtime.agent.harness.runs
-        for run_id in runtime.replay.journal.handed_on:
-            if run_id in self.live.attended:
-                continue
-            record = await runs.get(run_id, tenant=runtime.tenant)
-            if record is not None and not record.status.final:
-                return True
-        return False
+            await shared.gone(runtime, *answered, why=GONE, said=GONE_SAID, code=CODE)
 
     async def _live(
         self,
@@ -794,12 +777,12 @@ class ClaudeAdapter:
         """The conversation's live session for this query: the one kept, when it was started
         with these options, holds the session the query continues and owes no earlier turn's
         result; else a new one, started as a query's own process is (``resume=``). ``None``:
-        there is no room for one (``claude_live.KEPT``). ``unsent``: the turn's own prompt is
-        still to send — what the session's background runs wait to ask a person is asked
-        first, in this run (``LiveSession.asks``)."""
+        there is no room for one (``live.KEPT``). ``unsent``: the turn's own prompt is still
+        to send — what the session's background runs wait to ask a person is asked first, in
+        this run (``live.Keeper.asks``)."""
         runtime = run.runtime
         shape = _shape(options)
-        found = self.live.get(key)
+        found = cast("LiveSession | None", self.live.get(key))
         if found is not None:
             why = None
             if found.shape != shape:
@@ -812,18 +795,15 @@ class ClaudeAdapter:
                 await self.live.close(key, why)
                 found = None
         if found is None:
-            transcripts = runtime.replay.journal.transcripts
             # the places are the server process's: every agent's sessions count (``KEPT``)
-            adapters = (a.adapter for a in runtime.agent.harness.agents.values())
-            among = {id(a): a.live for a in adapters if isinstance(a, ClaudeAdapter)}
-            among[id(self)] = self.live
-            found = await self.live.open(
+            found = await opened(
+                self.live,
                 key,
                 shape,
                 options,
-                transcripts,
+                runtime.replay.journal.transcripts,
                 owner=(runtime.tenant, runtime.user),
-                among=list(among.values()),
+                among=shared.among(runtime, self),
             )
             if found is not None:
                 # a process that resumes a session reports the session's cost: what its
@@ -832,7 +812,7 @@ class ClaudeAdapter:
                 found.cost = spending.cost
         else:  # the session's running cost is the one its process has been charged from
             spending.cost = found.cost
-        _said(self.live, runtime)
+        shared.said(self.live, runtime, CODE)
         if found is not None and unsent:
             await found.asks(runtime)
         return found
@@ -849,12 +829,6 @@ def _dated(context: str | None, run: Invocation, *, kept: bool) -> str | None:
         return context
     now = now_said(run.runtime)
     return f"{context}\n\n{now}" if context else now
-
-
-def _converses(runtime: Runtime) -> bool:
-    """Whether the run is a turn of a conversation (a thread of its own, not a sub-agent's
-    run): what a later turn follows."""
-    return runtime.parent is None and runtime.conversation != runtime.run_id
 
 
 def _own_process(options: Any) -> bool:
@@ -875,14 +849,6 @@ def _own(result: Any) -> bool:
     ``MessageOrigin``: none, or ``human``) — not one the session injected by itself."""
     origin = getattr(result, "origin", None)
     return origin is None or origin.get("kind") == "human"
-
-
-def _said(live: LiveSessions, runtime: Runtime) -> None:
-    """The run is told, once, of the background work that ended with its conversation's
-    live session."""
-    said = live.told(runtime.conversation)
-    if said is not None:
-        runtime.events.warning("claude_session", said)
 
 
 def _turn(run: Invocation, options: Any) -> Turn:
@@ -1696,26 +1662,22 @@ async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     description why), another answer in words. The call the resumed session makes again in
     other words is the one the person answered (``Replay.made``): Claude reads its questions
     with their answers."""
-    made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
     # the answers it reads are this call's: read again when it is made again after a pause
-    calling = runtime.replay.calling(call_key(QUESTION_TOOL, made.args))
-    async with runtime.limited(None, made=made):
-        with calling:
-            for asked in made.args.get("questions") or ():
-                options = [o for o in asked.get("options") or () if o.get("label")]
-                best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
-                picked = await ask_question(
-                    asked["question"],
-                    [str(o["label"]) for o in options],
-                    multiple=bool(asked.get("multiSelect")),
-                    recommended=best.get("label"),
-                    why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
-                )
-                answers[asked["question"]] = (
-                    ", ".join(picked) if isinstance(picked, list) else str(picked)
-                )
-    runtime.replay.ended(made)
+    async with runtime.asking_within(QUESTION_TOOL, args) as made:
+        for asked in made.args.get("questions") or ():
+            options = [o for o in asked.get("options") or () if o.get("label")]
+            best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
+            picked = await ask_question(
+                asked["question"],
+                [str(o["label"]) for o in options],
+                multiple=bool(asked.get("multiSelect")),
+                recommended=best.get("label"),
+                why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
+            )
+            answers[asked["question"]] = (
+                ", ".join(picked) if isinstance(picked, list) else str(picked)
+            )
     return {**made.args, "answers": answers}
 
 

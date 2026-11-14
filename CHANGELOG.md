@@ -366,6 +366,136 @@ real memory service and agent-runs, models scripted ([docs/research/FEATURE_COVE
   warning when it stays `504`), and a turn stored then answered `504` is sent again under the
   same `Idempotency-Key` and kept once (`test_memory_outage.py`, `test_memory_window.py`).
 
+### Changed: Kimi Code runs in a home of its user's own; a team's allow rules no longer stop the run
+
+Every run of `kimi()` that is not sandboxed starts Kimi with `KIMI_CODE_HOME` set to a
+folder of the run's tenant and user (`$XDG_DATA_HOME/trellis/kimi/...`, mode 0700): their
+sessions, Kimi's logs and caches are theirs alone. It is an overlay of the team's Kimi home:
+login and setup are linked, and `config.toml` is the team's with an `ask` rule added for
+each `allow` rule, so a call a team rule allows is asked about and governance decides
+(before, such a run was refused). A config whose rules are written inline is still refused.
+Sessions are now kept per user on the worker, not in the team's `~/.kimi-code/sessions`.
+
+### Added: a conversation's Kimi Code process stays between its turns while work in its background goes on
+
+Kimi's background work (`Agent` with `run_in_background`, a `Bash` command run in the
+background) died with the attempt: the `kimi acp` process ended when the turn did, and a
+background sub-agent's child run ended `SUCCESS` with its launch text. A conversation's
+process is now kept while a task is at work or Kimi's own turn for one that ended is under
+way (`bridges/acp_live.py`, on the machinery Claude's live session uses: `bridges/live.py`).
+A background sub-agent's child run stays `RUNNING` until Kimi's log says its task ended,
+then ends `SUCCESS` or `ERROR` with its result; its calls are governed in its own run; what
+it asks a person is asked in the conversation's next turn. A process that crashes, idles
+past the limit or is held by another worker ends its runs saying so
+([docs/frameworks/kimi.md](docs/frameworks/kimi.md#background-work)). A sub-agent Kimi goes
+on with (`Agent(resume=...)`) is a child run named by the type it was started with.
+
+### Fixed: Kimi Code's own configuration cannot turn the approvals off
+
+Kimi's `config.toml` can start every session approving on its own (`default_permission_mode =
+"auto"` or `"yolo"`) or in plan mode (`default_plan_mode = true`), and Kimi's ACP server still
+reports the session as `default`. The harness set a session's mode only when the target named
+one, so with such a config Kimi asked about no call and governance saw none: a `Bash` command
+ran with nobody asked. Every session a run opens (new, resumed, loaded, forked) is now set to
+the mode that asks before its first prompt, its plan mode kept as the session has it, and
+Kimi's own log of the session must confirm it or the run fails without sending a prompt
+([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
+
+### Fixed: a user's message that starts with "/" is never a Kimi command
+
+Over ACP a prompt whose first block starts with `/` is a command of the agent's (Kimi's
+`/compact`, `/status`, `/skill:<name>`; any other answers "Unknown ACP command"), run with
+no model turn. A run's prompt usually has a block of the harness's before the user's
+message, but a sandboxed run with no memory context did not: there a user typing
+`/status of my order?` ran Kimi's command instead of asking the model. The user's message
+no longer starts the prompt's first block in any run.
+
+### Added: Kimi's plan is a run event
+
+Kimi's todo list reaches an ACP client as its plan (`session/update` `plan`), which the
+harness dropped. Each state of it is now a `CUSTOM` event named `plan` with Kimi's entries.
+
+### Fixed: a turn Kimi could not finish fails the run, with Kimi's reason
+
+Kimi answers a prompt whose turn failed (its provider's error, past Kimi's own retries)
+`end_turn`, as it answers a finished one, and says why only in its log. Such a run ended
+`SUCCESS` with no answer, or with the half answer that came before the failure. The run now
+fails with Kimi's own error (its code, the provider's status), read from the log's
+`turn.ended`.
+
+### Fixed: a sandboxed Kimi command is recorded with its output
+
+A sandboxed run's `Bash` runs in the client's terminal, and Kimi's last update of the call
+names the terminal and carries no output, so the call was recorded (journal, memory, events)
+with an empty result. It is recorded with what its terminal said.
+
+### Changed: Kimi Code neither updates itself nor reports usage under the harness
+
+`KIMI_CODE_NO_AUTO_UPDATE=1` and `KIMI_DISABLE_TELEMETRY=1` are set for every run of
+`kimi()`, whatever the agent's `env` says (it is told why, as for scheduling and tower
+mode): an update would move Kimi past the tested version while it serves runs, and its
+telemetry sent the tenants' usage to Moonshot.
+
+### Changed: Kimi Code 2.6.2 (was 2.1.1)
+
+The tested range of `kimi` is now `>=2.6.2,<2.7` (`compat.BINARIES`); 2.1.x is refused.
+What changed in Kimi between the two, and what the harness does with each:
+
+- **Swarms do not run over ACP.** Since 2.3.2 `AgentSwarm` runs only in Kimi's swarm mode,
+  which only its user turns on in its own terminal; Kimi's ACP server has no mode, option or
+  command for it. Kimi still offers the tool and answers a call with `Swarm mode is off...`:
+  the run goes on, and the child run opened for each member ends `ERROR` with Kimi's words.
+- **Kimi's `allow` rules apply.** Since 2.6 the `[permission]` rules of Kimi's `config.toml`
+  (and a project's `.kimi-code/local.toml`) apply over ACP: a call an `allow` rule covers
+  runs without Kimi asking, and ACP gives a client no way to be asked first. A run whose
+  Kimi holds such a rule is not started: it fails before the first prompt, naming the rules.
+- **A background sub-agent's launch is read from Kimi's log.** 2.6.2 sends no update of the
+  result of an `Agent` call that launched its sub-agent in the background, so its child run
+  stayed `RUNNING` for ever. The launch is now Kimi's log's `task.started`, with the call it
+  is the task of; a sub-agent that asks permission before the turn took its launch is still
+  decided in its own run.
+- **Kimi's own turns** are read from its log's `turn.prompt` (2.6.2 writes no
+  `agent.turn.started`), and a usage record's cache counts may be absent.
+- **Unchanged, pinned by tests on 2.6.2:** plans are reviewed by a person, every question
+  reaches the person, `Write`/`Edit` inside a git working tree are approved by Kimi itself,
+  the schedule tools are refused when called (Kimi's `[tools] disabled` takes them off the
+  model's list), tower mode stays off.
+
+### Changed: "Allow for this conversation" on a call Kimi Code asks about is Kimi's approval for its session
+
+A call Kimi asked about offered approve or reject only, and Kimi's own "Approve for this
+session" was never chosen, so a conversation asked again about each call. The person is now
+offered the choices of a tool the harness runs (allow once, allow for this conversation,
+deny); "for this conversation" answers Kimi with its session approval and covers the tool's
+later calls in the conversation, in this run and its later runs. `bridge.permitted` and
+`bridge.asked` take `kept=` for a framework that can keep an approval for its own session.
+
+### Fixed: a Kimi sub-agent's call is approved with its arguments, and every question Kimi asks reaches the person
+
+- **A sub-agent's call was governed blind.** ACP shows no update of a sub-agent's own call,
+  and Kimi's permission request for it carries the tool's name and one line that cuts a
+  command at 50 characters. The person was asked to approve `{"request": "Requesting approval
+  to Running: <the first 50 characters>"}`, a catalog rule's `approve_when` saw no command, and
+  a read-only command could not be told from a write. The call is now decided with what Kimi
+  shows its own user of it, read from Kimi's log of the session (`interaction.request`): the
+  whole command and the folder it runs in, a written file's path and content.
+- **Questions two to four of an `AskUserQuestion` call were dropped**, with the options'
+  descriptions and the several-picks kind. Kimi sends them all only to a client that takes
+  forms (ACP's `elicitation/create`); the harness now says it does, and the form is the run's
+  question, as an MCP server's form is (`tools/elicit.py`).
+
+### Fixed: a plan Kimi Code presents is reviewed by a person, with every option
+
+Kimi asks its user to review every plan (`ExitPlanMode`): the plan, an option for each
+approach, `Revise` and `Reject and Exit`. The harness treated the request as a read to let
+through and answered with the first option that allows, so a plan was approved by nobody and
+its first approach chosen. A permission request that offers a choice of the agent's own (two
+options of one kind, where a call's request has one way each to allow and to refuse) is now
+the agent's question to its user: the run pauses on one question that shows what the agent
+shows (the plan) and every option it offers, and the person's pick is the answer. Kimi's
+`AskUserQuestion` over a permission request is asked the same way, so its `Skip` is offered
+too. A session Kimi's own `default_plan_mode` starts in plan mode plans as Kimi does.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can
