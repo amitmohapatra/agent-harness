@@ -306,6 +306,33 @@ async def test_the_earlier_turns_are_the_run_stores_answered_ones_in_order(
     ]
 
 
+async def test_a_turn_cut_short_by_its_budget_is_a_turn_with_its_answer(harness: Harness) -> None:
+    from trellis import Budget
+
+    @tool(side_effects="read")
+    def stock(sku: str) -> int:
+        """Units of a SKU in stock."""
+        return 7
+
+    seen: list[list[Said]] = []
+
+    async def answer(input: str, agent: Runtime) -> str:
+        if input == "again":
+            seen.append(await earlier(agent))
+            return "ok"
+        said = await agent.tools.call("stock", sku="a")  # past the budget: not run
+        return f"partly: {said}"
+
+    agent = arm(harness.wrap(answer, id="fn-partial", budget=Budget(max_tool_calls=0)), [stock])
+    first = await agent.run("count", user="ada", thread=THREAD)
+    assert first.status is RunStatus.PARTIAL
+    await agent.run("again", user="ada", thread=THREAD)
+    assert [(s.role.value, s.content) for s in seen[0]] == [
+        ("user", "count"),
+        ("assistant", first.answer),
+    ]
+
+
 async def test_no_earlier_turns_outside_a_conversation_or_inside_a_child() -> None:
     from types import SimpleNamespace
 
