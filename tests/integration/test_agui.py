@@ -678,8 +678,14 @@ def test_the_routes_are_in_the_openapi_document() -> None:
     doc = app.openapi()
     assert doc["info"]["title"] == "chat agent" and doc["info"]["version"] != "0.1.0"
     assert [t["name"] for t in doc["tags"]] == ["agui"]
+    [tag] = doc["tags"]
+    assert "sticky sessions" in tag["description"]  # what an operator must know of replicas
+    assert tag["externalDocs"]["url"].rstrip("/") == "https://docs.ag-ui.com"
     run = doc["paths"][f"{PATH}/run"]["post"]
     assert list(run["responses"]["200"]["content"]) == ["text/event-stream"]
+    streamed = run["responses"]["200"]
+    assert "Last-Event-ID" in streamed["description"]
+    assert streamed["content"]["text/event-stream"]["schema"] == {"type": "string"}
     for status in ("401", "404", "409"):
         assert list(run["responses"][status]["content"]) == ["application/problem+json"]
     assert set(run["responses"]["422"]["content"]) == {
