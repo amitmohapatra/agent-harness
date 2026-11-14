@@ -115,6 +115,8 @@ Body here.
     assert front_matter("No front matter.", where="x") == ({}, "No front matter.")
     assert front_matter("", where="x") == ({}, "")
     assert front_matter("---\nliteral: |\n---\n", where="x") == ({"literal": ""}, "")
+    quoted = front_matter("---\nnone: \"\"\nalso: ''\none: '\n---\n", where="x")[0]
+    assert quoted == {"none": "", "also": "", "one": "'"}  # an empty quoted value is empty
 
 
 @pytest.mark.parametrize(
