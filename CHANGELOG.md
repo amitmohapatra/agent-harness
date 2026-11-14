@@ -41,6 +41,13 @@ answers, governed as ever; the conversation's next turn is that agent's (`active
 from turn to turn), said on the run's stream; a pause resumes in place
 ([react.md](docs/frameworks/react.md#handoffs-langgraph-swarm)).
 
+### Changed: Deep Agents' `compact_conversation` asks nobody
+
+Deep Agents' `SummarizationToolMiddleware`, given to `ReAct(middleware=)` or a graph of your
+own, compacts the conversation when the model asks: its tool is declared a read (it had
+declared nothing, so every call asked a person)
+([react.md](docs/frameworks/react.md#compaction-on-request)).
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

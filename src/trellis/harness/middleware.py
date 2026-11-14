@@ -278,6 +278,10 @@ ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
 #: date with the advice to call the tool again, which would start a second task. A status and
 #: the list are values that change: live, as any tool's by default.
 ASYNC_TASK_DONE: Final[Mapping[str, Any]] = {FRESHNESS: STATIC}
+#: Deep Agents' tool that compacts the conversation on request (its
+#: ``SummarizationToolMiddleware``): the graph's own state — a summary in the history's place,
+#: the history kept in its backend as its automatic summarization keeps it —, so a read.
+COMPACT: Final = "compact_conversation"
 #: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
 FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
 
@@ -305,8 +309,8 @@ def declare_files(graph: Any) -> None:
     is: those calls only change the state, which its checkpoint keeps. Deep Agents'
     :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
     (:data:`ASYNC_TASKS`; a write's result, that it is no value to read again:
-    :data:`ASYNC_TASK_DONE`) — a tool that says so itself keeps its word. Only the framework's
-    own (:func:`framework_made`)."""
+    :data:`ASYNC_TASK_DONE`), its :data:`COMPACT` a read — a tool that says so itself keeps
+    its word. Only the framework's own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
@@ -332,6 +336,8 @@ def declare_files(graph: Any) -> None:
                 tool.metadata = {**said, **outside_state(name)}
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
+            elif name == COMPACT and "side_effects" not in said:
+                tool.metadata = {**said, "side_effects": "read"}
             elif name in ASYNC_TASKS and "side_effects" not in said:
                 done = ASYNC_TASKS[name] == "write" and not data_of(said, strict=False)
                 given = ASYNC_TASK_DONE if done else {}

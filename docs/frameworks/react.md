@@ -877,6 +877,26 @@ lead = ReAct("You lead the research.", model, subagents=[{
 
 Tested in `tests/integration/test_react_fan_out.py`.
 
+### Compaction on request
+
+Claude's and Kimi's `/compact`, the model's own way: Deep Agents' `SummarizationToolMiddleware`
+(its `compact_conversation` tool), opt-in through `middleware=`:
+
+```python
+from deepagents.middleware.summarization import create_summarization_tool_middleware
+from trellis.harness.automatic import JournalBackend
+
+backend = JournalBackend()
+ReAct("...", model, backend=backend,
+      middleware=[create_summarization_tool_middleware(model, backend)])
+```
+
+The tool is the graph's own machinery — a summary in the history's place, the history kept in
+the backend as Deep Agents' automatic summarization keeps it — so it is declared a read (on
+any wrapped graph that has it, `middleware()`'s too): the model compacts without a person
+approving it. Deep Agents refuses a compaction that is too early (under half its automatic
+trigger); the run's question stays ahead of the summary, as with the automatic one.
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
