@@ -150,6 +150,34 @@ async def test_a_file_a_command_leaves_at_any_depth_is_known_to_be_the_users_or_
         assert beside in told, told
 
 
+async def test_twenty_new_files_beside_the_folder_are_named_and_the_rest_counted(
+    harness: Harness,
+) -> None:
+    """One command leaves new files beside the kept folder: up to 20 are named, with no
+    count; past 20, the first 20 and how many more."""
+    from langchain_core.messages import ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness.sandbox import OUTPUTS_BESIDE
+
+    twenty = [f"a{n:02}.csv" for n in range(20)]
+    more = [f"b{n:02}.csv" for n in range(21)]
+    steps = [
+        ("execute", {"command": "echo first"}),
+        ("execute", {"command": "touch " + " ".join(twenty)}),
+        ("execute", {"command": "touch " + " ".join(more)}),
+        "done",
+    ]
+    model = ScriptedChatModel(turns=steps)
+    agent = arm(harness.wrap(ReAct("s", model, backend=sandbox(FakeSandboxes())), id="many"), [])
+    assert (await agent.run("make the files", user="u")).answer == "done"
+    told = [m.text for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    folder = "/workspace/outputs"
+    assert OUTPUTS_BESIDE.format(folder=folder, files=", ".join(twenty)) in told[1], told[1]
+    named = ", ".join(more[:20]) + " and 1 more"
+    assert OUTPUTS_BESIDE.format(folder=folder, files=named) in told[2], told[2]
+
+
 async def test_a_function_targets_own_sandbox_is_its_runs_and_deleted_at_the_end(
     harness: Harness,
 ) -> None:
