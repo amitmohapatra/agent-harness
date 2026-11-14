@@ -143,12 +143,6 @@ BUG_M3 = (
 )
 
 
-#: HAR finding H1 (agent-harness, P3): ``memory_forget`` of the user's words is run first and
-#: asks only once the service refused it, so its ``TOOL_CALL_START`` is on the stream before
-#: the pause and again after the approval: two starts for one call (INV-10).
-FINDING_H1 = "H1: memory_forget's call starts before the pause and again after it"
-
-
 async def _forget_by_the_agent(
     adapter: str, tmp: Path, uid: str, pick: str
 ) -> tuple[str, str, str]:
@@ -195,7 +189,6 @@ async def test_forgetting_the_users_words_asks_then_they_are_gone(
     recall and marked deleted in the store (before BUG-M2's fix the approved forget was
     refused too: the documented flow never forgot)."""
     invariants.allow("INV-4", "the first memory_forget is the service's refusal: no effect")
-    invariants.allow("INV-10", FINDING_H1)
     await _forget_by_the_agent(adapter, tmp_path, uid, "turn")
 
 

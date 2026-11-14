@@ -708,8 +708,17 @@ class Invariants:
                 for n, ev in enumerate(evs_a):
                     if ev.get("type") == "RUN_ERROR" and n + 2 < len(evs_a):
                         out.append(f"INV-10 run {run_id} attempt {attempt}: events after RUN_ERROR")
+                # a call that paused the run (ask_user, an ask inside a tool, a refusal the
+                # person then answers) ended that attempt with a ``paused`` result and runs again
+                # when the run resumes: its start in the paused attempt is not a second start
+                paused = {
+                    str(ev.get("tool_call_id"))
+                    for ev in evs_a
+                    if ev.get("type") == "TOOL_CALL_RESULT"
+                    and (ev.get("data") or {}).get("status") == "paused"
+                }
                 for ev in evs_a:
-                    if ev.get("type") == "TOOL_CALL_START":
+                    if ev.get("type") == "TOOL_CALL_START" and str(ev.get("tool_call_id")) not in paused:
                         starts[str(ev.get("tool_call_id"))] += 1
                     if ev.get("type") == "TOOL_CALL_END":
                         ends[str(ev.get("tool_call_id"))] += 1
@@ -724,7 +733,7 @@ def _call_key(tool: Any, args: Any) -> str:
 
 
 #: what a tool's result says of a call that never ran (a person refused it, a hook denied it)
-NOT_RUN: Final = frozenset({"rejected", "denied", "refused", "cancelled", "skipped"})
+NOT_RUN: Final = frozenset({"rejected", "denied", "refused", "cancelled", "skipped", "paused"})
 
 
 def _route(path: str) -> str:
