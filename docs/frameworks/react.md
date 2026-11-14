@@ -897,6 +897,60 @@ any wrapped graph that has it, `middleware()`'s too): the model compacts without
 approving it. Deep Agents refuses a compaction that is too early (under half its automatic
 trigger); the run's question stays ahead of the summary, as with the automatic one.
 
+### A goal loop: the answer graded and revised (a recipe)
+
+Kimi's goal mode and Claude's `/loop`, as Deep Agents has it: `RubricMiddleware`, opt-in
+through `middleware=`. A run whose input names a `rubric` has its answer graded by a model of
+its own and revised until the grader is satisfied; a run that names none is sent what it
+always was.
+
+```python
+from deepagents.middleware.rubric import RubricMiddleware
+
+agent = h.wrap(ReAct("You answer with units.", model, tools=[mast],
+                     middleware=[RubricMiddleware(model=grader)]), id="surveyor")
+await agent.run({"messages": [{"role": "user", "content": "how high is the mast?"}],
+                 "rubric": "Says the unit"}, user="u")
+```
+
+It needs no harness code: the grader's calls count to the run's budget and spend as every
+model call of the graph does, and the revisions are model steps under `max_steps`. It adds
+model calls to every graded run, so it is never a default
+(`tests/integration/test_react_rubric.py`).
+
+### Guardrails: input and output (a recipe)
+
+An OpenAI agent's input and output guardrails are LangChain's `@before_agent` and
+`@after_agent` hooks with `jump_to`, given through `middleware=`:
+
+```python
+from langchain.agents.middleware import after_agent, before_agent
+from langchain_core.messages import AIMessage
+
+
+@before_agent(can_jump_to=["end"])
+def no_card_numbers(state, runtime):
+    if holds_a_card_number(state["messages"][-1].content):
+        return {"messages": [AIMessage("I cannot help with card numbers.")], "jump_to": "end"}
+
+
+@after_agent
+def no_cards_out(state, runtime):
+    answer = state["messages"][-1]
+    if holds_a_card_number(answer.content):
+        return {"messages": [AIMessage("The answer was withheld.", id=answer.id)]}
+
+
+ReAct("You help with accounts.", model, tools=[account], middleware=[no_card_numbers, no_cards_out])
+```
+
+A blocked input reaches no model and no tool; the guard's message is the turn's answer. It
+needs no harness code, and the blocked turn is the run's as any other: its record (`SUCCESS`,
+the guard's answer its output), its stream, the conversation's memory — so the next turn's
+model reads that the request was refused — and every tool call made before an output guard
+stays recorded. For a policy model as the guard, LangChain's `OpenAIModerationMiddleware` and
+`PIIMiddleware` go in `middleware=` the same way (`tests/integration/test_react_guardrails.py`).
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
