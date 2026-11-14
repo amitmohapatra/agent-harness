@@ -1883,6 +1883,8 @@ class ModelHooks(AgentMiddleware):
                     reply = await handler(request)
             except Exception as exc:
                 error = model_error(exc, self.timeout)
+                if runtime is not None and _retries_itself(request.model):
+                    runtime.model_failures += 1  # its client tried again before it failed
                 await running().failed("model", error)
                 if error is exc:
                     raise
@@ -2168,6 +2170,13 @@ async def _limited(runtime: Runtime | None, seconds: float | None) -> AsyncItera
         return
     async with runtime.limited(limit):
         yield
+
+
+def _retries_itself(model: Any) -> bool:
+    """Whether a chat model's own client tries a failed request again: LangChain's chat
+    models' ``max_retries`` (unset: the provider SDK's default, which retries). A model the
+    harness routes sets none (the gateway retries), and its failure is the run's to retry."""
+    return hasattr(model, "max_retries") and model.max_retries != 0
 
 
 def model_error(exc: Exception, timeout: float | None = None) -> Exception:

@@ -50,7 +50,8 @@ from pydantic import BaseModel, Field
 from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService, pushed
 from trellis import Harness
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ModelError, RunEventType, RunStatus
+from trellis.harness.middleware import ModelHooks
 
 ran: list[str] = []
 
@@ -475,6 +476,55 @@ async def test_model_retry_middleware_asks_the_model_again(harness: Harness) -> 
     graph = create_agent(model, tools=[stock], middleware=[retry])
     result = await harness.wrap(graph, id="again").run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "7"
+
+
+@pytest.mark.parametrize(
+    ("retries", "fails", "requests", "again"),
+    [
+        (None, 1, 1, True),  # no retry of the graph's: a worker may run the run again
+        (0, 1, 1, True),  # a retry middleware that retries nothing: the same
+        (2, 2, 3, None),  # the graph's retries met the failures: the run answers
+        (2, 9, 3, False),  # its retries spent: nobody runs the run again on top of them
+    ],
+)
+async def test_a_failing_model_is_tried_again_by_one_owner(
+    harness: Harness, retries: int | None, fails: int, requests: int, again: bool | None
+) -> None:
+    """Who tries a failed model call again has one owner. A graph with LangChain's
+    ``ModelRetryMiddleware`` retries as the library does; a failure that outlasts those
+    retries is reported as one a retry will not help (``retryable`` false: the run store runs
+    a retryable failure again, attempt after attempt — three tries, not three per attempt).
+    A graph with no retry of its own reports the failure as one a worker may run again."""
+    model = Flaky(turns=["answered"], errors=[ModelError("503", retryable=True)] * fails)
+    retry = ModelRetryMiddleware(
+        max_retries=retries or 0, on_failure="error", initial_delay=0.0, jitter=False
+    )
+    graph = create_agent(model, tools=[], middleware=[] if retries is None else [retry])
+    result = await harness.wrap(graph, id="retried").run("x", user="u")
+    assert fails - len(model.errors) + len(model.seen) == requests
+    if again is None:
+        assert result.status is RunStatus.SUCCESS and result.answer == "answered"
+    else:
+        assert result.error is not None and result.error.retryable is again
+
+
+class OwnRetries(Flaky):
+    """A chat model with LangChain's ``max_retries`` setting: its client retries, or not."""
+
+    max_retries: int | None = None
+
+
+@pytest.mark.parametrize(("own", "again"), [(None, False), (2, False), (0, True)])
+async def test_a_model_whose_client_retries_is_not_run_again_on_top(
+    harness: Harness, own: int | None, again: bool
+) -> None:
+    """A chat model's own client retries a failed request (``max_retries``; unset is the
+    provider SDK's default, which retries): its failure has been retried already and is not
+    reported as one to run again. With ``max_retries=0`` nothing retried, and it is."""
+    model = OwnRetries(turns=["x"], errors=[ModelError("503", retryable=True)], max_retries=own)
+    graph = create_agent(model, tools=[], middleware=[ModelHooks()])
+    result = await harness.wrap(graph, id="client").run("x", user="u")
+    assert result.error is not None and result.error.retryable is again
 
 
 async def test_model_fallback_middleware_asks_the_next_model_with_the_same_tools(

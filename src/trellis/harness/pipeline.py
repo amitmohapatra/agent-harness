@@ -888,7 +888,7 @@ async def _concluded(
             error=timed_out,
         )
     elif error is not None:
-        failure = AgentError.of(error, source=agent.adapter.name)
+        failure = _settled(AgentError.of(error, source=agent.adapter.name), runtime)
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
         await agent.hooks.failed("run", error)
         result = await _failed(agent, runtime, failure, extracted)
@@ -903,6 +903,18 @@ async def _concluded(
     if not _again(runtime, result):
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
+
+
+def _settled(failure: AgentError, runtime: Runtime) -> AgentError:
+    """``failure`` as the run reports it. Who tries a failed model call again has one owner:
+    where the framework did (``Runtime.model_failures``: the model failed again after its
+    own retry — LangChain's ``ModelRetryMiddleware``, a retrying node), a failure that still
+    ends the attempt is not one a retry may pass, and the run store does not run the whole
+    run again on top of those tries. Any other failure as it is: with no retry of the
+    framework's, a retryable one is run again by a worker."""
+    if failure.retryable and runtime.model_failures > 1:
+        return failure.model_copy(update={"retryable": False})
+    return failure
 
 
 def _unanswered(agent: Agent, runtime: Runtime, extracted: Extracted | None) -> AgentError | None:

@@ -28,6 +28,7 @@ from trellis.harness.adapters.langgraph import (
     LangGraphAdapter,
     added,
     carried_of,
+    carried_plain,
     langchain_message,
     notified,
 )
@@ -205,8 +206,20 @@ def test_the_turns_question_is_the_users_never_a_notification_after_it() -> None
 
 
 def test_a_conversation_carries_only_what_its_graph_holds_anything_in() -> None:
-    assert carried_of({"async_tasks": {}, "messages": []}) == {}
-    assert carried_of({"async_tasks": {"t": TASK}}) == {"async_tasks": {"t": TASK}}
+    assert carried_of({"async_tasks": {}, "messages": []}, {}) == {}
+    assert carried_of({"async_tasks": {"t": TASK}}, {}) == {"async_tasks": {"t": TASK}}
+
+
+def test_what_a_turn_emptied_or_deleted_is_carried_as_gone() -> None:
+    """A channel the turn began with and emptied is carried empty, and an entry of a mapping
+    it no longer holds (a file it deleted) as ``None`` — once: a marker it began with is not
+    made again. A checkpoint adds only the channels it holds whole to what is carried."""
+    began = {"files": {"/a": {"content": "a"}, "/b": {"content": "b"}, "/c": None}, "todos": [1]}
+    ended = {"files": {"/a": {"content": "a2"}}, "todos": []}
+    assert carried_of(ended, began) == {"files": {"/a": {"content": "a2"}, "/b": None}, "todos": []}
+    assert carried_of({"files": {}}, {"files": {"/a": {}}}) == {"files": {"/a": None}}
+    partial = {"todos": [2], "files": object()}  # files: kept as deltas, not whole here
+    assert carried_plain(partial, began) == {"files": began["files"], "todos": [2]}
 
 
 # --------------------------------------------------------------------------- with a run store

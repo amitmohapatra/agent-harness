@@ -511,7 +511,10 @@ def test_the_step_limit_counts_the_run_or_the_invocation() -> None:
 async def test_the_step_limit_given_no_number_is_twelve_steps(harness: Harness) -> None:
     """``step_limit()`` with no argument is the documented default: 12 model calls that may
     call tools, then the one that answers (as ``middleware()`` and ``ReAct`` have it)."""
-    assert step_limit().run_limit == step_limit(12).run_limit == 13
+    default, twelve = step_limit(), step_limit(12)
+    assert isinstance(default, ModelCallLimitMiddleware)
+    assert isinstance(twelve, ModelCallLimitMiddleware)
+    assert default.run_limit == twelve.run_limit == 13
     calls = [("look", {"item": str(n)}) for n in range(12)]
     model = ScriptedChatModel(turns=[*calls, "partial"])
     target = graph(model, HarnessTools(), step_limit(), checkpointer=RunCheckpointer())
