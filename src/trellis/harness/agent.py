@@ -1157,8 +1157,9 @@ class Agent:
             output(span, pushed.rendered)
         stale: list[str] = []
         if window is Window.MESSAGES:
+            said = from_window(pushed.conversation.messages if pushed.conversation else [])
             runtime.history, stale = snapshots.out_of_date(
-                from_window(pushed.conversation.messages if pushed.conversation else []),
+                await self.caught_up(runtime, said, replayed),
                 lambda name: snapshots.declared_max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
@@ -1208,6 +1209,29 @@ class Agent:
             data={"chars": len(rendered), "evidence_status": status},
         )
         return pushed
+
+    async def caught_up(
+        self, runtime: Runtime, window: list[Said], budget: int | None
+    ) -> list[Said]:
+        """Memory's ``window`` with the conversation's latest turns it does not hold yet, from
+        the run store (``conversation.earlier``: each one's question and answer, within the
+        conversation's ``budget``): a turn whose transcript was still on its way when its run
+        returned (past :data:`TURN_WRITE_SECONDS`, queued), on whichever process ran it.
+        Matched by message id — the window gives each chat message's back
+        (``history.from_window``) — so a turn memory holds is never said twice: only the turns
+        after the newest one it holds are read and added (all the run store gives when the
+        window is empty), and none when the window names no turn the run store has (written
+        before the window gave ids back, another agent's). One listing of the run store a
+        turn, and one run read for each turn memory lacks. A run store that cannot be read is
+        a warning, and the window is as memory gave it."""
+        known = {s.id for s in window if s.id is not None}
+        if window and not known:
+            return window
+        try:
+            return [*window, *await conversation.earlier(runtime, budget=budget, held=known)]
+        except Exception as exc:
+            runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+            return window
 
     def conversation_budget(self, runtime: Runtime) -> int | None:
         """The tokens the conversation memory replays may take: what the run's next request

@@ -35,8 +35,9 @@ import contextlib
 import dataclasses
 import functools
 import hashlib
+import itertools
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -211,7 +212,11 @@ def remembered(interrupt: Interrupt, resolution: InterruptResolution) -> bool:
 
 
 async def earlier(
-    runtime: Runtime, *, whole: bool = False, budget: int | None = None
+    runtime: Runtime,
+    *,
+    whole: bool = False,
+    budget: int | None = None,
+    held: Set[str] = frozenset(),
 ) -> list[Said]:
     """The conversation's earlier turns, oldest first, as the run store keeps them: each
     turn's question and answer (a cancelled turn's question alone), of this agent, tenant,
@@ -220,13 +225,24 @@ async def earlier(
     (``Agent.results``) is that transcript — its tool calls and their results too, the
     figures behind its answer — for a follow-up ("why was that?", "redo it with X").
     ``budget``: the tokens they may take (``Agent.conversation_budget``), spent as the memory
-    service spends its window's (:func:`_fitted`). A run with no conversation of its own, or a
-    child run, has none."""
+    service spends its window's (:func:`_fitted`). ``held``: the message ids the caller has
+    of the conversation already (memory's window: ``Agent.caught_up``) — only the turns after
+    the newest one among them are read (one run each) and given, none when the newest is, or
+    when none of the listed turns is among them (nothing says where they would go). A run
+    with no conversation of its own, or a child run, has none."""
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
-    records = sorted(await _asked(runtime, thread), key=lambda r: r.created_at)[-EARLIER_RUNS:]
+    found = sorted(await _asked(runtime, thread), key=lambda r: r.created_at)[-EARLIER_RUNS:]
     conversation = runtime.conversation
+    if held:  # newest first: the turns before the first one the caller holds are the newer
+        newer = list(
+            itertools.takewhile(
+                lambda turn: _lacking(held, conversation, turn.run_id), reversed(found)
+            )
+        )
+        found = newer[::-1] if len(newer) < len(found) else []
+    records = found
     kept = runtime.agent.results.turns(conversation) if whole else {}
     turns: list[list[Said]] = []
     previous: Any = None
@@ -312,6 +328,11 @@ async def _asked(runtime: Runtime, thread: str) -> list[Turn]:
                 if mine == EARLIER_RUNS:
                     break
     return found
+
+
+def _lacking(held: Set[str], conversation: str, run_id: str) -> bool:
+    """Whether ``held`` has neither the question nor the answer of the turn ``run_id``."""
+    return held.isdisjoint((question_id(conversation, run_id), answer_id(conversation, run_id)))
 
 
 def _fitted(turns: Sequence[Sequence[Said]], budget: int) -> list[Sequence[Said]]:

@@ -180,18 +180,29 @@ MESSAGE_ID: Final = "message_id"
 
 def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
     """The memory service's window as messages, in its order, each with the run record the
-    service keeps of it (``Said.facts``; a role the window does not replay is left out)."""
-    return [
-        Said(
-            role=SPEAKERS[m.role],
-            content=m.text,
-            tool_calls=tuple(Called(c.id, c.name, dict(c.arguments)) for c in m.tool_calls),
-            tool_call_id=m.tool_call_id,
-            facts=getattr(m, RUN_RECORD, None) or None,
+    service keeps of it (``Said.facts``) and the harness's id its run record names (a chat
+    message's: :func:`recorded`); a role the window does not replay is left out."""
+    out: list[Said] = []
+    for m in [m for m in messages if m.role in SPEAKERS]:
+        facts, named = _named(getattr(m, RUN_RECORD, None))
+        out.append(
+            Said(
+                role=SPEAKERS[m.role],
+                content=m.text,
+                tool_calls=tuple(Called(c.id, c.name, dict(c.arguments)) for c in m.tool_calls),
+                tool_call_id=m.tool_call_id,
+                facts=facts,
+                id=named,
+            )
         )
-        for m in messages
-        if m.role in SPEAKERS
-    ]
+    return out
+
+
+def _named(record: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+    """A stored run record (:func:`recorded`) as the message's facts and the id it names."""
+    facts = dict(record or {})
+    named = facts.pop(MESSAGE_ID, None)
+    return facts or None, named
 
 
 def answered(said: Sequence[Said]) -> list[Said]:
@@ -223,8 +234,12 @@ def recorded(said: Said) -> dict[str, Any]:
     if said.tool_call_id is not None:
         message["tool_call_id"] = said.tool_call_id
     metadata: dict[str, Any] = {}
-    if said.facts:
-        metadata[RUN_RECORD] = dict(said.facts)
+    facts = dict(said.facts or {})
+    if said.id is not None and said.role is not Speaker.TOOL:
+        # in its run record too: the one part of a message the window gives back (``from_window``)
+        facts[MESSAGE_ID] = said.id
+    if facts:
+        metadata[RUN_RECORD] = facts
     if said.id is not None:
         metadata[MESSAGE_ID] = said.id
     if metadata:
@@ -246,7 +261,7 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
             for c in stored.get("tool_calls") or ()
         ),
         tool_call_id=stored.get("tool_call_id"),
-        facts=(stored.get("custom_metadata") or {}).get(RUN_RECORD),
+        facts=_named((stored.get("custom_metadata") or {}).get(RUN_RECORD))[0],
         id=(stored.get("custom_metadata") or {}).get(MESSAGE_ID),
     )
 

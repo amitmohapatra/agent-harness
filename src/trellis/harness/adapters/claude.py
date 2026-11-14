@@ -112,7 +112,7 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending, approvals_read, content_key
+from trellis.harness.journal import Pending, approvals_read, call_key
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -476,7 +476,7 @@ class ClaudeAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
 
     async def _attended(
         self, target: Any, run: Invocation, found: Background
@@ -1148,7 +1148,7 @@ class Steps:
 
         if name.startswith(f"mcp__{SERVER}__"):  # its MCP request names no call: said here
             bare = name.removeprefix(f"mcp__{SERVER}__")
-            self.runtime.replay.announced(content_key("call", bare, args), call_id)
+            self.runtime.replay.announced(call_key(bare, args), call_id)
 
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
         self.helped.pop(call_id, None)
@@ -1431,7 +1431,7 @@ async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
     # the answers it reads are this call's: read again when it is made again after a pause
-    calling = runtime.replay.calling(content_key("call", QUESTION_TOOL, made.args))
+    calling = runtime.replay.calling(call_key(QUESTION_TOOL, made.args))
     async with runtime.limited(None, made=made):
         with calling:
             for asked in made.args.get("questions") or ():

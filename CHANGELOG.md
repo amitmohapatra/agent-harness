@@ -263,6 +263,77 @@ not hold:
   of it again (a `ToolRetryMiddleware` retrying a failed irreversible call was asked about a
   second time); an edited call, or the same call of a new model step, is asked about anew.
 
+### Fixed: a call across a run's attempts, and a turn while memory is slow or down
+
+Four findings of the user-scenario suite (SCN-2, SCN-3, SCN-4, SCN-6), each tested in process
+in `tests/integration/test_scenario_fixes.py`:
+
+- **Writes to memory were lost when the memory service was down for more than a few seconds.**
+  A background write had three tries half a second apart; once the memory client's circuit
+  opened each try was refused at once, and with no spool (none in a container) transcripts,
+  tool records and outcomes were "failed and is lost". While the circuit is open a write now
+  spends no attempt: it waits the circuit's cool-down, queued, and is sent when the service is
+  back — however long that takes, bounded by the queue (10,000 writes; past it a write is
+  spooled or lost and reported, as a full queue's always was). **A write now has six attempts,
+  not three**: one more than the five failed calls that open the circuit, so the first write
+  of an outage is still trying when it opens. Still lost: what waits in the queue when the
+  process is killed, with no spool what a clean stop cannot deliver in 10 s, and a write that
+  fails six times while the service answers other calls ([memory.md](docs/memory.md)).
+- **The next turn was answered without the turn before when memory took more than 5 s to keep
+  it.** Where memory's window comes as messages (LangGraph's graphs, `ReAct`), the
+  conversation's latest turns memory does not hold yet are added after it from the run store
+  (each one's question and answer), on whichever server the next turn runs; matched by message
+  id, so a turn memory holds is never given twice; with nothing in memory's window, the run
+  store's newest turns (at most 10, within the conversation's budget). A chat message's
+  `run_record` in memory now carries its `message_id`. One listing of the run store per turn
+  of a conversation.
+- **A call with no framework id had a different id in a later attempt, or another call's.**
+  A call a graph's node or a function makes itself was `<run>:<step>`, the step counted per
+  attempt: after a resume a checkpointed graph's payment took the id of a lookup made before
+  the pause. It is `<run>:<digest of the tool and arguments>:<which time>` — the call's
+  idempotency key — in every attempt. **The format of these ids changed**; a framework's own
+  call ids are as they were.
+- **A call replayed after a resume was announced again** (`TOOL_CALL_START`…`TOOL_CALL_RESULT`
+  with `cached`), so a run's event log, a reconnecting AG-UI client and a thread's replay
+  showed it twice. A replayed call emits nothing: the attempt that ran it announced it. The
+  AG-UI activity line counts a run's calls across its attempts on the replica that served them.
+
+### Fixed: a tool result shaped like the journal's record of a call is its result
+
+A run's journal kept a call's output bare and an outcome that was none (a timeout, an unknown
+effect) under the key `trellis_outcome`; a tool that returned a dict of that shape — third-party
+JSON passed on — was replayed as the harness's record after a pause: every resume of the run
+failed, or the tool's author chose the replayed status and metadata (security review, SEC-R-5).
+Every call's record is now kept in an envelope (`trellis_record`: status, output, metadata) and
+read back from those three fields only, so an output is never read as a record. A journal
+written before this release is still read (a run paused before the upgrade); a server of the
+release before does not read the new shape: resume a run where it paused, or upgrade every
+server before resuming.
+
+### Fixed: a run that fails leaves no child `RUNNING`
+
+A run whose model call stalled ends `ERROR`; a helper its framework had open in the foreground
+(a Claude subagent) was let go of as for a pause and never ended: `RUNNING` for ever, held by
+nothing (architecture review, ARCH-1). A run's open children — helpers, sub-agents' runs — now
+end with it whatever its final status, once, where the run is concluded: with its status and
+error when it failed or ran out of time, cancelled with its reason when it was cancelled, and
+cancelled ("the run that started it ended first") when it answered without them. A child handed
+on to its conversation's session (a Claude subagent working in the background) still goes on.
+One listing of the run's children at the end of every run.
+
+### Changed: what a turn costs the run store and the journal does not grow with the conversation
+
+- A call its framework ran itself (Claude Code's built-in tools, a provider's hosted tools, an
+  ACP agent's) is journaled as the stream previews its result (2,000 characters), not whole:
+  200 calls of 10 KB kept 2 MB in the journal and every pause checkpoint. Whole still while a
+  subagent works in the foreground — started again after a pause, it reads its calls' results
+  again (performance review, PERF-8).
+- Whether another server served a turn of the conversation since this one's last is read from
+  the newest runs only: two requests whatever the conversation's length, not one for each of
+  up to 50 turns (PERF-6).
+- The turns memory does not hold yet are read from the run store one run each; the turns it
+  holds are not read.
+
 ### Fixed: two failures a busy machine showed
 
 - **A wide table can be queried.** Typing a saved result asks every column whether a cell

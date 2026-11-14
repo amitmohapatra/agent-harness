@@ -234,7 +234,7 @@ class LangGraphAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from langchain_core.messages import AIMessage
@@ -270,7 +270,7 @@ class LangGraphAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
         _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
