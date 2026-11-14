@@ -1723,16 +1723,18 @@ def test_h_a_webhook_is_checked_as_every_url_the_harness_hands_on(server: StandI
 
 
 @pytest.mark.filterwarnings("ignore:The feature `forked subagents` is in beta")
-async def test_h_a_start_that_sends_the_conversation_asks_a_person(server: StandIn) -> None:
-    """With ``mode="fork"`` the server is sent the conversation at launch, which cannot be taken
-    back: ``start_async_task`` is irreversible — a person approves it, unless the catalog says
-    otherwise. The others say what they say for any async sub-agent."""
+async def test_h_a_start_that_sends_the_conversation_says_what_deep_agents_says(
+    server: StandIn,
+) -> None:
+    """With ``mode="fork"`` the server is sent the conversation at launch: the harness keeps
+    Deep Agents' behaviour — a start is a write, announced, not asked about — and a team that
+    wants a person to approve each start gives it that risk in the tool catalog."""
     graph = ReAct("You help.", Model(turns=[]), subagents=[subagent(server, mode="fork")])
     harness = Harness(config=Settings())
     try:
         agent = harness.wrap(graph, id="bg")
         own = {s.name: s.side_effects for s in await agent.adapter.native(agent.target)}
-        assert {name: own[name] for name in TOOLS} == {**RISKS, "start_async_task": "irreversible"}
+        assert {name: own[name] for name in TOOLS} == RISKS
     finally:
         await harness.aclose()
 

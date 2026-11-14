@@ -444,7 +444,6 @@ def ReAct(
         outside=outside,
         helper_only=not native,
         kept=not asked,
-        forks=any(s.get("mode") == "fork" for s in native if "graph_id" in s),
     )
     if tasks is not None:
         tasks.compiled(_compiled(graph))
@@ -691,7 +690,6 @@ def _declared(
     outside: bool,
     helper_only: bool,
     kept: bool = False,
-    forks: bool = False,
 ) -> None:
     """What the harness reads of Deep Agents' tools — the agent's and its sub-agents' — set on
     them: on a ``backend`` outside the graph's state (``outside``) the file tools are governed
@@ -702,10 +700,7 @@ def _declared(
     hands to: the hand-over is a read (``adapters.base.helper`` — each call the helper then
     makes is governed on its own). Left out of the run's set as machinery, it had said
     nothing, and a call of a tool that says nothing asks a person: every task handed to the
-    general-purpose helper paused for an approval of nothing. With an async sub-agent that
-    forks (``mode="fork"``: its server is sent the conversation at launch), a start sends what
-    cannot be taken back: ``start_async_task`` is ``irreversible`` (a person approves, unless
-    the catalog says otherwise)."""
+    general-purpose helper paused for an approval of nothing."""
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.base import helper
@@ -715,7 +710,6 @@ def _declared(
         KEPT_BY_RUN,
         MACHINERY,
         READ_FILE,
-        START_ASYNC_TASK,
         framework_made,
         outside_state,
         spec_of,
@@ -735,8 +729,6 @@ def _declared(
             marks = {MACHINERY: True}
         elif kept and tool.name == READ_FILE:
             marks = {KEPT_BY_RUN: True}
-        elif forks and tool.name == START_ASYNC_TASK:
-            marks = {"side_effects": "irreversible"}
         if marks:
             tool.metadata = {**(tool.metadata or {}), **marks}
 

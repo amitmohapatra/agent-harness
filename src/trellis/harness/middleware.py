@@ -261,13 +261,11 @@ FILES_CHANNEL: Final = "files"
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
 #: sandbox tool is (``sandbox().tools()``).
 EXECUTE: Final = "execute"
-#: Deep Agents' tool that starts a background task of an async sub-agent.
-START_ASYNC_TASK: Final = "start_async_task"
 #: Deep Agents' tools for the background tasks of its async sub-agents
 #: (``AsyncSubAgentMiddleware``), and what each does: a task started, sent new instructions or
 #: cancelled on the sub-agent's server is a write; its status and the list of tasks are reads.
 ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
-    START_ASYNC_TASK: "write",
+    "start_async_task": "write",
     "update_async_task": "write",
     "cancel_async_task": "write",
     "check_async_task": "read",

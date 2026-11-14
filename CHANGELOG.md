@@ -26,8 +26,7 @@ chat's own on its thread stream when it is idle; its questions asked through the
 - A task held by a server is read every 10 s: an idle chat is told how it ended, a task whose
   run was cancelled from another server is cancelled on its server, and a follow-up to a task
   that ended is a run of its own.
-- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`); a
-  start of a sub-agent with `mode="fork"` is irreversible.
+- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`).
 - An empty task list is not carried.
 
 ### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)

@@ -583,9 +583,9 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   run that started it (Deep Agents' `parent_thread_id`: a `ReAct`'s LangGraph thread is its
   run), nothing of the run's user or chat thread — and, with `mode="fork"`, the conversation at
   launch. A `webhook` is checked as every URL the harness hands on (https, a public host; one
-  refused is a `ConfigurationError` when `ReAct` is built); with a sub-agent that forks,
-  `start_async_task` is irreversible (a person approves each start, unless the catalog says
-  otherwise): what it sends cannot be taken back.
+  refused is a `ConfigurationError` when `ReAct` is built). A start of a sub-agent that forks
+  is a write as any start (Deep Agents asks nobody); to have a person approve it, give
+  `start_async_task` that risk in the tool catalog.
 * **In the chat** — the model starts a task with `start_async_task` and the turn ends at once
   with the task's id; the next messages are answered while it runs. Deep Agents reads the
   task's status itself (0.7.27 on) when a turn starts, before each model call and after a
