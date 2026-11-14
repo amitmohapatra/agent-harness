@@ -151,6 +151,37 @@ not hold:
   of it again (a `ToolRetryMiddleware` retrying a failed irreversible call was asked about a
   second time); an edited call, or the same call of a new model step, is asked about anew.
 
+### Fixed: a call across a run's attempts, and a turn while memory is slow or down
+
+Four findings of the user-scenario suite (SCN-2, SCN-3, SCN-4, SCN-6), each tested in process
+in `tests/integration/test_scenario_fixes.py`:
+
+- **Writes to memory were lost when the memory service was down for more than a few seconds.**
+  A background write had three tries half a second apart; once the memory client's circuit
+  opened each try was refused at once, and with no spool (none in a container) transcripts,
+  tool records and outcomes were "failed and is lost". While the circuit is open a write now
+  spends no attempt: it waits the circuit's cool-down, queued, and is sent when the service is
+  back — however long that takes, bounded by the queue (10,000 writes; past it a write is
+  spooled or lost and reported, as a full queue's always was). Still lost: what waits in the
+  queue when the process is killed, and with no spool what a clean stop cannot deliver in
+  10 s ([memory.md](docs/memory.md)).
+- **The next turn was answered without the turn before when memory took more than 5 s to keep
+  it.** Where memory's window comes as messages (LangGraph's graphs, `ReAct`), the
+  conversation's latest turns memory does not hold yet are added after it from the run store
+  (each one's question and answer), on whichever server the next turn runs; matched by message
+  id, so a turn memory holds is never given twice. A chat message's `run_record` in memory now
+  carries its `message_id`. One listing of the run store per turn of a conversation.
+- **A call with no framework id had a different id in a later attempt, or another call's.**
+  A call a graph's node or a function makes itself was `<run>:<step>`, the step counted per
+  attempt: after a resume a checkpointed graph's payment took the id of a lookup made before
+  the pause. It is `<run>:<digest of the tool and arguments>:<which time>` — the call's
+  idempotency key — in every attempt. **The format of these ids changed**; a framework's own
+  call ids are as they were.
+- **A call replayed after a resume was announced again** (`TOOL_CALL_START`…`TOOL_CALL_RESULT`
+  with `cached`), so a run's event log, a reconnecting AG-UI client and a thread's replay
+  showed it twice. A replayed call emits nothing: the attempt that ran it announced it. The
+  AG-UI activity line counts a run's calls across its attempts on the replica that served them.
+
 ### Fixed: two failures a busy machine showed
 
 - **A wide table can be queried.** Typing a saved result asks every column whether a cell
