@@ -318,6 +318,9 @@ class Runtime:
     #: the run is a turn of a chat's own for a background task's outcome
     #: (``background.notify``): its input, the notification it gives the model
     notification: Said | None = None
+    #: the background tasks this attempt started (``background.start``: their ids), counted
+    #: with the conversation's unfinished ones before its task list says them
+    tasks_started: set[str] = field(default_factory=set, repr=False)
     #: what the person allowed for this conversation in its runs (``conversation.allowed``),
     #: once read in this attempt
     allowed: frozenset[str] | None = field(default=None, repr=False)

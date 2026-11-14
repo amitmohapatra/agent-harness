@@ -246,8 +246,8 @@ async def a2a_pushes(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[byte
     """The push bodies the A2A server delivers (every target is taken as public)."""
     bodies: list[bytes] = []
 
-    async def public(url: str) -> None:
-        return None
+    async def public(url: str) -> str:
+        return url
 
     async def deliver(
         self: push.PushNotifier, url: str, token: str, task: str, body: bytes
@@ -255,7 +255,7 @@ async def a2a_pushes(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[byte
         bodies.append(body)
         return True
 
-    monkeypatch.setattr(push, "check_addresses", public)
+    monkeypatch.setattr(push, "checked", public)
     monkeypatch.setattr(push.PushNotifier, "deliver", deliver)
     yield bodies
 

@@ -550,7 +550,11 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   is asked through its parent (`payload["subagent"]` names the task's run, `background: true`),
   and the answer resumes the task where the answer reached — on another server sharing the run
   store too.
-* **Check, list, update, cancel** — read the run store from any server. `update_async_task`
+* **Check, list, update, cancel** — read the run store from any server (the list, only the
+  unfinished tasks). The turn's own reads of its tasks cost at most one request of the run
+  store per model call: a task at work, or ended, in the turn's process is known there, and
+  the others — at work on another server, waiting for a person — are read one per model
+  call, in turn, so with several of them an outcome may be told a model call or two later. `update_async_task`
   follows Deep Agents' `update_strategy` (a `SubAgent` dict may carry it): `interrupt`, the
   default, cancels the task's run at work and continues its conversation
   (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`).
@@ -558,6 +562,15 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   are reads; a start, an update and a cancel are writes, announced on the stream and not
   asked about (each call the sub-agent makes is governed in its own run). To have a person
   approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Bounds** — a chat has at most as many unfinished tasks as a run may have children working
+  at once (the admission limit of [subagents.md](../subagents.md): 4 at first, less under
+  pressure): a start past it is refused with the reason, and the model is told to wait or
+  cancel one. A task's outcome that reaches an idle chat may start or update a task three
+  times in a row with no message from the user between; the fourth is refused, so a result
+  cannot keep work going by itself. A process keeps at most 1,024 attempts at work.
+* **The list** — the conversation carries its unfinished tasks and the 50 that ended last
+  (a task's record says it ended once the conversation was told); an older one is no longer
+  tracked.
 * **Whose task** — a task belongs to the conversation that started it: its tenant, its user,
   the agent and the chat thread. The tools, the questions asked through the chat and each
   read act on a task's run only then; a task id from another conversation is answered as one
@@ -593,7 +606,9 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   run that started it (Deep Agents' `parent_thread_id`: a `ReAct`'s LangGraph thread is its
   run), nothing of the run's user or chat thread — and, with `mode="fork"`, the conversation at
   launch. A `webhook` is checked as every URL the harness hands on (https, a public host; one
-  refused is a `ConfigurationError` when `ReAct` is built). A start of a sub-agent that forks
+  refused is a `ConfigurationError` when `ReAct` is built) and again each time a task is
+  started, by where its host resolves: one that leads to a private address fails the start,
+  and the server is sent nothing. A start of a sub-agent that forks
   is a write as any start (Deep Agents asks nobody); to have a person approve it, give
   `start_async_task` that risk in the tool catalog.
 * **In the chat** — the model starts a task with `start_async_task` and the turn ends at once

@@ -34,7 +34,7 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
-from trellis.harness import background, holding, pipeline, schedules
+from trellis.harness import admission, background, holding, pipeline, schedules
 from trellis.harness.adapters.langgraph import notified
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
@@ -112,6 +112,14 @@ class Gate:
 @pytest.fixture
 def gate() -> Gate:
     return Gate()
+
+
+@pytest.fixture(autouse=True)
+def a_machine_at_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """How many unfinished tasks a chat may have is the admission limit, which falls while the
+    machine is under pressure: each test has one of its own that reads no machine (4 at
+    first), whatever else runs on this one."""
+    monkeypatch.setattr(admission, "ADMISSION", admission.Admission())
 
 
 def chat(harness: Harness, gate: Gate, model: Model, **more: Any) -> Agent:
@@ -1014,3 +1022,96 @@ async def test_two_servers_telling_one_outcome_start_one_turn(tmp_path: Path) ->
     with store.synced():
         own = [r async for r in store.iterate(agent_id="chat", thread_id="t1")]
     assert len(own) == 2  # the turn, and the chat's own turn for the outcome
+
+
+# --------------------------------------------------------------------------- SEC-R-2: bounds
+class Desk:
+    """A sub-agent whose tasks each wait until the test lets them end."""
+
+    def __init__(self) -> None:
+        self.started: list[asyncio.Event] = []
+
+    async def researcher(self, input: str, agent: Runtime) -> str:
+        """Research a topic in depth."""
+        gate = asyncio.Event()
+        self.started.append(gate)
+        await gate.wait()
+        return f"FOUND: {input}"
+
+
+def starts_another(messages: list[BaseMessage]) -> Any:
+    """A model that answers every task's outcome by starting a task, and says what a tool
+    said: the next turn of a script that goes on as long as the conversation does."""
+    return says_what_the_tool_said(messages) if isinstance(messages[-1], ToolMessage) else START
+
+
+class Endless(Model):
+    """A model whose script never ends: every turn is ``starts_another``."""
+
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+        self.turns = [starts_another]
+        return super()._generate(messages, *args, **kwargs)
+
+
+async def test_sec_r_2_a_tasks_result_starting_a_task_stops_at_the_third_in_a_row(
+    harness: Harness,
+) -> None:
+    """A model that starts a task whenever it is told a task's outcome: with no message of
+    the user's between, the chat's own turns start a task three times in a row, and the
+    fourth is refused — the chain ends there, and the model is told why."""
+    desk = Desk()
+    research = harness.wrap(desk.researcher, id="research")
+    agent = harness.wrap(ReAct("You help.", Endless(turns=[]), subagents=[research]), id="chat")
+    await chatted(agent, "research lighthouses")  # the user's turn starts the first
+
+    async def settled(count: int) -> bool:
+        return len(desk.started) >= count and await _all_final(harness)
+
+    for generation in range(4):
+        await until(lambda count=generation + 1: settled(count))
+        desk.started[generation].set()  # its outcome: a turn of the chat's own
+        await until(lambda count=generation + 1: _told(harness, count))
+    await until(lambda: _all_final(harness))
+    assert len(desk.started) == 4  # the user's, and three its results started
+    runs = [r async for r in harness.runs.iterate(agent_id="chat", thread_id=THREAD)]
+    said = [getattr(await harness.runs.get(r.run_id), "output", None) for r in runs]
+    assert [s for s in said if str(s).startswith("Not started")] == [
+        "Not started: the results of background tasks have started or updated a task 3 times "
+        "in a row with no message from the user between. Tell the user what was found; their "
+        "next message can start more."
+    ]
+
+
+async def _told(harness: Harness, count: int) -> bool:
+    return await _own_turns(harness) >= count
+
+
+async def test_sec_r_2_fifty_starts_in_one_turn_start_at_most_the_admission_limit(
+    harness: Harness, gate: Gate
+) -> None:
+    """One model turn that calls ``start_async_task`` fifty times: as many tasks start as a
+    run may have children working at once (the admission limit: 4 at first), and each of the
+    rest is refused with the reason, in that turn and in the next."""
+    starts = [
+        ("start_async_task", {"description": f"topic {n}", "subagent_type": "research"})
+        for n in range(50)
+    ]
+    model = Model(turns=[starts, "Started.", START, "Started."])
+    agent = chat(harness, gate, model)
+    first = await chatted(agent, "research fifty things")
+    assert first.status is RunStatus.SUCCESS, first.error
+    tasks = [c async for c in harness.runs.iterate(parent_run_id=first.run_id)]
+    assert len(tasks) == 4
+    said = results(model.seen[1])
+    assert len([s for s in said if s.startswith("Launched async subagent.")]) == 4
+    assert len(said) == 50 and {s for s in said if not s.startswith("Launched")} == {
+        "Not started: this chat has 4 background tasks unfinished, the most at once (4). "
+        "Wait for one to end, or cancel one that is no longer needed, then start it again."
+    }
+    again = await chatted(agent, "and one more")  # at the bound: refused again
+    assert results(model.seen[-1])[-1].startswith("Not started: this chat has 4")
+    assert [c async for c in harness.runs.iterate(parent_run_id=again.run_id)] == []
+    model.turns += ["Noted."] * 8  # the outcomes, told to the idle chat
+    gate.opened.set()
+    await until(lambda: _all_ended(harness, [t.run_id for t in tasks]))
+    await until(lambda: _all_final(harness))

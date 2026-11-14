@@ -59,12 +59,7 @@ from trellis.harness.a2a import push
 from trellis.harness.a2a import tasks as tasks_module
 from trellis.harness.a2a.executor import RunExecutor
 from trellis.harness.a2a.identity import HeaderIdentity, header
-from trellis.harness.a2a.push import (
-    PushNotifier,
-    TargetRefused,
-    check_addresses,
-    validate_url,
-)
+from trellis.harness.a2a.push import PushNotifier
 from trellis.harness.a2a.server import agent_card
 from trellis.harness.a2a.tasks import RunTaskStore, task_from_run
 from trellis.harness.a2a.translate import (
@@ -76,6 +71,7 @@ from trellis.harness.a2a.translate import (
 )
 from trellis.harness.agent import Agent
 from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, identity_headers
+from trellis.harness.outbound import TargetRefused, checked, validate_url
 from trellis.harness.runs import LocalRuns
 from trellis.runs.webhooks import verify_signature
 
@@ -180,6 +176,9 @@ async def test_the_card_describes_what_the_target_says_about_itself() -> None:
 
 def test_a_push_url_is_normalised_and_checked_without_resolving_it() -> None:
     assert validate_url(" https://hooks.example.com ") == "https://hooks.example.com/"
+    assert validate_url("https://Hooks.Example.com.:8443/h?x=1") == (
+        "https://hooks.example.com:8443/h?x=1"  # the host, as it is named without the dot
+    )
     assert validate_url("https://[::ffff:93.184.216.34]/h") == "https://[::ffff:93.184.216.34]/h"
     longest = "https://example.com/" + "a" * (2048 - len("https://example.com/"))
     assert validate_url(longest) == longest  # 2,048 characters: the most a url may have
@@ -189,6 +188,13 @@ def test_a_push_url_is_normalised_and_checked_without_resolving_it() -> None:
         ("https://[::ffff:10.0.0.1]/hook", "private address"),
         ("https://printer.local/", "local host"),
         ("https://example.com/#frag", "no credentials or fragment"),
+        # SEC-R-9: a trailing dot names the same host, and a number is an address
+        ("https://localhost./", "local host"),
+        ("https://x.internal./", "local host"),
+        ("https://2130706433/", "a number"),
+        ("https://127.1/", "a number"),
+        ("https://0x7f000001/", "a number"),
+        ("https://example.com:port/", "port"),
     ):
         with pytest.raises(TargetRefused, match=reason):
             validate_url(refused)
@@ -214,13 +220,18 @@ async def test_every_address_a_push_host_resolves_to_must_be_public(
     resolving["public.example"] = ["93.184.216.34"]
     resolving["mixed.example"] = ["93.184.216.34", "10.0.0.7"]
     resolving["empty.example"] = []
-    await check_addresses("https://public.example/hook")
+    resolving["rebound.example"] = ["127.0.0.1"]
+    assert await checked("https://public.example./hook") == "https://public.example/hook"
     with pytest.raises(TargetRefused, match="private address"):
-        await check_addresses("https://mixed.example/hook")
+        await checked("https://mixed.example/hook")
     with pytest.raises(TargetRefused, match="private address"):
-        await check_addresses("https://empty.example/hook")
+        await checked("https://empty.example/hook")
+    with pytest.raises(TargetRefused, match="private address"):
+        await checked("https://rebound.example/hook")  # a public name for a local address
     with pytest.raises(TargetRefused, match="does not resolve"):
-        await check_addresses("https://nowhere.example/hook")
+        await checked("https://nowhere.example/hook")
+    with pytest.raises(TargetRefused, match="https"):
+        await checked("http://public.example/hook")  # the lexical half, first
     notifier = PushNotifier(configs=None)  # type: ignore[arg-type]
     assert await notifier.validate_url("https://public.example/hook")
     assert not await notifier.validate_url("https://mixed.example/hook")

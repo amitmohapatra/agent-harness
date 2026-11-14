@@ -1987,3 +1987,29 @@ def test_perf_4_a_task_held_long_is_read_less_and_less_often() -> None:
     assert waits[0] <= 10 and max(waits) <= 120
     assert min(waits) >= 5  # never a burst
     assert len({round(w, 3) for w in waits[-10:]}) > 1  # jitter: not a fixed period
+
+
+async def test_sec_r_9_a_webhook_naming_a_private_address_starts_no_task(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A webhook is checked again when a task is started, as an A2A push target is when it is
+    delivered to (``outbound.checked``): a public-looking name that resolves to a private
+    address fails the start — the sub-agent's server is asked nothing — and one that resolves
+    publicly starts the task."""
+    table = {"hooks.example": ["10.0.0.7"]}
+
+    def getaddrinfo(host: str, *args: Any, **kwargs: Any) -> list[Any]:
+        if host not in table:
+            raise socket.gaierror("no such host")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, 0)) for a in table[host]]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    spec = subagent(server, webhook="https://hooks.example/done")
+    model = Model(turns=[START, says_what_the_tool_said, START, reports_the_id])
+    agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
+    refused = await say(agent, "run the optimization")
+    assert "private address" in refused.answer, refused.answer
+    assert asked_to_do(server) == [] and await task_runs(harness) == []
+    table["hooks.example"] = ["93.184.216.34"]
+    await say(agent, "run it now")
+    assert len(await task_runs(harness)) == 1

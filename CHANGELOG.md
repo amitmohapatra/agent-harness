@@ -82,6 +82,40 @@ A library's feature works as the library does it; the harness governs, records a
   `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
   cancel of a harness task no longer pauses a chat for an approval.
 
+### Performance: background tasks cost one run-store read per model call (PERF-4)
+
+- A turn's pull of its tasks' statuses asks the run store at most once per model call, however
+  many tasks are unfinished: a task at work in the process is known running, one that ended
+  there is known ended, and the others are read one per model call, the one read longest ago
+  first. `list_async_tasks` reads only the unfinished tasks.
+
+### Performance: the carried task list keeps the unfinished tasks and the last 50 that ended (PERF-5)
+
+- A conversation's task list no longer holds every task it ever started (it stopped being
+  kept at about 700 tasks, past the 256 KiB bound): the ended tasks past the 50 updated last
+  are dropped when the list is kept for the next turn. `check_async_task` of a task dropped
+  answers that it is not tracked.
+
+### Security: an outbound URL is checked by what it says and by where it leads (SEC-R-9)
+
+- `outbound.validate_url` reads a trailing dot as the same host (`https://localhost./` is
+  refused), refuses a host that is a number (`https://2130706433/`, `https://127.1/`), and
+  returns the host lower-cased without the dot. `outbound.checked` adds the resolution: every
+  address the host resolves to must be public. A2A push uses it (its own copy is gone), and an
+  `AsyncSubAgent`'s `webhook` is checked with it each time a task is started, beside the
+  check of the spec when the agent is built.
+
+### Security: background tasks are bounded (SEC-R-2)
+
+- A chat has at most as many unfinished background tasks as a run may have children working
+  at once (the admission limit: 4 at first, 1 to 16, falling under pressure); a start past it
+  is answered "Not started: this chat has N background tasks unfinished…".
+- A task's outcome told by a turn of the chat's own may start or update a task three times in
+  a row with no message from the user between; the fourth is refused (the depth is in the
+  runs' `trellis_background` / `trellis_notified` metadata).
+- A process keeps at most 1,024 background attempts at work; past it a start is refused, an
+  idle chat's outcome waits for the conversation's next turn.
+
 ### Security: a background task belongs to the conversation that started it (SEC-R-1)
 
 - The task tools, the questions asked through a chat, each pull and each recorded

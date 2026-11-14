@@ -5,6 +5,7 @@ reads a message the user did not type (``history``, ``adapters.langgraph``)."""
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,7 +21,7 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
-from trellis.harness import background, pipeline
+from trellis.harness import admission, background, pipeline
 from trellis.harness.a2a.executor import _payload
 from trellis.harness.a2a.translate import value_part
 from trellis.harness.adapters.langgraph import (
@@ -245,6 +246,16 @@ async def stored(runs: LocalRuns, status: RunStatus = RunStatus.RUNNING, **more:
     return found
 
 
+async def passed_over(run: Any, tasks: dict[str, Any]) -> bool:
+    """Whether a pull reads nothing of ``tasks``' runs: no outcome told, each record as it
+    was but for when it was last looked at."""
+    updated, told = await background.pulled(run, tasks)
+    as_they_were = {
+        i: {**t, "last_checked_at": updated[i]["last_checked_at"]} for i, t in tasks.items()
+    }
+    return told == [] and updated == as_they_were
+
+
 async def test_the_five_tools_answer_what_they_cannot_do() -> None:
     runs = LocalRuns()
     offered = background.Offered({"research": None}, described={"research": "Research."})
@@ -269,7 +280,7 @@ async def test_the_five_tools_answer_what_they_cannot_do() -> None:
         "list_async_tasks", run, {"task_1": TASK}, {"status_filter": "error"}
     )
     assert listed == (background.NONE, {})
-    assert await background.pulled(run, gone) == ({}, [])
+    assert await passed_over(run, gone)
     await offered.asked(run, {"task_1": {**TASK, "status": "waiting", "run_id": "run_gone"}})
 
 
@@ -369,7 +380,7 @@ async def test_sec_r_1_a_run_of_another_conversation_is_no_tracked_task(whose: s
     listed, changed = await offered.call("list_async_tasks", run, claimed, {})
     assert listed.endswith("status: waiting") and changed == claimed  # as claimed: nothing read
     await offered.asked(run, claimed)  # no question of it: the stand-in run could not be paused
-    assert await background.pulled(run, claimed) == ({}, [])
+    assert await passed_over(run, claimed)
     event = {"task_id": "task_1", "agent_name": "research", "status": "success", "run_id": "run_1"}
     assert await background.recorded(run, event, claimed) == {}
     assert await runs.get("run_1", tenant="t") == theirs  # neither cancelled nor answered
@@ -533,3 +544,191 @@ async def test_arch_7_an_attempt_that_ended_forgets_only_itself(
     await first
     assert tasks.at_work("run_1")
     await tasks.aclose()
+
+
+# --------------------------------------------------------------------------- SEC-R-2: admission
+def unfinished(count: int) -> dict[str, Any]:
+    return {f"task_{n}": {**TASK, "task_id": f"task_{n}"} for n in range(count)}
+
+
+def test_sec_r_2_a_chat_has_at_most_the_admission_limit_of_unfinished_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the bound (4 at first), below it and above it; a task that ended makes room, and
+    one the attempt started since its list was read counts too."""
+    monkeypatch.setattr(admission, "ADMISSION", admission.Admission())
+    run = runtime(LocalRuns(), tasks_started=set())
+    background._counted(run, unfinished(3), "task_new")  # below: admitted, and counted from now
+    assert run.tasks_started == {"task_new"}
+    with pytest.raises(background.Refused, match="has 4 background tasks unfinished"):
+        background._counted(run, unfinished(3), "task_other")  # the three, and the one started
+    background._counted(run, unfinished(3), "task_new")  # the same call again: the same task
+    with pytest.raises(background.Refused, match=r"the most at once \(4\)"):
+        background._counted(runtime(LocalRuns(), tasks_started=set()), unfinished(5), "task_new")
+    ended = {**unfinished(4), "task_0": {**TASK, "task_id": "task_0", "status": "success"}}
+    background._counted(runtime(LocalRuns(), tasks_started=set()), ended, "task_new")
+
+
+async def test_sec_r_2_a_turn_past_three_outcomes_in_a_row_starts_nothing() -> None:
+    """A turn a message began is at no depth; a turn of the chat's own at the depth its run
+    says, and refused past 3 — or when its run does not say (fail closed)."""
+    runs = LocalRuns()
+    assert await background._depth(runtime(runs)) == 0
+    told = notification_in(background.input_of({**TASK, "status": "success"}))
+    for depth, admitted in ((1, True), (3, True), (4, False)):
+        own = await stored(
+            runs, run_id=f"run_n{depth}", metadata={"trellis_notified": {"depth": depth}}
+        )
+        run = runtime(runs, notification=told, run_id=own.run_id)
+        if admitted:
+            assert await background._depth(run) == depth
+        else:
+            with pytest.raises(background.Refused, match="3 times in a row"):
+                await background._depth(run)
+    unsaid = await stored(runs, run_id="run_unsaid", metadata={"trellis_notified": {}})
+    with pytest.raises(background.Refused):
+        await background._depth(runtime(runs, notification=told, run_id=unsaid.run_id))
+
+
+def test_sec_r_2_a_process_keeps_a_bounded_number_of_attempts_at_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the bound a new run has no place, one below it has; a place nothing began in is
+    given back, and a run with a place keeps it."""
+    monkeypatch.setattr(background, "AT_WORK", 2)
+    tasks = background.Tasks()
+    with tasks.placed("run_a") as first, tasks.placed("run_b") as second:
+        assert first and second and tasks.at_work("run_a")
+        with tasks.placed("run_c") as third:
+            assert not third and not tasks.at_work("run_c")
+        with tasks.placed("run_a") as again:
+            assert again  # its own place
+    assert not tasks.at_work("run_a")  # given back: nothing began in it
+    with tasks.placed("run_c") as free:
+        assert free
+
+
+# --------------------------------------------------------------------------- PERF-4: reads
+class Counted(LocalRuns):
+    """A run store that counts its reads of a run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read: list[str] = []
+
+    async def get(self, run_id: str, *, tenant: str | None = None) -> RunRecord | None:
+        self.read.append(run_id)
+        return await super().get(run_id, tenant=tenant)
+
+
+async def twenty(runs: Counted) -> dict[str, Any]:
+    """Twenty unfinished tasks of the conversation, their runs in ``runs`` (not read since):
+    its task list."""
+    tasks: dict[str, Any] = {}
+    for n in range(20):
+        await stored(runs, run_id=f"run_{n}", thread_id=f"task_{n}")
+        tasks[f"task_{n}"] = {**TASK, "task_id": f"task_{n}", "run_id": f"run_{n}"}
+    runs.read.clear()
+    return tasks
+
+
+async def test_perf_4_a_pull_reads_the_store_once_however_many_tasks_are_unfinished() -> None:
+    """Twenty unfinished tasks at work elsewhere: each pull (one per model call) makes one
+    request of the run store, for the task read longest ago, so twenty pulls read each once —
+    and an outcome is told by the pull that reads it."""
+    runs = Counted()
+    tasks = await twenty(runs)
+    await runs.finish("run_7", RunStatus.SUCCESS, output="done", tenant="t")
+    run, told = runtime(runs), []
+    for _ in range(20):
+        before = len(runs.read)
+        updated, outcomes = await background.pulled(run, tasks)
+        assert len(runs.read) - before == 1
+        tasks, told = {**tasks, **updated}, [*told, *outcomes]
+    assert sorted(runs.read) == sorted(f"run_{n}" for n in range(20))
+    assert [(u["task_id"], u["status"]) for u in told] == [("task_7", "success")]
+    before = len(runs.read)
+    await background.pulled(run, tasks)
+    assert len(runs.read) - before == 1  # nineteen left unfinished: still one
+
+
+async def test_perf_4_a_task_at_work_here_or_ended_here_is_not_read_from_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What this process knows it does not ask the store: a task whose attempt works here is
+    running, and one whose attempt ended here ended as it left its run."""
+    runs = Counted()
+    record = await stored(runs)
+    release = asyncio.Event()
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        await release.wait()
+        await runs.finish("run_1", RunStatus.SUCCESS, output="done", tenant="t")
+
+    async def then(found: RunRecord) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    run = runtime(runs)
+    run.agent.running = {}
+    tasks = run.agent.harness.background
+    tasks.run(run.agent, record, then=then)
+    runs.read.clear()
+    waiting = {"task_1": {**TASK, "status": "waiting"}}
+    updated, told = await background.pulled(run, waiting)  # resumed here: it works again
+    assert (updated["task_1"]["status"], told, runs.read) == ("running", [], [])
+    release.set()
+    await tasks._at_work["run_1"]
+    runs.read.clear()
+    updated, told = await background.pulled(run, {"task_1": TASK})
+    assert updated["task_1"]["status"] == "success" and told[0]["result"] == "done"
+    assert runs.read == []
+
+
+async def test_perf_4_the_list_reads_only_the_unfinished_tasks() -> None:
+    runs = Counted()
+    tasks = await twenty(runs)
+    for n in range(15):  # ended, and told: their records say so
+        tasks[f"task_{n}"]["status"] = "success"
+    offered = background.Offered({"research": None}, described={"research": "Research."})
+    listed, _ = await offered.call("list_async_tasks", runtime(runs), tasks, {})
+    assert listed.startswith("20 tracked task(s):")
+    assert sorted(runs.read) == sorted(f"run_{n}" for n in range(15, 20))
+
+
+# --------------------------------------------------------------------------- PERF-5: the list
+def at(second: int) -> str:
+    return f"2026-11-14T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}Z"
+
+
+def carried(n: int, status: str, second: int) -> dict[str, Any]:
+    task = {**TASK, "task_id": f"task_{n}", "run_id": f"run_{n}", "status": status}
+    return {"async_tasks": {f"task_{n}": {**task, "last_updated_at": at(second)}}}
+
+
+def test_perf_5_the_carried_task_list_keeps_the_unfinished_and_the_last_fifty_that_ended() -> None:
+    """A thousand tasks started and ended in one conversation, and two still at work: the list
+    it carries holds the unfinished ones and the 50 that ended last — not every task ever —
+    and stays far under the 256 KiB kept for it."""
+    from trellis.harness.tools.results import merged
+
+    kept: dict[str, Any] = {}
+    for n in (1000, 1001):  # started first, never ended: older than every ended one
+        kept = merged(kept, carried(n, "running", 0))
+    for n in range(1000):
+        kept = merged(kept, carried(n, "running", 2 * n + 1))
+        kept = merged(kept, carried(n, "success", 2 * n + 2))
+    tasks = kept["async_tasks"]
+    assert sorted(tasks, key=lambda i: int(i[5:])) == [
+        *(f"task_{n}" for n in range(950, 1000)),
+        "task_1000",
+        "task_1001",
+    ]
+    assert len(json.dumps(kept).encode()) < 256 * 1024
+    # at the bound: fifty ended are all kept, the fifty-first drops the one that ended first
+    few: dict[str, Any] = {}
+    for n in range(50):
+        few = merged(few, carried(n, "success", n))
+    assert len(few["async_tasks"]) == 50
+    more = merged(few, carried(50, "error", 50))
+    assert len(more["async_tasks"]) == 50 and "task_0" not in more["async_tasks"]

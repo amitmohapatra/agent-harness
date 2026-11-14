@@ -386,20 +386,44 @@ def merged(kept: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
     """``kept`` with ``state`` over it, channel by channel: a channel both hold as a mapping
     (Deep Agents' tasks, by their ids) keeps the entries of both — of an entry both have, the
     one updated last (:func:`_later`), so two turns that overlap and change one task lose
-    neither's update, whichever ends last; any other channel is ``state``'s."""
+    neither's update, whichever ends last —, less the tasks that ended long ago
+    (:func:`_recent`); any other channel is ``state``'s."""
     out = {**kept, **state}
     for name, value in state.items():
         before = kept.get(name)
-        if isinstance(before, Mapping) and isinstance(value, Mapping):
-            out[name] = {
+        if not isinstance(value, Mapping):
+            continue
+        both: Mapping[str, Any] = value
+        if isinstance(before, Mapping):
+            both = {
                 key: _later(before[key], entry) if key in before else entry
                 for key, entry in value.items()
             } | {key: entry for key, entry in before.items() if key not in value}
+        out[name] = _recent(both)
     return out
 
 
 #: A task's statuses by how far along they are: at the same second, the further one stands.
 _FURTHER: Final = {"pending": 0, "running": 1, "waiting": 2}
+#: The most ended tasks a conversation's list keeps: those updated last. A task's record says
+#: it ended once the conversation was told so, and an older one is known to nobody's next
+#: step — without this the list would hold every task the conversation ever started.
+ENDED_KEPT: Final = 50
+
+
+def _recent(tasks: Mapping[str, Any]) -> Mapping[str, Any]:
+    """``tasks`` (Deep Agents' ``AsyncTask`` records, by id) without the ended ones past the
+    :data:`ENDED_KEPT` updated last: every unfinished task stays."""
+    ended = [
+        key
+        for key, task in tasks.items()
+        if isinstance(task, Mapping) and "status" in task and task["status"] not in _FURTHER
+    ]
+    if len(ended) <= ENDED_KEPT:
+        return tasks
+    ended.sort(key=lambda key: str(tasks[key].get("last_updated_at", "")), reverse=True)
+    dropped = set(ended[ENDED_KEPT:])
+    return {key: task for key, task in tasks.items() if key not in dropped}
 
 
 def _later(kept: Any, given: Any) -> Any:

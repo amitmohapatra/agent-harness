@@ -48,6 +48,7 @@ from trellis.contracts import AgentError, RunRecord, RunStatus, stable_id
 from trellis.harness.bounded import MAXSIZE
 from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
+from trellis.harness.outbound import checked
 from trellis.harness.task_tools import CANCEL, CHECK, START, UPDATE
 from trellis.runs import ConflictError, LeaseLostError
 
@@ -115,6 +116,16 @@ class AsyncTasks:
 
     def __init__(self) -> None:
         self._kept: OrderedDict[str, Kept] = OrderedDict()
+
+    async def starting(self, tool: Any, args: Mapping[str, Any]) -> None:
+        """Before a call of Deep Agents' task tool ``tool`` reaches the sub-agent's server: a
+        start names the ``webhook`` the server is told to call, which is checked where it
+        leads now (``outbound.checked``: every address its host resolves to is public), as
+        its spec was checked when the agent was built. ``TargetRefused``: the call fails, and
+        the server is sent nothing."""
+        spec = _specs(tool).get(str(args.get("subagent_type"))) or {}
+        if tool.name == START and spec.get("webhook"):
+            await checked(str(spec["webhook"]))
 
     async def said(
         self, runtime: Runtime, tool: Any, *, args: Mapping[str, Any], done: Any, told: str
