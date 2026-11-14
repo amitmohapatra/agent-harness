@@ -29,14 +29,14 @@ import inspect
 import json
 import weakref
 from collections import deque
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Collection, Hashable, Sequence
 from typing import Any, Final
 
 from trellis.contracts import ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import Tool, not_run
 
 #: The fields of a call item that say which call it is, not what it does: left out of what a
 #: person is shown and what governance decides on (the call's id is the bridge's own).
@@ -334,8 +334,8 @@ def _computer_class() -> type:
         act.__name__ = name
         return act
 
-    actions = sorted(AsyncComputer.__abstractmethods__)
-    body: dict[str, Any] = {name: acting(name) for name in actions}
+    actions = AsyncComputer.__abstractmethods__  # the interface's actions: nothing else runs
+    body: dict[str, Any] = {name: acting(name) for name in sorted(actions)}
 
     def __init__(self: Any, inner: Any, tool: Any) -> None:
         self._inner, self._tool = inner, tool
@@ -350,17 +350,20 @@ def _computer_class() -> type:
         def run(given: dict[str, Any]) -> Any:
             if given == {"action": action}:
                 return method(*args, **kwargs)
-            edited = dict(given.get("action") or {})
-            return getattr(self._inner, str(edited.pop("type", name)))(**edited)
+            edited = {"type": name, **(given.get("action") or {})}
+            return _edited_action(self._inner, edited, actions, self._tool.name)
 
         runtime = current()
-        return await through(
-            self._tool.name,
-            {"action": action},
-            run,
-            decision=None if runtime is None else _COMPUTER_CALL.get(runtime),
-            on_refusal=_skipped,
-        )
+        try:
+            return await through(
+                self._tool.name,
+                {"action": action},
+                run,
+                decision=None if runtime is None else _COMPUTER_CALL.get(runtime),
+                on_refusal=_skipped,
+            )
+        except NotAnAction as refused:  # recorded as failed; nothing of the computer called
+            return _skipped(refused.message)
 
     body.update(
         __init__=__init__,
@@ -369,6 +372,28 @@ def _computer_class() -> type:
         dimensions=property(lambda self: self._inner.dimensions),
     )
     return type("GovernedComputer", (AsyncComputer,), body)
+
+
+class NotAnAction(ToolError):
+    """A computer call edited (a person's edit, a hook's rewrite) into what is no action of the
+    SDK's computer interface, or an action with arguments that are not its own: not carried
+    out."""
+
+
+def _edited_action(inner: Any, edited: dict[str, Any], actions: Collection[str], tool: str) -> Any:
+    """An edited computer action carried out on ``inner``: only one of the interface's own
+    ``actions`` (the SDK's ``AsyncComputer`` abstract methods — never another method or
+    attribute of the team's computer object), its arguments bound to that method's signature;
+    anything else is :class:`NotAnAction`, raised before the computer is touched."""
+    kind = str(edited.pop("type"))
+    if kind not in actions:
+        raise NotAnAction(not_run(tool, f"{kind!r} is not an action of the computer"))
+    method = getattr(inner, kind)
+    try:
+        bound = inspect.signature(method).bind(**edited)
+    except TypeError as exc:
+        raise NotAnAction(not_run(tool, f"the arguments of {kind} do not fit ({exc})")) from exc
+    return method(*bound.args, **bound.kwargs)
 
 
 def _skipped(said: str) -> None:
