@@ -312,6 +312,8 @@ FLOWS: Final = {
     # ... each its own decision: the second does not take the first's answer
     "again-approve-reject": Flow(((5, 5),), decisions=("approve", "reject")),
     "again-reject-edit": Flow(((5, 5),), decisions=("reject", "edit")),
+    # a rejection is the call's it answered: the same call made again later is asked again
+    "again-reject-approve": Flow(((5, 5),), decisions=("reject", "approve")),
     # the same call in the next turn of the conversation: asked again
     "next-turn": Flow(((5,), (5,))),
     # allowed for this conversation: asked zero times after (a hook's Ask: once again)
@@ -376,17 +378,6 @@ CARRIED: Final = {
 }
 
 
-#: The adapters that go on from the framework's own session after a pause: the paused call
-#: is not made again (Claude is told to make it again; a denied one, not to).
-SESSIONS: Final = {"claude_agent_sdk", "kimi"}
-#: Why "again-reject-edit" is not run on them: the harness keeps a person's denial of a call
-#: for the run ("a call answered already in this run keeps its answer: a denial stays one",
-#: ``bridge._decided``), and a session is not made to make the denied call again — so the
-#: same call made again later in that turn takes the denial without asking. Run again from
-#: its input, an adapter makes the denied call again first, and the later one is asked.
-DENIAL_STAYS: Final = "a denial stays one: the same call later in a session's turn is denied"
-
-
 def cases() -> list[Any]:
     found = []
     for framework in FRAMEWORKS:
@@ -394,8 +385,6 @@ def cases() -> list[Any]:
             for flow_name, flow in FLOWS.items():
                 if flow.remember == "always" and not source.always:
                     continue  # not offered where a rule or a hook decides the call
-                if flow_name == "again-reject-edit" and framework in SESSIONS:
-                    continue  # a denial stays one in a session (DENIAL_STAYS)
                 found.append(pytest.param(framework, source_name, flow_name))
     return found
 
@@ -755,7 +744,7 @@ async def test_a_call_whose_arguments_nest_is_one_decision_counted(
     memory_service: FakeMemoryService, decision: str
 ) -> None:
     """A call whose arguments nest (a list, an object) is fed back as any call: the memory
-    service takes the decision (its metadata within the service's bounds) and counts it."""
+    service takes the decision, its arguments as they are, and counts it."""
     args = {"items": ["a", "b"], "where": {"shelf": "s1"}}
 
     async def follow(input: Any, agent: Runtime) -> Any:
@@ -775,7 +764,8 @@ async def test_a_call_whose_arguments_nest_is_one_decision_counted(
     [stored] = [
         f for f in memory_service.stored_feedback.values() if f["target_kind"] == "tool_call"
     ]
-    assert stored["metadata"]["tool"] == "tag" and set(stored["metadata"]["args"]) == set(args)
+    # the arguments as the call was asked about, structured as they are
+    assert stored["metadata"]["tool"] == "tag" and stored["metadata"]["args"] == args
     assert [n for t, n in RAN if t == "tag"] == {"approve": [2], "reject": [], "edit": [1]}[
         decision
     ]
@@ -802,6 +792,7 @@ CLAUDE_FLOWS: Final[dict[str, tuple[list[dict[str, str]], list[str], list[dict[s
     # the same call made again in the turn: each its own question, each its own decision
     "again-approve-reject": ([DEPLOY, DEPLOY], ["approve", "reject"], [DEPLOY]),
     "again-reject-edit": ([DEPLOY, DEPLOY], ["reject", "edit"], [DRY]),
+    "again-reject-approve": ([DEPLOY, DEPLOY], ["reject", "approve"], [DEPLOY]),
 }
 
 
@@ -877,6 +868,7 @@ ACP_FLOWS: Final[dict[str, tuple[list[dict[str, str]], list[str], list[dict[str,
     "reject": ([DEPLOY], ["reject"], []),
     "two-calls": ([DEPLOY, DRY], ["approve", "approve"], [DEPLOY, DRY]),
     "again-approve-reject": ([DEPLOY, DEPLOY], ["approve", "reject"], [DEPLOY]),
+    "again-reject-approve": ([DEPLOY, DEPLOY], ["reject", "approve"], [DEPLOY]),
 }
 
 

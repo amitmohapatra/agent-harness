@@ -89,6 +89,9 @@ CANONICAL = [
 ]
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
 
+#: This process, in its calls' ids.
+PROCESS = uuid.uuid4().hex[:8]
+
 
 def written(path: Path, data: dict[str, Any]) -> None:
     """Replaces ``path`` whole, so a reader (the test, the next agent) never sees half of it."""
@@ -398,8 +401,10 @@ class FakeAgent:
         )
 
     def call_id(self) -> str:
+        """A call's id, unique in the session whichever of its processes makes it, as the
+        model's call ids are."""
         self.calls += 1
-        return f"0:call_{self.calls}"
+        return f"0:call_{self.calls}_{PROCESS}"
 
     async def permitted(
         self, session_id: str, call_id: str, title: str, text: str, options: list[Any] | None = None

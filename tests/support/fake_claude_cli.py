@@ -36,8 +36,8 @@ recovery gave up (``success``, no text, ``stop_reason`` ``max_tokens``).
 (``stream_event``) before its message.
 
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
-the temporary directory): the steps done so far — a tool call that failed or paused is not done
-(a call denied is: the "model" read why).
+the temporary directory): the steps done so far — a tool call the run paused at is not done
+(one denied or failed is: the "model" read why).
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
 does not hold is the real CLI's error result. With ``--session-mirror`` (the SDK has a
 ``SessionStore``) every step is mirrored as the real CLI mirrors its transcript (a
@@ -181,7 +181,7 @@ class Cli:
         self.working: dict[str, str] = {}
         #: the session this process runs (one for all its turns), once its first turn began
         self.session: str | None = None
-        #: whether the last tool call was denied (not paused): done all the same
+        #: whether the last tool call ended without running, or failed (not paused): done
         self.denied = False
         #: every prompt the session's "model" was given: the user's and the injected ones
         self.heard: list[str] = []
@@ -1033,9 +1033,10 @@ class Cli:
         waits = read == WAITING  # the run paused: the SDK stops reading, the process ends
         self.result(session, tool_id, content, parent)
         stops = waits or bool(permission.get("interrupt"))
-        # a call denied is done: the "model" read why, as the real CLI's transcript keeps it,
-        # and a resumed session goes on after it (``played``)
-        self.denied = not allowed and not stops
+        # a call that did not run, or failed, is done all the same: the "model" read why, as
+        # the real CLI's transcript keeps it, and a resumed session goes on after it
+        # (``played``); only a call the run paused at is made again
+        self.denied = not stops
         return read, not error, stops
 
 
