@@ -379,3 +379,13 @@ def test_two_overlapping_turns_changing_one_task_lose_neither_update() -> None:
     assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": again}}) == {
         "async_tasks": {"task_1": again}  # a follow-up after its end: updated later
     }
+
+
+async def test_past_the_step_limit_with_nothing_read_the_run_ends_as_it_is() -> None:
+    from trellis.harness.middleware import step_limit
+
+    limit = step_limit(1, scoped=True)
+    none: Any = None  # no graph runtime: the hook reads the state alone
+    state = {"thread_model_call_count": 2, "messages": [AIMessage("the answer")]}
+    assert await limit.abefore_model(state, none) == {"jump_to": "end"}
+    assert await limit.abefore_model({"thread_model_call_count": 1}, none) is None
