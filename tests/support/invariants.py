@@ -745,7 +745,11 @@ def _route(path: str) -> str:
 
 
 def _executed(ev: dict[str, Any]) -> bool:
-    return str((ev.get("data") or {}).get("status") or "ok").lower() not in NOT_RUN
+    data = ev.get("data") or {}
+    # a call the harness refused before running it (a spent budget) says so in its output, its
+    # status ``error`` as a failure's would be: "<tool> was not run: ..."
+    refused = str(data.get("output") or "").startswith(f"{data.get('tool')} was not run")
+    return str(data.get("status") or "ok").lower() not in NOT_RUN and not refused
 
 
 def _starts(
