@@ -12,6 +12,8 @@ real memory service and agent-runs, models scripted ([docs/research/FEATURE_COVE
 
 - **`trellis doctor` reported every working agent-runs as failing.** Its runs check sent the
   key as a bearer token; agent-runs reads it from `X-API-Key` only, and answered `401`.
+- **An A2A card ignored `h.wrap(description=)`.** The card read only the target's own
+  description and docstring; it now says what `h.wrap` was told first.
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
