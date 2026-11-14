@@ -577,10 +577,10 @@ async def _kept_file(path: str) -> tuple[Source, dict[str, Any]] | str:
     from trellis.harness.tools import stored  # noqa: PLC0415
 
     found = await stored.table(path)
-    if isinstance(found, str) or not isinstance(found[0], str) or not found[0].strip():
+    if isinstance(found, str):
         return found
     text, record = found
-    if not path.lower().endswith(".csv"):
+    if not isinstance(text, str) or not text.strip() or not path.lower().endswith(".csv"):
         return found
     head = _QUOTED.sub("", text.splitlines()[0])
     delimiter = max(DELIMITERS, key=head.count)
