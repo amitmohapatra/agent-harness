@@ -48,6 +48,11 @@ def test_a_google_docstring_is_a_description_and_the_parameters_descriptions() -
     assert params == {"store": "The store's id, such as S12.", "rest": "Ignored."}
 
 
+def test_each_name_google_and_numpy_give_the_arguments_section_is_read() -> None:
+    for header in ("Args", "Arguments", "Parameters", "Params", "Keyword Args"):
+        assert documented(f"Do it.\n\n{header}:\n    x: the x") == ("Do it.", {"x": "the x"})
+
+
 def test_sphinx_fields_and_a_docstring_without_sections() -> None:
     text, params = documented(
         "Do it.\n\n:param x: the x\n    and more\n:type x: int\n:returns: y\nAfter."
