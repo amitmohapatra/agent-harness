@@ -632,6 +632,24 @@ async def test_a_refusal_is_a_problem_document(client: httpx.AsyncClient) -> Non
     assert (nobody.status_code, nobody.json()["code"]) == (401, "AUTHENTICATION")
 
 
+async def test_a_run_this_surface_did_not_serve_is_not_found_in_process() -> None:
+    """Without agent-runs no event log is kept: a run the surface did not serve (here, run
+    by code) has no events to replay, even for its own user."""
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    agent = harness.wrap(agent_fn, id="chat")
+    agent.serve_chat(app, identity=user_of)
+    ran = await agent.run("hi", user="u1")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://agui", headers={"x-user": "u1"}
+    ) as http:
+        found = await http.get(f"{PATH}/runs/{ran.run_id}/events")
+    await harness.aclose()
+    assert (found.status_code, found.json()["code"]) == (404, "NOT_FOUND")
+    assert found.json()["detail"] == f"no run {ran.run_id} here"
+
+
 async def test_a_decision_or_a_role_outside_the_vocabulary_is_a_validation_error(
     client: httpx.AsyncClient,
 ) -> None:

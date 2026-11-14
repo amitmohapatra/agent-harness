@@ -381,6 +381,8 @@ def test_every_ending_is_the_task_state_a2a_names() -> None:
         data = asked if outcome is RunOutcome.INTERRUPT else {}
         update = update_for(event(RunEventType.RUN_FINISHED, outcome=outcome, data=data))
         assert update is not None and update.state == state, outcome
+        # a task cannot leave a final state: all but a question are final
+        assert update.terminal is (outcome is not RunOutcome.INTERRUPT), outcome
     partial = update_for(
         event(RunEventType.RUN_FINISHED, outcome=RunOutcome.PARTIAL, data={"result": "half"})
     )
