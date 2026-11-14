@@ -180,7 +180,7 @@ async def test_a_worker_never_told_of_is_waited_for_once(
     Told later after all, it is the helper it was told."""
     from trellis.harness.bridges import helpers as module
 
-    waited: list[float] = []
+    waited: list[float | None] = []
     timeout = asyncio.timeout
 
     def counted(delay: float | None) -> asyncio.Timeout:
