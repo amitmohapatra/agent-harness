@@ -92,6 +92,7 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    stable_id,
 )
 from trellis.harness import budget, skills
 from trellis.harness.adapters.base import (
@@ -264,6 +265,12 @@ SUBAGENT_FAILED: Final = "the subagent's call failed"
 TASK_COMPLETED: Final = "completed"
 TASK_FAILED: Final = "failed"
 TASK_STOPPED: Final = "stopped"
+#: Claude Code's config folder (its settings, sessions, auto memory: ``~/.claude`` unless this
+#: says otherwise) and the switch that turns its auto memory off. Each tenant and user of a
+#: worker has a folder of their own (:func:`config_folder`), so no run reads another's state or
+#: the worker's own, and auto memory — which the memory service does not see — is off.
+CONFIG_ENV: Final = "CLAUDE_CONFIG_DIR"
+AUTO_MEMORY_ENV: Final = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -1221,6 +1228,10 @@ def _options(
     env = dict(routed_env(options.env, runtime) or options.env)
     if MCP_OUTPUT_ENV not in env and MCP_OUTPUT_ENV not in os.environ:
         env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
+    # the run's tenant and user's own Claude Code folder, with no auto memory (the team's own
+    # word in the options' ``env`` stands)
+    env.setdefault(CONFIG_ENV, config_folder(runtime.tenant, runtime.user))
+    env.setdefault(AUTO_MEMORY_ENV, "1")
     shell = _shell(options, env)
     hooks = _with_governance(options.hooks, steps, shell)
     changes: dict[str, Any] = {
@@ -1230,6 +1241,9 @@ def _options(
         "can_use_tool": _asked(options.can_use_tool, steps, shell),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
         "env": env,
+        # a user's text is delivered as written: an ``@path`` in it reads no file, a
+        # ``/command`` runs nothing — unless the app says so for the run
+        "verbatim_prompts": runtime.framework_options.get("verbatim_prompts", True),
     }
     store = session_store(options, runtime.replay.journal, runtime.agent_id)
     if store is not None:
@@ -1247,6 +1261,16 @@ def _options(
             # Claude Code takes both only to fork
             changes["session_id"] = None
     return dataclasses.replace(options, **changes)
+
+
+def config_folder(tenant: str, user: str) -> str:
+    """The Claude Code config folder of ``tenant``'s ``user`` on this worker: under the XDG data
+    folder (``$XDG_DATA_HOME/trellis/claude``, else ``~/.local/share/trellis/claude``), made
+    for them alone. The SDK seeds a resumed session's folder from it."""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    folder = Path(base) / "trellis" / "claude" / stable_id(tenant, user, prefix="u_")
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return str(folder)
 
 
 def _told(given: Any) -> Any:

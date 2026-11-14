@@ -31,13 +31,16 @@ from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
+    AUTO_MEMORY_ENV,
     CLI_MESSAGE_BYTES,
+    CONFIG_ENV,
     MCP_OUTPUT_ENV,
     MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
     UNHELD_AGENTS,
     ClaudeAdapter,
     ClaudeRunError,
+    config_folder,
     configured_servers,
 )
 from trellis.harness.adapters.function import FunctionAdapter
@@ -198,6 +201,8 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
         offered=None,
+        tenant="default",
+        user="u1",
         agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderSDK())),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
@@ -223,7 +228,13 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
     assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
-    assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
+    # the harness keeps large results; the user's own Claude folder, no auto memory
+    assert sent.env == {
+        MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS),
+        CONFIG_ENV: config_folder("default", "u1"),
+        AUTO_MEMORY_ENV: "1",
+    }
+    assert sent.verbatim_prompts  # the user's text, as written
     unchanged = {
         "hooks": None,
         "can_use_tool": None,
@@ -232,6 +243,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         "session_store": None,
         "disallowed_tools": [],
         "env": {},
+        "verbatim_prompts": False,
     }
     assert dataclasses.replace(sent, session_store_flush="batched", **unchanged) == options
 

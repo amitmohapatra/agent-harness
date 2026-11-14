@@ -145,6 +145,20 @@ the user Claude Code would ask:
   the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`) are added to
   `disallowed_tools`, whatever `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the
   bundled CLI's named agents are background subagents, each a child run: below).
+* **A user's text is text.** The run's input reaches Claude Code as written (the SDK's
+  `verbatim_prompts`): an `@/path` in a user's message reads no file of the worker and a
+  `/command` runs nothing — neither would go through governance or be recorded. An app that
+  means a slash command (or a file mention) sends it on purpose, with the run's
+  `framework_options={"verbatim_prompts": False}`.
+* **Each user's own Claude folder, no auto memory.** Claude Code keeps settings, sessions and
+  its auto memory in its config folder (`~/.claude` by default), which every run on a worker
+  would share. Each tenant's user gets a folder of their own instead (`CLAUDE_CONFIG_DIR`,
+  under `$XDG_DATA_HOME/trellis/claude`), and auto memory is off
+  (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`): two users share no settings and no memory, and the
+  worker's own `~/.claude` is not read or written. What you configure on the agent — its
+  `settings`, `skills`, `plugins`, `agents` — still reaches the CLI; a `CLAUDE_CONFIG_DIR`
+  (or the switch) in your `env` stands. The folder holds no login: the CLI authenticates with
+  the gateway's key (or your own `ANTHROPIC_API_KEY`), not a `claude login` of the worker.
 * **One call, one question.** A call whose approval a person answered before it ran
   (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
   about again when Claude Code asks too: it runs. Another question answered while the call

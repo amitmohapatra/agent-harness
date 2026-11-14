@@ -348,9 +348,9 @@ async def test_every_hook_event_of_the_teams_own_runs_inside_the_run(
 async def test_a_slash_command_no_model_replied_in_is_a_turn_done_with_an_empty_answer(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:
-    """A prompt that is one of Claude Code's slash commands runs as with the SDK alone
-    (``/compact``: the options' ``PreCompact`` hook is called, inside the run; no prompt
-    hook). The CLI answers it itself — its result says ``success`` with no text, and no
+    """A slash command the app sends on purpose (the run's ``verbatim_prompts=False``: a
+    user's own text is delivered as written) runs as with the SDK alone (``/compact``: the
+    options' ``PreCompact`` hook is called, inside the run; no prompt hook). The CLI answers it itself — its result says ``success`` with no text, and no
     reply of the model's is in its turn — so the run ends ``SUCCESS`` with an empty answer,
     as a run of any framework in which no model replied does. The conversation goes on."""
     called: list[tuple[str, str | None]] = []
@@ -362,7 +362,10 @@ async def test_a_slash_command_no_model_replied_in_is_a_turn_done_with_an_empty_
 
     hooks = {event: [HookMatcher(hooks=[own])] for event in ("PreCompact", "UserPromptSubmit")}
     agent = harness.wrap(options(tmp_path, [{"text": "ok"}], hooks=hooks), id="compact")
-    compacted = await agent.run("/compact", user="u1", thread=conversation(path))
+    explicit = {"verbatim_prompts": False}
+    compacted = await agent.run(
+        "/compact", user="u1", thread=conversation(path), framework_options=explicit
+    )
     assert called == [("PreCompact", compacted.run_id)]
     assert compacted.status is RunStatus.SUCCESS and compacted.answer == "", compacted.error
     after = await agent.run("hello", user="u1", thread=conversation(path))

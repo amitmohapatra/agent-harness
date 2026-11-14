@@ -722,6 +722,54 @@ async def test_messages_to_other_agents_are_not_offered_and_workflows_are(
     assert not {"Workflow", "Agent", "Task", "TaskStop", "ListAgents"} & disallowed
 
 
+async def test_a_users_text_is_delivered_as_written_no_file_read_no_command(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """What a user types is text: an ``@/path`` in it reads no file of the worker and a
+    ``/command`` runs nothing (Claude Code is told the prompt is composed: the SDK's
+    ``verbatim_prompts``). An app that means a slash command sends it explicitly, with the
+    run's ``verbatim_prompts=False``."""
+    secret = tmp_path / "hostname"
+    secret.write_text("worker-7")
+    target = options(tmp_path, [{"text": "ok"}])
+    agent = harness.wrap(target, id="verbatim")
+    said = f"what is in @{secret} ? /compact"
+    assert (await agent.run(said, user="u1")).answer == "ok"
+    record = started_with(tmp_path)
+    assert record["composed"] and record["attached"] == {} and record["prompt"] == said
+    compacted = await agent.run("/compact", user="u1")
+    assert compacted.answer == "ok"  # a turn of the model's: no command ran
+    explicit = await agent.run(
+        f"@{secret}", user="u1", framework_options={"verbatim_prompts": False}
+    )
+    assert explicit.status is RunStatus.SUCCESS
+    assert started_with(tmp_path)["attached"] == {str(secret): "worker-7"}
+
+
+async def test_each_user_has_a_claude_folder_of_their_own_and_no_auto_memory(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code keeps settings, sessions and memory in its config folder: each tenant and
+    user gets one of their own (``CLAUDE_CONFIG_DIR``), with auto memory off — two users on
+    one worker share no settings and no memory, and nothing is written to the worker's own
+    ``~/.claude``. The team's own settings still reach the CLI (its flag layer)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = options(tmp_path, [{"text": "ok"}], settings='{"model": "team-model"}')
+    agent = harness.wrap(target, id="folders")
+    folders = []
+    for user in ("ada", "bob", "ada"):
+        await agent.run(f"note for {user}", user=user)
+        record = started_with(tmp_path)
+        assert record["auto_memory_off"] == "1" and record["memory"] is None
+        assert "--settings" in record["argv"]
+        folders.append(record["config_dir"])
+    assert folders[0] == folders[2] != folders[1]
+    assert all(not Path(f).is_relative_to(home) for f in folders)
+    assert not (home / ".claude").exists()
+
+
 async def test_a_large_result_is_the_harness_s_to_keep_not_the_cli_s(
     harness: Harness, tmp_path: Path
 ) -> None:

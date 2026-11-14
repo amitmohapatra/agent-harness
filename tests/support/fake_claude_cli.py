@@ -97,6 +97,7 @@ were seen from the bundled CLI driven against a scripted model; no real model wa
 from __future__ import annotations
 
 import atexit
+import contextlib
 import fcntl
 import json
 import os
@@ -274,6 +275,10 @@ class Cli:
         self.helped = 0
         #: what the process exits with when its input ends: 1 once a turn ended at a limit
         self.status = 0
+        #: the prompt under way was composed by the client (``client_composed``: the SDK's
+        #: ``verbatim_prompts``): its text is delivered as written — no ``@path`` read, no
+        #: slash command
+        self.composed = False
         #: the structured answer the turn under way gave (:data:`STRUCTURED`)
         self.structured: dict[str, Any] | None = None
         #: the steps the session took before this process resumed it: a result's cost is
@@ -293,6 +298,7 @@ class Cli:
         """A message that came while another was waited for: a prompt is queued, a control
         request answered (an ``interrupt`` stops the turn under way)."""
         if message.get("type") == "user":
+            self.composed = bool(message.get("client_composed"))
             self.queued.append(message["message"]["content"])
         elif message.get("type") == "control_request":
             if message["request"].get("subtype") == "interrupt":
@@ -764,7 +770,7 @@ class Cli:
         self.began = self.steps - self.helped
         resumed = (self.resumes() if first else self.session) or None
         session = self.session = resumed or argument("--session-id") or str(uuid.uuid4())
-        if str(prompt).strip() == COMPACT:  # a slash command: no prompt hook, no model turn
+        if str(prompt).strip() == COMPACT and not self.composed:  # a slash command: no hook
             self.hooked("PreCompact", session, trigger="manual", custom_instructions=None)
             send(self.ended(session, last="", turns=0))
             return
@@ -876,9 +882,15 @@ class Cli:
                 "cwd": os.getcwd(),
                 "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
                 "initialize": self.initialized,
+                "composed": self.composed,
+                "attached": {} if self.composed else attached(str(prompt)),
+                "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+                "auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+                "memory": remembered(),
             }
             replaced(record, said)
             appended(f"{record}.turns", said)
+        remember(str(prompt))
 
     def played(
         self, session: str, script: list[dict[str, Any]], done: int, turn: int, context: str
@@ -1205,6 +1217,42 @@ def mirror(
     send({"type": "transcript_mirror", "filePath": str(path), "entries": [entry]})
 
 
+def attached(prompt: str) -> dict[str, str]:
+    """The files an ``@/path`` in ``prompt`` names, read into the turn as the real CLI expands a
+    mention (a prompt not composed by the client)."""
+    found = {}
+    for path in re.findall(r"@(/\S+)", prompt):
+        with contextlib.suppress(OSError):
+            found[path] = Path(path).read_text()
+    return found
+
+
+def memory_file() -> Path:
+    """Where Claude Code's auto memory is kept: under its config folder (``CLAUDE_CONFIG_DIR``,
+    else ``~/.claude``)."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    return Path(base) / "projects" / "fake-project" / "memory" / "MEMORY.md"
+
+
+def remembered() -> str | None:
+    """What auto memory holds (``None``: nothing, or auto memory is off)."""
+    if os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"):
+        return None
+    with contextlib.suppress(OSError):
+        return memory_file().read_text()
+    return None
+
+
+def remember(prompt: str) -> None:
+    """Auto memory saves what the turn learned (each prompt here), unless it is off."""
+    if os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"):
+        return
+    kept = memory_file()
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    with kept.open("a") as file:
+        file.write(prompt + "\n")
+
+
 def materialised(session: str) -> list[dict[str, Any]] | None:
     """The entries of a transcript the SDK materialised (``None``: there is none)."""
     if not os.environ.get("CLAUDE_CONFIG_DIR"):
@@ -1395,6 +1443,7 @@ def main() -> None:
             cli.asked_to_stop(message)
             acknowledge(message)
         elif kind == "user":
+            cli.composed = bool(message.get("client_composed"))
             cli.turn(message["message"]["content"])
 
 
