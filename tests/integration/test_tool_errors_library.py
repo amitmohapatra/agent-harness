@@ -566,6 +566,28 @@ async def test_a_call_that_asks_is_asked_about_once_across_the_harnesss_tries(
     assert ran == ["stock a"] * 3 and done.answer == "7"
 
 
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("built", BUILT)
+async def test_a_call_the_catalog_asks_about_is_asked_once_across_the_harnesss_tries(
+    memory_harness: Harness, memory_service: FakeMemoryService, built: str
+) -> None:
+    """A read the catalog's rule asks about (``approve_when``), approved for the rest of the
+    run, fails twice and is tried again: no second question, and the approval is said on the
+    stream once, not again for each try."""
+    refused(2)
+    memory_service.catalog = {"stock": {"side_effects": "read", "approve_when": "true"}}
+    build = dict(zip(BUILT, builders(InMemorySaver()), strict=True))[built]
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    agent = memory_harness.wrap(build(model, [stock]), id="ruled")
+    paused = await agent.run("a?", user="u", thread="t")
+    assert paused.interrupt is not None and ran == []
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "approve", reviewer="u", remember="run"
+    )
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
+    assert ran == ["stock a"] * 3 and done.answer == "7"
+
+
 class Watching(Hooks):
     """The run's ``on_error`` hooks: each failed call they are told of."""
 

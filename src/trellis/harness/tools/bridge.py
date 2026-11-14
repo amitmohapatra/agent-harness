@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import types
 import weakref
 from collections.abc import Hashable, Iterable
 from datetime import UTC, datetime
@@ -651,7 +652,7 @@ async def _decided(
     )
     if tool is None or tool.confined:
         decision = decision.unasked()
-    events = _Silent() if again else runtime.events  # a try again: said with its first
+    events = _SILENT if again else runtime.events  # a try again: said with its first
     if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
         events.warning(decision.error.code, decision.error.message)
     if asked is not None:
@@ -711,14 +712,13 @@ async def _decided(
     return decision, call, None
 
 
-class _Silent:
-    """What a try again of a decided call says on the run's stream of its decision: nothing."""
+def _said_before(*_args: Any, **_kwargs: Any) -> None:
+    """What a try again of a decided call says on the run's stream of its decision: nothing
+    (its first try said it)."""
 
-    def warning(self, *args: Any, **kwargs: Any) -> None:
-        return None
 
-    def custom(self, *args: Any, **kwargs: Any) -> None:
-        return None
+#: The run's stream as a try again of a decided call speaks to it (:func:`_said_before`).
+_SILENT: Final = types.SimpleNamespace(warning=_said_before, custom=_said_before)
 
 
 async def _answered(
