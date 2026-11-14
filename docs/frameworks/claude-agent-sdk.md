@@ -91,21 +91,30 @@ the user Claude Code would ask:
   them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
   recommended with its description as why, another answer in words); Claude reads the answers
   by question.
-* **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
-  `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash` write (announced; Claude Code asks
-  first where it would). The tools Claude keeps its own work with run too: its task list
-  (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`: `TodoWrite`'s successors in the bundled
-  CLI), `EnterPlanMode`, and `StructuredOutput`, which its answer in an `output_format` is
-  handed to. Your in-process server's tool is what its annotations say; any other tool (an
-  MCP server's of yours the CLI reaches itself, a tool of the CLI's the harness has no word
-  on) says nothing of what it does: a person approves each call, until its risk is in the
-  tool catalog.
+* **Risk.** Every tool the bundled CLI has is declared by what it does. Reads run: `Read`,
+  `Glob`, `Grep`, `LSP`, the listing and look-up tools, loading a deferred MCP tool
+  (`ToolSearch`), waiting for MCP servers (`WaitForMcpServers`), the tools Claude keeps its
+  own work with (its task list `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`, and
+  `TodoWrite`; `EnterPlanMode`; `StructuredOutput`, which its answer in an `output_format` is
+  handed to; a subagent's `SubagentHandback`), and a subagent's or a workflow's call. Writes
+  are announced and run, Claude Code asking first where it would: `Write`, `Edit`,
+  `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`, `REPL`, `Monitor`, `EnterWorktree`,
+  `ExitWorktree`, `TaskStop`, and what reaches outside the session (`Artifact`,
+  `PushNotification`, `SendUserFile`, `SendFeedback`, `ShareOnboardingGuide`,
+  `EndConversation`). Claude Code asks its user before `ExitPlanMode` (the plan's approval),
+  `WebFetch` and `WebSearch` (the network) and `Skill`: a person answers there too, as Claude
+  Code would have asked, unless the tool catalog has a rule for the tool that lets it run.
+  Your in-process server's tool is what its annotations say; any other tool (an MCP server's
+  of yours the CLI reaches itself, a tool of a newer CLI's the harness has no word on) says
+  nothing of what it does: a person approves each call, until its risk is in the tool
+  catalog. `PowerShell` gets no read-only analysis (`Bash` does).
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)): a team that wants every shell command approved, even
   one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
   `true`) there.
-* **Not offered: schedules.** A scheduled prompt (`CronCreate`) or a wake-up
-  (`ScheduleWakeup`) fires only in a CLI that is running then. A query's own process ends
+* **Not offered: schedules.** A scheduled prompt (`CronCreate`), a wake-up
+  (`ScheduleWakeup`) or a claude.ai scheduled task (`RemoteTrigger`) fires with no run to
+  check its calls: the first two only in a CLI that is running then. A query's own process ends
   with it; a conversation's process (below) outlives the turn, but only until it is idle,
   and the turn a schedule fires has no run: its tool calls are refused and its answer reaches
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
@@ -141,8 +150,8 @@ the user Claude Code would ask:
   catalog's risk for `Workflow` still decides its launch.
 * **Not offered: messages to other agents.** `SendMessage` resumes a finished background
   subagent as a new task whose messages carry the call that first started it, or reaches
-  another Claude session on the machine or in the cloud. No run holds that work, so it and
-  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`) are added to
+  another Claude session on the machine or in the cloud. No run holds that work, so it, `ListAgents` (the sessions it reaches: on a shared
+  worker, other tenants' runs) and the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`) are added to
   `disallowed_tools`, whatever `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the
   bundled CLI's named agents are background subagents, each a child run: below).
 * **A user's text is text.** The run's input reaches Claude Code as written (the SDK's

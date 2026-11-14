@@ -50,6 +50,7 @@ from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
     RESUMED_CALL,
+    UNHELD_AGENTS,
     ClaudeAdapter,
 )
 from trellis.harness.agent import Agent
@@ -2281,14 +2282,41 @@ async def test_with_memory_on_each_live_turn_asks_memory_first_and_is_saved_afte
 
 
 # --------------------------------------------------------------------------- the tools
-def test_the_task_tools_the_bundled_cli_exposes_have_a_declared_risk() -> None:
-    """Named as the bundled CLI (2.1.283) lists them when asked (its ``init`` message), each
-    by what it does: stopping a task is a write; tools that only list or look up, read-only by
-    the CLI's own word, are reads. ``TaskOutput`` and ``Monitor`` are not tools it lists."""
-    assert BUILTIN_SIDE_EFFECTS["TaskStop"] == "write"
-    looked_up = ("ListAgents", "ListConnectors", "ReadNotifications", "ReportFindings")
-    assert {BUILTIN_SIDE_EFFECTS[name] for name in looked_up} == {"read"}
-    assert not {"TaskOutput", "Monitor"} & set(BUILTIN_SIDE_EFFECTS)
+#: The tools the bundled CLI (2.1.283) has: those its ``init`` message lists, and those it
+#: offers where it is set up for them (a shell on Windows, an LSP server, MCP servers, deferred
+#: tools, worktrees, a claude.ai login, auto mode...), every name found in the binary.
+CLI_TOOLS = (
+    "Agent", "AskUserQuestion", "Bash", "Edit", "EnterPlanMode", "EnterWorktree",
+    "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "ListConnectors", "ListMcpResourcesTool",
+    "ListPlugins", "ListSkills", "LSP", "Monitor", "MultiEdit", "NotebookEdit", "PowerShell",
+    "Read", "ReadMcpResourceTool", "ReadNotifications", "ReportFindings", "REPL",
+    "SearchMcpRegistry", "SearchPlugins", "SearchSkills", "SendUserMessage",
+    "ShowOnboardingRolePicker", "Skill", "StructuredOutput", "SubagentHandback",
+    "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills", "TaskCreate", "TaskGet",
+    "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WaitForMcpServers",
+    "WebFetch", "WebSearch", "Workflow", "Write", "Artifact", "PushNotification",
+    "SendFeedback", "SendUserFile", "ShareOnboardingGuide", "EndConversation",
+)  # fmt: skip
+
+
+def test_every_tool_of_the_bundled_cli_has_a_declared_risk_or_is_not_offered() -> None:
+    """Each tool the bundled CLI has is declared by what it does — or is not offered (work
+    that outlives the run, agents no run holds) — and no name it does not have is: a tool
+    with no word asks a person on every call, and one listed but gone is a ghost in the
+    agent's tool set. Loading a deferred tool or waiting for MCP servers only reads; a
+    shell, a worktree, a published page or a notification writes; ``ListAgents``, which lists
+    the other sessions of the worker's user (other tenants' runs), and ``RemoteTrigger``,
+    whose scheduled task outlives the run as a schedule does, are not offered."""
+    offered = set(BUILTIN_SIDE_EFFECTS)
+    off = {*OUTLIVES_THE_QUERY, *UNHELD_AGENTS}
+    assert set(CLI_TOOLS) - offered - off == set()
+    assert not {"LS", "KillShell", "BashOutput", "SlashCommand", "TaskOutput"} & offered
+    assert {"RemoteTrigger", "CronCreate"} <= set(OUTLIVES_THE_QUERY)
+    assert {"ListAgents", "SendMessage"} <= set(UNHELD_AGENTS) and not off & offered
+    reads = ("ToolSearch", "WaitForMcpServers", "LSP", "SubagentHandback", "ReportFindings")
+    assert {BUILTIN_SIDE_EFFECTS[name] for name in reads} == {"read"}
+    writes = ("TaskStop", "PowerShell", "Monitor", "EnterWorktree", "Artifact", "REPL")
+    assert {BUILTIN_SIDE_EFFECTS[name] for name in writes} == {"write"}
 
 
 async def test_schedules_stay_disallowed_in_a_live_session(

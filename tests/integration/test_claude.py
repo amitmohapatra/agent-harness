@@ -720,7 +720,8 @@ async def test_messages_to_other_agents_are_not_offered_and_workflows_are(
     await harness.wrap(target, id="no-teams").run("fan this out to agents", user="u1")
     disallowed = set(started_with(tmp_path)["disallowed_tools"].split(","))
     assert {"SendMessage", "TeamCreate", "TeamDelete"} <= disallowed
-    assert not {"Workflow", "Agent", "Task", "TaskStop", "ListAgents"} & disallowed
+    assert "ListAgents" in disallowed  # the sessions SendMessage would reach
+    assert not {"Workflow", "Agent", "Task", "TaskStop"} & disallowed
 
 
 async def test_a_users_text_is_delivered_as_written_no_file_read_no_command(

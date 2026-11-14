@@ -140,63 +140,93 @@ log = logging.getLogger("trellis.harness")
 if TYPE_CHECKING:
     from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
-#: Claude Code's built-in tools, and what each does as governance sees it (the tool catalog's
-#: word overrides it): reads run; writes, ``Bash`` among them, run and are announced, Claude
-#: Code's own permission check asking first where it would (a team that wants every shell
-#: command approved gives ``Bash`` the risk ``irreversible``, or an ``approve_when``, in the
-#: tool catalog); a subagent's
-#: call (``Agent``, ``Task``) and a dynamic workflow's (``Workflow``) only hand work on — their
-#: agents' calls are governed one by one; a
-#: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
-#: may do anything its command does: a write. Stopping a background task (``TaskStop``, named
-#: ``KillShell`` before) is a write. Tools that only list or look up (``ListAgents``,
-#: ``ListConnectors``, ``ReadNotifications``, ``ReportFindings``, ``SearchMcpRegistry``,
-#: ``SuggestConnectors``: each read-only by the bundled CLI's own word) are reads. So are the
-#: tools Claude keeps its own work with, which change nothing outside its session and which
-#: the bundled CLI runs without asking its user: its task list (``TaskCreate``, ``TaskGet``,
-#: ``TaskList``, ``TaskUpdate``: ``TodoWrite``'s successors), entering plan mode
-#: (``EnterPlanMode``), and the tool it hands a structured answer to (``StructuredOutput``,
-#: with ``output_format``: asked about, a run would pause on its own answer). Any other
-#: tool the CLI asks about has said nothing of what it does: a person approves each call (its
-#: risk in the catalog says more).
+#: Claude Code's built-in tools — every one the bundled CLI (2.1.283) has, those its ``init``
+#: message lists and those it offers where it is set up for them — and what each does as
+#: governance sees it (the tool catalog's word overrides it). Reads run: looking things up,
+#: listing, loading a deferred tool (``ToolSearch``), waiting for MCP servers to connect
+#: (``WaitForMcpServers``), code intelligence (``LSP``), the tools Claude keeps its own work
+#: with (its task list, plan mode, a structured answer, a subagent's hand-back), and a
+#: subagent's or a workflow's call (``Agent``, ``Task``, ``Workflow``), which only hands work
+#: on — its agents' calls are governed one by one. Writes run and are announced, Claude Code's
+#: own permission check asking first where it would: a file changed, a shell (``Bash``,
+#: ``PowerShell``, ``REPL``, ``Monitor``'s command), a worktree entered or left, a task
+#: stopped, a page published, a notification, a file or feedback sent, the session ended.
+#: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
+#: or an ``approve_when``, in the tool catalog. What Claude Code asks its user about although
+#: it only reads — leaving plan mode with a plan, the network, a skill (:data:`CLAUDE_ASKS`)
+#: — a person answers. Any other tool says nothing of what it does: a person approves each
+#: call (its risk in the catalog says more).
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
-    "Read": "read",
-    "Glob": "read",
-    "Grep": "read",
-    "LS": "read",
-    "WebFetch": "read",
-    "WebSearch": "read",
-    "TodoWrite": "read",
-    "Agent": "read",
-    "Task": "read",
-    "Workflow": "read",
-    "Skill": "read",
-    "ExitPlanMode": "read",
-    "EnterPlanMode": "read",
-    "TaskCreate": "read",
-    "TaskGet": "read",
-    "TaskList": "read",
-    "TaskUpdate": "read",
-    "StructuredOutput": "read",
-    "AskUserQuestion": "read",
-    "BashOutput": "read",
-    "ListMcpResourcesTool": "read",
-    "ReadMcpResourceTool": "read",
-    "ListAgents": "read",
-    "ListConnectors": "read",
-    "ReadNotifications": "read",
-    "ReportFindings": "read",
-    "SearchMcpRegistry": "read",
-    "SuggestConnectors": "read",
-    "Write": "write",
-    "Edit": "write",
-    "MultiEdit": "write",
-    "NotebookEdit": "write",
-    "KillShell": "write",
-    "TaskStop": "write",
-    "SlashCommand": "write",
-    "Bash": "write",
+    **dict.fromkeys(
+        (
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "Agent",
+            "Task",
+            "Workflow",
+            "Skill",
+            "ExitPlanMode",
+            "EnterPlanMode",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+            "StructuredOutput",
+            "AskUserQuestion",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ListConnectors",
+            "ReadNotifications",
+            "ReportFindings",
+            "SearchMcpRegistry",
+            "SuggestConnectors",
+            "ListPlugins",
+            "ListSkills",
+            "SearchPlugins",
+            "SearchSkills",
+            "SuggestPluginInstall",
+            "SuggestSkills",
+            "ShowOnboardingRolePicker",
+            "LSP",
+            "ToolSearch",
+            "WaitForMcpServers",
+            "SubagentHandback",
+            "SendUserMessage",
+        ),
+        "read",
+    ),
+    **dict.fromkeys(
+        (
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "TaskStop",
+            "Bash",
+            "PowerShell",
+            "REPL",
+            "Monitor",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Artifact",
+            "PushNotification",
+            "SendFeedback",
+            "SendUserFile",
+            "ShareOnboardingGuide",
+            "EndConversation",
+        ),
+        "write",
+    ),
 }
+#: The tools Claude Code asks its user about although they only read: leaving plan mode with a
+#: plan (``ExitPlanMode``), the network (``WebFetch``, ``WebSearch``), a skill (``Skill``). A
+#: person answers when it asks, as for a write — unless the tool catalog has a rule for the
+#: tool that lets it run.
+CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "WebFetch", "WebSearch", "Skill"})
 #: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
 #: ends a recommended option's label with.
 QUESTION_TOOL: Final = "AskUserQuestion"
@@ -210,15 +240,23 @@ CLAUDE_CODE: Final = "Claude Code"
 #: is idle, and the turn a schedule fires then has no run: its tool calls are refused and its
 #: answer reaches nobody. So they stay disallowed (with the tools that list and delete the
 #: schedules): offered, Claude promised a schedule that nothing keeps.
-OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+OUTLIVES_THE_QUERY: Final = (
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "RemoteTrigger",  # a claude.ai scheduled task: it fires with no run either
+)
 #: Claude Code's built-in tools that start agents no run of the harness can hold, disallowed
 #: too. ``SendMessage`` resumes a finished background subagent as a new task, whose messages
 #: carry the call that first started it (the bundled CLI, 2.1.283, driven against a scripted
 #: model), or reaches another Claude session on the machine or in the cloud. The agent-teams
 #: tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` (``TeamCreate``,
 #: ``TeamDelete``; 2.1.283 has none, its named agents are background subagents) are left out
-#: with it, whatever the team's own environment says.
-UNHELD_AGENTS: Final = ("SendMessage", "TeamCreate", "TeamDelete")
+#: with it, whatever the team's own environment says, and ``ListAgents`` — the agents
+#: ``SendMessage`` reaches: the other Claude sessions of the worker's user, other tenants' runs
+#: among them.
+UNHELD_AGENTS: Final = ("SendMessage", "ListAgents", "TeamCreate", "TeamDelete")
 #: The name of a dynamic workflow's child run (its script names it, which the call does not).
 WORKFLOW: Final = "workflow"
 #: What the record of a workflow agent's call keeps of who made it (its hook's input).
@@ -1474,8 +1512,9 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif (
             this in steps.answered
-            or spec.side_effects == "read"
+            or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())
+            or (name in CLAUDE_ASKS and await _catalog_allows(runtime, name, args))
         ):  # a person approved this call (``PreToolUse``)
             verdict = PermissionResultAllow()
         else:
@@ -1498,6 +1537,18 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         return verdict
 
     return can_use_tool
+
+
+async def _catalog_allows(runtime: Runtime, name: str, args: dict[str, Any]) -> bool:
+    """Whether the tool catalog has a rule for ``name`` that lets this call run without a
+    person (:data:`CLAUDE_ASKS`: Claude Code asks about it otherwise)."""
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    rules = await governance.rules([name], agent_id=runtime.agent_id)
+    if rules.get(name) is None:
+        return False
+    risk = BUILTIN_SIDE_EFFECTS[name]
+    decision = await governance.check(name, args, side_effects=risk, agent_id=runtime.agent_id)
+    return not decision.asks
 
 
 async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:

@@ -486,7 +486,7 @@ async def test_the_teams_permission_answer_reaches_claude_code_as_given(
 
 
 @pytest.mark.parametrize("path", PATHS)
-@pytest.mark.parametrize("name", ["EnterWorktree", "mcp__erp__post_invoice"])
+@pytest.mark.parametrize("name", ["FutureTool", "mcp__erp__post_invoice"])
 async def test_a_tool_that_says_nothing_of_what_it_does_asks_a_person_once(
     harness: Harness, tmp_path: Path, path: str, name: str
 ) -> None:
@@ -508,6 +508,51 @@ async def test_a_tool_that_says_nothing_of_what_it_does_asks_a_person_once(
     # Claude Code did ask (its own check), and was answered without a person
     asked = lines(tmp_path / "cli.json.permissions")
     assert [(a["tool"], a["answer"]["behavior"]) for a in asked] == [(name, "allow")]
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_loading_a_deferred_tool_asks_nobody(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Claude Code loads a team MCP server's deferred tools with ``ToolSearch`` (and waits for
+    a server still connecting with ``WaitForMcpServers``): both only read, so they run."""
+    script = [
+        {"builtin": "ToolSearch", "args": {"query": "select:mcp__erp__post_invoice"}},
+        {"builtin": "WaitForMcpServers", "args": {}},
+        {"text": "{last}"},
+    ]
+    done = await harness.wrap(options(tmp_path, script), id="deferred").run(
+        "go on", user="u1", thread=conversation(path)
+    )
+    assert done.status is RunStatus.SUCCESS and done.answer == "WaitForMcpServers ran"
+    assert [c["tool"] for c in lines(tmp_path / "builtins.jsonl")] == [
+        "ToolSearch",
+        "WaitForMcpServers",
+    ]
+
+
+@pytest.mark.parametrize("name", ["ExitPlanMode", "WebFetch", "WebSearch", "Skill"])
+async def test_what_claude_code_asks_about_a_person_answers_unless_the_catalog_allows_it(
+    tmp_path: Path, name: str
+) -> None:
+    """Claude Code asks its user before it leaves plan mode with a plan (``ExitPlanMode``),
+    reaches the network (``WebFetch``, ``WebSearch``) or runs a skill (``Skill``): a person
+    answers as it would have, once — unless the tool catalog allows the tool, which then
+    runs without a question."""
+    script = [{"builtin": name, "args": {"url": "https://example.com"}}, {"text": "{last}"}]
+    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog({}))) as h:
+        agent = h.wrap(options(tmp_path, script), id="asks")
+        paused = await agent.run("go on", user="u1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == name
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.answer == f"{name} ran", done.error
+        assert [c["tool"] for c in lines(tmp_path / "builtins.jsonl")] == [name]  # once
+    (tmp_path / "builtins.jsonl").unlink()
+    allows = FakeCatalog({name: Rule(risk="read")})
+    async with with_governance(Harness(config=Settings()), Governance(allows)) as h:
+        done = await h.wrap(options(tmp_path, script), id="allowed").run("go on", user="u1")
+        assert done.status is RunStatus.SUCCESS and done.answer == f"{name} ran", done.error
 
 
 @pytest.mark.parametrize("path", PATHS)
