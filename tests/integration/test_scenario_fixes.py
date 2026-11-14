@@ -24,6 +24,7 @@ from tests.support.runlog import LoggedRuns
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEvent, RunEventType, RunStatus
 from trellis.harness import agent as agent_module
+from trellis.harness import conversation
 from trellis.harness import writes as writes_module
 from trellis.harness.agent import Agent
 from trellis.harness.agui.sse import decode
@@ -425,7 +426,16 @@ async def test_scn4_a_run_store_that_cannot_be_read_is_a_warning(
     async with Harness(config=Settings(), memory=_holding(FakeMemoryService(), kept)) as h:
         agent, _ = _react(h, ["Noted.", "I do not know."], "unread")
         await agent.run("The locker code is 4242.", user="ada", thread="t1")
-        monkeypatch.setattr(h.runs, "iterate", Mock(side_effect=RuntimeError("no agent-runs")))
+        listed = h.runs.iterate
+
+        def unread(**asked: Any) -> Any:
+            # the conversation's line lists the runs still working; the earlier turns are the
+            # ended ones, and only their listing fails here
+            if asked.get("status") in conversation.ASKED:
+                raise RuntimeError("no agent-runs")
+            return listed(**asked)
+
+        monkeypatch.setattr(h.runs, "iterate", Mock(side_effect=unread))
         events = [e async for e in agent.stream("What is it?", user="ada", thread="t1")]
         kept.set()
         warned = [e.data for e in events if e.data.get("code") == "earlier_turns"]
