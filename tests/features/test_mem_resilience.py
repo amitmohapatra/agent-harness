@@ -247,4 +247,6 @@ async def test_the_platform_and_admin_routes_refuse_lesser_keys(invariants: Any)
         assert listed.status_code == 200 and "feat" in listed.text
         keys = await c.get("/v1/keys", headers={"X-API-Key": ADMIN_KEY or ""})
         assert keys.status_code == 200, keys.text
-        assert API_KEY not in keys.text and (ADMIN_KEY or "x") not in keys.text  # no secret
+        assert (API_KEY or "x") not in keys.text and (
+            ADMIN_KEY or "x"
+        ) not in keys.text  # no secret

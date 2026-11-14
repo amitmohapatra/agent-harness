@@ -51,7 +51,7 @@ async def test_retention_forgets_what_is_older_than_the_tenants_policy(uid: str)
         keep = await feat.memory.client.bind(tenant_id="feat", user_id=user).remember(  # type: ignore[union-attr]
             f"Elsewhere my badge was FEAT{uid}."
         )
-    old_id, new_id, keep_id = (getattr(m, "memory_id", None) or m.id for m in (old, new, keep))
+    old_id, new_id, keep_id = (m.memory_id for m in (old, new, keep))
     for memory_id in (old_id, keep_id):
         move_clock(
             MEMORY_DSN,
@@ -92,9 +92,10 @@ async def test_a_purged_message_is_read_back_whole_from_its_archive_segment(
     ]
     async with harness() as h:
         thread = await h.conversation(user=user, thread="notes")
+        assert h.memory is not None
         ctx = h.memory.client.bind(
             tenant_id=await h._tenant(),
-            user_id=user,  # type: ignore[union-attr]
+            user_id=user,
             agent_id=f"arch-{uid}",
             thread_id=thread,
         )
@@ -139,9 +140,10 @@ async def test_a_purged_message_is_read_back_whole_from_its_archive_segment(
         )
     )
     async with harness() as h:
+        assert h.memory is not None
         ctx = h.memory.client.bind(
             tenant_id=await h._tenant(),
-            user_id=user,  # type: ignore[union-attr]
+            user_id=user,
             agent_id=f"arch-{uid}",
             thread_id=thread,
         )

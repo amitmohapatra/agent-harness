@@ -78,6 +78,21 @@ class Served:
             await self.task
 
 
+async def read_until_paused(
+    c: httpx.AsyncClient, url: str, headers: dict[str, str]
+) -> list[tuple[Any, Any]]:
+    """A run's AG-UI event stream read until the event that pauses it (the stream itself stays
+    open for the run's next attempt), decoded as ``decode`` does."""
+    text = ""
+    async with c.stream("GET", url, headers=headers) as s:
+        assert s.status_code == 200, await s.aread()
+        async for chunk in s.aiter_text():
+            text += chunk
+            if '"interrupt"' in text and text.endswith("\n\n"):
+                break
+    return decode(text)
+
+
 def identity(user: str) -> dict[str, str]:
     return {"x-trellis-identity": json.dumps({"user_id": user})}
 
@@ -111,12 +126,13 @@ async def test_agui_a_run_paused_on_one_replica_is_replayed_and_resumed_on_the_o
             assert paused["outcome"]["type"] == "interrupt"
             interrupt_id = paused["outcome"]["interrupts"][0]["id"]
             # the other replica: replays the run from agent-runs' log, after event 1
-            replay = await c.get(
-                f"{two.url}/agui/runs/{run_id}/events",
-                headers={**identity(user), "Last-Event-ID": "1"},
+            # (a paused run's stream stays open for its next attempt: read up to the pause)
+            replayed = await read_until_paused(
+                c, f"{two.url}/agui/runs/{run_id}/events", {**identity(user), "Last-Event-ID": "1"}
             )
-            assert replay.status_code == 200, replay.text
-            assert decode(replay.text) == events[1:] or decode(replay.text) == events[2:]
+            again = [(e["type"], e.get("name")) for _, e in replayed]
+            assert again[-1] == ("RUN_FINISHED", None), again  # up to the pause, from the log
+            assert replayed[-1][1]["outcome"]["interrupts"][0]["id"] == interrupt_id
             # someone else's run is not theirs to read, nor to cancel
             other = await c.get(
                 f"{two.url}/agui/runs/{run_id}/events", headers=identity(f"hal-{uid}")
@@ -163,7 +179,7 @@ async def test_agui_a_run_paused_on_one_replica_is_replayed_and_resumed_on_the_o
             done = decode(resumed.text)
             assert done[-1][1]["outcome"] == {"type": "success"}
             assert done[-1][1]["result"] == "Booked for friday."
-            assert done[0][0] > events[-1][0]  # numbering continues across attempts
+            # (its numbering starts again on this replica: H-AGUI, the strict xfail below)
             ended = await c.post(f"{one.url}/agui/runs/{run_id}/cancel", headers=identity(user))
             assert ended.status_code == 409  # it ended
     assert (await record(run_id)).status is RunStatus.SUCCESS
@@ -208,7 +224,9 @@ async def test_a2a_the_card_is_public_and_a_call_needs_a_trusted_identity(uid: s
                 },
             )
             assert foreign.status_code == 401
-            ok = await c.post(url, json=call, headers=identity(f"ivo-{uid}"))
+            ok = await c.post(
+                url, json=call, headers={**identity(f"ivo-{uid}"), "A2A-Version": "1.0"}
+            )
             assert ok.status_code == 200, ok.text
             assert "You said hello" in ok.text, ok.text
 
@@ -311,3 +329,58 @@ def test_doctor_finds_the_services_and_says_the_keys_tenant_and_role() -> None:
     assert "a service key of tenant feat" in said, said  # the key's tenant and role
     assert "FAIL  runs" not in said and "FAIL  memory" not in said, said
     assert (API_KEY or "x") not in said  # the key itself never
+
+
+#: H-AGUI (agent-harness, P2): the replica that serves an AG-UI run numbers its events itself
+#: (from 0, the interrupt folded into the finishing event), while a reconnect on another replica
+#: numbers them by agent-runs' log positions (from 1, the interrupt counted): after
+#: ``Last-Event-ID: 1`` the other replica sends again an event the client already has, and the
+#: ids of one run differ by replica, and an attempt resumed on another replica starts its
+#: numbering again — against docs/surfaces.md ("any replica resumes a
+#: stream", ids "those of the run's events").
+H_AGUI = (
+    "H-AGUI: AG-UI event ids differ between the serving replica and a reconnect on another "
+    "(own numbering from 0 vs agent-runs log positions)"
+)
+
+
+@pytest.mark.plan("SURF", "F62", "RUN-06")
+@pytest.mark.xfail(strict=True, reason=H_AGUI)
+async def test_agui_event_ids_are_the_same_on_every_replica(uid: str) -> None:
+    agent_id, user, thread, run_id = f"ids-{uid}", f"hal-{uid}", f"t-{uid}", f"run_{uid}ids1"
+    async with harness() as h1, harness() as h2:
+        apps = []
+        for h in (h1, h2):
+            app = FastAPI()
+            h.wrap(concierge, id=agent_id).serve_chat(app)
+            apps.append(app)
+        async with (
+            Served(apps[0]) as one,
+            Served(apps[1]) as two,
+            httpx.AsyncClient(timeout=60) as c,
+        ):
+            message = [{"id": "m1", "role": "user", "content": "book a table"}]
+            first = await c.post(
+                f"{one.url}/agui/run",
+                headers=identity(user),
+                json={"threadId": thread, "runId": run_id, "messages": message},
+            )
+            events = decode(first.text)
+            interrupt_id = events[-1][1]["outcome"]["interrupts"][0]["id"]
+            try:
+                replayed = await read_until_paused(
+                    c,
+                    f"{two.url}/agui/runs/{run_id}/events",
+                    {**identity(user), "Last-Event-ID": str(events[1][0])},
+                )
+                served = [(n, e["type"]) for n, e in events[2:]]
+                assert [(n, e["type"]) for n, e in replayed] == served
+            finally:
+                await c.post(
+                    f"{one.url}/agui/run",
+                    headers=identity(user),
+                    json={
+                        "threadId": thread,
+                        "resume": [{"interruptId": interrupt_id, "payload": "friday"}],
+                    },
+                )

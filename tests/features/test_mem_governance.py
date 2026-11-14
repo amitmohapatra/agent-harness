@@ -160,9 +160,11 @@ async def test_the_catalogs_risk_and_rule_decide_and_reach_a_running_agent(
         ]
         agent, _ = await armed("react", h, tmp_path, plan, id=f"cat-{uid}", tools=[peek_tool, buy])
         first = await agent.run("Peek, buy 5, buy 500.", user=f"wu-{uid}", thread="c")
-        assert first.interrupt is not None and first.interrupt.tool_call.tool == read_name
+        assert first.interrupt and first.interrupt.tool_call, first
+        assert first.interrupt.tool_call.tool == read_name
         second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="wu")
         assert second.interrupt is not None, second  # 5 ran unasked: the rule did not hold
+        assert second.interrupt.tool_call, second
         assert second.interrupt.tool_call.args["qty"] == 500
         assert "qty > 100" in second.interrupt.question
         done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="wu")

@@ -75,8 +75,14 @@ CREDENTIAL_HEADERS: Final = ("authorization", "x-api-key", "x-trellis-api-key")
 #: the memory service's own agent tools: the service logs their calls itself, the harness
 #: records none (docs/memory.md, "What is recorded")
 SERVICE_LOGGED: Final = frozenset(
-    {"memory_search", "memory_remember", "memory_update", "memory_forget", "profile_edit",
-     "tool_search"}
+    {
+        "memory_search",
+        "memory_remember",
+        "memory_update",
+        "memory_forget",
+        "profile_edit",
+        "tool_search",
+    }
 )
 #: the routes whose answer is a new credential, shown once (a tenant's first admin key, an
 #: issued key, a webhook's signing secret): a key there is the route's purpose (INV-8)
@@ -214,19 +220,44 @@ def _models(e: Exchange) -> list[str]:
         if (e.method, e.path) == ("POST", "/v1/runs") and isinstance(e.request, dict):
             # agent-runs' wire body is a RunStart and its own ``queue`` flag (RunStartRequest)
             checks.append((c.RunStart, {k: v for k, v in e.request.items() if k != "queue"}))
-        if e.method == "GET" and len(parts) == 3 and parts[1] == "runs" and ok and isinstance(e.response, dict):
+        if (
+            e.method == "GET"
+            and len(parts) == 3
+            and parts[1] == "runs"
+            and ok
+            and isinstance(e.response, dict)
+        ):
             checks.append((c.RunRecord, e.response))
-        if e.method == "POST" and len(parts) == 4 and parts[3] == "events" and isinstance(e.request, dict):
+        if (
+            e.method == "POST"
+            and len(parts) == 4
+            and parts[3] == "events"
+            and isinstance(e.request, dict)
+        ):
             checks += [(c.RunEvent, ev) for ev in e.request.get("events", [])]
-        if e.method == "POST" and len(parts) == 4 and parts[3] == "pause" and isinstance(e.request, dict):
+        if (
+            e.method == "POST"
+            and len(parts) == 4
+            and parts[3] == "pause"
+            and isinstance(e.request, dict)
+        ):
             checks.append((c.Interrupt, e.request.get("interrupt")))
-        if e.method == "POST" and len(parts) == 4 and parts[3] == "resume" and isinstance(e.request, dict):
+        if (
+            e.method == "POST"
+            and len(parts) == 4
+            and parts[3] == "resume"
+            and isinstance(e.request, dict)
+        ):
             checks.append((c.InterruptResolution, e.request))
         if (e.method, e.path) == ("POST", "/v1/schedules") and isinstance(e.request, dict):
             checks.append((c.ScheduleSpec, e.request))
             if ok and isinstance(e.response, dict):
                 checks.append((c.Schedule, e.response))
-    if e.service == "memory" and (e.method, e.path) == ("POST", "/v1/feedback") and isinstance(e.request, dict):
+    if (
+        e.service == "memory"
+        and (e.method, e.path) == ("POST", "/v1/feedback")
+        and isinstance(e.request, dict)
+    ):
         body = e.request
         if body.get("source") == KNOWN_DRIFT_SOURCE:  # reported: see KNOWN_DRIFT_SOURCE
             body = {**body, "source": "judge"}
@@ -690,24 +721,7 @@ class Invariants:
             starts: Counter[str] = Counter()
             ends: Counter[str] = Counter()
             for attempt, evs_a in sorted(by_attempt.items()):
-                if evs_a[0].get("type") != "RUN_STARTED":
-                    out.append(
-                        f"INV-10 run {run_id} attempt {attempt}: begins with {evs_a[0].get('type')}"
-                    )
-                numbers = [int(ev.get("sequence") or 0) for ev in evs_a]
-                if numbers != sorted(numbers) or len(set(numbers)) != len(numbers):
-                    out.append(
-                        f"INV-10 run {run_id} attempt {attempt}: events out of order {numbers[:12]}"
-                    )
-                # an ending is RUN_FINISHED (a failure says RUN_ERROR right before it)
-                finished = [ev for ev in evs_a if ev.get("type") == "RUN_FINISHED"]
-                if len(finished) > 1:
-                    out.append(f"INV-10 run {run_id} attempt {attempt}: {len(finished)} endings")
-                if finished and finished[-1] is not evs_a[-1]:
-                    out.append(f"INV-10 run {run_id} attempt {attempt}: events after its end")
-                for n, ev in enumerate(evs_a):
-                    if ev.get("type") == "RUN_ERROR" and n + 2 < len(evs_a):
-                        out.append(f"INV-10 run {run_id} attempt {attempt}: events after RUN_ERROR")
+                out += _attempt_shape(f"INV-10 run {run_id} attempt {attempt}", evs_a)
                 # a call that paused the run (ask_user, an ask inside a tool, a refusal the
                 # person then answers) ended that attempt with a ``paused`` result and runs again
                 # when the run resumes: its start in the paused attempt is not a second start
@@ -723,7 +737,10 @@ class Invariants:
                     )
                 }
                 for ev in evs_a:
-                    if ev.get("type") == "TOOL_CALL_START" and str(ev.get("tool_call_id")) not in paused:
+                    if (
+                        ev.get("type") == "TOOL_CALL_START"
+                        and str(ev.get("tool_call_id")) not in paused
+                    ):
                         starts[str(ev.get("tool_call_id"))] += 1
                     if ev.get("type") == "TOOL_CALL_END":
                         ends[str(ev.get("tool_call_id"))] += 1
@@ -757,9 +774,26 @@ def _executed(ev: dict[str, Any]) -> bool:
     return str(data.get("status") or "ok").lower() not in NOT_RUN and not refused
 
 
-def _starts(
-    evs: list[dict[str, Any]], tool: Any, call_id: Any, wanted: Any = None
-) -> list[Any]:
+def _attempt_shape(where: str, evs: list[dict[str, Any]]) -> list[str]:
+    """What is wrong with the shape of one attempt's events: how it begins, their order, its
+    ending (RUN_FINISHED, a failure saying RUN_ERROR right before it)."""
+    out = []
+    if evs[0].get("type") != "RUN_STARTED":
+        out.append(f"{where}: begins with {evs[0].get('type')}")
+    numbers = [int(ev.get("sequence") or 0) for ev in evs]
+    if numbers != sorted(numbers) or len(set(numbers)) != len(numbers):
+        out.append(f"{where}: events out of order {numbers[:12]}")
+    finished = [ev for ev in evs if ev.get("type") == "RUN_FINISHED"]
+    if len(finished) > 1:
+        out.append(f"{where}: {len(finished)} endings")
+    if finished and finished[-1] is not evs[-1]:
+        out.append(f"{where}: events after its end")
+    if any(ev.get("type") == "RUN_ERROR" and n + 2 < len(evs) for n, ev in enumerate(evs)):
+        out.append(f"{where}: events after RUN_ERROR")
+    return out
+
+
+def _starts(evs: list[dict[str, Any]], tool: Any, call_id: Any, wanted: Any = None) -> list[Any]:
     """The arguments of each execution of ``tool``'s call ``call_id`` in a run's events (a
     ``TOOL_CALL_RESULT`` saying it ran; by its id, else by its tool)."""
     args: dict[Any, Any] = {}

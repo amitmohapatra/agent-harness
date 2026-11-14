@@ -43,7 +43,7 @@ from tests.features.kit import (
 from tests.support.planned import PlannedChat
 from trellis import ReAct
 from trellis.contracts import RunStatus
-from trellis.memory import MemoryClient
+from trellis.memory import MemoryClient, SearchKind
 from trellis.memory.errors import NotFoundError
 
 pytestmark = pytest.mark.timeout(300)
@@ -258,7 +258,14 @@ async def test_erasing_a_user_leaves_nothing_any_read_returns(tmp_path: Path, ui
             await ctx.forget(row["memory_id"])
         await admin.bind(tenant_id=tenant, user_id=user, thread_id=conversation).history.delete()
     async with harness() as h:
-        for kinds in (["memory"], ["message"], ["episode"], ["summary"], ["memory", "chunk"]):
+        every: list[list[SearchKind]] = [
+            ["memory"],
+            ["message"],
+            ["episode"],
+            ["summary"],
+            ["memory", "chunk"],
+        ]
+        for kinds in every:
             assert f"B{uid}" not in await recall_text(h, user, "badge number", kinds), kinds
         thread = await scope_of(h, user, agent=agent_id, thread="chat-1")
         try:

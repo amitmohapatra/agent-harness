@@ -251,6 +251,7 @@ async def test_three_failed_runs_in_a_row_pause_the_schedule_and_say_so(
         await work(tmp_path, agent_id, [], hooks=[Broken()])
     ended = [await record(r) for r in runs]
     assert [e.status for e in ended] == [RunStatus.ERROR] * 3, ended
+    assert ended[-1].error and ended[0].error, ended
     assert "paused" in ended[-1].error.message and "sync stock" in ended[-1].error.message
     assert "paused" not in ended[0].error.message
     kept = runs_sql(
@@ -312,7 +313,8 @@ async def test_a_fired_run_of_a_user_who_left_ends_before_any_tool(
     run_id = await fire(row["schedule_id"])
     await work(tmp_path, agent_id, [("lookup", {"sku": "A-1"})], hooks=[Left()])
     ended = await record(run_id)
-    assert ended.status is RunStatus.ERROR and "has left" in ended.error.message
+    assert ended.status is RunStatus.ERROR and ended.error, ended
+    assert "has left" in ended.error.message
     assert "lookup:A-1" not in ledger()
     async with runs_http() as c:
         await c.delete(f"/v1/schedules/{row['schedule_id']}")

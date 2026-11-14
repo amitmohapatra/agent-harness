@@ -113,7 +113,12 @@ async def test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_ba
     async with harness(files_url=str(store)) as h:
         plan2 = [("query_result", {"file_path": path, "sql": "SELECT count(*) AS n FROM result"})]
         agent, built = await armed("react", h, tmp_path, plan2, id=agent_id, tools=[big_report])
-        done = await agent.run("How many rows did I export?", user=user, thread="t2")
+        # memory off for this turn: a planned model counts the chat's earlier tool results
+        # (memory's window replays them) as its own steps; the run store's history is the
+        # questions and answers alone
+        done = await agent.run(
+            "How many rows did I export?", user=user, thread="t", without=["memory"]
+        )
     assert done.status is RunStatus.SUCCESS, done
     assert path in built.said(), built.said()[:2000]  # told of it
     assert f"n\n{len(expected)}" in str(done.answer), done.answer

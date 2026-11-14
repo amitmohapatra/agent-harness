@@ -134,7 +134,7 @@ async def test_evaluate_verifies_answers_against_their_contexts_in_memory(
             user=user,
         )
     scores = [s for item in report.items for s in item.scores if s.name == "grounding"]
-    assert scores and scores[0].value is not None and scores[0].value > 0.5, report
+    assert scores and isinstance(scores[0].value, float) and scores[0].value > 0.5, report
 
 
 #: Background work pending on unmerged branches: each test fails until its branch is merged

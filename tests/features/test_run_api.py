@@ -38,6 +38,7 @@ from tests.features.conftest import (
 )
 from trellis.contracts import (
     Interrupt,
+    InterruptDecision,
     InterruptResolution,
     RunEvent,
     RunEventType,
@@ -73,7 +74,12 @@ def interrupt(run: dict[str, Any], **fields: Any) -> dict[str, Any]:
     return made.model_dump(mode="json")
 
 
-def answer(run_id: str, interrupt_id: str, decision: str = "APPROVE", **fields: Any) -> dict:
+def answer(
+    run_id: str,
+    interrupt_id: str,
+    decision: InterruptDecision = InterruptDecision.APPROVE,
+    **fields: Any,
+) -> dict:
     made = InterruptResolution(
         interrupt_id=interrupt_id, run_id=run_id, decision=decision, reviewer="user:lee", **fields
     )
@@ -195,8 +201,9 @@ async def test_the_queue_hands_out_by_priority_and_one_run_per_concurrency_key(
         low = await start(c, agent, queue=True, priority=-5)
         mid = await start(c, agent, queue=True)
         high = await start(c, agent, queue=True, priority=10)
-        got = [await claim(c, agent, f"w{n}") for n in range(3)]
-        assert [g["run"]["run_id"] for g in got if g] == [
+        claimed = [await claim(c, agent, f"w{n}") for n in range(3)]
+        got = [g for g in claimed if g]
+        assert [g["run"]["run_id"] for g in got] == [
             high["run_id"],
             mid["run_id"],
             low["run_id"],

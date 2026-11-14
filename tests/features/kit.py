@@ -15,6 +15,7 @@ from trellis import Harness, tool
 from trellis.contracts import RunRecord, RunStatus
 from trellis.harness.agent import Agent
 from trellis.harness.result import Result
+from trellis.memory import SearchKind
 
 LEDGER: list[str] = []
 
@@ -155,30 +156,20 @@ def memories_of(user: str, *, tenant: str = "feat", live: bool = True) -> list[d
 
 
 async def recall_text(
-    h: Harness, user: str, query: str, kinds: Sequence[str] = ("memory", "message")
+    h: Harness, user: str, query: str, kinds: Sequence[SearchKind] = ("memory", "message")
 ) -> str:
     """Everything the memory service's recall answers ``user`` for ``query``, as text."""
     assert h.memory is not None
     ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)
     found = await ctx.search(query, kinds=list(kinds), limit=50)
-    return json.dumps(
-        found.model_dump(mode="json")
-        if hasattr(found, "model_dump")
-        else [f.model_dump(mode="json") for f in found],
-        default=str,
-    )
+    return json.dumps([f.model_dump(mode="json") for f in found], default=str)
 
 
 async def inventory_text(h: Harness, user: str) -> str:
     assert h.memory is not None
     ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)
     page = await ctx.advanced.memories.page(limit=100)
-    return json.dumps(
-        page.model_dump(mode="json")
-        if hasattr(page, "model_dump")
-        else [p.model_dump(mode="json") for p in page],
-        default=str,
-    )
+    return json.dumps(page.model_dump(mode="json"), default=str)
 
 
 async def scope_of(h: Harness, user: str, *, agent: str | None = None, thread: str | None = None):
