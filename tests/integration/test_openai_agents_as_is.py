@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from agents import (
@@ -16,6 +16,7 @@ from agents import (
     RunConfig,
     Runner,
     SQLiteSession,
+    Tool,
     ToolOutputImage,
     ToolsToFinalOutputResult,
     Usage,
@@ -242,7 +243,7 @@ async def test_an_agent_tools_own_run_config_gets_the_runs_day_and_not_its_steer
     inner = ScriptedModel(["inner"], ids="i")
     own = ScriptedModel([("made_up", {}), "own"], ids="o")
     outer = ScriptedModel([("ask", {"input": "x"}), ("ask2", {"input": "y"}), "done"])
-    tools = [
+    tools: list[Tool] = [
         Agent(name="inner", instructions="INNER", model=inner).as_tool("ask", "a"),
         Agent(name="own", instructions="OWN", model=own).as_tool(
             "ask2", "b", run_config=RunConfig(workflow_name="mine")
@@ -388,7 +389,7 @@ async def test_an_mcp_server_that_retries_owns_its_tries(harness: Harness) -> No
         async def cleanup(self) -> None: ...
 
         async def list_tools(self, run_context: Any = None, agent: Any = None) -> Any:
-            return [McpTool(name="find", inputSchema={"type": "object", "properties": {}})]
+            return [McpTool(name="find", input_schema={"type": "object", "properties": {}})]
 
         async def call_tool(self, tool_name: str, arguments: Any, meta: Any = None) -> Any:
             self.calls += 1
@@ -589,7 +590,8 @@ async def test_an_sse_server_and_a_server_managers_servers_are_governed_as_any_s
     target = Agent(name="m", model=ScriptedModel(["ok"]), mcp_servers=[*manager.all_servers])
     copy = governed_agents(target, added=[], agent_id="sse", nested=lambda _agent, own: own)
     [governed] = copy.mcp_servers
-    assert isinstance(governed, GovernedServer) and governed._inner is sse
+    assert isinstance(governed, GovernedServer)
+    assert cast("Any", governed).params is sse.params  # the SDK's own state, read through
     agent = harness.wrap(target, id="sse")
     assert await agent.adapter.native(agent.target) == []
 

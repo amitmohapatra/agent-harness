@@ -23,6 +23,11 @@ class GraphInterrupt(Exception):
     """A pause signal."""
 
 
+async def attempt_ended(helpers: Helpers, error: BaseException | None) -> None:
+    """An attempt's end as every adapter reports it: paused when the attempt says so."""
+    await helpers.closed(error, paused=helpers.suspended(error))
+
+
 def runtime(runs: LocalRuns, attempt: int = 1) -> Any:
     identity = Identity(tenant="t", user="u", agent_id="desk", run_id="run_p")
     events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="desk"))
@@ -79,7 +84,7 @@ async def test_the_same_task_twice_in_an_attempt_is_two_helpers() -> None:
     helpers = Helpers(runtime(runs), "langgraph")
     for key in ("a", "b"):
         await helpers.start(key, kind=Kind.TASK, name="checker", task="check o1")
-    await helpers.closed(None)
+    await attempt_ended(helpers, None)
     assert await statuses(runs) == [RunStatus.SUCCESS, RunStatus.SUCCESS]
 
 
@@ -90,7 +95,7 @@ async def test_a_pause_or_a_crash_leaves_the_helper_to_the_next_attempt(
     runs = LocalRuns()
     helpers = Helpers(runtime(runs), "langgraph")
     await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
-    await helpers.closed(error)
+    await attempt_ended(helpers, error)
     assert await statuses(runs) == [RunStatus.RUNNING]
 
 
@@ -98,7 +103,7 @@ async def test_a_failed_run_ends_its_open_helpers_as_errors() -> None:
     runs = LocalRuns()
     helpers = Helpers(runtime(runs), "langgraph")
     await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
-    await helpers.closed(ValueError("boom"))
+    await attempt_ended(helpers, ValueError("boom"))
     [child] = [c async for c in runs.iterate(parent_run_id="run_p")]
     record = await runs.get(child.run_id)
     assert record is not None and record.error is not None
@@ -109,7 +114,7 @@ async def test_a_helper_an_earlier_attempt_left_open_and_the_next_did_not_take_u
     runs = LocalRuns()
     first = Helpers(runtime(runs), "claude_agent_sdk")
     await first.start("k", kind=Kind.SUBAGENT, name="checker", task="check o1")
-    await first.closed(GraphInterrupt())  # paused with it open
+    await attempt_ended(first, GraphInterrupt())  # paused with it open
     await runs.start(  # a sub-agent of the harness's own: it ends itself
         RunStart(
             run_id="run_own",
@@ -121,7 +126,7 @@ async def test_a_helper_an_earlier_attempt_left_open_and_the_next_did_not_take_u
             input="x",
         )
     )
-    await Helpers(runtime(runs, attempt=2), "claude_agent_sdk").closed(None)
+    await attempt_ended(Helpers(runtime(runs, attempt=2), "claude_agent_sdk"), None)
     found = {c.run_id: c.status async for c in runs.iterate(parent_run_id="run_p")}
     assert found.pop("run_own") is RunStatus.RUNNING
     [(run_id, status)] = found.items()
@@ -192,7 +197,7 @@ async def test_a_helper_at_work_in_the_background_ends_as_its_work_did() -> None
     await helpers.settled("task_5", failed=False, said="not a background one")
     await helpers.settled("task_7", failed=False, said="nobody's")
     assert [c.status async for c in runs.iterate(parent_run_id="run_p", status=RunStatus.RUNNING)]
-    await helpers.closed(None)  # the run answered
+    await attempt_ended(helpers, None)  # the run answered
     found = {}
     async for child in runs.iterate(parent_run_id="run_p"):
         record = await runs.get(child.run_id)
@@ -212,7 +217,7 @@ async def test_a_background_helper_of_a_run_that_failed_ends_with_why_the_run_di
     helpers = Helpers(runtime(runs), "claude_agent_sdk")
     await helpers.start("call_1", kind=Kind.SUBAGENT, name="worker", task="task 1")
     helpers.attribute("task_1", "call_1", background=True)
-    await helpers.closed(RuntimeError("boom"))
+    await attempt_ended(helpers, RuntimeError("boom"))
     [child] = [c async for c in runs.iterate(parent_run_id="run_p")]
     record = await runs.get(child.run_id)
     assert record is not None and record.error is not None

@@ -275,7 +275,9 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
     assert headers["x-bf-dim-agent"] == "named"  # whose run, read per request
 
 
-BIFROST = {"llm_gateway": "bifrost", "llm_base_url": URL, "llm_api_key": "vk"}
+def behind_bifrost() -> Settings:
+    """The settings of a harness behind a Bifrost gateway."""
+    return Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
 
 
 async def test_a_gateway_without_a_responses_route_answers_on_chat_completions(
@@ -287,7 +289,7 @@ async def test_a_gateway_without_a_responses_route_answers_on_chat_completions(
     (never asked on Responses again), said once."""
     fake = FakeGateway(turns=["routed", "again"], serves_responses=0)
     fake.serve_models(monkeypatch)
-    async with Harness(config=Settings(**BIFROST), gateway=fake.gateway()) as h:
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
         agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
         with caplog.at_level(logging.WARNING, logger="trellis.harness"):
             first = await agent.run("x", user="u")
@@ -316,7 +318,7 @@ async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_
         prompt={"id": "pmpt_1"},
         model_settings=ModelSettings(truncation="auto"),
     )
-    async with Harness(config=Settings(**BIFROST), gateway=fake.gateway()) as h:
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
         refused = await h.wrap(hosted, id="hosted").run("x", user="u")  # not known yet: asked
         assert refused.error is not None and fake.completions == []
         for feature in ("tool 'web_search'", "a stored prompt", "ModelSettings.truncation"):
@@ -349,7 +351,7 @@ async def test_a_model_known_to_answer_on_responses_never_falls_back(
 
     fake = FakeGateway(turns=[("ship", {"order": "o1"}), "never"], serves_responses=1)
     fake.serve_models(monkeypatch)
-    harness = declaring(Harness(config=Settings(**BIFROST), gateway=fake.gateway()), ship="read")
+    harness = declaring(Harness(config=behind_bifrost(), gateway=fake.gateway()), ship="read")
     async with harness as h:
         result = await h.wrap(Agent(name="s", model="gpt-x", tools=[ship]), id="s").run(
             "ship o1", user="u"
@@ -380,7 +382,7 @@ async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
         capabilities=[capabilities.Shell(), getattr(capabilities, capability)()],
     )
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    async with Harness(config=Settings(**BIFROST), gateway=fake.gateway()) as h:
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
         assert (await h.wrap(Agent(name="p", model="gpt-x"), id="p").run("x", user="u")).answer
         agent = h.wrap(target, id="box", framework_options={"run_config": config})
         result = await agent.run("x", user="u")

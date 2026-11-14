@@ -14,7 +14,7 @@ from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
-from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
+from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus, ToolCall
 from trellis.harness import budget
 from trellis.harness.adapters.claude import RESUMED_ASKED
 from trellis.harness.events import WARNING
@@ -992,7 +992,7 @@ async def test_at_its_turn_limit_a_run_ends_partial_with_the_sdks_outcome(
     target = Agent(name="looper", instructions="Look.", model=model)
     agent = arm(harness.wrap(target, id="turns", framework_options={"max_turns": 3}), [look])
     events = [e async for e in agent.stream("x", user="u")]
-    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].outcome.value == "partial"
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].outcome is RunOutcome.PARTIAL
     assert len(model.inputs) == 3  # the SDK's three turns, none past them
     warned = [e.data for e in events if e.type is RunEventType.CUSTOM and e.data.get("code")]
     assert warned[-1]["code"] == "budget" and "max_turns=3" in warned[-1]["message"]
