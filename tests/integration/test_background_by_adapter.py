@@ -63,12 +63,10 @@ from tests.integration.test_claude_background_session import (
 )
 from tests.integration.test_claude_background_session import options as claude_options
 from tests.integration.test_react_async_subagent import (
-    AT_ONCE,
     NO_TASKS,
     RESULT,
     RISKS,
     START,
-    TASK_SECONDS,
     THREAD,
     TOOLS,
     USER,
@@ -80,7 +78,6 @@ from tests.integration.test_react_async_subagent import (
     say,
     says_what_the_tool_said,
     subagent,
-    timed,
 )
 from tests.support.arm import arm
 from tests.support.openai_model import ScriptedModel
@@ -145,14 +142,17 @@ async def risks(agent: Agent) -> dict[str, Any]:
 
 
 async def t1_and_t2(agent: Agent, server: StandIn) -> None:
-    """T1: the task starts and the turn ends at once with its id. T2: the next message is
-    answered while the task runs."""
-    first, took = await timed(say(agent, "run the optimization"))
+    """T1: the task starts and the turn ends with its id. T2: the next message is answered
+    while the task runs. The task cannot end until both did (``StandIn.hold``): neither
+    waited for it. Then it ends."""
+    server.hold()
+    first = await say(agent, "run the optimization")
     assert first.status is RunStatus.SUCCESS, first.error
-    assert server.task_id in first.answer and took < AT_ONCE, took
-    second, took = await timed(say(agent, "what is 2+2?"))
-    assert second.answer == "4" and took < AT_ONCE, second.error
+    assert server.task_id in first.answer
+    second = await say(agent, "what is 2+2?")
+    assert second.answer == "4", second.error
     assert server.status(server.task_id) == "running" and len(server.calls) == 2
+    server.release()
 
 
 async def t3_list_and_another_user(agent: Agent, server: StandIn, model: Model) -> None:
@@ -465,10 +465,13 @@ async def test_d_a_function_queues_a_child_run_and_a_later_turn_reads_its_result
     (``agent.start`` inside the run: a child of the turn, in its thread, worked by a worker in
     its own time). T1 answers with the run's id at once; T2 is answered while the worker runs
     it; T3 reads the run from the run store by the id its history holds (memory off: the
-    earlier turns' questions and answers) — and another user's thread has no such history."""
+    earlier turns' questions and answers) — and another user's thread has no such history.
+    The run works until the test lets it end (``finish``): T1 and T2 end while it cannot."""
+    started, finish = asyncio.Event(), asyncio.Event()
 
     async def optimize(input: str, agent: Runtime) -> str:
-        await asyncio.sleep(TASK_SECONDS)
+        started.set()
+        await finish.wait()
         return RESULT
 
     optimizer = harness.wrap(optimize, id="optimizer")
@@ -488,14 +491,15 @@ async def test_d_a_function_queues_a_child_run_and_a_later_turn_reads_its_result
         return f"{record.status.value}: {record.output}"
 
     agent = harness.wrap(chat, id="bg")
-    first, took = await timed(say(agent, "run the optimization"))
-    assert first.status is RunStatus.SUCCESS and took < AT_ONCE, first.error
+    first = await say(agent, "run the optimization")  # nothing works the run yet: not waited for
+    assert first.status is RunStatus.SUCCESS, first.error
     [run_id] = _RUN.findall(first.answer)
     working = asyncio.create_task(harness.worker([optimizer]).run_once())
-    await asyncio.sleep(0.1)  # the worker has the run
-    second, took = await timed(say(agent, "what is 2+2?"))
-    assert second.answer == "4" and took < AT_ONCE
+    await started.wait()  # the worker has the run, which waits for the test
+    second = await say(agent, "what is 2+2?")
+    assert second.answer == "4"  # answered while the run could not end
     assert (await say(agent, "is the optimization done?")).answer == "RUNNING: None"
+    finish.set()
     assert await working
     third = await say(agent, "is the optimization done?")
     assert third.answer == f"SUCCESS: {RESULT}"
