@@ -111,6 +111,7 @@ def test_a_query_is_bounded_in_time_rows_and_length(
     assert wide == "t\n" + "x" * 19_998  # 20,000 characters with its header: whole
     cut = ask(text, "SELECT repeat('x', 19999) AS t FROM result LIMIT 1")
     assert cut == "t\n" + "x" * 19_998 + "\n…[cut at 20000 characters: aggregate more]"
+    assert query.SECONDS == 5.0  # docs/tools.md: "a query runs at most 5 s"
     monkeypatch.setattr(query, "SECONDS", 0.0)
     endless = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT max(x) FROM c"
     assert "took too long" in ask(text, endless)
@@ -118,12 +119,25 @@ def test_a_query_is_bounded_in_time_rows_and_length(
 
 def test_a_wrong_call_is_said(journal: Journal) -> None:
     assert "sql" in asyncio.run(query.query({"file_path": "/large_tool_results/x"}))
+    unknown = asyncio.run(query.query({"sql": "SELECT 1", "where": "x"}))
+    assert "unknown argument(s): where" in unknown  # no argument of its own: said
     missing = asyncio.run(query.query({"file_path": "/x", "sql": "SELECT 1"}))
     assert missing == "Error: File '/x' not found"
     given = asyncio.run(
         query.query({"file_path": "x", "sql": "SELECT count(*) AS n FROM result"}, "a\nb")
     )
     assert given == "n\n2"  # a text given (a file Deep Agents saved in the state)
+
+
+def test_a_query_names_at_most_8_past_results(journal: Journal) -> None:
+    """Past 8 past results the call is refused, before any is read; 8 go on to be read."""
+
+    def asked(n: int) -> str:
+        refs = [f"msg_{k}" for k in range(n)]
+        return asyncio.run(query.query({"sql": "SELECT 1", "results": refs}))
+
+    assert "results names at most 8 past results" in asked(9)
+    assert asked(8) == "Error: past results are read from memory, which this run does not have."
 
 
 def test_outside_a_run_nothing_is_read() -> None:
@@ -143,6 +157,7 @@ KINDS = {"BIGINT": "INTEGER", "DOUBLE": "REAL", "DECIMAL": "DECIMAL", "VARCHAR":
         (["-0.05", "12.50", ".5", "7."], "DECIMAL"),
         (["123456789012345", "0.000000000000001"], "DECIMAL"),
         (["1234567890123456.5"], "REAL"),  # 17 digits: more than a decimal keeps
+        (["123456789012345.6"], "REAL"),  # 16 digits: past the 15 a decimal keeps
         (["0.30000000000000004"], "REAL"),
         (["1e-3", "2"], "REAL"),
         (["007", "8"], "TEXT"),
@@ -625,6 +640,33 @@ def test_after_a_summarization_every_result_the_run_keeps_is_still_named(
     assert middleware._held_named(run, plain) is plain  # no summary: as it was
 
 
+def test_past_the_most_held_results_named_after_a_summary_the_rest_are_counted(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Up to :data:`HELD_MOST` results no message names are named after the summary, with no
+    count; past it, those and how many more."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import HumanMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    monkeypatch.setattr(middleware, "HELD_MOST", 2)
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    summary = HumanMessage("A summary.", additional_kwargs={"lc_source": "summarization"})
+    given = ModelRequest(model=ScriptedChatModel(turns=[]), messages=[summary], tools=[])  # type: ignore[arg-type]
+
+    def said() -> str:
+        return middleware._held_named(run, given).messages[0].text  # type: ignore[arg-type]
+
+    for n in range(2):
+        assert results.keep(f"a,b\n{n},2\n" * 40, tool="stock") is not None
+    assert "more" not in said()
+    assert results.keep("a,b\n9,2\n" * 40, tool="stock") is not None
+    assert said().endswith("; and 1 more.")
+
+
 def test_a_page_whose_call_the_request_no_longer_holds_is_shortened_as_it_stands(
     journal: Journal,
 ) -> None:
@@ -875,12 +917,25 @@ def test_a_querys_rows_past_what_a_query_loads_are_shown_and_not_kept(
 
     names = ["sku", "units"]
     assert query._whole(Cursor([("s1", 3)]), names) == ("sku,units\ns1,3", None)
+    two = "sku,units\ns1,3\ns2,4"
+    assert query._whole(Cursor([("s1", 3), ("s2", 4)]), names) == (two, two)
     many = [(f"s{n}", n) for n in range(query.ROWS + 5)]
     shown, kept = query._whole(Cursor(list(many)), names)
     assert shown.endswith(
         f"only the first {query.ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
     )
     assert kept is not None and kept.splitlines()[-1] == f"s{query.ROWS + 4},{query.ROWS + 4}"
+    monkeypatch.setattr(query, "LOAD_CHARS", len(kept) + 1)  # exactly, with its last newline
+    assert query._whole(Cursor(list(many)), names) == (shown, kept)
     monkeypatch.setattr(query, "LOAD_CHARS", 100)
     again, dropped = query._whole(Cursor(list(many)), names)
     assert again == shown and dropped is None
+
+
+def test_one_line_is_a_line_and_a_markdown_header_alone_is_a_table_of_no_rows(
+    journal: Journal,
+) -> None:
+    """A text of one line is no CSV (no row under its header): the table of its lines; a
+    markdown table's header over its rule line is a table with those columns and no rows."""
+    assert ask("a,b", "SELECT * FROM result") == 'line\n"a,b"'
+    assert ask("| a | b |\n|---|---|", "SELECT * FROM result") == "a,b"

@@ -224,6 +224,7 @@ class Rules:
                 self._agents.add(agent_id)  # the most recently asked
             if self._names and now - self._asked_at > GOVERNANCE_TTL_SECONDS:
                 await self._read(now)
+            self._expire(now)
             return self._rules
 
     async def _read(self, now: float) -> None:
@@ -240,8 +241,6 @@ class Rules:
                     exc,
                 )
                 self._unread = True
-            if self._rules is not None and now - self._read_at > GOVERNANCE_STALE_SECONDS:
-                self._rules, self._etag = None, None
             return
         if self._unread:
             log.info("the tool catalog can be read again")
@@ -250,6 +249,17 @@ class Rules:
         if rules is not None:  # changed (a 304 keeps what was read under that ETag)
             self._rules = rules
         await self._accept_learned()
+
+    def _expire(self, now: float) -> None:
+        """While the catalog cannot be read, rules read more than
+        :data:`GOVERNANCE_STALE_SECONDS` ago no longer stand — judged each time they are
+        asked for, not only when a read is tried."""
+        if (
+            self._unread
+            and self._rules is not None
+            and now - self._read_at > GOVERNANCE_STALE_SECONDS
+        ):
+            self._rules, self._etag = None, None
 
     async def _accept_learned(self) -> None:
         """For each agent asked for: accept each approval suggestion learned from its

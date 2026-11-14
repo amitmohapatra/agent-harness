@@ -68,7 +68,11 @@ async def test_a_remote_agent_is_an_async_callable_with_its_card_and_spec(
     assert spec.name == "greeter" and spec.source == "a2a" and spec.server == "greeter"
     assert spec.description == "Greets, and asks where to deploy when asked to ask."
     assert spec.side_effects == "write"
-    assert spec.input_schema is not None and spec.input_schema["required"] == ["message"]
+    assert spec.input_schema == {  # the task in words, as any agent takes it
+        "type": "object",
+        "properties": {"message": {"type": "string", "description": "what the agent should do"}},
+        "required": ["message"],
+    }
     assert not http.is_closed  # an injected client is the caller's
     named = RemoteAgent(URL, tenant=TENANT, user="u1", name="the greeter!", client=http)
     assert (await named.connect()).spec.name == "the_greeter_"

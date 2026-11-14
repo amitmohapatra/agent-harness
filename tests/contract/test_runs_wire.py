@@ -99,6 +99,16 @@ def test_agent_runs_enums_are_the_contracts_enums(name: str) -> None:
     assert set(schema["enum"]) == {member.value for member in ENUMS[name]}
 
 
+def test_a_listing_page_holds_what_agent_runs_holds_when_no_limit_is_named() -> None:
+    """``LocalRuns`` stands in for agent-runs: a listing with no ``limit`` holds as many items
+    as agent-runs' own default page."""
+    from trellis.harness.runs import PAGE_LIMIT
+
+    for template, item in runs_contract().document["paths"].items():
+        for limit in (p for p in item.get("get", {}).get("parameters", []) if p["name"] == "limit"):
+            assert limit["schema"]["default"] == PAGE_LIMIT, template
+
+
 # --------------------------------------------------------------------------- the wire
 class RunsService:
     """agent-runs' routes over ``LocalRuns``, checking every exchange against the document, and

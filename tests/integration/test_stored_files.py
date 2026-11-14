@@ -286,6 +286,20 @@ async def test_every_sheet_of_a_workbook_is_a_table_under_its_header(run: Run) -
     ), read
 
 
+def test_a_cell_merged_in_the_last_row_or_column_is_its_value_in_every_cell_it_spans() -> None:
+    book = Workbook()
+    rows = book.active
+    assert rows is not None
+    for row in (("k", "v", "w"), ("x", 1, 2), ("y", None, None), ("z", 5, None)):
+        rows.append(row)
+    rows.merge_cells("C2:C3")  # in the last column
+    rows.merge_cells("B4:C4")  # in the last row
+    out = io.BytesIO()
+    book.save(out)
+    table = (["k", "v", "w"], [["x", 1, 2], ["y", None, 2], ["z", 5, 5]])
+    assert stored._sheets(out.getvalue()) == {"Sheet": table}
+
+
 async def test_a_csv_file_reads_as_it_is_after_how_it_was_made(run: Run) -> None:
     files = run.agent.harness.files
     await files.put("t/u/c_1/r0", "d.csv", b"a,b\n1,2\n", source="sandbox_exec")
@@ -307,6 +321,8 @@ async def test_a_file_that_is_no_table_or_too_large_says_so(
     await files.put("t/u/c_1/r0", "b.csv", b"\xff\xfe", source="sandbox_exec")
     said = await stored.read("/files/r0/b.csv")
     assert said.startswith("Error: /files/r0/b.csv is no table: UnicodeDecodeError"), said
+    monkeypatch.setattr(stored, "MAX_BYTES", 2)  # exactly its size: read
+    assert "UnicodeDecodeError" in await stored.read("/files/r0/b.csv")
     monkeypatch.setattr(stored, "MAX_BYTES", 1)
     said = await stored.read("/files/r0/b.csv")
     assert said == "Error: /files/r0/b.csv is 2 bytes, more than 1 read here", said
@@ -365,6 +381,19 @@ async def test_the_note_names_the_newest_and_counts_the_rest(
     assert stored.looks(run)  # type: ignore[arg-type]
     run.parent = object()
     assert not stored.looks(run)  # type: ignore[arg-type]  # its parent was told
+
+
+async def test_the_note_names_the_20_newest_with_no_count_when_there_are_20(run: Run) -> None:
+    files = run.agent.harness.files
+    for n in range(20):
+        await files.put("t/u/c_1/r0", f"f{n:02d}.csv", b"a\n1", source="sandbox_exec")
+    twenty = await stored.note(run)  # type: ignore[arg-type]
+    await files.put("t/u/c_1/r0", "f20.csv", b"a\n1", source="sandbox_exec")
+    assert twenty is not None and len(twenty.splitlines()[1:]) == 20  # all named, no count
+    said = await stored.note(run)  # type: ignore[arg-type]
+    assert said is not None
+    assert said.splitlines()[-1] == '- and 1 more: read_file(file_path="/files")'
+    assert len(said.splitlines()[1:]) == 21  # the 20 newest, then the count
 
 
 async def test_how_a_file_was_made_says_what_is_known(run: Run) -> None:

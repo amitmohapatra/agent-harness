@@ -131,6 +131,13 @@ def test_settings_that_fit_no_route_are_refused(settings: Settings, said: str) -
         ("mistral-large", "mistral", "mistral-large", None, "mistralai:mistral-large"),
         ("ollama/granite", "ollama", "granite", "ollama/granite", "ollama:granite"),
         ("granite", None, "granite", "granite", None),
+        # each prefix that tells a provider (OpenAI's, Mistral's, Cohere's), and Vertex
+        ("chatgpt-4o", "openai", "chatgpt-4o", "openai/chatgpt-4o", "openai:chatgpt-4o"),
+        ("o1-mini", "openai", "o1-mini", "openai/o1-mini", "openai:o1-mini"),
+        ("o4-mini", "openai", "o4-mini", "openai/o4-mini", "openai:o4-mini"),
+        ("codestral-2", "mistral", "codestral-2", None, "mistralai:codestral-2"),
+        ("command-r", "cohere", "command-r", "cohere/command-r", "cohere:command-r"),
+        ("vertex:gemini-pro", "vertex", "gemini-pro", None, "google_vertexai:gemini-pro"),
     ],
 )
 def test_a_name_is_mapped_to_the_routes_form(
@@ -297,6 +304,57 @@ async def test_a_langchain_model_object_is_said_once_as_not_routed(
     assert len(said) == 1 and "objects" in said[0].getMessage()
 
 
+@pytest.mark.parametrize(
+    "argument", ["openai_api_base", "base_url", "anthropic_api_url", "api_base"]
+)
+def test_a_model_object_pointed_at_bifrost_by_any_client_argument_is_routed(
+    argument: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whichever constructor argument a LangChain chat model names its endpoint with
+    (OpenAI's, Anthropic's, LiteLLM's...), one pointed at Bifrost is not said to bypass it."""
+    from types import SimpleNamespace
+
+    from trellis.harness import accounting
+
+    gateway = SimpleNamespace(has=lambda capability: True, origin="http://bf.test")
+    runtime = SimpleNamespace(agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=gateway)))
+    runtime.agent_id = "pointed"
+    accounting._unrouted.cache_clear()
+    serialized = {
+        "id": ["langchain", "Chat"],
+        "kwargs": {argument: "http://bf.test/v1", "model": "m"},
+    }
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        accounting._routed_or_said(runtime, serialized)
+    assert "calls its provider directly" not in caplog.text
+    elsewhere = {"id": ["langchain", "Chat"], "kwargs": {argument: "http://own.test/v1"}}
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        accounting._routed_or_said(runtime, elsewhere)
+    assert "calls its provider directly" in caplog.text  # one pointed elsewhere is said
+
+
+def test_a_models_record_names_its_window_and_output_by_any_servers_field() -> None:
+    """Anthropic, Bifrost, OpenRouter, Groq, vLLM, Mistral, LiteLLM: each server's own field."""
+    windows = ("max_input_tokens", "context_length", "context_window", "max_model_len")
+    for field in (*windows, "max_context_length"):
+        assert gateways._limits_said({field: 1000}) == (1000, None), field
+    for field in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+        assert gateways._limits_said({field: 100}) == (None, 100), field
+
+
+def test_doctor_names_each_provider_key_a_provider_sdk_reads() -> None:
+    keys = (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY",
+        "COHERE_API_KEY",
+        "GROQ_API_KEY",
+    )
+    assert gateways.provider_keys(dict.fromkeys(keys, "k")) == keys
+
+
 def _claude_runtime(gateway: Any) -> Any:
     harness = SimpleNamespace(model_gateway=gateway)
     return SimpleNamespace(agent=SimpleNamespace(harness=harness))
@@ -347,6 +405,9 @@ def test_doctor_says_how_models_are_routed_and_what_is_off(
     assert "off: Code Mode" in out and "off: model names" not in out
     said = doctor.gateway_said(Settings(), {})
     assert said[0] == "route: provider-sdk (provider SDK) at each provider's own endpoint"
+    # every capability but model names is off on provider SDKs, and each is said
+    assert len([line for line in said if line.startswith("off: ")]) == len(Capability) - 1
+    assert set(gateways.CAPABILITIES) == set(Capability)  # a gateway of one's own: each said
     assert said[1] == "provider keys: each provider's own SDK reads its own (none set)"
     assert said[2].endswith("the memory service uses its own settings")
     both = doctor.gateway_said(

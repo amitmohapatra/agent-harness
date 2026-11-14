@@ -298,6 +298,25 @@ def test_a_failed_run_is_a_failed_task_with_its_error() -> None:
     assert task.context_id == "th"
 
 
+def test_a_tasks_state_follows_its_runs_as_documented() -> None:
+    """docs/surfaces.md: QUEUED submitted, RUNNING working, PAUSED input-required, SUCCESS (and
+    PARTIAL) completed, ERROR/TIMEOUT failed, CANCELLED canceled; a refused run rejected."""
+    states = {
+        RunStatus.QUEUED: TaskState.TASK_STATE_SUBMITTED,
+        RunStatus.RUNNING: TaskState.TASK_STATE_WORKING,
+        RunStatus.PAUSED: TaskState.TASK_STATE_INPUT_REQUIRED,
+        RunStatus.SUCCESS: TaskState.TASK_STATE_COMPLETED,
+        RunStatus.PARTIAL: TaskState.TASK_STATE_COMPLETED,
+        RunStatus.ERROR: TaskState.TASK_STATE_FAILED,
+        RunStatus.TIMEOUT: TaskState.TASK_STATE_FAILED,
+        RunStatus.CANCELLED: TaskState.TASK_STATE_CANCELED,
+        RunStatus.REJECTED: TaskState.TASK_STATE_REJECTED,
+    }
+    assert set(states) == set(RunStatus)
+    for status, state in states.items():
+        assert task_from_run(record(status)).status.state == state, status
+
+
 def test_a_finished_run_carries_its_result_as_the_tasks_artifact() -> None:
     task = task_from_run(record(RunStatus.SUCCESS, output={"n": 1}))
     assert task.status.state == TaskState.TASK_STATE_COMPLETED
@@ -381,6 +400,8 @@ def test_every_ending_is_the_task_state_a2a_names() -> None:
         data = asked if outcome is RunOutcome.INTERRUPT else {}
         update = update_for(event(RunEventType.RUN_FINISHED, outcome=outcome, data=data))
         assert update is not None and update.state == state, outcome
+        # a task cannot leave a final state: all but a question are final
+        assert update.terminal is (outcome is not RunOutcome.INTERRUPT), outcome
     partial = update_for(
         event(RunEventType.RUN_FINISHED, outcome=RunOutcome.PARTIAL, data={"result": "half"})
     )

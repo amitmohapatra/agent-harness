@@ -444,3 +444,24 @@ async def test_an_answer_its_session_is_not_here_to_take_ends_the_background_run
     said.clear()
     await gone(runtime, "run_approved", asked.interrupt_id, answer(InterruptDecision.APPROVE))
     assert said == []  # it waits on nothing any more
+
+
+def test_the_harness_tools_a_live_session_lists_are_the_same_in_every_turn() -> None:
+    """A live session's process keeps what its ``trellis`` server listed in the first turn
+    (``adapters.claude._shape``: each tool's name and input schema, ``convert.listing``); a
+    later turn is served by it only if it lists the same. The schedule tools, every parameter
+    described, list alike each turn."""
+    from trellis.harness.schedules import SPECS
+    from trellis.harness.tools.base import Tool
+    from trellis.harness.tools.convert import claude as convert
+
+    async def run(args: dict[str, Any]) -> Any:
+        return None
+
+    def listed() -> Any:
+        return convert.listing(convert.convert([Tool(spec, run) for spec in SPECS]))
+
+    first = listed()
+    assert first == listed()
+    [update] = [schema for name, schema in first if name == "update_schedule"]
+    assert '"enabled": {"description": "false pauses it, true resumes it."' in update

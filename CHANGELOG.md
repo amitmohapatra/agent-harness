@@ -466,6 +466,21 @@ names the helper in its payload (`{"native_helper": {"run_id", "name"}}`, beside
 sub-agent's), and the resume sends the decision on the helper's run
 (`Feedback.agent_run_id`, the run the feedback is about).
 
+### Fixed: update_schedule describes each of its parameters
+
+`update_schedule`'s `task`, `condition` and `enabled` had a type and no description, so the
+harness's own tool set check flagged its own tool. `task` and `condition` now carry
+`schedule_task`'s descriptions (the same constants), and `enabled` says that false pauses and true
+resumes; a test checks that every parameter of every tool the harness offers is described.
+`doctor.SECRETS` no longer names three fields that are not settings.
+
+### Fixed: a catalog's rules stand no more than 300 s while it cannot be read
+
+Rules read earlier stand for `GOVERNANCE_STALE_SECONDS` (300) while the tool catalog cannot be
+read; their age was judged only when a read was tried (every 30 s), so they could stand about
+half a minute longer. It is judged each time a rule is asked for: at 301 s every tool that does
+more than read asks.
+
 ### Fixed: an in-process run store's temporary folder goes with the store
 
 `LocalRuns` (no `RUNS_URL`) kept a checkpoint's segments in a `trellis-runs-*` folder it made

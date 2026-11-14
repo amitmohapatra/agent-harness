@@ -76,8 +76,9 @@ from trellis.harness.skills import skill_set
 
 log = logging.getLogger("trellis.models")
 
-#: The share of the window past which older tool results are cleared from the request, the
-#: last :data:`KEEP_RESULTS` kept, and the share a clearing frees at least (the cached prompt
+#: The share of the window past which older tool results are cleared from the request (oldest
+#: first, never the last :data:`KEEP_RESULTS`), and the share whose freeing stops a clearing
+#: (LangChain's ``clear_at_least``: more than the last results may stay; the cached prompt
 #: breaks only when it pays).
 CLEAR_AT: Final = 0.5  # where a task is long, too: ``automatic.LONG_AT``
 KEEP_RESULTS: Final = 3

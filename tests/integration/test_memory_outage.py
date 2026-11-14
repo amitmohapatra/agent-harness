@@ -104,6 +104,13 @@ async def test_the_memory_tools_are_listed_again_every_10_minutes_the_last_kept_
         await agent.run("q", user="u")
     assert "agent tools could not be read again" in caplog.text  # asked again: it is down
     assert offered[2] == offered[0] != []  # the last listing stands
+    del memory_service.failures["agent_tools"]
+    now[0] += 29
+    await agent.run("q", user="u")
+    assert len(memory_service.named("agent_tools")) == 1  # not asked again within 30 s
+    now[0] += 2
+    await agent.run("q", user="u")
+    assert len(memory_service.named("agent_tools")) == 2
 
 
 async def test_memory_tools_that_cannot_be_listed_leave_the_run_without_them(

@@ -35,6 +35,9 @@ def test_an_lru_forgets_the_least_recently_used_past_its_bound() -> None:
     assert lru.pop("d") == 4 and lru.pop("zz") is None
     with pytest.raises(ValueError, match="at least one"):
         LRU(0)
+    one: LRU[str, int] = LRU(1)  # the smallest bound: one entry
+    one["a"], one["b"] = 1, 2
+    assert list(one) == ["b"]
     seen = LRUSet(["x", "y", "z"], maxsize=2)
     assert list(seen) == ["y", "z"] and "x" not in seen and len(seen) == 2
     seen.discard("y")
@@ -138,3 +141,11 @@ async def test_a_full_spool_loses_the_write_and_says_so_once(
     assert len((tmp_path / SPOOL_FILE).read_text().splitlines()) == 1
     assert caplog.text.count("is full") == 1
     await spooling.aclose()
+    held = (tmp_path / SPOOL_FILE).stat().st_size
+    monkeypatch.setattr(writes, "MAX_SPOOL_BYTES", 2 * held)  # room for exactly one more
+    again = Writes(spool=tmp_path)
+    for _ in range(2):
+        await again.submit("memory.transcript", down, record=record)
+    await again.drain()
+    assert (again.spooled, again.failed) == (1, 1)
+    await again.aclose()

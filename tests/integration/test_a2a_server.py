@@ -315,6 +315,8 @@ def test_push_targets_are_public_https_only() -> None:
         "https://10.0.0.1/hook",
         "https://user:pw@example.com/",
         "https://service.internal/",
+        "https://printer.local/",
+        "https://app.localhost/",  # docs/surfaces.md: never a .local/.internal/.localhost name
     ):
         with pytest.raises(TargetRefused):
             validate_url(refused)
@@ -425,6 +427,13 @@ async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_th
     async with httpx.AsyncClient(transport=transport, base_url="http://a2a.test") as http:
         card = await http.get("/agents/greeter/.well-known/agent-card.json")
         assert card.status_code == 200 and card.json()["name"] == "greeter"  # the SDK's route
+        modes = ["text/plain", "application/json"]  # it takes and gives text and JSON
+        assert card.json()["defaultInputModes"] == card.json()["defaultOutputModes"] == modes
+    [tag] = doc["tags"]
+    assert tag["description"].startswith("A2A surface (serve_a2a)")
+    assert tag["externalDocs"]["url"].rstrip("/") == "https://a2a-protocol.org"
+    request = rpc["requestBody"]["content"]["application/json"]["schema"]
+    assert request["type"] == "object" and request["required"] == ["jsonrpc", "method"]
     with pytest.raises(HTTPException):
         await served_by_the_sdk()
     bare = Starlette()

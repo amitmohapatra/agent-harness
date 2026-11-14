@@ -144,6 +144,36 @@ READS = [
     "/usr/bin/wc -l s.csv",
     "echo a#b  # a comment",
     """grep "total$" s.csv | cut -d, -f2 ; echo a\\ b "it's \\$5" '{$x}' "{a,b}" $""",
+    # each program whose words are texts, not files to read
+    "printf '%s\\n' /etc/passwd",
+    "true /etc/passwd",
+    "basename /etc/passwd",
+    "dirname /etc/passwd",
+    # each program whose first word is a script or a pattern, and the options that take a value
+    "grep /etc/ notes.txt",
+    "egrep /etc/ notes.txt",
+    "rg /etc/ notes.txt",
+    "jq /etc/ a.json",
+    "awk /etc/ a.csv",
+    "sed -n /etc/p a.csv",
+    "awk -F / '{print $1}' a.csv",
+    "awk -v x=/etc/ '{print x}' a.csv",
+    "cat a.csv || true",
+    'python -c "print(1)"',
+    # each name and method Python may read, each reader of a path written out
+    'python3 -c "import pandas as pd; print(pd.__version__, pd.__name__, pd.__file__, pd.__doc__)"',
+    'python3 -c "import pandas as pd; d = pd.DataFrame(); print(d.to_string(), d.to_markdown())"',
+    'python3 -c "import pandas as pd; d = pd.DataFrame(); print(d.to_html(), d.to_latex())"',
+    "python3 -c \"import pandas as pd; pd.read_csv('a.csv'); pd.read_excel('a.xlsx')\"",
+    "python3 -c \"import pandas as pd; pd.read_json('a.json'); pd.read_table('a.tsv')\"",
+    "python3 -c \"import pandas as pd; pd.read_parquet('a.pq'); pd.read_fwf('a.txt')\"",
+    "python3 -c \"import pandas as pd; pd.ExcelFile('a.xlsx')\"",
+    "python3 -c \"import numpy as np; np.loadtxt('a.csv'); np.genfromtxt('a.csv')\"",
+    "python3 -c \"import os; os.listdir('.'); os.walk('.'); os.scandir('.')\"",
+    "python3 -c \"import glob, openpyxl; glob.glob('*.csv'); glob.iglob('*'); openpyxl.load_workbook('a.xlsx')\"",
+    "python3 -c \"import pandas as pd; pd.set_option('display.max_rows', 5); pd.option_context('display.width', 80)\"",
+    "python3 -c \"import pandas as pd; d = pd.DataFrame(); d.apply(lambda r: r); d.agg('sum')\"",
+    "python3 -c \"import pandas as pd; d = pd.DataFrame(); d.aggregate('mean'); d.transform(lambda x: x)\"",
 ]
 NOT = [
     "rm -rf /tmp/x",
@@ -470,6 +500,28 @@ NOT = [
     "exec rm x",
     "command rm x",
     "time rm x",
+    # each reader that also fetches an address, given one
+    *(
+        f"python3 -c \"import pandas as pd; pd.{reader}('https://x.test/a')\""
+        for reader in ("read_csv", "read_excel", "read_json", "read_table", "read_parquet")
+    ),
+    *(
+        f"python3 -c \"import pandas as pd; pd.{reader}('https://x.test/a')\""
+        for reader in ("read_fwf", "ExcelFile")
+    ),
+    "python3 -c \"import numpy as np; np.loadtxt('https://x.test/a')\"",
+    "python3 -c \"import numpy as np; np.genfromtxt('https://x.test/a')\"",
+    # each function that lists a folder, given one the run may not read
+    *(f"python3 -c \"import os; os.{f}('/etc')\"" for f in ("listdir", "walk", "scandir")),
+    *(f"python3 -c \"import glob; glob.{f}('/etc/*')\"" for f in ("glob", "iglob")),
+    "python3 -c \"import openpyxl; openpyxl.load_workbook('/etc/a.xlsx')\"",
+    # an option that is not how a table is shown; a function applied that is not listed
+    "python3 -c \"import pandas as pd; pd.set_option('io.excel.xlsx.writer', 'x')\"",
+    "python3 -c \"import pandas as pd; pd.option_context('io.excel.xlsx.writer', 'x')\"",
+    *(
+        f'python3 -c "import os, pandas as pd; pd.DataFrame().{f}(os.system)"'
+        for f in ("apply", "agg", "aggregate", "transform")
+    ),
 ]
 
 
@@ -673,7 +725,11 @@ def test_the_environment_the_command_gets_is_the_one_read(
     plain = py("import json\nprint(json.dumps(1))")
     command = {"command": plain}
     assert read_only("Bash", command, run, env={})
-    for variable, value in (("PYTHONPATH", "src"), ("PYTHONSTARTUP", f"{run}/s.py")):
+    for variable, value in (
+        ("PYTHONPATH", "src"),
+        ("PYTHONSTARTUP", f"{run}/s.py"),
+        ("PYTHONHOME", "py"),  # a relative one: the run's
+    ):
         assert not read_only("Bash", command, run, env={variable: value}), variable
     monkeypatch.setenv("PYTHONPATH", "src")  # this process's: not the CLI's
     assert read_only("Bash", command, run, env={})
@@ -823,6 +879,14 @@ def test_a_command_that_cannot_move_its_shell_is_known_so() -> None:
     assert shell.Shell(None).places is None
 
 
+def test_each_move_and_each_word_a_compound_command_starts_with_is_known() -> None:
+    moving = ("cd /tmp", "pushd /tmp", "popd", "builtin cd /tmp", "command cd /tmp", "eval x")
+    for command in (*moving, "source x", ". x", "exec bash"):
+        assert shell.moves({"command": command}), command
+    for word in ("if", "then", "else", "elif", "do", "while", "until", "!", "time"):
+        assert shell.moves({"command": f"{word} cd /tmp"}), word
+
+
 def test_only_a_shell_call_is_read_here() -> None:
     assert not read_only("Write", {"command": "cat s.csv", "file_path": "x"})
     assert not read_only("Bash", {})
@@ -849,6 +913,12 @@ SAVES = [
     "python3 - <<'EOF'\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
     "import pandas as pd\nax = pd.read_csv('s.csv').plot(kind='bar')\nax.set_title('Q3')\n"
     "ax.figure.savefig('c.png')\nplt.close()\nEOF",
+    "touch a.txt",
+    "python3 -c \"from pathlib import Path; Path('a.bin').write_bytes(b'x')\"",
+    "python3 -c \"open('a.txt', 'w', errors='strict', newline='', buffering=1).write('x')\"",
+    "python3 -c \"import pandas as pd; d = pd.DataFrame(); d.to_csv('a.csv'); d.to_parquet('a.pq')\"",
+    "python3 -c \"import pandas as pd; d = pd.DataFrame(); d.to_json('a.json'); d.to_pickle('a.pkl')\"",
+    "python3 -c \"import pandas as pd; pd.DataFrame().to_feather('a.feather')\"",
 ]
 #: Writing outside it, deleting, moving, a path not written out, installing, the network: a pause.
 OUTSIDE = [
@@ -896,6 +966,7 @@ OUTSIDE = [
     "python3 -c \"import matplotlib.pyplot as plt; plt.title('t', {'usetex': 1}); plt.savefig('c.png')\"",
     "python3 -c \"import matplotlib.pyplot as plt; fd = {'usetex': 1}; plt.xlabel('x', fontdict=fd)\"",
     "python3 -c \"import matplotlib.pyplot as plt; s = plt.savefig; s('/etc/c.png')\"",
+    "python3 -c \"from pathlib import Path; Path('/etc/motd').write_bytes(b'notes.md')\"",
 ]
 
 
@@ -917,6 +988,9 @@ def test_a_write_outside_the_folder_a_delete_or_a_move_stays_a_pause(
 def test_a_frameworks_own_file_tool_is_approved_inside_the_folder_only(tmp_path) -> None:
     assert approvable("Write", {"file_path": str(tmp_path / "report.md")}, tmp_path)
     assert approvable("Write", {"path": "exports/report.md"}, tmp_path)  # Kimi's, relative
+    for editor in ("Edit", "MultiEdit"):  # Claude Code's other tools that write one file
+        assert approvable(editor, {"file_path": str(tmp_path / "report.md")}, tmp_path)
+        assert not approvable(editor, {"file_path": "/tmp/report.md"}, tmp_path)
     assert not approvable("Write", {"file_path": "/tmp/report.md"}, tmp_path)
     assert not approvable("Write", {"file_path": str(tmp_path / "report.md")})
 

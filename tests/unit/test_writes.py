@@ -48,6 +48,16 @@ async def test_writes_run_in_the_background_and_drain_waits_for_them() -> None:
     await writes.aclose()
 
 
+def test_the_queue_holds_10_000_writes_for_4_writers_and_a_full_one_waits_5_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/architecture.md: ``MAX_PENDING`` 10 000, ``WRITERS`` 4, ``WRITE_ATTEMPTS`` 3,
+    ``SUBMIT_WAIT_SECONDS`` 5."""
+    monkeypatch.undo()  # the values themselves, not the fast ones
+    assert (module.MAX_PENDING, module.WRITERS, module.WRITE_ATTEMPTS) == (10_000, 4, 3)
+    assert module.SUBMIT_WAIT_SECONDS == 5.0
+
+
 async def test_a_write_that_may_pass_is_tried_again() -> None:
     writes, tries = Writes(), []
 
@@ -60,6 +70,50 @@ async def test_a_write_that_may_pass_is_tried_again() -> None:
     await writes.drain()
     assert len(tries) == 3 and writes.failed == 0  # the third of 3 attempts
     await writes.aclose()
+
+
+async def test_a_writes_retries_back_off_at_random_from_half_a_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # the module's own backoff, not this file's
+    ranges: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        ranges.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr(module.random, "uniform", uniform)
+    writes, tries = Writes(), []
+
+    async def flaky() -> None:
+        tries.append(1)
+        if len(tries) < 3:
+            raise DependencyUnavailableError("memory is restarting", retryable=True)
+
+    await writes.submit("memory.transcript", flaky)
+    await writes.drain()
+    assert len(tries) == 3 and ranges[:2] == [(0, 0.5), (0, 1.0)]  # full jitter, doubled
+    await writes.aclose()
+
+
+async def test_a_shutdown_waits_at_most_10_s_for_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()  # the module's own bound, not this file's
+    bounds: list[float] = []
+    timeout = asyncio.timeout
+
+    def bounded(delay: float | None) -> Any:
+        bounds.append(delay or 0.0)
+        return timeout(delay)
+
+    monkeypatch.setattr(module.asyncio, "timeout", bounded)
+    writes = Writes()
+
+    async def done() -> None:
+        return None
+
+    await writes.submit("memory.transcript", done)
+    await writes.aclose()
+    assert 10.0 in bounds  # the drain bound
 
 
 async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:

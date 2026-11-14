@@ -48,6 +48,11 @@ def test_a_google_docstring_is_a_description_and_the_parameters_descriptions() -
     assert params == {"store": "The store's id, such as S12.", "rest": "Ignored."}
 
 
+def test_each_name_google_and_numpy_give_the_arguments_section_is_read() -> None:
+    for header in ("Args", "Arguments", "Parameters", "Params", "Keyword Args"):
+        assert documented(f"Do it.\n\n{header}:\n    x: the x") == ("Do it.", {"x": "the x"})
+
+
 def test_sphinx_fields_and_a_docstring_without_sections() -> None:
     text, params = documented(
         "Do it.\n\n:param x: the x\n    and more\n:type x: int\n:returns: y\nAfter."
@@ -206,6 +211,14 @@ def test_pairs_a_model_cannot_tell_apart() -> None:
     )
 
 
+def test_two_tools_sharing_three_quarters_of_their_words_are_said_alike() -> None:
+    same = spec("a", "Reads the ledger totals.")
+    alike = spec("b", "Reads the ledger lines.")  # 2 shared of 4 in all with a: 50%
+    three = spec("c", "Reads ledger totals now.")  # 3 shared of 4 in all with a: 75%
+    assert "overlapping_descriptions" in [f.code for f in lint([same, three])]
+    assert "overlapping_descriptions" not in [f.code for f in lint([same, alike])]
+
+
 def test_too_many_tools_at_once() -> None:
     many = [
         spec(f"t{n}", f"Report number {n} of the ledger, its totals and its lines.")
@@ -222,8 +235,94 @@ def test_too_many_tools_at_once() -> None:
 
 
 async def test_the_harness_own_tools_pass_the_check() -> None:
+    from trellis.harness.schedules import SPECS
+
     sandboxed = await sandbox().tools().resolve()
     assert lint([*CODE_MODE_TOOLS, *(t.spec for t in sandboxed)]) == []
+    assert lint(SPECS) == []  # the schedule tools: each parameter described
+
+    def typed(properties: dict[str, Any]) -> dict[str, Any]:
+        return {
+            name: (
+                schema.get("type"),
+                typed(schema["items"].get("properties", {}))
+                if schema.get("type") == "array" and schema.get("items", {}).get("type") == "object"
+                else schema.get("items", {}).get("type"),
+            )
+            for name, schema in properties.items()
+        }
+
+    shapes = {spec.name: typed((spec.input_schema or {})["properties"]) for spec in SPECS}
+    task = {"task": ("string", None), "when": ("string", None), "condition": ("string", None)}
+    assert shapes == {
+        "schedule_task": {
+            **task,
+            "once": ("boolean", None),
+            "in_minutes": ("number", None),
+            "choices": ("array", task),
+            "timezone": ("string", None),
+            "tools": ("array", "string"),
+        },
+        "list_schedules": {},
+        "update_schedule": {
+            "id": ("string", None),
+            "ids": ("array", "string"),
+            **task,
+            "enabled": ("boolean", None),
+        },
+        "cancel_schedule": {"id": ("string", None), "ids": ("array", "string")},
+    }
+    described = {
+        (spec.name, name)
+        for spec in SPECS
+        for name, schema in (spec.input_schema or {})["properties"].items()
+        if schema.get("description")
+    }
+    assert {("update_schedule", "id"), ("update_schedule", "when")} <= described
+    choice = SPECS[0].input_schema["properties"]["choices"]["items"]["properties"]  # type: ignore[index]
+    assert all(schema.get("description") for schema in choice.values())
+
+
+def _undescribed(schema: dict[str, Any], at: str = "") -> list[str]:
+    """Each parameter of ``schema`` with no description, nested ones (an array's objects')
+    included, by its path."""
+    found = []
+    for name, field in (schema.get("properties") or {}).items():
+        if not field.get("description"):
+            found.append(f"{at}{name}")
+        items = field.get("items") or {}
+        if items.get("type") == "object":
+            found += _undescribed(items, f"{at}{name}[].")
+    return found
+
+
+async def test_every_parameter_of_every_tool_the_harness_offers_is_described(tmp_path: Any) -> None:
+    """The harness's own tools - schedules, Code Mode, the sandbox, skills, asking, the kept
+    results' readers, a sub-agent, a remote agent, an MCP server's resources - describe each
+    parameter, so a model knows what to give (the tool set check's ``undescribed_parameter``)."""
+    from trellis.harness import skills, subagents
+    from trellis.harness.a2a import client as a2a_client
+    from trellis.harness.schedules import SPECS
+    from trellis.harness.tools import query, resources
+    from trellis.harness.tools import results as results_module
+    from trellis.harness.tools.ask import ask_user
+
+    specs = [*SPECS, *CODE_MODE_TOOLS]
+    specs += [t.spec for t in await sandbox().tools().resolve()]
+    specs += [t.spec for t in await skills.directory(tmp_path).tools().resolve()]
+    specs += [ask_user().spec]
+    schemas = {spec.name: spec.input_schema or {} for spec in specs}
+    schemas |= {
+        "read_file": results_module.READ_FILE_SCHEMA,
+        "query_result": query.QUERY_RESULT_SCHEMA,
+        "query_result (saving)": query.QUERY_RESULT_SAVING_SCHEMA,
+        "a sub-agent": subagents.INPUT,
+        "a remote agent": a2a_client.SCHEMA,
+        "read_resource": resources.SCHEMA,
+    }
+    missing = {name: found for name, schema in schemas.items() if (found := _undescribed(schema))}
+    assert missing == {}
+    assert len(schemas) >= 20
 
 
 async def test_the_toolbox_logs_what_the_check_found_when_its_tools_change(

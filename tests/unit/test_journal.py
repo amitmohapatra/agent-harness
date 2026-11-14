@@ -606,3 +606,46 @@ def test_a_step_passed_drops_whose_answers_they_were() -> None:
     later = stepped(journal, "s2")
     later.passed("s1")
     assert "a" not in journal.answers and "a" not in journal.answered_by
+
+
+async def test_progress_after_reads_is_saved_at_most_every_20_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker's run saves its journal after calls that only read at most every 20 s (after
+    a write at once): the progress a crash keeps, without a save per step."""
+    from types import SimpleNamespace
+
+    from trellis.harness import runtime as runtime_module
+    from trellis.harness.runtime import Runtime
+
+    clock = [1000.0]
+    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock[0])
+    saves: list[float] = []
+
+    class Changing:  # a journal that always has something new to save
+        async def save(self, *args: Any, **kwargs: Any) -> Any:
+            saves.append(clock[0])
+            return SimpleNamespace(checkpoint={})
+
+        def saved(self, save: Any) -> None:
+            return None
+
+    async def heartbeat(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    run: Any = SimpleNamespace(
+        worker_id="w",
+        lease_seconds=60.0,
+        run_id="run_1",
+        tenant="t",
+        _saved_at=None,
+        replay=SimpleNamespace(journal=Changing()),
+        agent=SimpleNamespace(
+            harness=SimpleNamespace(runs=SimpleNamespace(artifacts=None, heartbeat=heartbeat))
+        ),
+    )
+    for step in (0.0, 19.5, 0.5, 5.0):  # 19.5 s on: not yet; 20 s on: saved
+        clock[0] += step
+        await Runtime._saved(run, now=False)
+    await Runtime._saved(run, now=True)  # after a write: at once
+    assert saves == [1000.0, 1020.0, 1025.0]

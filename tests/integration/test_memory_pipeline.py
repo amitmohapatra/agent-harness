@@ -35,7 +35,6 @@ from trellis.harness.agent import (
     ANSWERING,
     ASKING,
     EARLIER_VALUES,
-    NARROW_FROM,
     REMEMBERED,
 )
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
@@ -303,13 +302,18 @@ async def test_confident_hints_narrow_a_large_tool_set(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     memory_service.candidates = ["t3", "t1"]
-    model = ScriptedChat(["done"])
-    tools = many(NARROW_FROM)
+    model = ScriptedChat(["done", "done"])
+    tools = many(30)  # from 30 tools of the run's own
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), tools)
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
     assert {"t1", "t3"} <= offered and "t5" not in offered
+    fewer = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="m"), many(29))
+    await fewer.run("look up a", user="u")
+    assert {f"t{i}" for i in range(29)} <= {
+        t["function"]["name"] for t in model.requests[1]["tools"]
+    }
 
 
 async def test_hints_below_the_floor_narrow_nothing(

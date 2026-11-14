@@ -330,7 +330,7 @@ async def test_a_slow_write_does_not_hold_the_run(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(RunMemory, "record_messages", stalled)
     monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.05)
-    assert TURN_WRITE_SECONDS > 0.05
+    assert TURN_WRITE_SECONDS == 5.0  # what a run waits at most for its turn to be written
     async with Harness(config=Settings(), memory=service.client()) as h:
         agent = h.wrap(create_agent(ScriptedChat(["ok"]), tools=[]), id="slow")
         result = await agent.run("hi", user="u1", thread=THREAD)

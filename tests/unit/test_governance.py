@@ -288,7 +288,7 @@ async def test_rules_read_earlier_stand_for_a_while_when_the_catalog_goes_down(
     assert still.announces and still.rule == "amount > 10"  # the rule read 31 s ago stands
     clock.now += 268
     assert (await governance.check("po", {"amount": 1})).rule == "amount > 10"  # 299 s ago
-    clock.now += 31  # read again (every 30 s): now past 300 s
+    clock.now += 2  # 301 s: too old to stand, read again or not
     unread = await governance.check("po", {"amount": 1})
     assert unread.asks and unread.rule == CATALOG_UNREAD  # too old to trust: it asks
     catalog.down = False

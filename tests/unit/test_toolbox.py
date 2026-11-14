@@ -180,6 +180,12 @@ async def test_every_tool_is_published_once_mcp_with_annotations_local_with_side
 async def test_many_read_only_code_mode_tools_become_the_meta_tools() -> None:
     tools, _, _ = await resolved([Def(f"wiki-t{i}", "wiki") for i in range(20)])
     assert list(tools) == [s.name for s in CODE_MODE_TOOLS]
+    assert list(tools) == [
+        "list_tool_files",
+        "read_tool_file",
+        "get_tool_docs",
+        "execute_tool_code",
+    ]
     assert all(t.feature == "code_mode" for t in tools.values())
 
 
@@ -195,6 +201,13 @@ async def test_three_read_only_servers_go_to_code_mode_scoped_to_them_others_sta
     await tools["execute_tool_code"].run({"code": "print(1)"})  # the harness's name...
     # ...run as the gateway's meta-tool
     assert gateway.executed == [("executeToolCode", {"code": "print(1)"}, ("a", "b", "c"))]
+    for mine, theirs in [
+        ("list_tool_files", "listToolFiles"),
+        ("read_tool_file", "readToolFile"),
+        ("get_tool_docs", "getToolDocs"),
+    ]:
+        await tools[mine].run({"fileName": "servers/a.pyi"})
+        assert gateway.executed[-1][0] == theirs
 
 
 async def test_a_tool_the_gateway_would_run_itself_is_not_offered(
@@ -347,10 +360,10 @@ async def test_a_listing_that_fails_keeps_the_last_good_one(clock: Clock) -> Non
     gateway.tools = unreachable  # type: ignore[method-assign]
     clock.now += toolbox.TOOLS_TTL_SECONDS + 1
     assert [t.name for t in await made.tools()] == [t.name for t in first]
-    clock.now += toolbox.TOOLS_RETRY_SECONDS / 2
+    clock.now += 29
     await made.tools()
-    assert down.listed == 1  # not asked again before the retry interval
-    clock.now += toolbox.TOOLS_RETRY_SECONDS
+    assert down.listed == 1  # not asked again before the retry interval (30 s)
+    clock.now += 2
     await made.tools()
     assert down.listed == 2
     await writes.aclose()

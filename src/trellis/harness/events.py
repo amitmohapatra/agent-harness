@@ -58,11 +58,6 @@ LOG: Final = "log"
 #: for a call approved without asking because a reviewer approved its tool for the rest of the
 #: run (``tool``, ``remembered: true``).
 DECISION: Final = "decision"
-#: The ``CUSTOM`` event names of the live task tree (``admission.py``): a child run of the run
-#: waiting for a slot (``helper_queued``), working (``helper_started``) and ended
-#: (``helper_finished``: its status, seconds, tokens and cost) — every engine's (a sub-agent's
-#: call, a framework's own helper).
-HELPER_PHASES: Final = ("queued", "started", "finished")
 #: How much of a tool result rides on the event stream.
 PREVIEW_CHARS: Final = 2000
 
@@ -162,7 +157,10 @@ class RunEvents:
             self.emit(RunEventType.CUSTOM, data={"name": name, **data})
 
     def helper(self, phase: str, **data: Any) -> None:
-        """A child run's step on the task tree (``phase``: one of :data:`HELPER_PHASES`)."""
+        """A child run's step on the live task tree (``admission.py``), the ``CUSTOM`` event
+        ``helper_<phase>``: waiting for a slot (``queued``), working (``started``) and ended
+        (``finished``: its status, seconds, tokens and cost) — every engine's (a sub-agent's
+        call, a framework's own helper)."""
         self.custom(f"helper_{phase}", **data)
 
     def warning(self, code: str, message: str) -> None:

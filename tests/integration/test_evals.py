@@ -337,6 +337,8 @@ async def test_a_long_answer_is_grounded_on_the_head_verify_takes(
     assert verified("x" * 9000) == "x" * 8000  # no sentence ends within: cut at the limit
     assert verified("\n" + "x" * 9000) == "\n" + "x" * 7999  # nothing but a blank before it
     assert verified(sentence) == sentence
+    exactly = "Fine. " + "x" * 7994
+    assert verified(exactly) == exactly  # 8000 characters: checked whole, not cut back
 
 
 # --------------------------------------------------------------------------- offline, Langfuse
@@ -932,6 +934,9 @@ async def test_a_judge_scores_a_tenth_of_runs_unless_it_says(harness: Harness) -
         return None
 
     assert evals_module.sample_of(llm_judge("ok?")) == evals_module.JUDGE_SAMPLE == 0.1
+    from trellis.harness import agent as agent_module
+
+    assert agent_module.GROUNDING_SAMPLE == 0.1  # documented: a fixed 0.1 of the runs grounded
     assert evals_module.sample_of(llm_judge("ok?", sample=0.5)) == 0.5
     assert evals_module.sample_of(custom) == 0.1  # another evaluator: the default share
     with pytest.raises(ConfigurationError, match="sample"):

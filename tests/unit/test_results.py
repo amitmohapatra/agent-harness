@@ -43,14 +43,14 @@ def test_outside_a_run_nothing_is_cut_or_kept() -> None:
 
 
 def test_a_large_result_is_kept_and_previewed_by_its_head_and_tail(journal: Journal) -> None:
-    text = "\n".join(f"line {n} " + "y" * 900 for n in range(1, 201))
+    text = "\n".join(f"line {n:03} " + "y" * 991 for n in range(1, 201))  # 1,000 each: whole
     stub = readable(text)
     path = kept_path(stub)
     assert path.startswith("/large_tool_results/") and journal.results == {path: text}
     assert kept() and len(stub) < 25_000
     assert "the read_file tool" in stub and "showing the head and tail" in stub
     assert "... [190 lines truncated] ..." in stub and "longer than" not in stub
-    assert "\n1  line 1 " in stub and "\n200  line 200 " in stub and "line 6 " not in stub
+    assert "\n1  line 001 " in stub and "\n200  line 200 " in stub and "line 006 " not in stub
     assert readable(text) == stub  # the same result, the same path: kept once
 
 
@@ -96,6 +96,17 @@ def test_read_file_pages_by_lines_from_an_offset(journal: Journal) -> None:
     )
 
 
+def test_a_page_holds_at_most_20_000_characters() -> None:
+    from trellis.harness.tools.results import page
+
+    def lines_on_page(fourth: int) -> int:
+        text = "\n".join(["a" * 5_000] * 3 + ["b" * fourth, "c"])
+        return len([row for row in page(text, "/p", limit=9).splitlines() if "  " in row])
+
+    assert lines_on_page(4_985) == 4  # 3 x (1 + 2 + 5,000 + 1) + 1 + 2 + 4,985: 20,000 whole
+    assert lines_on_page(4_986) == 3  # one character more: the line goes to the next page
+
+
 def test_read_checks_the_arguments_the_model_wrote(journal: Journal) -> None:
     path = kept_path(readable("z\n" * MAX_CHARS))
     assert read({"file_path": path, "limit": 1}).startswith("1  z\n…[")
@@ -121,6 +132,15 @@ def test_a_kept_text_is_named_by_its_content_and_read_on_from_where_a_cut_starts
     assert results.line_at(text, two) == 2  # on a line's end: the next line
     assert results.line_at(text, two + 2) == 2  # within a line: that line, again
     assert path is not None and read_file(path, offset=2, limit=1).startswith("3  row 3")
+
+
+def test_a_table_of_5_rows_read_whole_is_kept_and_one_of_4_is_not(journal: Journal) -> None:
+    """docs/tools.md: a table of 5 rows or more that is read whole is kept as well - the
+    shortest such table too."""
+    five = "k,v\na,1\nb,2\nc,3\nd,4\ne,5"  # the fewest characters 5 rows take
+    assert results.tabled(five) != five and len(journal.results) == 1
+    four = "k,v\na,1\nb,2\nc,3\nd,4"
+    assert results.tabled(four) == four and len(journal.results) == 1
 
 
 def test_outside_a_run_nothing_is_kept_and_no_code_runs() -> None:

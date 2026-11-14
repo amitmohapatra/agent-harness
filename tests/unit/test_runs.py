@@ -25,6 +25,32 @@ from trellis.harness.runs import LocalRuns
 from trellis.runs import ConflictError, Lease, LeaseLostError, NotFoundError
 
 
+def test_each_named_cadence_fires_as_agent_runs_fires_it() -> None:
+    """docs/runs.md: ``hourly``, ``daily``, ``weekly``, ``weekdays`` (local midnight; weekly on
+    Monday) and ``manual``, which never fires on its own."""
+    from datetime import UTC, datetime
+
+    from trellis.contracts import ScheduleSpec
+    from trellis.harness.runs import _next_fire
+
+    friday = datetime(2026, 11, 13, 10, 30, tzinfo=UTC)
+    expected = {
+        "hourly": datetime(2026, 11, 13, 11, 0, tzinfo=UTC),
+        "daily": datetime(2026, 11, 14, 0, 0, tzinfo=UTC),
+        "weekly": datetime(2026, 11, 16, 0, 0, tzinfo=UTC),
+        "weekdays": datetime(2026, 11, 16, 0, 0, tzinfo=UTC),
+        "manual": None,
+    }
+    for cadence, fires in expected.items():
+        spec = ScheduleSpec(
+            tenant_id="t", agent_id="a", name="n", cadence=cadence, on_behalf_of="u"
+        )
+        assert _next_fire(spec, friday) == fires, cadence
+    tuesday = datetime(2026, 11, 17, 10, 30, tzinfo=UTC)
+    spec = ScheduleSpec(tenant_id="t", agent_id="a", name="n", cadence="weekdays", on_behalf_of="u")
+    assert _next_fire(spec, tuesday) == datetime(2026, 11, 18, 0, 0, tzinfo=UTC)
+
+
 def start(run_id: str = "run_1", agent: str = "a", tenant: str = "t") -> RunStart:
     return RunStart(run_id=run_id, tenant_id=tenant, agent_id=agent, user_id="u", input="hi")
 
@@ -445,6 +471,21 @@ async def test_finished_runs_go_after_their_time_with_their_artifacts(
     await finished(runs, "run_c")
     assert await runs.artifacts.download(shared.artifact_id) is None
     assert runs._artifact_runs == {} and set(runs._run_artifacts) == set()
+
+
+async def test_a_schedules_listing_pages_by_offset_and_ends_on_its_last_page() -> None:
+    runs = LocalRuns()
+    for n in range(4):
+        await runs.schedules.create(
+            ScheduleSpec(
+                tenant_id="t", agent_id="a", name=f"s{n}", cadence="daily", on_behalf_of=f"u{n}"
+            )
+        )
+    first = await runs.schedules.list(limit=2, tenant="t")
+    assert [s.name for s in first.items] == ["s3", "s2"] and first.next_cursor == "2"
+    last = await runs.schedules.list(limit=2, cursor=first.next_cursor, tenant="t")
+    assert [s.name for s in last.items] == ["s1", "s0"] and last.next_cursor is None
+    assert (await runs.schedules.list(limit=4, tenant="t")).next_cursor is None
 
 
 async def test_by_default_1000_finished_runs_are_kept_for_an_hour(

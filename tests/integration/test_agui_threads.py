@@ -165,6 +165,27 @@ async def test_one_poller_and_one_listing_per_tick_serve_every_open_thread(
     assert threads.polling is None  # nobody listening: no polling
 
 
+async def test_the_poller_looks_once_a_second(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+    sleep = asyncio.sleep
+
+    async def quick(seconds: float) -> None:  # each wait the poller asks for, said and shortened
+        waits.append(seconds)
+        await sleep(0)
+
+    chat = Chat()
+    sid = await chat.schedule()
+    stream = chat.stream()
+    await events(stream, 4)
+    monkeypatch.setattr(threads_module.asyncio, "sleep", quick)
+    await chat.fire(sid, "Only 2 left.")
+    assert texts(await events(stream, 4)) == ["Only 2 left."]
+    monkeypatch.undo()
+    await stream.aclose()
+    await chat.harness.aclose()
+    assert 1.0 in waits  # one look per second
+
+
 async def test_the_route_needs_a_caller_and_is_in_the_openapi_document() -> None:
     chat = Chat()
     transport = httpx.ASGITransport(app=chat.app)
@@ -258,17 +279,18 @@ async def test_from_agent_runs_log_a_scheduled_runs_events_are_held_and_a_quiet_
         assert await chunks(NO_REPORT, fired=True) == []
         assert len(await chunks(NO_REPORT, fired=False)) == len(shown)
         # in process, a run followed as it runs: its text is said from its record at the end
-        said = logged["hi"][0].model_copy(update={"type": RunEventType.TEXT_MESSAGE_CONTENT})
+        text = ("TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END")
+        said = [logged["hi"][0].model_copy(update={"type": RunEventType(t)}) for t in text]
 
         async def live(run_id: str, *, tenant: str) -> Any:
-            for event in [said, *logged["hi"]]:
+            for event in [*said, *logged["hi"]]:
                 yield event
 
         monkeypatch.setattr(threads_module, "event_log", lambda store: None)
         monkeypatch.setattr(agent, "events", live)
         running = record("hi", fired=False).model_copy(update={"status": RunStatus.RUNNING})
         followed = [c async for c in threads._run(running, -1)]
-        assert '"TEXT_MESSAGE_CONTENT"' not in "".join(followed)
+        assert not [t for t in text if f'"{t}"' in "".join(followed)]  # no message said twice
 
 
 def test_a_reply_from_a_record_and_the_last_event_id() -> None:
