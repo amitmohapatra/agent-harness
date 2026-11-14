@@ -405,7 +405,7 @@ def test_the_harness_tools_a_live_session_lists_are_the_same_in_every_turn() -> 
     from trellis.harness.tools.base import Tool
     from trellis.harness.tools.convert import claude as convert
 
-    async def run(**kwargs: Any) -> Any:
+    async def run(args: dict[str, Any]) -> Any:
         return None
 
     def listed() -> Any:
