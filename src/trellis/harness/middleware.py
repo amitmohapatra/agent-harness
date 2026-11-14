@@ -144,6 +144,7 @@ from trellis.harness.adapters.langgraph import (
     TASK_TOOL,
     carried_plain,
     notified,
+    summarizes,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
@@ -2820,9 +2821,19 @@ class FitWindow(AgentMiddleware):
         if window is not None and window <= 0:
             raise ConfigurationError("a window is a number of tokens over 0")
         self.window = window
-        self.turns = turns
+        self._turns_asked = turns
         #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
         self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
+
+    @property
+    def turns(self) -> bool:
+        """Whether fitting leaves older turns out: as it was built — and never in a graph
+        that summarizes its own history (``adapters.langgraph.summarizes``: LangChain's
+        ``SummarizationMiddleware``, Deep Agents'): the older turns are the library's to
+        shrink, as on its own, and fitting only guards the window after it — both shrinking
+        one history, the summary itself was left out with the turns."""
+        runtime = current()
+        return self._turns_asked and not (runtime is not None and summarizes(runtime.agent.target))
 
     async def awrap_model_call(
         self,

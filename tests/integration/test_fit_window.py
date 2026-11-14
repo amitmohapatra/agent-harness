@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelRequest, ModelResponse
+from langchain.agents.middleware import ModelRequest, ModelResponse, SummarizationMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
@@ -666,3 +666,40 @@ def test_a_tool_made_smaller_keeps_the_fields_its_provider_reads() -> None:
     assert ours._compact(search) == search and ours._signature(search) == search
     plain = ours._compact(StructuredTool.from_function(lookup))
     assert isinstance(plain, dict) and plain["function"]["description"] == "Look an order up."
+
+
+# -------------------------------------------------- a graph that summarizes its own history
+def long_talk() -> list[Any]:
+    """Three turns, each with a long answer: more than a small window holds, and nothing a
+    clearing of tool results makes smaller."""
+    said: list[Any] = []
+    for asked in ("first", "second", "third"):
+        said += [HumanMessage(asked), AIMessage(content=f"did {asked} " + "x" * 12_000)]
+    return [*said, HumanMessage("and now?")]
+
+
+@pytest.mark.parametrize("summarized", [True, False])
+async def test_a_graphs_own_summarization_has_the_older_turns_and_fitting_only_guards_the_window(
+    harness: Harness, summarized: bool
+) -> None:
+    """LangChain's ``SummarizationMiddleware`` beside ``middleware()``: the older turns are
+    the summarization's — it runs once, as on its own — and fitting the window after it cuts
+    what is too long but leaves no turn out (the turns it kept are sent). Without it, fitting
+    leaves the older turns out itself, as ever."""
+    model, summarizer = ScriptedChatModel(turns=["answered"]), ScriptedChatModel(turns=["SUMMARY"])
+    # what it keeps (the last two turns) is itself more than the window: the library's choice
+    own = SummarizationMiddleware(model=summarizer, trigger=("messages", 6), keep=("messages", 5))
+    stack = [*([own] if summarized else []), *middleware(context_window=6000)]
+    graph = create_agent(model, tools=[], middleware=stack)
+    events = [e async for e in harness.wrap(graph, id="talk").stream(long_talk(), user="u")]
+    assert events[-1].data["result"] == "answered"
+    sent = " ".join(m.text for m in model.seen[-1])
+    if summarized:
+        assert summarizer.turns == [] and "SUMMARY" in sent  # it ran, once
+        # the summary, then every turn the summarization kept, each once and in order
+        kept = [m.text.split(" x")[0] for m in model.seen[-1]][1:]
+        assert kept[0].endswith("SUMMARY")
+        assert kept[1:] == ["second", "did second", "third", "did third", "and now?"]
+    else:
+        fitted = [str(e.data) for e in events if e.data.get("code") == "context_fit"]
+        assert "did second" not in sent and any("turns" in said for said in fitted)
