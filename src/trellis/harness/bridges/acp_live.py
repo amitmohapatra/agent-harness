@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
+from trellis.harness.bridges import live
 from trellis.harness.bridges.helpers import ATTRIBUTED_SECONDS
 from trellis.harness.bridges.live import (
     COMPLETED,
@@ -94,6 +95,8 @@ SERVER: Final = "trellis"
 HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
 #: How often the agent's usage log is read while a turn runs (and the budget checked).
 USAGE_SECONDS: Final = 0.5
+#: The first wait between two reads of Kimi's log for a line it is about to write.
+LOG_STEP: Final = 0.05
 #: The most a cancelled turn waits for the agent to say it stopped.
 CANCEL_SECONDS: Final = 5.0
 #: The last of the agent's stderr kept, for the error of a process that ended mid-turn.
@@ -178,16 +181,19 @@ def unfilled() -> Any:
     return CancelElicitationResponse(action="cancel")
 
 
-async def _logged_in_time(said: Callable[[], Awaitable[bool]]) -> bool:
-    """Whether Kimi's log ``said`` so within :data:`ATTRIBUTED_SECONDS`, asked again as it is
-    written: Kimi logs an event a moment after it answers for it. A file of this machine's,
-    read at most a hundred times."""
+async def _logged_in_time(said: Callable[[], Awaitable[bool]], seconds: float) -> bool:
+    """Whether Kimi's log ``said`` so within ``seconds``, asked again as it is written: Kimi
+    logs an event after it answers for it — a moment after, long after on a busy machine. A
+    file of this machine's, read again after a wait that doubles (from :data:`LOG_STEP` to a
+    second): some forty reads over the longest wait."""
+    step = LOG_STEP
     with contextlib.suppress(TimeoutError):
-        async with asyncio.timeout(ATTRIBUTED_SECONDS):
+        async with asyncio.timeout(seconds):
             while True:
                 if await said():
                     return True
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(step)
+                step = min(2 * step, 1.0)
     return False
 
 
@@ -413,8 +419,10 @@ class ACPSession(Keeper[Background]):
         session is in (``UsageLog.asking_in``), that one — its plan mode kept on, a resumed
         session's too — asking, whatever the agent's own configuration started it in (Kimi's
         ``default_permission_mode`` approves on its own behind ACP's ``default``). The log
-        must then say so, or the run fails (:data:`UNGOVERNED`): no call is governed in a
-        session that asks about none. An agent with no such log keeps the mode it starts in."""
+        must then say so — waited for as a prompt waits for its session
+        (``live.SETTLE_SECONDS``: Kimi writes its log after it answers, long after on a busy
+        server) — or the run fails (:data:`UNGOVERNED`): no call is governed in a session that
+        asks about none. An agent with no such log keeps the mode it starts in."""
         given = mode if not self.continued else None
         wanted, steps = (given, (given,) if given else ()) if log is None else log.asking_in(given)
         for step in steps:
@@ -427,7 +435,9 @@ class ACPSession(Keeper[Background]):
         async def confirmed() -> bool:
             return log.mode() == (wanted, None)
 
-        if not await _logged_in_time(confirmed):
+        # no prompt goes before the log confirms: waited for as long as a prompt waits for
+        # its session (``live.SETTLE_SECONDS``), then the run fails
+        if not await _logged_in_time(confirmed, live.SETTLE_SECONDS):
             found, alone = log.mode()
             raise ACPRunError(UNGOVERNED.format(wanted=wanted, found=found, alone=alone))
 
@@ -595,7 +605,7 @@ class ACPSession(Keeper[Background]):
             return raw in self._asked
 
         if self.log is not None:
-            await _logged_in_time(asked)
+            await _logged_in_time(asked, ATTRIBUTED_SECONDS)
         return self._asked.get(raw) or (None, None)
 
     # ------------------------------------------------------------------ the agent's requests

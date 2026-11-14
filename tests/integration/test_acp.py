@@ -33,6 +33,7 @@ from trellis.harness.adapters.acp import (
 )
 from trellis.harness.adapters.claude import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.agent import NARROW_FROM
+from trellis.harness.bridges import acp_live, live
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import DELIVERS_HERE, sandbox
@@ -881,7 +882,7 @@ async def test_a_session_asks_whatever_the_agents_config_starts_it_in(
 
 
 async def test_a_session_the_agent_leaves_in_a_mode_that_asks_nothing_fails_the_run(
-    harness: Harness, tmp_path: Path
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """APR-01, L46. Fails closed: the agent answered ``session/set_mode`` but its log says the
     session still approves on its own, so no prompt is sent and the run fails saying so."""
@@ -890,11 +891,39 @@ async def test_a_session_the_agent_leaves_in_a_mode_that_asks_nothing_fails_the_
         "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
         "FAKE_ACP_MODE_STUCK": "1",
     }
+    monkeypatch.setattr(live, "SETTLE_SECONDS", 0.3)  # the wait before a prompt is sent
     result = await harness.wrap(fake(tmp_path, script, env=env), id="stuck").run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert "session mode was set to 'default'" in result.error.message
     assert "permission mode 'auto'" in result.error.message
     assert "prompts" not in recorded(tmp_path)
+
+
+async def test_a_mode_kimis_log_confirms_late_still_runs_and_no_prompt_goes_before_it(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """APR-01, L46. Kimi writes its log after it answers, and on a busy server long after:
+    the run waits for the line as long as a prompt waits for its session (not the few
+    seconds a request's line is waited for), sends no prompt meanwhile, and goes on once the
+    log confirms the mode."""
+    gate = tmp_path / "the-log-is-written"
+    script = [{"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True}, {"text": "done"}]
+    env = {
+        "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
+        "FAKE_ACP_LOG_GATE": str(gate),
+    }
+    # the wait for a request's line is over before the mode's line is written
+    monkeypatch.setattr(acp_live, "ATTRIBUTED_SECONDS", 0.0)
+    running = asyncio.ensure_future(
+        harness.wrap(fake(tmp_path, script, env=env), id="late").run("x", user="u1")
+    )
+    while "modes" not in recorded(tmp_path):  # noqa: ASYNC110 - the stand-in's record, a file
+        await asyncio.sleep(0.01)
+    assert not running.done() and "prompts" not in recorded(tmp_path)
+    gate.touch()
+    asked = await running
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert len(recorded(tmp_path)["prompts"]) == 1
 
 
 async def test_a_session_keeps_the_plan_mode_it_is_in(harness: Harness, tmp_path: Path) -> None:

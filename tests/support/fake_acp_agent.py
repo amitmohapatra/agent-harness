@@ -65,7 +65,8 @@ session's MCP servers and how it began, the prompts, the permission answers).
 ``FAKE_ACP_CONFIG`` (JSON) is what its ``config.toml`` starts every session in, as Kimi's does
 (``default_permission_mode``: ``auto`` or ``yolo``, in which it asks about no call;
 ``default_plan_mode``): in its log (``permission.set_mode``, ``plan_mode.enter``) while ACP
-goes on saying ``default``. ``session/set_mode`` sets both (logged so), and fails for the plan
+goes on saying ``default``. ``session/set_mode`` sets both (logged so, once the file
+``FAKE_ACP_LOG_GATE`` names is there: Kimi's log is written after its answer), and fails for the plan
 mode of a session already in it, as Kimi's does — ``FAKE_ACP_MODE_STUCK=1``: it answers and
 changes nothing.
 """
@@ -337,10 +338,21 @@ class FakeAgent:
             if plan and mode_of(session_id)[0]:  # as Kimi: its permission mode left as it was
                 raise RequestError.internal_error({"why": "Already in plan mode"})
             kind = "plan_mode.enter" if plan else "plan_mode.cancel"
-            logged(session_id, "main", {"type": kind, "agentId": "main"})
-            line = {"type": "permission.set_mode", "agentId": "main", "mode": permission}
-            logged(session_id, "main", line)
+            lines = [
+                {"type": kind, "agentId": "main"},
+                {"type": "permission.set_mode", "agentId": "main", "mode": permission},
+            ]
+            self.later = asyncio.ensure_future(self.logged_late(session_id, lines))
         return SetSessionModeResponse()
+
+    async def logged_late(self, session_id: str, lines: list[dict[str, Any]]) -> None:
+        """Kimi writes its log a moment after it answers — on a busy machine, a long moment:
+        ``FAKE_ACP_LOG_GATE`` names a file the lines wait for (a test's word)."""
+        gate = os.environ.get("FAKE_ACP_LOG_GATE")
+        while gate and not os.path.exists(gate):  # noqa: ASYNC110, ASYNC240 - a file
+            await asyncio.sleep(0.01)
+        for line in lines:
+            logged(session_id, "main", line)
 
     async def cancel(self, session_id: str, **kw: Any) -> None:
         record("cancels", session_id)

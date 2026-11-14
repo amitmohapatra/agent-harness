@@ -146,8 +146,9 @@ of the session to see that it took:
   nothing; one its config starts both planning and approving on its own (`default_plan_mode`
   with `default_permission_mode`) is set to `default` and then `plan`, before any plan exists.
 * **A session whose log does not confirm the mode gets no prompt**: the run fails saying which
-  mode was set and what Kimi's log says (within 5 s of Kimi's answer; Kimi writes its log a
-  moment after).
+  mode was set and what Kimi's log says. Kimi writes its log after it answers, later on a
+  busy server: the line is waited for up to 30 s, as long as a prompt waits for its session,
+  and no prompt is sent before it.
 
 An ACP agent with no profile (`ACPAgent(profile=None)`) names its own modes and keeps the one
 it starts in; only the `mode=` the target gives is set, on a session the run starts.
