@@ -742,6 +742,9 @@ async def test_the_card_says_what_it_can_and_a_probe_that_fails_leaves_the_tool_
     card = await sandbox(open_box, spec=SandboxSpec(network="open")).card()
     assert card.startswith("Its environment: Python 3.13.1; installed: p000 1, p001 1")
     assert card.endswith("p079 1 and 5 more.")  # no network sentence: it has one
+    open_box.environment = "3.13.1\n" + " ".join(f"p{n:03}==1" for n in range(80))
+    eighty = await sandbox(open_box, spec=SandboxSpec(network="open")).card()
+    assert eighty.endswith("p079 1.")  # 80: each named, no count
     bare = FakeSandboxes()
     bare.environment = "3.12.7"
     assert await sandbox(bare).card() == (
