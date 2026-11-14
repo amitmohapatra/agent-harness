@@ -2432,6 +2432,21 @@ async def test_a_second_workflow_while_one_runs_is_refused(
     await when(harness, child.run_id, RunStatus.SUCCESS)
 
 
+async def test_a_second_workflow_in_a_run_with_no_conversation_is_refused_too(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """In a process of the run's own the run's open workflow is the one at work: a second
+    launch in the same turn is refused, saying why; the first ends as its task does."""
+    agent = harness.wrap(options(tmp_path, [[WORKFLOW, ANOTHER, {"text": "{last}"}]]), id="q2")
+    running = asyncio.create_task(agent.run("fan out twice", user="u1"))
+    await until(lambda: len(agent.running) == 1 and (tmp_path / "cli.json.turns").exists())
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    done = await running
+    assert done.answer == ONE_WORKFLOW, done.error
+    child = await child_of(harness, done.run_id)
+    assert (child.status, child.output) == (RunStatus.SUCCESS, FLOWED)
+
+
 @pytest.mark.parametrize("how", ["cancel", "lost", "quit"])
 async def test_a_workflow_that_does_not_finish_ends_its_run_as_it_was_ended(
     harness: Harness, tmp_path: Path, how: str

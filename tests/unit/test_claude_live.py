@@ -219,7 +219,9 @@ async def background() -> tuple[LiveSession, Background, Store]:
     )
     session = LiveSession("conversation", (), LiveSessions())
     session.turn = turn_of(agent, "turn")
-    helper = SimpleNamespace(run_id="child", parent_run_id="turn", name="researcher", began=0.0)
+    helper = SimpleNamespace(
+        run_id="child", parent_run_id="turn", name="researcher", began=0.0, kind=None
+    )
     found = Background(session, "t1", "toolu_bg_t1", helper)
     session.turn = None
     session.background["t1"] = found
