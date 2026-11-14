@@ -209,8 +209,9 @@ class Runtime:
     cut_off: bool = False
     #: the latest harness tool call (its key), how many times in a row it was made
     #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
-    #: not run again) and the decision that made it last (:attr:`deciding`)
-    repeating: tuple[str, int, Hashable | None] = ("", 0, None)
+    #: not run again), the decision that made it last (:attr:`deciding`) and the framework's
+    #: step it was made in (``Replay.here``)
+    repeating: tuple[str, int, Hashable | None, str | None] = ("", 0, None, None)
     #: set by an adapter whose framework says which decision a call comes from, the same for
     #: each execution its framework makes of that decision (a LangGraph task, run again by its
     #: ``RetryPolicy``): the call made again by the same decision is no repeat of it
@@ -234,6 +235,10 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: how many model calls in a row have failed in this attempt (``accounting``: a reply
+    #: ends the row): past one, something of the framework's tried a failed call again, so a
+    #: failure that still ends the attempt is not run again on top (``pipeline._settled``)
+    model_failures: int = 0
     #: the tool node calls under way of each model step of the run, by the step
     #: (``middleware.govern_tool_nodes``): a call that pauses waits for the others of its step
     beside: dict[Hashable, set[Any]] = field(default_factory=dict, repr=False)

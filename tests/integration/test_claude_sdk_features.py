@@ -531,6 +531,44 @@ async def test_what_claude_code_says_beside_its_replies_is_on_the_runs_stream(
 
 
 @pytest.mark.parametrize("path", PATHS)
+async def test_claudes_reasoning_and_the_tools_the_api_ran_are_on_the_stream_and_recorded(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    path: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """What the provider did inside a model step. Claude's reasoning (a ``thinking`` block)
+    is on the run's stream — its text only: the block's signature is nowhere (no event, no
+    log, no record), and none of it goes to memory. A tool the API ran itself (web search,
+    the advisor) is a call of the run: recorded as a read, with its result where the stream
+    carries one, and never put to a person — it already ran."""
+    thought = {"type": "thinking", "thinking": "Weighing the refund.", "signature": "SIG-SECRET"}
+    searched = {"type": "server_tool_use", "id": "srv_1", "name": "web_search"}
+    advised = {"type": "server_tool_use", "id": "srv_2", "name": "advisor", "input": {}}
+    advice = {"type": "advisor_tool_result", "tool_use_id": "srv_2", "content": {"text": "go"}}
+    blocks = [thought, {**searched, "input": {"query": "refund policy"}}, advised, advice]
+    said = {"id": "msg_blocks", "role": "assistant", "model": "fake", "content": blocks}
+    frame = {"type": "assistant", "message": said, "parent_tool_use_id": None}
+    agent = memory_harness.wrap(
+        options(tmp_path, [{"frame": frame}, {"text": "done"}]), id="thinks"
+    )
+    with caplog.at_level("DEBUG"):
+        events = [e async for e in agent.stream("go", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "done"
+    reasoned = [e.data for e in events if e.data.get("name") == "reasoning"]
+    assert reasoned == [{"name": "reasoning", "text": "Weighing the refund."}]
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert [(r["tool"], r["status"]) for r in results] == [("advisor", "ok"), ("web_search", "ok")]
+    assert results[0]["output"] == {"text": "go"}  # the advisor's, as the stream carried it
+    await memory_harness.writes.drain()
+    kept = repr(memory_service.calls)
+    assert "advisor" in kept and "web_search" in kept  # the calls are recorded
+    everywhere = kept + repr([e.model_dump() for e in events]) + caplog.text
+    assert "SIG-SECRET" not in everywhere and "Weighing the refund." not in kept + caplog.text
+
+
+@pytest.mark.parametrize("path", PATHS)
 async def test_the_teams_hook_answers_before_governance_decides_what_it_left(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:

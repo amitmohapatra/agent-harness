@@ -82,6 +82,7 @@ class UsageAccounting(BaseCallbackHandler):
         runtime = current()
         if runtime is not None:
             runtime.model_ended(str(run_id))
+            runtime.model_failures += 1
             _STARTED.pop(str(run_id))
             if _status(error) == RATE_LIMITED:
                 admission.ADMISSION.throttled()
@@ -109,6 +110,7 @@ class UsageAccounting(BaseCallbackHandler):
         if runtime is None:
             return
         runtime.model_ended(str(run_id))
+        runtime.model_failures = 0
         began = _STARTED.pop(str(run_id))
         for generations in response.generations:
             for generation in generations:

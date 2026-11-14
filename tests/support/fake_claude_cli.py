@@ -418,6 +418,10 @@ class Cli:
                 if task["agent"] not in ("shell", WORKFLOW_AGENT):  # the subagent's last reply
                     said = [{"type": "text", "text": summary}]
                     send(assistant(self.session, said, parent=task["tool_id"]))
+                    # then its ``SubagentStop`` hooks, before the task's end is said (the
+                    # bundled CLI, 2.1.325, driven against a scripted model)
+                    who = {"agent_id": task_id, "agent_type": task["agent"]}
+                    self.hooked("SubagentStop", self.session, **who, stop_hook_active=False)
                 send({**frame, "subtype": "task_updated", "patch": {"status": status}})
                 send(
                     {
@@ -460,11 +464,14 @@ class Cli:
     def injected(self, summary: str) -> None:
         """The turn the session runs by itself once a background task ended: the "model"'s
         reply to its notification (``FAKE_CLAUDE_INJECTED``) and that turn's result, whose
-        origin says whose turn it was. No prompt is sent for it: the bundled CLI sends none."""
+        origin says whose turn it was. No prompt is sent for it: the bundled CLI sends none —
+        and runs the turn's hooks as any turn's: ``UserPromptSubmit`` with the notification
+        as the prompt, its calls' hooks, ``Stop`` (2.1.325, driven against a scripted model)."""
         assert self.session is not None
         origin = {"kind": "task-notification"}
         prompt = f"<task-notification>{summary}</task-notification>"
         self.heard.append(prompt)
+        self.prompt_context(self.session, prompt)
         state = json.loads((SESSIONS / f"{self.session}.json").read_text())
         mirror(self.session, state["done"], state.get("turn", 0), prompt=prompt, key=summary)
         script = json.loads(
@@ -487,6 +494,7 @@ class Cli:
             pass
         finally:
             self.in_turn = self.stopping = False
+        self.hooked("Stop", self.session, stop_hook_active=False)
         send({**self.ended(self.session, last=last, turns=len(script)), "origin": origin})
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         if record:  # what the session said in a turn of its own (nobody's answer)

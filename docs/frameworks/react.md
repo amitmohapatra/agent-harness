@@ -1092,6 +1092,14 @@ row is the library's own class or tool and, for `ReAct`, the code and its test.
 
 ## Limits
 
+* The general-purpose `task` helper is built from a spec `ReAct` passes, not by Deep Agents'
+  own builder: Deep Agents builds its default helper only when no sub-agent of that name is
+  given (`deepagents/graph.py:853-854`, 0.7.38), and that helper takes the model profile's
+  settings (`general_purpose_subagent`: enabled, description, prompt) and the middleware of
+  Deep Agents' own default slots only — not the harness's guards (`StallGuard`, the step
+  limit, `ModelHooks`, the run's tools per call). So the helper `ReAct` gives has the
+  loop's guards and the run's tools, and does not read a profile's
+  `general_purpose_subagent` settings.
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
 * No `store=` or `checkpointer=`: the memory service and the run keep them; a graph with its
   own is `create_agent(..., middleware=middleware())`.

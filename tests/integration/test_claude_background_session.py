@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 from claude_agent_sdk import (
     ClaudeAgentOptions,
+    HookMatcher,
     ResultMessage,
     TaskStartedMessage,
     create_sdk_mcp_server,
@@ -234,6 +235,56 @@ async def test_a_background_task_goes_on_while_the_next_turns_are_answered_by_it
     assert third.status is RunStatus.SUCCESS
     assert third.answer == f"you asked: {' | '.join(asked)}"  # its own answer; it knows the task
     assert [turn["pid"] for turn in served(tmp_path)] == [one["pid"]] * 3
+
+
+async def test_the_teams_hooks_run_between_a_kept_sessions_turns_as_claude_code_runs_them(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Between the turns of a kept session Claude Code goes on running the team's own hooks
+    (seen with the bundled CLI, 2.1.325): a background subagent's ``SubagentStop``, then, for
+    the turn the session runs by itself, ``UserPromptSubmit`` (the task's notification), the
+    hooks of its calls and ``Stop``. They are the library's: each runs once, in no run's
+    context where no run is under way — and a call nobody can decide is still refused."""
+    import trellis
+
+    seen: list[tuple[str, Any, bool]] = []
+
+    def hook(event: str) -> list[HookMatcher]:
+        async def own(given: Any, tool_use_id: str | None, context: Any) -> Any:
+            seen.append((event, given.get("agent_id"), trellis.current() is None))
+            return {}
+
+        return [HookMatcher(hooks=[own])]
+
+    events = ("SubagentStop", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+    injected = json.dumps([READS, {"text": "Noted: {last}"}])
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    hooks = {event: hook(event) for event in events}
+    target = options(tmp_path, scripts, hooks=hooks, env={"FAKE_CLAUDE_INJECTED": injected})
+    agent = harness.wrap(target, id="between")
+    await agent.run("research the market", user="u1", thread="t1")
+    in_turn = len(seen)
+    assert [event for event, _, _ in seen] == [
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+    ]
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await until(lambda: own_turns(tmp_path))
+    between = seen[in_turn:]
+    assert [event for event, _, _ in between] == [
+        "SubagentStop",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "Stop",
+    ]
+    assert between[0][1] == "t1"  # the subagent's, as its run's
+    assert [alone for _, _, alone in between[1:]] == [True, True, True]  # nobody's run
+    # the call of the session's own turn had no run to decide it: refused, not run
+    assert own_turns(tmp_path) == [f"Noted: {UNATTENDED}"] and built_ins(tmp_path) == []
+    assert (await agent.run("and?", user="u1", thread="t1")).answer == "ok"
+    assert [event for event, _, _ in seen[in_turn + 4 :]] == ["UserPromptSubmit", "Stop"]
 
 
 async def test_the_result_of_a_turn_the_session_injected_is_never_a_users_answer(

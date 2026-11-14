@@ -5,6 +5,7 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+<<<<<<< HEAD
 ### Added: a provider's own tools in `ReAct`
 
 `ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web
@@ -103,6 +104,15 @@ A library's feature works as the library does it; the harness governs, records a
 - What a decision model used (`langchain_core.decisions`: the classifier of
   `AutoModeMiddleware` and `ModelRouterMiddleware`) is counted in the run's budget, and a
   call `AutoModeMiddleware` blocks is on the run's events and records as a failed call.
+- A failed model call is tried again by one owner: where the graph (`ModelRetryMiddleware`,
+  a retrying node) or the model's own client (`max_retries`) already retried, a failure that
+  still ends the run is reported not retryable, so the run store does not run the whole run
+  again on top of those tries.
+- Fitting the window keeps a tool's provider fields (`extras`: `defer_loading`,
+  `cache_control`) and leaves a provider's own tool (web search, code execution) as it is.
+- A graph that summarizes its own history (LangChain's `SummarizationMiddleware`, Deep
+  Agents' summarization) beside `middleware()`: fitting the window after it keeps the
+  summary when it leaves older turns out (the summary itself was dropped with them).
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks
@@ -190,6 +200,22 @@ A library's feature works as the library does it; the harness governs, records a
   `additional_kwargs` and `response_metadata` are dropped, so it is never read as a
   notification (`history.from_client`).
 
+=======
+### Fixed: what the user-scenario suite found (tests/scenarios)
+
+- **A message longer than 4,000 characters got no memory context and lost its tool records.**
+  The whole message went to the memory service as `ContextRequest.query`,
+  `HintsRequest.task` and `ToolInvocationIn.task`, which it caps at 4,000 characters: a `422`,
+  so the run had no context and each tool record was "failed and is lost". The question is
+  sent as its head and its tail when it is longer (`clients.memory.fitted`).
+- **AG-UI: the same `runId` posted twice at once (a client's retry racing its first try)
+  started the run twice.** The id was checked before the run was opened and only marked
+  taken after: it is taken before the first await, and the second request is a `422`.
+- **A file that did not fit the file store left its first bytes there** (a full disk), so the
+  next file failed too: a write that fails removes what it wrote (`FileStore.put`).
+- **AG-UI: a user message with no text (`content: ""`) and no `state` started a run** that
+  failed inside the framework (`EmptyInputError`); it is a `422`, as a blank message is.
+>>>>>>> origin/claude/cool-maxwell-w5avo8-scenarios
 ### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
 
 Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
@@ -727,6 +753,17 @@ cancelled after its start (the task is cancelled with it). See
   replaced: a turn in a process of its own counted the lower total as nothing spent, so the
   spend escaped the run's budget. One `SessionCost` owns the rule for a query and for a
   kept process: all of a total lower than the last seen is charged.
+- **A read is not answered across a write.** A query run again from its prompt (or a
+  subagent started again) made a `Read` again and was answered with what it had returned
+  before a later `Write` of the run. The journal drops the reads a framework ran itself when
+  a write of the run runs: such a read runs again; a write still runs once.
+- **The team's hooks run between a kept session's turns.** With no turn under way every
+  hook of the team's own was answered for it and never run: `Stop` and `UserPromptSubmit`
+  of the turn the session runs by itself, a `SubagentStop` whose run had ended, the
+  `PreToolUse` of a call nobody could decide. They run as Claude Code runs them, once.
+- **Claude's reasoning and the tools the API ran are on the stream and recorded**: a
+  `thinking` block is a `reasoning` event (its text; never its signature, nothing to
+  memory), and a server tool's use is a call of the run, recorded as a read.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.

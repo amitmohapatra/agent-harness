@@ -291,8 +291,8 @@ def test_tool_events_carry_their_call() -> None:
 async def test_a_buffer_keeps_its_last_events_and_numbers_them() -> None:
     buffer = Hub().open("r", "u")
     for n in range(2048 + 5):
-        buffer.publish(AGUIEvent(type=AGUIEventType.CUSTOM, value=n))
-    buffer.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), final=True)
+        buffer.publish(AGUIEvent(type=AGUIEventType.CUSTOM, value=n), n)
+    buffer.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), 2048 + 5, final=True)
     read = [(n, e.value) async for n, e in buffer.read(-1)]
     assert len(read) == 2048  # a run's last 2,048 events
     assert read[0][0] == 6
@@ -302,7 +302,7 @@ async def test_a_buffer_keeps_its_last_events_and_numbers_them() -> None:
 def test_the_hub_keeps_256_runs_before_it_forgets_a_finished_one() -> None:
     runs = Hub()
     first = runs.open("run-0", "u")
-    first.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), final=True)
+    first.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), 0, final=True)
     for n in range(1, 256):
         runs.open(f"run-{n}", "u")
     assert runs.get("run-0") is first  # 256 runs: all kept
@@ -313,9 +313,9 @@ def test_the_hub_keeps_256_runs_before_it_forgets_a_finished_one() -> None:
 
 async def test_a_derived_event_shares_the_number_of_the_event_before_it() -> None:
     buffer = Hub().open("r", "u")
-    buffer.publish(AGUIEvent(type=AGUIEventType.TOOL_CALL_RESULT, value="result"))
-    buffer.publish(AGUIEvent(type=AGUIEventType.ACTIVITY_SNAPSHOT, value="line"), derived=True)
-    buffer.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED, value="end"), final=True)
+    buffer.publish(AGUIEvent(type=AGUIEventType.TOOL_CALL_RESULT, value="result"), 0)
+    buffer.publish(AGUIEvent(type=AGUIEventType.ACTIVITY_SNAPSHOT, value="line"), 0)
+    buffer.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED, value="end"), 1, final=True)
     read = [(n, e.value) async for n, e in buffer.read(-1)]
     assert read == [(0, "result"), (0, "line"), (1, "end")]  # numbered as the log's events
     assert [(n, e.value) async for n, e in buffer.read(0)] == [(1, "end")]
@@ -328,7 +328,7 @@ def test_the_hub_forgets_finished_runs_first(monkeypatch: pytest.MonkeyPatch) ->
     runs = Hub()
     live = runs.open("live", "u")
     done = runs.open("done", "u")
-    done.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), final=True)
+    done.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), 0, final=True)
     runs.open("new", "u")
     assert runs.get("done") is None
     assert runs.get("live") is live

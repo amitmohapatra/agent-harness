@@ -114,7 +114,13 @@ class FileStore:
 
         def write() -> None:
             self.fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
-            self.fs.pipe_file(path, data)
+            try:
+                self.fs.pipe_file(path, data)
+            except BaseException:
+                # what did not fit is not left half-written, filling the store for the next file
+                with contextlib.suppress(Exception):
+                    self.fs.rm_file(path)
+                raise
 
         await asyncio.to_thread(write)
         return StoredFile(name=name, size=len(data), content_type=kind, source=source)

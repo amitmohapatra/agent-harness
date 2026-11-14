@@ -237,6 +237,8 @@ the user Claude Code would ask:
 |---|---|
 | Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks. The options' `system_prompt` keeps what you wrote, with one line after it: that files written in `outputs/` of the working directory are given to the user (every run's are: [sandbox.md](../sandbox.md)). Options with no `system_prompt`, or one read from a file, are left as they are (none stays the SDK's default) and that line goes with the context |
 | What Claude Code says beside its replies | its rate limit near or reached (`rate_limit`), a model call tried again (`model_retry`), the session's context compacted (`compaction`), another model answering (`model_fallback`), a step its session store did not take (`session_store`) and a reply that failed (`model_error`) are warnings on the run's stream |
+| Reasoning, and tools the API ran | Claude's reasoning (a `thinking` block of the main agent) is a `reasoning` event on the run's stream: its text only — the block's signature goes nowhere, and none of it to memory or a log. A tool the API ran itself (`server_tool_use`: web search, code execution, the advisor) is recorded as a call of the run, a read nobody is asked about, with its result where the SDK's stream carries one (the advisor's) and without at the turn's result. A subagent's are not recorded |
+| MCP elicitation | not reachable: when a team's own MCP server asks the user something (`elicitation/create`), the SDK (0.2.182) cannot hand it on — its control channel takes only `can_use_tool`, `hook_callback` and `mcp_message` (any other request is answered "Unsupported control request subtype"), and an in-process server's own requests to the client are refused ("not supported for SDK servers"). Claude Code declines the question; nobody is asked |
 | Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
 | Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn and a resumed attempt are each charged once |
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
@@ -266,7 +268,10 @@ the call (the approved call runs once). Every decision works: `approve`, `reject
 **On failure.** The CLI keeps its sessions on its machine (or in your `session_store`). A run
 resumed where the CLI does not hold the session (another worker's machine) gets a `warning`
 event (`claude_session`) and runs the query again from its prompt, against the journal — the
-harness calls already made are not made again; the built-ins run again.
+harness calls already made are not made again, and a built-in that already ran is answered
+with what it returned: a write runs once. A read is answered so only until a write of the
+run: one made before a later write runs again, since what it read may be what the write
+changed.
 
 ## The run's own options
 
@@ -428,6 +433,12 @@ turn the session runs by itself (a finished task's notification) is never a user
   the date once a session (and again when the day changes), so each turn the process serves
   is told the day and the hour it is with its prompt (the context hook's text, after
   memory's), whatever time has passed since its first.
+* Your own hooks go on running between the turns, as Claude Code runs them (seen with the
+  bundled CLI, 2.1.325): a background subagent's `SubagentStop`, then, for the turn the
+  session runs by itself once a task ended, `UserPromptSubmit` (the task's notification as
+  the prompt), the hooks of its calls and `Stop`. With no run under way they run in no run's
+  context (`trellis.current()` is `None`), once each; a tool call of such a turn is still
+  refused, since no run can decide or record it.
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 in that server

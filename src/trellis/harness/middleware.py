@@ -141,7 +141,6 @@ from trellis.harness.adapters.base import FIT_SHARE, helper
 from trellis.harness.adapters.langgraph import (
     ASKED,
     CONTEXT_MESSAGE_ID,
-    HITL,
     TASK_TOOL,
     carried_plain,
     notified,
@@ -1346,15 +1345,15 @@ async def _refused_by_graph(
     failed call the model reads: on the run's stream, traced and in the memory service
     (``bridge.observed``; nothing is run, journaled or counted against the budget). A call
     the wrapper answered well (a cache, an emulator) is the wrapper's answer, not a refusal;
-    the harness's own tools are the bridge's. In a run where a person answered the library's
-    own approval gate (:data:`HITL`), a refusal may be that person's rejection — recorded as
-    their decision, never as a call — so none is recorded as one there."""
+    the harness's own tools are the bridge's. A call a person rejected at the library's own
+    approval gate is their decision, recorded as such, never as a failed call
+    (``Journal.rejected_by_person``: by what the call is)."""
     name = str(call["name"])
     tool = node.tools_by_name.get(name)
     refused = isinstance(done, ToolMessage) and done.status == "error" and not calling.entries
     if not refused or tool is None or converted.made(tool) or name in runtime.toolbox:
         return
-    if runtime.replay.journal.answers.get(HITL):
+    if runtime.replay.journal.rejected_by_person(name, dict(call["args"])):
         return
     outcome = ToolOutcome(tool=name, status=ToolStatus.ERROR, output=text_of(done.content))
     spec = runtime.native.get(name) or spec_of(tool)
@@ -1918,6 +1917,8 @@ class ModelHooks(AgentMiddleware):
                     reply = await handler(request)
             except Exception as exc:
                 error = model_error(exc, self.timeout)
+                if runtime is not None and _retries_itself(request.model):
+                    runtime.model_failures += 1  # its client tried again before it failed
                 await running().failed("model", error)
                 if error is exc:
                     raise
@@ -2203,6 +2204,13 @@ async def _limited(runtime: Runtime | None, seconds: float | None) -> AsyncItera
         return
     async with runtime.limited(limit):
         yield
+
+
+def _retries_itself(model: Any) -> bool:
+    """Whether a chat model's own client tries a failed request again: LangChain's chat
+    models' ``max_retries`` (unset: the provider SDK's default, which retries). A model the
+    harness routes sets none (the gateway retries), and its failure is the run's to retry."""
+    return hasattr(model, "max_retries") and model.max_retries != 0
 
 
 def model_error(exc: Exception, timeout: float | None = None) -> Exception:
@@ -3157,12 +3165,10 @@ def _provider_own(tool: dict[str, Any]) -> bool:
     return "function" not in tool and tool.get("type") not in (None, "function")
 
 
-def _signature(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+def _signature(tool: BaseTool | dict[str, Any]) -> BaseTool | dict[str, Any]:
     """A tool as its name and the arguments a call takes (their names, types and which are
     required), no description: what a call needs, in a few tokens."""
-    found = _compact(tool)
-    found.get("function", found)["description"] = FIT_SIGNATURE
-    return found
+    return _compact(tool, FIT_SIGNATURE)
 
 
 def _whole(tool: BaseTool | dict[str, Any]) -> bool:
@@ -3208,16 +3214,25 @@ def _described(tool: BaseTool | dict[str, Any]) -> str:
     return tool.description or ""
 
 
-def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+def _compact(tool: BaseTool | dict[str, Any], said: str | None = None) -> BaseTool | dict[str, Any]:
     """A tool as its definition with the description cut to its first sentence (at most
-    :data:`FIT_DESCRIPTION` characters) and no parameter descriptions."""
+    :data:`FIT_DESCRIPTION` characters; ``said``: in its place) and no parameter
+    descriptions. A provider's own tool (a definition that is no function: web search, code
+    execution) is as it is: nothing of it is the harness's to cut. A tool carrying provider
+    fields (LangChain's ``extras``: Anthropic's ``defer_loading``, a ``cache_control``) stays
+    a tool carrying them — a provider reads them from the tool, not from a definition."""
+    if isinstance(tool, dict) and tool.get("type", "function") != "function":
+        return tool
     found = copy.deepcopy(convert_to_openai_tool(tool))
     function = found.get("function", found)
     first = re.split(r"(?<=[.!?])\s", str(function.get("description") or ""), maxsplit=1)[0]
-    function["description"] = first[:FIT_DESCRIPTION]
+    function["description"] = first[:FIT_DESCRIPTION] if said is None else said
     for spec in (function.get("parameters") or {}).get("properties", {}).values():
         spec.pop("description", None)
-    return found
+    if isinstance(tool, dict) or not tool.extras:
+        return found
+    cut = {"description": function["description"], "args_schema": function["parameters"]}
+    return tool.model_copy(update=cut)
 
 
 def _asked(request: ModelRequest[Any]) -> int | None:
@@ -3225,7 +3240,7 @@ def _asked(request: ModelRequest[Any]) -> int | None:
     a note appended to this call alone, as the step limit's and the budget's are, is not one:
     the turn starts at the question before it — or ``None`` when no turn is before it."""
     messages = request.messages
-    lead = sum(1 for _ in itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
+    lead = _lead(messages)
     state = request.state.get("messages") or []
     said = {id(m) for m in state}
     named = {m.id for m in state if m.id is not None}
@@ -3236,14 +3251,23 @@ def _asked(request: ModelRequest[Any]) -> int | None:
     return None if asked is None or asked <= lead else asked
 
 
+def _lead(messages: Sequence[AnyMessage]) -> int:
+    """How many messages open a request before its turns: its leading system messages, and
+    the summary a summarization of the graph's own (LangChain's, Deep Agents') put in its
+    older turns' place. The summary is what is left of those turns: left out with the turns
+    that follow it, they would be lost twice."""
+    opens = itertools.takewhile(lambda m: isinstance(m, SystemMessage) or _summary(m), messages)
+    return sum(1 for _ in opens)
+
+
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
-    """The request with its leading system messages and its latest turn only (:func:`_asked`)."""
+    """The request with what opens it (:func:`_lead`) and its latest turn only
+    (:func:`_asked`)."""
     asked = _asked(request)
     if asked is None:
         return request
     messages = list(request.messages)
-    lead = itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages)
-    return request.override(messages=[*lead, *messages[asked:]])
+    return request.override(messages=[*messages[: _lead(messages)], *messages[asked:]])
 
 
 def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:

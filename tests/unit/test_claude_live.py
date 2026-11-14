@@ -17,6 +17,7 @@ from claude_agent_sdk._internal.message_parser import parse_message
 from trellis.contracts import RunStatus
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import claude_live
+from trellis.harness.bridges.claude import harness_matcher
 from trellis.harness.bridges.claude_live import (
     _NUDGE,
     _OVER,
@@ -48,15 +49,17 @@ def refusal(answer: Any) -> tuple[str, str]:
 
 
 async def test_with_no_turn_to_take_it_a_tool_call_is_refused_and_counted() -> None:
-    """Between two turns nothing can check a call: whichever way the CLI asks — its
-    ``PreToolUse`` hook, its permission check, a harness tool's call — the answer is no."""
+    """Between two turns nothing can check a call: whichever way the CLI asks — the
+    harness's ``PreToolUse`` hook, its permission check, a harness tool's call — the answer
+    is no (a hook of the team's own runs then as Claude Code runs it: the integration
+    test)."""
 
     async def never(given: Any, tool_use_id: str | None, context: Any) -> Any:
         raise AssertionError("a hook of no turn's")
 
     session = LiveSession("conversation", (), LiveSessions(), owner="u")
     hooks = session._hooks(
-        {"PreToolUse": [HookMatcher(hooks=[never])], "Stop": [HookMatcher(hooks=[never])]}
+        {"PreToolUse": [harness_matcher(never)], "Stop": [harness_matcher(never)]}
     )
     asked = await hooks["PreToolUse"][0].hooks[0]({"tool_name": "Bash"}, "toolu_1", None)
     assert refusal(asked) == ("deny", UNATTENDED)
@@ -77,7 +80,7 @@ async def test_the_main_agents_call_in_a_turn_that_was_left_ends_that_turn() -> 
 
     session = LiveSession("conversation", (), LiveSessions(), owner="u")
     session.owed = 1
-    relay = session._hooks({"PreToolUse": [HookMatcher(hooks=[never])]})["PreToolUse"][0].hooks[0]
+    relay = session._hooks({"PreToolUse": [harness_matcher(never)]})["PreToolUse"][0].hooks[0]
     ended = await relay({"tool_name": "Bash"}, "toolu_1", None)
     assert refusal(ended) == ("deny", LEFT)
     assert ended["continue_"] is False and ended["stopReason"] == LEFT
@@ -355,7 +358,7 @@ async def test_a_background_run_that_cannot_go_on_says_why_and_asks_nothing_more
     async def hook(given: Any, tool_use_id: str | None, context: Any) -> Any:
         raise AssertionError("a hook of a run that is over")
 
-    relay = session._hooks({"PreToolUse": [HookMatcher(hooks=[hook])]})["PreToolUse"][0].hooks[0]
+    relay = session._hooks({"PreToolUse": [harness_matcher(hook)]})["PreToolUse"][0].hooks[0]
     hooked = await relay({"tool_name": "Read", "agent_id": "t1"}, "toolu_1", None)
     assert refusal(hooked) == ("deny", UNATTENDED)
     session._calling["toolu_2"] = found

@@ -361,13 +361,18 @@ async def observed(
         if not outcome.ok:
             span.set_status(StatusCode.ERROR, str(outcome.status.value))
     runtime.used.add(spec.name)
+    key = call_key(spec.name, args)
+    if spec.side_effects != "read":  # the reads before it are not answered across it
+        runtime.replay.wrote()
     if outcome.ok:  # made again (its framework begins that work again), it is not run twice
-        key, helpers = call_key(spec.name, args), runtime.helpers
+        helpers = runtime.helpers
         replays = helpers is not None and helpers.begun_again() is not None
         kept = (
             outcome if replays else outcome.model_copy(update={"output": preview(outcome.output)})
         )
         runtime.replay.record_call(key, journal_record(kept), scope=key)
+        if spec.side_effects == "read":
+            runtime.replay.read(key)
     _events(runtime, ref, call, outcome)
     metrics.tool_called(spec.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
@@ -595,13 +600,19 @@ def _repeated(
     ``RetryPolicy`` runs again, a tool node's call a wrapper tries again, the same call id in
     the same task), or another action of the same OpenAI computer call (a batch of three
     ``Down`` presses, and the screenshot after them) — is part of it: neither counted nor
-    starting a count of its own, and refused when that decision was."""
-    last, times, made_by = runtime.repeating
-    again = decision is not None and decision == made_by
+    starting a count of its own, and refused when that decision was. So is the same call made
+    again in the same step of its framework (``Replay.here``: a checkpointed graph's step, whose
+    tool node runs each identical call of the model's reply): one step's calls, not a model
+    making the call step after step."""
+    last, times, made_by, stepped = runtime.repeating
+    step = runtime.replay.here()
+    again = (decision is not None and decision == made_by) or (
+        step is not None and step == stepped and key == last
+    )
     if again:
         key = last  # the decision is counted by the call it began with
     times = times if again else times + 1 if key == last else 1
-    runtime.repeating = (key, times, decision)
+    runtime.repeating = (key, times, decision, step)
     if times < MAX_REPEATS:
         return None
     if times == MAX_REPEATS and not again:
@@ -662,6 +673,8 @@ async def _record(
 ) -> None:
     """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
     attempt), saved, counted and recorded."""
+    if decision.risk != "read":  # what a framework read itself before it is read anew
+        runtime.replay.wrote()
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
         runtime.replay.record_call(key, journal_record(outcome), tool=call.tool, stepped=True)
     elif decision.risk != "read":

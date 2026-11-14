@@ -30,7 +30,7 @@ import weakref
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.history import in_ram
 from trellis.harness.journal import Journal
 
@@ -150,6 +150,8 @@ def task_said(message: Any) -> TaskStarted | TaskEnded | None:
     return None
 
 
+#: The most calls whose team hooks' answers are kept for the harness's hook to read.
+CALLS_KEPT: Final = 256
 #: How long Claude Code waits for a hook whose matcher sets no ``timeout`` (seconds).
 HOOK_SECONDS: Final = 60.0
 #: The events at which a team's hook may put something in the place of what the call's other
@@ -181,14 +183,16 @@ def after_theirs(hooks: Mapping[str, Sequence[Any]]) -> dict[str, list[Any]]:
     a harness hook waits for the team's hooks asked about the same call (no longer than
     Claude Code waits for them), reads the call as they left it — its arguments before it
     runs, its result after (:data:`REPLACES`) — and says nothing of a call one of them
-    refused: Claude Code refuses it. Kept per call until the harness's hook read it."""
-    calls: dict[tuple[str, str], _Theirs] = {}
+    refused: Claude Code refuses it. Kept per call until the harness's hook read it, the
+    most recent :data:`CALLS_KEPT` (a call no harness hook reads for — one made between a
+    kept session's turns — is forgotten then)."""
+    calls: LRU[tuple[str, str], _Theirs] = LRU(CALLS_KEPT)
 
     def theirs(event: str, callback: Any, seconds: float) -> Any:
         async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
             ref = tool_use_id or given.get("tool_use_id")
             answered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            found = calls.setdefault((event, ref), _Theirs()) if ref else _Theirs()
+            found = calls.setdefault((event, ref), _Theirs) if ref else _Theirs()
             found.asked.append((answered, seconds))
             try:
                 answer = await callback(given, tool_use_id, hook)
