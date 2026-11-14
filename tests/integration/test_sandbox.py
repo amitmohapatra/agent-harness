@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, cast
@@ -39,8 +40,6 @@ from trellis.harness.governance import Governance, governed
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.runs import LocalRuns
 from trellis.harness.sandbox import (
-    READ_BYTES,
-    REAP_SECONDS,
     DockerSandbox,
     ExecResult,
     SandboxRef,
@@ -540,7 +539,7 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
     deleted = await reap(provider, harness.runs, tenant="default")
     assert [r.id for r in deleted] == ["left"]  # a paused run's, an unknown run's: left alone
     assert sorted(provider.boxes) == sorted(["unknown", "other", f"trellis-{waiting.run_id}"])
-    # a process reaps in the background when it makes a sandbox: once, then every REAP_SECONDS
+    # a process reaps in the background when it makes a sandbox: once, then every 10 minutes
     again = FakeSandboxes()
     source = sandbox(again)
     late = arm(harness.wrap(work, id="late"), [source.tools()])
@@ -549,7 +548,13 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
         await late.run("x", user="u")
         await harness.writes.drain()
     assert sorted(again.boxes) == ["left"]  # reaped the first time, not the second
-    source._reaped["default"] -= REAP_SECONDS
+    # within 10 minutes of the last (a minute to spare for this test's own time): not again
+    source._reaped["default"] = time.monotonic() - 540
+    await again.create(left, SandboxSpec())
+    await late.run("x", user="u")
+    await harness.writes.drain()
+    assert sorted(again.boxes) == ["left"]
+    source._reaped["default"] = time.monotonic() - 600
     await late.run("x", user="u")
     await harness.writes.drain()
     assert again.boxes == {}
@@ -558,6 +563,21 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
 async def _asking(input: str, agent: Runtime) -> Any:
     await agent.tools.call("sandbox_exec", command="echo hi")
     return await agent.ask("Go on?")
+
+
+def test_a_sandbox_name_is_at_most_63_characters_else_the_run_ids_digest() -> None:
+    from types import SimpleNamespace
+
+    from trellis.harness.sandbox import ref_of
+
+    def named(run_id: str) -> str:
+        run: Any = SimpleNamespace(run_id=run_id, tenant="t", agent_id="a")
+        return ref_of(run, "fake").id
+
+    assert named("r" * 55) == "trellis-" + "r" * 55  # 63 characters: the run's own id
+    longer = named("r" * 56)
+    assert longer.startswith("trellis-") and "r" * 56 not in longer and len(longer) <= 63
+    assert named("r/1") != "trellis-r/1"  # not a name every provider takes: its digest too
 
 
 def test_without_a_provider_a_sandbox_is_dockers_of_the_image_given() -> None:
@@ -574,14 +594,14 @@ async def test_a_large_file_is_read_in_parts_and_a_sandbox_of_another_provider_i
     harness: Harness,
 ) -> None:
     provider = FakeSandboxes()
-    source = sandbox(provider, spec=SandboxSpec(files={"big.txt": "x" * (READ_BYTES + 1)}))
+    source = sandbox(provider, spec=SandboxSpec(files={"big.txt": "x" * (256 * 1024 + 1)}))
 
     async def reads(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("sandbox_read", path="big.txt")
 
     big = await arm(harness.wrap(reads, id="big"), [source.tools()]).run("x", user="u")
     assert big.answer == (
-        f"sandbox_read failed: big.txt is {READ_BYTES + 1} bytes, more than the {READ_BYTES} "
+        "sandbox_read failed: big.txt is 262145 bytes, more than the 262144 "
         "read at once: read a part of it with sandbox_exec (head -c, tail -c, sed -n)"
     )
     agent = arm(harness.wrap(_asking, id="moved"), [source.tools()])

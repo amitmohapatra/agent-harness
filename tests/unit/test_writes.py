@@ -53,12 +53,12 @@ async def test_a_write_that_may_pass_is_tried_again() -> None:
 
     async def flaky() -> None:
         tries.append(1)
-        if len(tries) < module.WRITE_ATTEMPTS:
+        if len(tries) < 3:
             raise DependencyUnavailableError("memory is restarting", retryable=True)
 
     await writes.submit("memory.transcript", flaky)
     await writes.drain()
-    assert len(tries) == module.WRITE_ATTEMPTS and writes.failed == 0
+    assert len(tries) == 3 and writes.failed == 0  # the third of 3 attempts
     await writes.aclose()
 
 
@@ -73,7 +73,7 @@ async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:
 
     await writes.submit("memory.transcript", boom, events=events)
     await writes.drain()
-    assert writes.failed == 1 and len(tries) == module.WRITE_ATTEMPTS
+    assert writes.failed == 1 and len(tries) == 3  # 3 attempts in all
     event: RunEvent = seen[0]
     assert event.data["name"] == "warning"
     assert "memory is down" in event.data["message"]

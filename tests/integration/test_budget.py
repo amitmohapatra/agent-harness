@@ -111,6 +111,61 @@ async def test_a_sub_agents_calls_count_toward_its_parents_budget(harness: Harne
     assert result.status is RunStatus.PARTIAL
 
 
+async def test_a_sub_agents_tokens_count_toward_its_parents_and_its_own_limit_is_its_own(
+    harness: Harness,
+) -> None:
+    shop = Shop()
+
+    async def thinker(input: str, agent: Runtime) -> Any:
+        budget.account(agent, model="m", input_tokens=60, output_tokens=0, cost=0.5)
+        return await agent.tools.call("stock", sku="a")
+
+    child = arm(harness.wrap(thinker, id="thinker"), shop.tools())
+    capped = arm(harness.wrap(thinker, id="capped", budget=Budget(max_tokens=50)), shop.tools())
+
+    async def lead(input: str, agent: Runtime) -> Any:
+        said = await agent.tools.call(input, message="think")
+        return said, dict(budget.spent(agent))
+
+    parent = arm(harness.wrap(lead, id="lead", budget=Budget(max_tokens=100)), [child, capped])
+    own = await parent.run("thinker", user="u")
+    assert own.status is RunStatus.SUCCESS and own.answer[1]["tokens"] == 60  # the child's
+    assert own.answer[1]["cost"] == 0.5 and shop.reads == ["a"]
+    cut = await parent.run("capped", user="u")
+    assert shop.reads == ["a"]  # the child's own limit: its call not run
+    assert cut.status is RunStatus.SUCCESS  # the parent's is not reached: its run is whole
+    [record] = [r async for r in harness.runs.iterate(agent_id="capped")]
+    assert record.status is RunStatus.PARTIAL
+
+
+def test_a_replys_cached_tokens_and_cost_are_read_from_its_usage() -> None:
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+
+    from trellis.harness.journal import Journal, Replay
+
+    runtime: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    reply = AIMessage(
+        content="ok",
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "total_tokens": 110,
+            "input_token_details": {"cache_read": 80},
+        },
+        response_metadata={"model_name": "m", "token_usage": {"cost": {"total_cost": 0.02}}},
+    )
+    budget.account_reply(runtime, SimpleNamespace(result=[reply]))
+    assert budget.spent(runtime) == {
+        "tokens": 110,
+        "cached_tokens": 80,
+        "cost": 0.02,
+        "model_calls": 1,
+        "tool_calls": 0,
+    }
+
+
 async def test_a_resumed_run_goes_on_from_what_it_spent(harness: Harness) -> None:
     shop = Shop()
 
@@ -141,6 +196,10 @@ async def test_without_a_budget_nothing_is_refused(harness: Harness) -> None:
 
 def test_a_budget_is_numbers_from_zero() -> None:
     assert Budget() == Budget(max_tokens=None, max_cost=None, max_tool_calls=None)  # no cap
+    assert (
+        Budget(max_tokens=0, max_cost=0, max_tool_calls=0).over({})
+        == "max_tokens 0 reached (0 spent)"
+    )
     with pytest.raises(ConfigurationError, match="max_cost is a number from 0"):
         Budget(max_cost=-1)
 

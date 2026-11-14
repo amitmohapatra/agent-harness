@@ -67,6 +67,22 @@ async def test_paused_runs_are_listed_and_answered_with_h_inbox_and_agent_resume
         await agent.resume("run_other.1.1", "answer", answer="a", reviewer="lee")
 
 
+async def test_the_inbox_reads_pages_of_500_and_at_most_10(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[dict[str, Any]] = []
+    iterate = harness.runs.iterate
+
+    def listing(**kwargs: Any) -> Any:
+        asked.append(kwargs)
+        return iterate(**kwargs)
+
+    monkeypatch.setattr(harness.runs, "iterate", listing)
+    assert await harness.inbox("role:sales") == []
+    [kwargs] = asked
+    assert (kwargs["status"], kwargs["limit"], kwargs["max_pages"]) == (RunStatus.PAUSED, 500, 10)
+
+
 async def test_a_screen_of_your_own_lists_and_answers_with_the_same_two_calls(
     harness: Harness,
 ) -> None:

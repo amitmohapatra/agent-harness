@@ -39,7 +39,6 @@ from trellis.harness.governance import (
 from trellis.harness.governance import catalog as catalog_module
 from trellis.harness.governance.catalog import (
     CATALOG_UNREAD,
-    GOVERNANCE_STALE_SECONDS,
     GOVERNANCE_TTL_SECONDS,
     TOP_RISK,
     MemoryCatalog,
@@ -223,16 +222,16 @@ async def test_rules_are_read_again_within_seconds_conditionally(clock: Clock) -
     catalog = FakeCatalog({"po": Rule(risk="write")})
     governance = Governance(catalog)
     assert (await governance.check("po", {"amount": 50})).asks  # a write asks
-    clock.now += GOVERNANCE_TTL_SECONDS / 2
+    clock.now += 29
     await governance.check("po", {"amount": 50})
     assert len(catalog.asked) == 1  # fresh: not asked again
-    clock.now += GOVERNANCE_TTL_SECONDS
+    clock.now += 2  # past 30 s: read again
     assert (await governance.check("po", {"amount": 50})).asks  # a 304: the same rules
     assert catalog.etags_sent == [None, '"v1"']
     # an administrator adds a rule: the next read (seconds later, not minutes) has it
     catalog.rules["po"] = Rule(risk="write", approve_when="amount > 100")
     catalog.version = 2
-    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    clock.now += 31
     assert (await governance.check("po", {"amount": 50})).announces  # the rule decides
 
 
@@ -284,14 +283,16 @@ async def test_rules_read_earlier_stand_for_a_while_when_the_catalog_goes_down(
     governance = Governance(catalog)
     await governance.check("po", {"amount": 1})
     catalog.down = True
-    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    clock.now += 31
     still = await governance.check("po", {"amount": 1})
     assert still.announces and still.rule == "amount > 10"  # the rule read 31 s ago stands
-    clock.now += GOVERNANCE_STALE_SECONDS
+    clock.now += 268
+    assert (await governance.check("po", {"amount": 1})).rule == "amount > 10"  # 299 s ago
+    clock.now += 31  # read again (every 30 s): now past 300 s
     unread = await governance.check("po", {"amount": 1})
     assert unread.asks and unread.rule == CATALOG_UNREAD  # too old to trust: it asks
     catalog.down = False
-    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    clock.now += 31
     back = await governance.check("po", {"amount": 1})
     assert back.rule == "amount > 10" and catalog.etags_sent[-1] is None
 

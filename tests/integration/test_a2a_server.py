@@ -377,6 +377,15 @@ def test_an_answer_is_read_as_the_decision_it_names() -> None:
     question = Interrupt(tenant_id="t", run_id="r", question="Where?")
     assert _decision(approval, message("yes")) == (InterruptDecision.APPROVE, "yes")
     assert _decision(approval, message("deny"))[0] is InterruptDecision.REJECT
+    words = {
+        InterruptDecision.APPROVE: ("approve", "approved", "yes", "ok", " Allow "),
+        InterruptDecision.REJECT: ("reject", "rejected", "no", "deny", "DENIED"),
+        InterruptDecision.CANCEL: ("cancel", "abort", "stop"),
+    }
+    for decided, said in words.items():  # each word the surface documents, in any case
+        assert [_decision(approval, message(w))[0] for w in said] == [decided] * len(said)
+    edited = {"decision": "edit", "amount": 7, "comment": "less", "remember": "run"}
+    assert _decision(approval, message(data=edited)) == (InterruptDecision.EDIT, {"amount": 7})
     assert _decision(approval, message(data={"amount": 5})) == (
         InterruptDecision.EDIT,
         {"amount": 5},

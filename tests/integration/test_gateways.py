@@ -438,6 +438,7 @@ def test_a_model_langchain_does_not_know_is_asked_of_anthropics_api(
     assert routed_chat_model("claude-newer").profile == {"max_input_tokens": 1_000_000}
     (asked,) = anthropic_models.asked
     assert str(asked.url) == "https://api.anthropic.com/v1/models/claude-newer"
+    assert asked.extensions["timeout"]["read"] == 5.0  # within 5 seconds
     assert asked.headers["x-api-key"] == "sk-ant"
     with caplog.at_level(logging.INFO, logger="trellis.models"):
         graph = ReAct("Answer.", "claude-newer")
@@ -488,6 +489,7 @@ def test_an_endpoints_model_list_says_the_window(
     )
     assert routed_chat_model(name).profile == {"max_input_tokens": 65_536}
     assert routed_chat_model("another").profile == {"max_input_tokens": 8_192}
+    assert models.calls.last.request.extensions["timeout"]["read"] == 5.0  # within 5 seconds
     if "LLM_API_KEY" in settings:
         assert models.calls.last.request.headers["authorization"] == "Bearer vk"
 
@@ -506,10 +508,16 @@ def test_a_route_that_does_not_say_leaves_the_window_unknown(
     assert routed_chat_model("granite").profile is None  # listed, no window said
     assert routed_chat_model("absent").profile is None  # not listed
     assert routed_chat_model("granite").profile is None and models.call_count == 2  # kept
+    models.mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"id": "zero", "context_length": 0, "max_model_len": 4_096}]}
+        )
+    )
+    assert routed_chat_model("zero").profile == {"max_input_tokens": 4_096}  # 0 is no window
     models.mock(side_effect=httpx.ConnectError("refused"))
     assert routed_chat_model("later").profile is None
     models.mock(return_value=httpx.Response(200, json={"data": [{"id": "later", "n_ctx": 1}]}))
-    assert routed_chat_model("later").profile is None and models.call_count == 4  # asked again
+    assert routed_chat_model("later").profile is None and models.call_count == 5  # asked again
     with caplog.at_level(logging.WARNING, logger="trellis.models"):
         ReAct("Answer.", "granite-unsaid")
     assert "the context window of granite-unsaid is not known" in caplog.text

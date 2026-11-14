@@ -275,9 +275,9 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 async def test_definitions_are_listed_again_after_their_ttl(clock: Clock) -> None:
     made, gateway, writes = box([Def("erp-get", "erp")], FakeCatalog())
     first = await made.tools()
-    clock.now += toolbox.TOOLS_TTL_SECONDS / 2
-    assert await made.tools() == first and gateway.listed == 1
-    clock.now += toolbox.TOOLS_TTL_SECONDS
+    clock.now += 299
+    assert await made.tools() == first and gateway.listed == 1  # kept 300 s
+    clock.now += 2
     await made.tools()
     assert gateway.listed == 2
     await writes.aclose()

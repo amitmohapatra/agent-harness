@@ -62,6 +62,17 @@ def test_a_retired_variable_is_not_read(retired: str) -> None:
     assert Settings.from_env({retired: "x", "K_SERVICE": "svc"}) == Settings()
 
 
+def test_the_schedule_limits_default_to_5_minutes_and_20_and_are_checked() -> None:
+    settings = Settings()
+    assert (settings.schedule_min_interval, settings.schedule_max_per_user) == (300.0, 20)
+    assert Settings(schedule_max_per_user=0).schedule_max_per_user == 0  # none may be set
+    for wrong in ({"schedule_min_interval": 0}, {"schedule_max_per_user": -1}):
+        with pytest.raises(ValidationError):
+            Settings(**wrong)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="frozen"):
+        settings.memory_url = "http://mem"  # type: ignore[misc]
+
+
 def test_a_setting_that_is_not_one_is_refused() -> None:
     with pytest.raises(ValidationError, match="eval_sample"):
         Settings(eval_sample=1.0)  # type: ignore[call-arg]
@@ -106,12 +117,30 @@ def test_langfuses_own_variables_name_its_host_and_keys() -> None:
     assert langfuse_keys(keys) == ("https://cloud.langfuse.com", "pk", "sk")
     hosted = {**keys, "LANGFUSE_BASE_URL": "https://lf.example/"}
     assert langfuse_keys(hosted) == ("https://lf.example", "pk", "sk")
-    for partial in ({"LANGFUSE_PUBLIC_KEY": "pk"}, {"LANGFUSE_BASE_URL": "http://lf"}):
+    for partial in (
+        {"LANGFUSE_PUBLIC_KEY": "pk"},
+        {"LANGFUSE_BASE_URL": "http://lf"},
+        {"LANGFUSE_PUBLIC_KEY": " ", "LANGFUSE_SECRET_KEY": "sk"},
+    ):
         assert langfuse_keys(partial) is None
+    spaced = {**keys, "LANGFUSE_BASE_URL": " "}  # blank: its cloud
+    assert langfuse_keys(spaced) == ("https://cloud.langfuse.com", "pk", "sk")
+    assert langfuse_otlp("https://lf.example/", "pk", "sk")[0] == (
+        "https://lf.example/api/public/otel"
+    )
     assert langfuse_otlp(None, "pk", "sk") == (
         "https://cloud.langfuse.com/api/public/otel",
         {"authorization": "Basic cGs6c2s=", "x-langfuse-ingestion-version": "4"},
     )
+
+
+def test_the_agents_version_is_service_version_in_the_otel_resource_attributes() -> None:
+    from trellis.harness.settings import service_version
+
+    attributes = "deployment.environment=prod,service.version=1.4%2B2"
+    assert service_version({"OTEL_RESOURCE_ATTRIBUTES": attributes}) == "1.4+2"
+    assert service_version({"OTEL_RESOURCE_ATTRIBUTES": "service.version="}) is None
+    assert service_version({}) is None
 
 
 def test_env_example_documents_exactly_what_is_read() -> None:

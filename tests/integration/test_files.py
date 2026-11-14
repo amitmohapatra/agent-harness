@@ -20,7 +20,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ToolError
 from trellis.harness.agui.sse import decode
-from trellis.harness.files import LINK_SECONDS, FileStore, scope
+from trellis.harness.files import FileStore, scope
 from trellis.harness.journal import Journal
 from trellis.harness.settings import default_files_url, sourced
 
@@ -134,7 +134,7 @@ async def test_a_store_that_signs_links_is_a_short_lived_redirect() -> None:
     await harness.aclose()
     assert served.status_code == 307
     assert served.headers["location"].startswith("https://storage.example/")
-    assert SigningMemory.signed[-1][1] == LINK_SECONDS
+    assert SigningMemory.signed[-1][1] == 300  # a link signed for 5 minutes
 
 
 async def test_the_journal_names_each_file_once_with_what_made_it() -> None:
@@ -163,9 +163,14 @@ async def test_the_journal_names_each_file_once_with_what_made_it() -> None:
 
 async def test_a_name_that_is_not_one_path_part_is_refused_and_parts_stay_in_scope() -> None:
     store = FileStore(f"memory://names-{uuid.uuid4().hex}")
-    for bad in ("../x.csv", "a/b.csv", "", ".hidden", "x" * 200, "a b.csv"):
-        with pytest.raises(ToolError, match="is not a file name"):
+    for bad in ("../x.csv", "a/b.csv", "", ".hidden", "x" * 117 + ".csv", "a b.csv"):
+        with pytest.raises(ToolError, match=r"is not a file name.*at most 120"):
             await store.put("f", bad, b"1", source="t")
+    longest = "x" * 116 + ".csv"  # 120 characters: a name as it is
+    await store.put("f", longest, b"1", source="t")
+    assert await store.size("f", longest) == 1
+    assert scope("t1", "u" * 120, "c", "r").split("/")[1] == "u" * 120
+    assert len(scope("t1", "u" * 121, "c", "r").split("/")[1]) == 32  # a longer part: its digest
     folder = scope("t1", "../../etc", "c", "r")
     assert folder.split("/")[0] == "t1" and ".." not in folder and len(folder.split("/")) == 4
     assert await store.size(folder, "x.csv") is None

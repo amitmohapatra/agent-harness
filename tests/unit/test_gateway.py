@@ -13,7 +13,6 @@ import respx
 from tests.support.gateway import FakeGateway
 from trellis.contracts import ConfigurationError
 from trellis.harness import fresh
-from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway, PromptPin, pinned, prompt_ref
 from trellis.harness.identity import IDENTITY_HEADER
 from trellis.harness.runtime import _current
@@ -51,10 +50,13 @@ async def test_a_prompt_resolves_to_its_id_and_latest_version_once_then_after_it
     pin = await gateway.prompt("triage")
     assert pin == PromptPin(name="triage", id="p-triage", version=2)
     assert await gateway.prompt("triage@1") == PromptPin(name="triage", id="p-triage", version=1)
+    assert await gateway.prompt("triage@2") == PromptPin(name="triage", id="p-triage", version=2)
     await gateway.prompt("triage")
-    assert fake.asked("/api/prompt-repo/prompts") == 2  # one read per reference
+    assert fake.asked("/api/prompt-repo/prompts") == 3  # one read per reference
     fake.prompts["triage"].append(SYSTEM)
-    clock[0] += bifrost.REPOSITORY_TTL_SECONDS + 1
+    clock[0] += 299
+    assert (await gateway.prompt("triage")).version == 2  # kept for 5 minutes
+    clock[0] += 2
     assert (await gateway.prompt("triage")).version == 3
     assert pin.attributes() == {
         "trellis.prompt.name": "triage",
@@ -69,7 +71,7 @@ async def test_a_prompt_resolves_to_its_id_and_latest_version_once_then_after_it
     [
         ({}, "triage", "no committed prompt named 'triage'"),
         ({"triage": []}, "triage", "no committed prompt"),
-        ({"triage": [SYSTEM]}, "triage@2", "has no version 2"),
+        ({"triage": [SYSTEM]}, "triage@2", r"has no version 2 \(its latest: 1\)"),
     ],
 )
 async def test_a_prompt_that_is_not_there_is_a_configuration_error(

@@ -84,6 +84,12 @@ def test_read_file_pages_by_lines_from_an_offset(journal: Journal) -> None:
         f'…[29987 more lines: read_file(file_path="{path}", offset=13)]',
     ]
     assert read_file(path, offset=29_999) == "30000  row 30000"
+    whole = read_file(path).splitlines()  # 100 lines unless it says
+    assert len(whole) == 101 and whole[-1].endswith("offset=100)]")
+    lines = kept_path(readable("a" * 5_000 + "\n" + "b" * 5_001 + "\n" + "c\n" * 40_000))
+    parts = read_file(lines, limit=3).splitlines()
+    assert parts[0] == "1  " + "a" * 5_000  # a line of 5,000 characters reads as one
+    assert parts[1] == "2  " + "b" * 5_000 and parts[2] == "3  b"  # a longer one, in parts
     assert read_file(path, offset=-5, limit=0).splitlines()[0] == "1  row 1"
     assert read_file(path, offset=30_000) == (
         "Error: Line offset 30000 exceeds file length (30000 lines)"

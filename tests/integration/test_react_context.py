@@ -81,6 +81,19 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
     assert len(model.requests) == asked + 1  # only the step after the approval
 
 
+def test_results_are_cleared_past_half_the_window_a_tenth_at_least_the_last_3_kept() -> None:
+    from langchain.agents.middleware import ContextEditingMiddleware
+
+    from trellis import middleware
+
+    [editing] = [
+        m for m in middleware(context_window=6000) if isinstance(m, ContextEditingMiddleware)
+    ]
+    [edit] = editing.edits
+    assert (edit.trigger, edit.clear_at_least, edit.keep) == (3000, 600, 3)  # type: ignore[attr-defined]
+    assert not [m for m in middleware() if isinstance(m, ContextEditingMiddleware)]  # unknown
+
+
 async def test_a_cleared_result_is_queried_by_the_path_its_mark_names(
     memory_harness: Harness,
 ) -> None:

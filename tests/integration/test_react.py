@@ -107,6 +107,18 @@ async def test_a_loop_that_never_answers_ends_at_the_step_limit(harness: Harness
     assert len(model.requests) == 4
 
 
+async def test_the_step_limit_is_12_model_calls_by_default(harness: Harness) -> None:
+    model = ScriptedChat([("stock", {"sku": f"s{n}"}) for n in range(13)])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="twelve"), [stock])
+    result = await agent.run("x", user="u1")
+    assert result.error is not None
+    assert result.error.message == "stopped: the step limit (12) was reached"
+    assert len(model.requests) == 13
+    # middleware() on a graph of yours: the same default (LangChain's own limit one call on)
+    [limit] = [m for m in middleware() if m.name == "ModelCallLimitMiddleware"]
+    assert (limit.thread_limit or limit.run_limit) == 13  # type: ignore[attr-defined]
+
+
 @respx.mock
 async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_BASE_URL", "http://gw.test/v1")
@@ -279,6 +291,16 @@ async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None
 def test_steps_and_repeats_are_whole_numbers(name: str, least: int, value: Any) -> None:
     with pytest.raises(ConfigurationError, match=f"{name} is a number of steps, {least} or more"):
         ReAct(system_prompt="s", model=ScriptedChat(["hi"]), **{name: value})
+
+
+def test_the_least_steps_and_repeats_build_and_one_repeat_does_not() -> None:
+    ReAct(system_prompt="s", model=ScriptedChat(["hi"]), max_steps=1, max_repeats=2)
+    with pytest.raises(ConfigurationError, match="max_repeats is a number of steps, 2 or more"):
+        ReAct(system_prompt="s", model=ScriptedChat(["hi"]), max_repeats=1)
+    with pytest.raises(
+        ConfigurationError, match=r"stored prompt \(stored\(\.\.\.\)\): give a text"
+    ):
+        middleware(system_prompt="You sell.")  # type: ignore[arg-type]
 
 
 class Mine(AgentMiddleware):

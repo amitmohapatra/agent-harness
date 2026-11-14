@@ -110,10 +110,18 @@ async def test_the_identity_header_names_the_user_of_the_keys_tenant() -> None:
     await harness.aclose()
 
 
+def test_an_identity_header_of_4096_characters_is_read() -> None:
+    from trellis.harness.identity import trusted_user
+
+    raw = '{"user_id": "' + "u" * (4096 - len('{"user_id": ""}')) + '"}'
+    assert len(raw) == 4096
+    assert trusted_user(raw, "acme") == "u" * (4096 - 15)
+
+
 @pytest.mark.parametrize(
     ("raw", "reason"),
     [
-        ("x" * 5000, "too long"),
+        ("x" * 4097, "too long"),
         ("{not json", "not JSON"),
         ('["a list"]', "must be a JSON object"),
         ('{"tenant_id": "other", "user_id": "u"}', "tenant 'other' is not served here"),
@@ -173,8 +181,10 @@ async def test_the_card_describes_what_the_target_says_about_itself() -> None:
 def test_a_push_url_is_normalised_and_checked_without_resolving_it() -> None:
     assert validate_url(" https://hooks.example.com ") == "https://hooks.example.com/"
     assert validate_url("https://[::ffff:93.184.216.34]/h") == "https://[::ffff:93.184.216.34]/h"
+    longest = "https://example.com/" + "a" * (2048 - len("https://example.com/"))
+    assert validate_url(longest) == longest  # 2,048 characters: the most a url may have
     for refused, reason in (
-        ("https://example.com/" + "a" * 2048, "too long"),
+        ("https://example.com/" + "a" * (2049 - len("https://example.com/")), "too long"),
         ("https://[::1]/hook", "private address"),
         ("https://[::ffff:10.0.0.1]/hook", "private address"),
         ("https://printer.local/", "local host"),
@@ -254,7 +264,7 @@ async def test_a_push_that_is_never_accepted_or_may_not_go_is_dropped(
 
     def refuse(request: httpx.Request) -> httpx.Response:
         attempts.append(request)
-        return httpx.Response(410)
+        return httpx.Response(300 if len(attempts) == 1 else 410)  # a redirect is not taken
 
     notifier = PushNotifier(
         configs=None,  # type: ignore[arg-type]
@@ -263,7 +273,7 @@ async def test_a_push_that_is_never_accepted_or_may_not_go_is_dropped(
     with caplog.at_level(logging.WARNING, logger="trellis.a2a.push"):
         assert not await notifier.deliver("https://93.184.216.34/hook", "tok", "run-1", b"{}")
         assert not await notifier.deliver("https://10.1.1.1/hook", "tok", "run-2", b"{}")
-    assert len(attempts) == push.ATTEMPTS
+    assert len(attempts) == 3
     assert "A2A push attempt 3 for run-1 failed: HTTP 410" in caplog.text
     assert "A2A push target refused for run-2" in caplog.text
 
@@ -353,6 +363,73 @@ def test_an_ending_without_an_error_says_how_it_ended() -> None:
     timeout = update_for(event(RunEventType.RUN_FINISHED, outcome=RunOutcome.TIMEOUT))
     assert timeout is not None and timeout.state == TaskState.TASK_STATE_FAILED
     assert timeout.parts[0].text == "the run ended timeout"
+
+
+def test_every_ending_is_the_task_state_a2a_names() -> None:
+    states = {
+        RunOutcome.SUCCESS: TaskState.TASK_STATE_COMPLETED,
+        RunOutcome.PARTIAL: TaskState.TASK_STATE_COMPLETED,  # an answer, cut short
+        RunOutcome.INTERRUPT: TaskState.TASK_STATE_INPUT_REQUIRED,
+        RunOutcome.ERROR: TaskState.TASK_STATE_FAILED,
+        RunOutcome.TIMEOUT: TaskState.TASK_STATE_FAILED,
+        RunOutcome.REJECTED: TaskState.TASK_STATE_REJECTED,
+        RunOutcome.CANCELLED: TaskState.TASK_STATE_CANCELED,
+    }
+    assert set(states) == set(RunOutcome)
+    asked = {"interrupt": {"question": "Which plan?"}}
+    for outcome, state in states.items():
+        data = asked if outcome is RunOutcome.INTERRUPT else {}
+        update = update_for(event(RunEventType.RUN_FINISHED, outcome=outcome, data=data))
+        assert update is not None and update.state == state, outcome
+    partial = update_for(
+        event(RunEventType.RUN_FINISHED, outcome=RunOutcome.PARTIAL, data={"result": "half"})
+    )
+    assert partial is not None and partial.result == "half"
+
+
+def test_a_pause_says_what_a_caller_renders_and_nothing_else() -> None:
+    told = {
+        "interrupt_id": "i1",
+        "reason": "approval",
+        "ui": "choice",
+        "options": ["a"],
+        "multiple": True,
+        "expects": {"type": "string"},
+        "ui_schema": {"x": 1},
+        "component": "Picker",
+        "props": {"p": 1},
+        "payload": {"amount": 5},
+        "tool_call": {"tool": "pay"},
+    }
+    kept_back = {"question": "Pay?", "run_id": "run_1", "tenant_id": "t", "evidence": ["x"]}
+    update = update_for(
+        event(
+            RunEventType.RUN_FINISHED,
+            outcome=RunOutcome.INTERRUPT,
+            data={"interrupt": {**told, **kept_back}},
+        )
+    )
+    assert update is not None and update.parts[0].text == "Pay?"
+    assert values(update.parts[1:]) == [told]  # the documented fields, all and only them
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        RunEventType.STEP_STARTED,
+        RunEventType.STEP_FINISHED,
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+        RunEventType.CONTEXT_LOADED,
+        RunEventType.CUSTOM,
+    ],
+)
+def test_each_progress_event_keeps_the_task_working_and_says_itself(kind: RunEventType) -> None:
+    update = update_for(event(kind, tool_call_id="c1", data={"n": 1}))
+    assert update is not None and update.state == TaskState.TASK_STATE_WORKING
+    assert values(update.parts) == [{"event": kind.value, "tool_call_id": "c1", "n": 1}]
 
 
 def test_values_and_parts_convert_both_ways() -> None:

@@ -15,7 +15,7 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType
-from trellis.harness.agui.hub import MAX_EVENTS_PER_RUN, Hub
+from trellis.harness.agui.hub import Hub
 from trellis.harness.agui.sse import decode
 from trellis.harness.agui.translate import translate
 from trellis.harness.harness import LOCAL_TENANT
@@ -290,13 +290,25 @@ def test_tool_events_carry_their_call() -> None:
 
 async def test_a_buffer_keeps_its_last_events_and_numbers_them() -> None:
     buffer = Hub().open("r", "u")
-    for n in range(MAX_EVENTS_PER_RUN + 5):
+    for n in range(2048 + 5):
         buffer.publish(AGUIEvent(type=AGUIEventType.CUSTOM, value=n))
     buffer.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), final=True)
     read = [(n, e.value) async for n, e in buffer.read(-1)]
-    assert len(read) == MAX_EVENTS_PER_RUN
+    assert len(read) == 2048  # a run's last 2,048 events
     assert read[0][0] == 6
-    assert read[-2] == (MAX_EVENTS_PER_RUN + 4, MAX_EVENTS_PER_RUN + 4)
+    assert read[-2] == (2048 + 4, 2048 + 4)
+
+
+def test_the_hub_keeps_256_runs_before_it_forgets_a_finished_one() -> None:
+    runs = Hub()
+    first = runs.open("run-0", "u")
+    first.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED), final=True)
+    for n in range(1, 256):
+        runs.open(f"run-{n}", "u")
+    assert runs.get("run-0") is first  # 256 runs: all kept
+    runs.open("run-256", "u")
+    assert runs.get("run-0") is None  # the 257th: the finished one goes, never a live one
+    assert runs.get("run-1") is not None
 
 
 async def test_a_derived_event_shares_the_number_of_the_event_before_it() -> None:
@@ -332,6 +344,8 @@ def test_every_harness_event_has_its_agui_members() -> None:
 
     assert one(RunEventType.RUN_STARTED).type is AGUIEventType.RUN_STARTED
     assert one(RunEventType.STEP_STARTED, step="plan").step_name == "plan"
+    finished = one(RunEventType.STEP_FINISHED, step="plan")
+    assert (finished.type, finished.step_name) == (AGUIEventType.STEP_FINISHED, "plan")
     start = one(RunEventType.TEXT_MESSAGE_START, message_id="m1", data={})
     assert (start.message_id, start.role, start.delta) == ("m1", "assistant", None)
     content = one(RunEventType.TEXT_MESSAGE_CONTENT, message_id="m1", data={"delta": "hi"})
@@ -360,6 +374,41 @@ def test_endings_that_are_not_errors_or_successes() -> None:
     rejected = translate(RunEvent.finished(context, RunOutcome.REJECTED, 0))
     assert rejected is not None and rejected.type is AGUIEventType.RUN_ERROR
     assert (rejected.message, rejected.code) == ("rejected", "REJECTED")
+    timed_out = translate(RunEvent.finished(context, RunOutcome.TIMEOUT, 0))
+    assert timed_out is not None and timed_out.type is AGUIEventType.RUN_ERROR
+    assert (timed_out.message, timed_out.code) == ("timeout", "TIMEOUT")
+    partial = translate(RunEvent.finished(context, RunOutcome.PARTIAL, 0))
+    assert partial is not None and partial.type is AGUIEventType.RUN_FINISHED  # an answer
+    asked = RunEvent.of(context, RunEventType.INTERRUPT, 0, data={"question": "Which?"})
+    assert translate(asked) is None  # RUN_FINISHED carries it
+
+
+def test_an_interrupt_entry_carries_what_a_client_renders_under_its_metadata() -> None:
+    from trellis.harness.agui.translate import interrupt_entry
+
+    shown = {
+        "ui": "form",
+        "options": ["a"],
+        "multiple": True,
+        "ui_schema": {"w": 1},
+        "component": "Picker",
+        "props": {"p": 1},
+        "payload": {"rows": 2},
+        "payload_ref": {"artifact_id": "art_1"},
+        "tool_call": {"tool": "pay", "idempotency_key": "k1"},
+        "assignee": "role:ops",
+        "deadline": "2026-11-14T09:00:00Z",
+    }
+    raw = {**shown, "interrupt_id": "i1", "reason": "APPROVAL", "question": "Pay?", "run_id": "r"}
+    entry = interrupt_entry({**raw, "expects": {"type": "string"}})
+    assert entry.metadata == shown  # each documented field, and not the run's own
+    assert (entry.id, entry.reason, entry.message, entry.tool_call_id) == (
+        "i1",
+        "approval",
+        "Pay?",
+        "k1",
+    )
+    assert entry.response_schema == {"type": "string"}
 
 
 def test_an_event_the_protocol_has_no_type_for_is_not_sent(
@@ -575,6 +624,9 @@ async def test_a_refusal_is_a_problem_document(client: httpx.AsyncClient) -> Non
     assert (missing.status_code, missing.json()["code"]) == (404, "NOT_FOUND")
     gone = await client.get(f"{PATH}/runs/run_nope/artifacts/art_1")
     assert (gone.status_code, gone.json()["code"]) == (404, "NOT_FOUND")
+    named = await client.post(f"{PATH}/run", json=body("hi", runId="not an id!"))
+    assert (named.status_code, named.json()["code"]) == (422, "VALIDATION")
+    assert named.headers["content-type"] == "application/problem+json"
     client.headers["x-user"] = ""
     nobody = await client.post(f"{PATH}/run", json=body("hi"))
     assert (nobody.status_code, nobody.json()["code"]) == (401, "AUTHENTICATION")

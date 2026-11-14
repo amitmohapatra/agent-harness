@@ -174,8 +174,13 @@ def test_the_worker_cli_loads_a_harness_by_module_path(
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     assert list(load("deployed:h").agents) == ["echo"]
-    for bad in ("deployed:not_a_harness", "deployed:empty", "deployed"):
-        with pytest.raises(SystemExit):
+    for bad, said in (
+        ("deployed:not_a_harness", "deployed:not_a_harness is not a trellis Harness"),
+        ("deployed:empty", "deployed:empty wraps no agents"),
+        ("deployed", "usage: python -m trellis.harness.worker module:harness_attribute"),
+        (":h", "usage: python -m trellis.harness.worker module:harness_attribute"),
+    ):
+        with pytest.raises(SystemExit, match=said):
             load(bad)
     with pytest.raises(SystemExit) as usage:
         main([])
