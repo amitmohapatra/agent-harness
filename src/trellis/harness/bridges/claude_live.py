@@ -48,7 +48,8 @@ it (``client.query``) instead of into a new process that resumes the session.
   background shell commands cost is on the conversation's next turn, as their tokens are in
   no turn's usage.
 * **Its life.** One process per conversation, in this process only; at most :data:`KEPT`. It
-  closes :data:`IDLE_SECONDS` after its last activity when nothing works in it, and
+  closes :data:`IDLE_SECONDS` after its last activity when nothing works in it (no background
+  task, and no turn of its own for a finished one due or under way), and
   :data:`WORKING_SECONDS` after its last turn whatever does; when a turn needs other options
   than it was started with; and with the harness (``Harness.aclose``). Work that ends with
   it is said in the conversation's next run (``claude_session``), never dropped in silence.
@@ -569,6 +570,9 @@ class LiveSession:
         self.owed = 0
         #: a turn the session injected is under way
         self.injected = False
+        #: a background task ended while no turn was served: the session's own turn for it is
+        #: due (Claude Code runs it as soon as it gets to it), until that turn begins
+        self.due = False
         self.closed = False
         #: why the process ended, when it ended of itself with an error
         self.error: BaseException | None = None
@@ -770,11 +774,14 @@ class LiveSession:
         )
         if main and not result and (not own or (began and not self.owed)):
             self.injected = True
+            self.due = False
             self._settled.clear()
         turn = self.turn
         mine = turn is not None and turn.listening and not turn.answered
         if result and own:  # a prompt is sent once the one before has its result
             self.owed = 0
+        if result:  # a turn of the session's own ended with it (one of a caller's, never)
+            self.injected = self.injected and own
         if turn is not None and mine and (own if result else not self.injected):
             turn.answered = result
             charged = self.charged(message, own=own, taken=True) if result else message
@@ -785,10 +792,8 @@ class LiveSession:
             unattended(self, message)
             if turn is None:
                 self._rest()
-        if result:
-            self.injected = self.injected and own
-            if not self.owed and not self.injected:
-                self._settled.set()
+        if result and not self.owed and not self.injected:
+            self._settled.set()
 
     def _tracked(self, message: Any) -> None:
         """The background tasks under way, as the stream says: started, or ended (its
@@ -807,6 +812,8 @@ class LiveSession:
             isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES
         ):
             self.working.pop(message.task_id, None)
+            # its notification, with no turn served, is followed by a turn of the session's own
+            self.due = self.due or (isinstance(message, TaskNotificationMessage) and not self.turn)
             found = self.background.get(message.task_id)
             if found is not None:
                 found.finished(str(message.status), str(getattr(message, "summary", "") or ""))
@@ -913,6 +920,7 @@ class LiveSession:
 
     def _attach(self, turn: Turn) -> None:
         self.turn = turn
+        self.due = False  # a turn is served: what is due is handed to it
         self.kept_in = turn.runtime.agent.sessions
         if self._timer is not None:
             self._timer.cancel()
@@ -1006,12 +1014,14 @@ class LiveSession:
     # ------------------------------------------------------------------ its end
     def _rest(self) -> None:
         """No turn is served: the session closes when its time is up (:data:`IDLE_SECONDS`
-        after this, nothing working in it; :data:`WORKING_SECONDS` after its last turn)."""
+        after this, nothing working in it — no background task, and no turn of its own due
+        or under way; :data:`WORKING_SECONDS` after its last turn)."""
         loop = asyncio.get_running_loop()
         if self._timer is not None:
             self._timer.cancel()
         last = self._rested + WORKING_SECONDS - loop.time()
-        wait = max(0.0, last) if self.working else min(IDLE_SECONDS, max(0.0, last))
+        busy = self.working or self.due or self.injected
+        wait = max(0.0, last) if busy else min(IDLE_SECONDS, max(0.0, last))
         self._timer = loop.call_later(wait, self._expired)
 
     def _expired(self) -> None:

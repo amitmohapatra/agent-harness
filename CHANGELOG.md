@@ -18,6 +18,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   run's end deleted it, and delete it again: two deletes of one sandbox at once, which a
   provider may refuse (stopping the reaper's round, and logging the run's end as not
   deleted). Whichever begins first deletes it; the other passes it over.
+- **A Claude live session waits for its own turn for a finished task.** When a background
+  task ended while no turn was served, Claude Code runs a turn of its own for it as soon as it
+  gets to it; the session counted as idle from the task's end, and closed (its process with
+  it) if that turn had not begun in time, or ran long: what the turn said was lost to the
+  conversation. Such a turn, due or under way, is work now (`LiveSession.due`, `injected`).
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
