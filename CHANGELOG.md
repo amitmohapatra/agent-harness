@@ -26,17 +26,18 @@ not hold:
   again got the earlier call's record (approved, it did not run) or answer (Claude Code's
   question rejected for the second call ran it). The journal keeps what each call read
   (`reads`) and how far the calls before the pause read (`cursors`); a subagent paused in its
-  work, which its framework starts again, reads its own again. (Not changed: a person's
-  denial of a call stands for the run, so in a session the same call made again later in
-  the turn is denied without asking.)
+  work, which its framework starts again, reads its own again.
+- **A rejection is the call's it answered.** In a session that goes on (Claude, Kimi over
+  ACP), a person's rejection of a call was taken by the next identical call: rejected, the
+  same call made again later in the turn was refused without asking. A rejection now
+  belongs to the call its framework named (its call id): that call — made again under its
+  id, or still waiting — keeps it, and a new call, identical or not, is asked, as on every
+  other adapter and as Claude Code itself does. The stall guard still stops a model that
+  makes one call over and over.
 - **A subagent started again ran a built-in it had run.** Claude starts a subagent paused in
   its work again: it made its earlier built-in calls again, and they ran again on their
   recorded approval. A built-in that ran is recorded in the journal; made again, it is not
   run, and the subagent reads its result.
-- **A decision on a call whose arguments nest was never counted.** The memory service refuses
-  feedback whose metadata nests past two levels or passes 8 KiB: the decision on a list or
-  object argument (an OpenAI shell command, any tool taking one) was lost. Each nested value
-  is sent as its JSON text, cut to fit.
 - **An OpenAI agent tool's own approval was fed back on the calling run.** The SDK's
   `needs_approval` inside `Agent.as_tool` names the agent tool's child run, which records the
   call, as governance's approvals of a helper's call do.
