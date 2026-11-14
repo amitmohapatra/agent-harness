@@ -111,6 +111,7 @@ def test_a_query_is_bounded_in_time_rows_and_length(
     assert wide == "t\n" + "x" * 19_998  # 20,000 characters with its header: whole
     cut = ask(text, "SELECT repeat('x', 19999) AS t FROM result LIMIT 1")
     assert cut == "t\n" + "x" * 19_998 + "\n…[cut at 20000 characters: aggregate more]"
+    assert query.SECONDS == 5.0  # docs/tools.md: "a query runs at most 5 s"
     monkeypatch.setattr(query, "SECONDS", 0.0)
     endless = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT max(x) FROM c"
     assert "took too long" in ask(text, endless)
