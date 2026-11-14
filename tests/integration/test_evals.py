@@ -337,6 +337,8 @@ async def test_a_long_answer_is_grounded_on_the_head_verify_takes(
     assert verified("x" * 9000) == "x" * 8000  # no sentence ends within: cut at the limit
     assert verified("\n" + "x" * 9000) == "\n" + "x" * 7999  # nothing but a blank before it
     assert verified(sentence) == sentence
+    exactly = "Fine. " + "x" * 7994
+    assert verified(exactly) == exactly  # 8000 characters: checked whole, not cut back
 
 
 # --------------------------------------------------------------------------- offline, Langfuse

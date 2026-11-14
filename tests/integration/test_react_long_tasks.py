@@ -299,6 +299,7 @@ async def test_the_journal_holds_a_file_of_100_000_characters_and_a_run_of_1_000
             ("write_file", {"file_path": "/big.md", "content": "x" * 100_001}),
             ("write_file", {"file_path": "/f10.md", "content": "y"}),
             ("write_file", {"file_path": "/f0.md", "content": "z" * 100_000}),  # in its place
+            ("write_file", {"file_path": "/conversation_history/t1.md", "content": "h" * 100_001}),
             "ok",
         ]
     )
@@ -311,6 +312,7 @@ async def test_the_journal_holds_a_file_of_100_000_characters_and_a_run_of_1_000
     assert "/big.md would hold 100001 characters; a file holds at most 100000" in said[0]
     assert "would hold 1000001 characters; a run's files hold at most 1000000" in said[1]
     assert "Error" not in said[2]  # a file written over is counted once, at its new size
+    assert "Error" not in said[3]  # a summarized history is the harness's own: not capped
     assert out["files"]["/f0.md"]["content"] in ("z" * 100_000, ["z" * 100_000])
 
 
