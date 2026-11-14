@@ -198,6 +198,17 @@ written before this release is still read (a run paused before the upgrade); a s
 release before does not read the new shape: resume a run where it paused, or upgrade every
 server before resuming.
 
+### Fixed: a run that fails leaves no child `RUNNING`
+
+A run whose model call stalled ends `ERROR`; a helper its framework had open in the foreground
+(a Claude subagent) was let go of as for a pause and never ended: `RUNNING` for ever, held by
+nothing (architecture review, ARCH-1). A run's open children — helpers, sub-agents' runs — now
+end with it whatever its final status, once, where the run is concluded: with its status and
+error when it failed or ran out of time, cancelled with its reason when it was cancelled, and
+cancelled ("the run that started it ended first") when it answered without them. A child handed
+on to its conversation's session (a Claude subagent working in the background) still goes on.
+One listing of the run's children at the end of every run.
+
 ### Fixed: two failures a busy machine showed
 
 - **A wide table can be queried.** Typing a saved result asks every column whether a cell

@@ -476,7 +476,7 @@ class ClaudeAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
 
     async def _attended(
         self, target: Any, run: Invocation, found: Background

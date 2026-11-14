@@ -1,8 +1,9 @@
-"""The children an attempt has open when it ends out of time or cancelled — a sub-agent's child
-run working inside one of its calls, a helper a framework spawned in the foreground — end with
-it, as it ends: ``TIMEOUT`` with its error, ``CANCELLED`` with its reason; none is left
-``RUNNING`` with nothing behind it. A Claude subagent working in the background of its
-conversation's session outlives the turn that started it, and keeps doing so."""
+"""The children an attempt has open when its run ends — out of time, cancelled, or failed (a
+stalled model call: ARCH-1) — a sub-agent's child run working inside one of its calls, a helper
+a framework spawned in the foreground — end with it, as it ends: ``TIMEOUT`` or ``ERROR`` with
+its error, ``CANCELLED`` with its reason; none is left ``RUNNING`` with nothing behind it. A
+Claude subagent working in the background of its conversation's session outlives the turn that
+started it, and keeps doing so."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions
 
 from tests.support.arm import arm
-from trellis import Harness, Runtime, Settings, tool
+from trellis import Harness, Runtime, Settings, current, tool
 from trellis.contracts import RunRecord, RunStatus
 from trellis.harness.runs import LocalRuns
 
@@ -36,6 +37,17 @@ async def look_up() -> str:
 
 
 async def forever(input: str, agent: Runtime) -> str:
+    await asyncio.Event().wait()
+    return "never"
+
+
+@tool(side_effects="read")
+async def look_up_as_the_model_stalls() -> str:
+    """Look something up (it takes for ever) while the model call under way never answers:
+    its watchdog (0.05 s here) stops the attempt."""
+    runtime = current()
+    assert runtime is not None
+    runtime.model_started("the step", 0.05)
     await asyncio.Event().wait()
     return "never"
 
@@ -86,6 +98,42 @@ async def test_a_foreground_helper_ends_out_of_time_with_its_run(tmp_path: Path)
         [helper] = await children(store, ended.run_id)
     assert helper.status is RunStatus.TIMEOUT and helper.error is not None
     assert helper.error.code == ended.error.code
+
+
+async def test_a_sub_agents_run_ends_with_the_run_whose_model_call_stalled() -> None:
+    """The stalled model call ends the run ``ERROR`` (``MODEL_TIMEOUT``): the sub-agent's run
+    its call was working in is not left ``RUNNING`` — its caller went away, and it ends
+    ``CANCELLED`` there (only a parent's clock ends it as its parent ends)."""
+    store = LocalRuns()
+    async with Harness(config=Settings(), runs=store) as h:
+        worker = h.wrap(forever, id="worker")
+
+        async def boss(input: str, agent: Runtime) -> str:
+            agent.model_started("the step", 0.05)
+            return str(await worker.run("dig", user="u1"))
+
+        ended = await h.wrap(boss, id="boss").run("go", user="u1")
+        assert ended.status is RunStatus.ERROR and ended.error is not None
+        assert ended.error.code == "MODEL_TIMEOUT"
+        [child] = await children(store, ended.run_id)
+    assert child.status is RunStatus.CANCELLED
+
+
+async def test_a_foreground_helper_ends_failed_with_the_run_whose_model_call_stalled(
+    tmp_path: Path,
+) -> None:
+    """ARCH-1: a helper open in the foreground when a model call stalls: its hold was let go
+    of as for a pause, and nothing ended it — it ends ``ERROR`` with its run now."""
+    stalled = {**FOREGROUND, "steps": [{"tool": "look_up_as_the_model_stalls", "args": {}}]}
+    store = LocalRuns()
+    async with Harness(config=Settings(), runs=store) as h:
+        agent = arm(h.wrap(claude(tmp_path, [stalled]), id="helped"), [look_up_as_the_model_stalls])
+        ended = await agent.run("research", user="u1")
+        assert ended.status is RunStatus.ERROR and ended.error is not None
+        assert ended.error.code == "MODEL_TIMEOUT"
+        [helper] = await children(store, ended.run_id)
+    assert helper.status is RunStatus.ERROR and helper.error is not None
+    assert helper.error.code == "MODEL_TIMEOUT"
 
 
 async def test_a_foreground_helper_and_a_sub_agents_run_are_cancelled_with_their_run(

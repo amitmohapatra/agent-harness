@@ -225,7 +225,7 @@ class OpenAIAgentsAdapter:
                 resumed = None  # an edited call is approved once
                 result = await Runner.run(agent, state, hooks=hooks, **options)
         except BaseException as exc:
-            await helpers.closed(exc)
+            await helpers.closed(exc, paused=helpers.suspended(exc))
             raise
         await _closed(helpers, result)
         return result
@@ -258,7 +258,7 @@ class OpenAIAgentsAdapter:
             assert result.run_loop_task is not None  # set by run_streamed
             await asyncio.wait({result.run_loop_task})
             if error is not None:
-                await helpers.closed(error)
+                await helpers.closed(error, paused=helpers.suspended(error))
         await _closed(helpers, result)
         yield Output(result)
 
@@ -390,7 +390,7 @@ async def _closed(helpers: Helpers, result: Any) -> None:
     one inside it (``tools.convert.openai_agents.waits_inside``) stays open, and the resume,
     which makes its call again, ends it."""
     if not result.interruptions:
-        await helpers.closed(None)
+        await helpers.closed(None, paused=helpers.suspended(None))
 
 
 def governed_agents(

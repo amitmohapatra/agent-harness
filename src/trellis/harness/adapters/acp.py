@@ -647,7 +647,7 @@ class ACPAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
 
     async def _attempt(
         self, target: Any, native_input: Any, run: Invocation

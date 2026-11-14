@@ -388,14 +388,24 @@ class Helpers:
             },
         )
 
-    async def closed(self, error: BaseException | None) -> None:
-        """The attempt ended (``error``: how, ``None`` with its answer): the helpers still open
-        end with it — except on a pause or a crash, after which the next attempt ends them;
-        and, after an earlier attempt, the helpers it left open that this one did not take up
-        again (the framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
-        paused = self.runtime.pending is not None or (
+    def suspended(self, error: BaseException | None) -> bool:
+        """Whether the attempt that ended with ``error`` did not end its run itself (what
+        :meth:`closed` is told as ``paused``): it asked a person — a question waits
+        (``Runtime.pending``), or ``error`` is the pause's signal — or it was stopped from
+        outside (its task cancelled: a cancel, the run's clock, a stalled model call, its
+        worker letting it go), where the pipeline ends the run's open children as it ends the
+        run, whatever its final status (``pipeline._children_ended``), or the next attempt
+        takes them up."""
+        return self.runtime.pending is not None or (
             error is not None and (not isinstance(error, Exception) or is_pause_signal(error))
         )
+
+    async def closed(self, error: BaseException | None, *, paused: bool) -> None:
+        """The attempt ended (``error``: how, ``None`` with its answer): the helpers still open
+        end with it — except when it is ``paused`` (:meth:`suspended`: they wait with the run,
+        for the next attempt or for the pipeline, which ends them with the run); and, after an
+        earlier attempt, the helpers it left open that this one did not take up again (the
+        framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
         if paused:  # they wait with the run: let go of in the store, not left to lapse
             for helper in self._open.values():
                 await self.runtime.agent.harness.holds.release(helper.run_id, self.runtime.tenant)
