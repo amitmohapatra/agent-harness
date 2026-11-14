@@ -167,7 +167,8 @@ async def test_the_options_reach_the_cli_as_the_sdk_sends_them(
         "--tools": "Read,Bash,Agent",
         "--allowedTools": "Read",
         "--add-dir": str(tmp_path / "shared"),
-        "--settings": '{"includeCoAuthoredBy": false}',
+        # the team's, and other Claude sessions' messages refused
+        "--settings": '{"includeCoAuthoredBy": false, "crossSessionInbound": "refuse"}',
         "--setting-sources": "user,project",
         "--team-flag": "on",
         "--max-thinking-tokens": "2048",
@@ -266,6 +267,7 @@ async def test_a_sandbox_of_the_options_is_merged_into_the_settings_the_cli_gets
     settings = json.loads(str(flag(started_with(tmp_path)["argv"], "--settings")))
     assert settings == {
         "includeCoAuthoredBy": False,
+        "crossSessionInbound": "refuse",
         "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False},
     }
 

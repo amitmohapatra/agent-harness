@@ -117,6 +117,16 @@ SERVER = os.environ.get("FAKE_CLAUDE_SERVER", "trellis")
 #: workflow is (``task_type``), as the bundled CLI (2.1.283) sends them.
 WORKFLOW_AGENT = "workflow-subagent"
 WORKFLOW_TASK = "local_workflow"
+#: A CLI that predates ``onFailure`` on hook matchers (before 2.1.3xx): it ignores the option,
+#: and its ``initialize`` answer does not say ``hook_on_failure_supported``.
+FAIL_OPEN = bool(os.environ.get("FAKE_CLAUDE_HOOKS_FAIL_OPEN"))
+#: What the CLI answers the SDK's ``initialize`` request.
+INITIALIZED: dict[str, Any] = {
+    "commands": [],
+    **({} if FAIL_OPEN else {"hook_on_failure_supported": True}),
+}
+#: What a call whose hook failed in a matcher set to block is refused with.
+BLOCKED = {"permissionDecision": "deny", "permissionDecisionReason": "PreToolUse hook failed"}
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
@@ -570,7 +580,11 @@ class Cli:
             for callback in matcher.get("hookCallbackIds") or []:
                 try:
                     answer = self.pre_tool_hook(session, callback, name, args, tool_id)
-                except RuntimeError:  # a hook that failed decides nothing: the CLI goes on
+                except RuntimeError:
+                    # a hook that failed decides nothing, and the CLI goes on — unless its
+                    # matcher says ``onFailure: "block"``: the call is blocked
+                    if matcher.get("onFailure") == "block" and not FAIL_OPEN:
+                        return {"hookSpecificOutput": {**BLOCKED, "hookEventName": "PreToolUse"}}
                     continue
                 said = answer.get("hookSpecificOutput") or {}
                 if said.get("permissionDecision") or answer.get("continue") is False:
@@ -580,8 +594,7 @@ class Cli:
     def pre_tool_hook(
         self, session: str, callback: str, name: str, args: dict[str, Any], tool_id: str
     ) -> dict[str, Any]:
-        """One ``PreToolUse`` hook's answer (an error raised: the hook failed — the bundled
-        CLI, 2.1.283, then goes on as if it had decided nothing)."""
+        """One ``PreToolUse`` hook's answer (an error raised: the hook failed)."""
         return self.control(
             {
                 "subtype": "hook_callback",
@@ -872,6 +885,10 @@ class Cli:
                 "cwd": os.getcwd(),
                 "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
                 "initialize": self.initialized,
+                "hooks": {
+                    event: [matcher.get("onFailure") for matcher in matchers]
+                    for event, matchers in self.hooks.items()
+                },
                 "composed": self.composed,
                 "attached": {} if self.composed else attached(str(prompt)),
                 "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
@@ -1370,7 +1387,7 @@ def acknowledge(message: dict[str, Any]) -> None:
             "response": {
                 "subtype": "success",
                 "request_id": message["request_id"],
-                "response": {"commands": []} if initialize else {},
+                "response": INITIALIZED if initialize else {},
             },
         }
     )

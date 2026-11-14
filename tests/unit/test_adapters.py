@@ -250,7 +250,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         AUTO_MEMORY_ENV: "1",
     }
     assert sent.verbatim_prompts  # the user's text, as written
+    assert sent.settings == '{"crossSessionInbound": "refuse"}'  # no peer's messages
     unchanged = {
+        "settings": None,
         "hooks": None,
         "can_use_tool": None,
         "system_prompt": "Mine.",  # told of outputs/ after it (``sandbox.DELIVERS_HERE``)
@@ -625,18 +627,23 @@ def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() 
 
 
 def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> None:
-    """``sandbox.DELIVERS_HERE`` after the team's prompt in every form the SDK takes; a prompt
-    read from a file is left as it is (the CLI takes no text beside it)."""
+    """``sandbox.DELIVERS_HERE`` after the team's prompt in every form that has one; no prompt
+    (the SDK's default) stays none, and a prompt read from a file is left as it is (the CLI
+    takes no text beside it): :func:`_told` then says it with the turn's context instead."""
     from trellis.harness.adapters.claude import _told
     from trellis.harness.sandbox import DELIVERS_HERE
 
     preset = {"type": "preset", "preset": "claude_code"}
-    assert _told(None) == DELIVERS_HERE and _told("") == DELIVERS_HERE
-    assert _told("Mine.") == f"Mine.\n\n{DELIVERS_HERE}"
-    assert _told(preset) == {**preset, "append": DELIVERS_HERE}
-    assert _told({**preset, "append": "Be brief."})["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
-    assert _told({"type": "custom", "prompt": "Mine."})["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
-    assert _told({"type": "file", "path": "p.md"}) == {"type": "file", "path": "p.md"}
+    file = {"type": "file", "path": "p.md"}
+    assert _told(None, "ctx") == (None, f"ctx\n\n{DELIVERS_HERE}")
+    assert _told(file, None) == (file, DELIVERS_HERE)
+    assert _told("", None) == ("", DELIVERS_HERE)
+    assert _told("Mine.", "ctx") == (f"Mine.\n\n{DELIVERS_HERE}", "ctx")
+    assert _told(preset, None) == ({**preset, "append": DELIVERS_HERE}, None)
+    appended = _told({**preset, "append": "Be brief."}, None)[0]
+    assert appended["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
+    custom = _told({"type": "custom", "prompt": "Mine."}, None)[0]
+    assert custom["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
 
 
 def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> None:

@@ -401,6 +401,20 @@ def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[An
     )
 
 
+async def _task_kept(runtime: Runtime, own: Any, args: dict[str, Any], done: Any) -> None:
+    """What a call of Deep Agents' async task tools (:data:`ASYNC_TASKS`) said, kept as the
+    task's run (``bridges.async_tasks``): a task started is a child run of the turn, and one
+    Deep Agents found ended ends. The run is a record: failing to keep it is logged, and the
+    call's result stands."""
+    tasks = getattr(runtime.agent.adapter, "tasks", None)
+    if tasks is None or own.name not in ASYNC_TASKS or not framework_made(own):
+        return
+    try:
+        await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
+    except Exception as exc:
+        log.warning("run %s: the run of a task of %s not kept: %s", runtime.run_id, own.name, exc)
+
+
 async def governed_call(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
@@ -463,15 +477,7 @@ async def governed_call(
             failure = ToolError(text_of(done.content), source="tools")
             reported[:] = [(done, failure)]
             raise failure
-        tasks = getattr(runtime.agent.adapter, "tasks", None)
-        if tasks is not None and call["name"] in ASYNC_TASKS and framework_made(own):
-            # a task started is a child run; one Deep Agents found ended, ends (``async_tasks``)
-            try:
-                await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
-            except Exception as exc:  # the task's run is a record: the call's result stands
-                log.warning(
-                    "run %s: the run of a task of %s not kept: %s", runtime.run_id, own.name, exc
-                )
+        await _task_kept(runtime, own, args, done)
         produced.append(done)
         # a content_and_artifact tool's artifact: the sources of its result, when it names any
         cited = citations(getattr(done, "artifact", None))

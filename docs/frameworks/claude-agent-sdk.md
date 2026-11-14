@@ -72,6 +72,12 @@ the user Claude Code would ask:
   yours), decides each built-in call as a harness tool call is: the run's `before_tool` hooks
   ([hooks.md](../hooks.md)), then governance by the tool's risk and the tool catalog's rules.
   A call they refuse, or ask a person about, stops there.
+* **A call that cannot be decided does not run.** If the harness's hook fails (the tool
+  catalog or the run store out of reach), the call is refused, saying why. The hook's matcher
+  is also registered `on_failure="block"`, so Claude Code itself blocks a call whose hook
+  failed instead of passing it on to its permission mode (under `bypassPermissions` it would
+  run); the SDK starts no query on a Claude Code too old to do that. Your own hooks keep
+  the `on_failure` you set.
 * **Then Claude Code's own.** A call they let through goes to Claude Code's own permission
   check: its `permission_mode`, its rules (`allowed_tools`, `disallowed_tools`, its settings
   files: your allowlist, passed through as it is) and its own read-only checks. What it lets
@@ -153,7 +159,11 @@ the user Claude Code would ask:
   another Claude session on the machine or in the cloud. No run holds that work, so it, `ListAgents` (the sessions it reaches: on a shared
   worker, other tenants' runs) and the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`) are added to
   `disallowed_tools`, whatever `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the
-  bundled CLI's named agents are background subagents, each a child run: below).
+  bundled CLI's named agents are background subagents, each a child run: below). Messages
+  other Claude sessions send in are refused too (Claude Code's `crossSessionInbound`
+  setting is sent as `refuse`, over your `settings`' own word: every Claude Code a worker
+  starts is one OS user's, another tenant's among them); the rest of your `settings` reach
+  the CLI as given.
 * **A user's text is text.** The run's input reaches Claude Code as written (the SDK's
   `verbatim_prompts`): an `@/path` in a user's message reads no file of the worker and a
   `/command` runs nothing — neither would go through governance or be recorded. An app that
@@ -213,7 +223,7 @@ the user Claude Code would ask:
 
 | | |
 |---|---|
-| Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks; the options' `system_prompt` is left as you wrote it |
+| Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks. The options' `system_prompt` keeps what you wrote, with one line after it: that files written in `outputs/` of the working directory are given to the user (every run's are: [sandbox.md](../sandbox.md)). Options with no `system_prompt`, or one read from a file, are left as they are (none stays the SDK's default) and that line goes with the context |
 | Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
 | Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn and a resumed attempt are each charged once |
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |

@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
+)
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
@@ -518,7 +523,9 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     assert not (work / "outputs" / "report.csv").exists()  # moved to the file store
     assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
     assert (work / "outputs" / "sub" / "x.txt").exists()
-    assert started_with(tmp_path)["system_prompt"] == boxes.DELIVERS_HERE  # none of its own
+    # no system prompt of its own stays none (the SDK's default): told with the context
+    started = started_with(tmp_path)
+    assert started["system_prompt"] == "" and started["context"] == boxes.DELIVERS_HERE
     await harness.aclose()
 
 
@@ -614,7 +621,8 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
 async def test_without_memory_no_context_hook_is_registered(
     harness: Harness, tmp_path: Path
 ) -> None:
-    target = options(tmp_path, [{"text": "told: {context}"}])
+    script = [{"text": "told: {context}"}]
+    target = options(tmp_path, script, system_prompt="You help.")  # told of outputs/ there
     result = await harness.wrap(target, id="helper").run("reach me how?", user="u1")
     assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
 
@@ -982,6 +990,84 @@ async def test_a_call_governance_cannot_decide_is_refused_never_let_through(
     assert result.answer.startswith("said: The harness could not decide this call")
     assert "the catalog is out of reach" in result.answer
     assert built_ins(tmp_path) == []  # it did not run
+
+
+@pytest.mark.parametrize("given", [None, "inline", "file"])
+async def test_messages_from_other_claude_sessions_are_refused(
+    harness: Harness, tmp_path: Path, given: str | None
+) -> None:
+    """SEC: every Claude Code a worker starts runs as one OS user, so each takes the others —
+    other tenants' runs — for "your other sessions", and a message one sends arrives here as
+    a turn nobody asked for. The session refuses them (Claude Code's ``crossSessionInbound``
+    setting, ``refuse``), whatever the options' own settings say of it; the rest of those
+    settings — inline, or a file read as the CLI reads it — reach the CLI as given."""
+    own = {"permissions": {"deny": ["Bash(rm:*)"]}, "crossSessionInbound": "accept"}
+    (tmp_path / "team.json").write_text(json.dumps(own))
+    settings = {None: None, "inline": json.dumps(own), "file": "team.json"}[given]
+    target = options(tmp_path, [{"text": "ok"}], settings=settings, cwd=str(tmp_path))
+    assert (await harness.wrap(target, id="alone").run("hello", user="u1")).answer == "ok"
+    argv = started_with(tmp_path)["argv"]
+    sent = json.loads(argv[argv.index("--settings") + 1])
+    assert sent.pop("crossSessionInbound") == "refuse"
+    assert sent == ({} if given is None else {"permissions": own["permissions"]})
+
+
+async def test_settings_that_cannot_be_read_start_no_query(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Settings the harness cannot read would be sent without the team's rules, or without
+    the refusal: the run ends ``ERROR`` naming the file, and Claude Code is not started."""
+    target = options(tmp_path, [{"text": "ok"}], settings="missing.json", cwd=str(tmp_path))
+    result = await harness.wrap(target, id="unread").run("hello", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "missing.json" in result.error.message
+    assert not (tmp_path / "cli.json").exists()
+
+
+async def test_a_governance_hook_that_fails_blocks_the_call_in_claude_code_itself(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEC: the harness's ``PreToolUse`` matcher is registered ``on_failure="block"`` (the
+    SDK's ``HookMatcher`` option, Claude Code 2.1.325's ``onFailure``): were the hook to fail
+    all the same — here its own refusal fails too — Claude Code blocks the call, where an
+    unset matcher lets it through to its permission mode. A team's own matcher keeps what it
+    set (nothing: a failure of theirs decides nothing, as Claude Code does it)."""
+
+    class Unsayable:
+        def format(self, **why: Any) -> str:
+            raise RuntimeError("no refusal either")
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the catalog is out of reach")
+
+    async def theirs(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        return {}
+
+    monkeypatch.setattr(claude_adapter.bridge, "permitted", broken)
+    monkeypatch.setattr(claude_adapter, "UNDECIDED", Unsayable())
+    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    own = {"PreToolUse": [HookMatcher(hooks=[theirs])]}
+    target = options(tmp_path, script, permission_mode="bypassPermissions", hooks=own)
+    result = await harness.wrap(target, id="blocks").run("work", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert built_ins(tmp_path) == []  # it did not run
+    registered = started_with(tmp_path)["hooks"]["PreToolUse"]
+    assert registered == [None, "block"]  # theirs, then the harness's
+
+
+async def test_a_claude_code_that_cannot_block_on_a_failed_hook_is_not_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """SEC: a Claude Code that predates ``onFailure`` would run a call whose governance hook
+    failed. The SDK refuses to start a query on one (its ``initialize`` answer says whether
+    it honors the option): the run ends ``ERROR`` saying so, and nothing ran."""
+    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "done"}]
+    target = options(tmp_path, script, permission_mode="bypassPermissions")
+    target.env["FAKE_CLAUDE_HOOKS_FAIL_OPEN"] = "1"
+    result = await harness.wrap(target, id="old-cli").run("work", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "does not honor on_failure" in result.error.message
+    assert built_ins(tmp_path) == []
 
 
 async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_duration(

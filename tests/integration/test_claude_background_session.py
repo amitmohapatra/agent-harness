@@ -2266,20 +2266,26 @@ async def test_with_memory_on_each_live_turn_asks_memory_first_and_is_saved_afte
 
 
 # --------------------------------------------------------------------------- the tools
-#: The tools the bundled CLI (2.1.283) has: those its ``init`` message lists, and those it
+#: The tools the bundled CLI (2.1.325) has: those its ``init`` message lists, and those it
 #: offers where it is set up for them (a shell on Windows, an LSP server, MCP servers, deferred
-#: tools, worktrees, a claude.ai login, auto mode...), every name found in the binary.
+#: tools, worktrees, a claude.ai login, auto mode...) — its own list of tool names, read from
+#: the binary, and those 2.1.283 had beside it.
 CLI_TOOLS = (
-    "Agent", "AskUserQuestion", "Bash", "Edit", "EnterPlanMode", "EnterWorktree",
-    "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "ListConnectors", "ListMcpResourcesTool",
-    "ListPlugins", "ListSkills", "LSP", "Monitor", "MultiEdit", "NotebookEdit", "PowerShell",
-    "Read", "ReadMcpResourceTool", "ReadNotifications", "ReportFindings", "REPL",
-    "SearchMcpRegistry", "SearchPlugins", "SearchSkills", "SendUserMessage",
-    "ShowOnboardingRolePicker", "Skill", "StructuredOutput", "SubagentHandback",
-    "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills", "TaskCreate", "TaskGet",
+    "Agent", "Artifact", "AskUserQuestion", "Bash", "ClaudeDesign", "CronCreate", "CronDelete",
+    "CronList", "Edit", "EndConversation", "EnterPlanMode", "EnterWorktree", "ExitPlanMode",
+    "ExitWorktree", "Glob", "Grep", "ListAgents", "ListMcpResourcesTool", "LSP", "Monitor",
+    "NotebookEdit", "OfferChromeSetup", "PowerShell", "Projects", "propose_skills",
+    "ProposeGoal", "PushNotification", "Read", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
+    "ReadNotifications", "RemoteTrigger", "ReportFindings", "ScheduleWakeup", "SendFeedback",
+    "SendMessage", "SendUserFile", "SendUserMessage", "ShareOnboardingGuide",
+    "ShowOnboardingRolePicker", "Skill", "SubagentHandback", "TaskCreate", "TaskGet",
     "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WaitForMcpServers",
-    "WebFetch", "WebSearch", "Workflow", "Write", "Artifact", "PushNotification",
-    "SendFeedback", "SendUserFile", "ShareOnboardingGuide", "EndConversation",
+    "WebFetch", "WebSearch", "Workflow", "Write",
+    # its ``init`` message's, not in that list
+    "ListConnectors", "ListPlugins", "ListSkills", "SearchMcpRegistry", "SearchPlugins",
+    "SearchSkills", "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills", "Task",
+    # 2.1.283's, still in the binary
+    "MultiEdit", "REPL", "StructuredOutput",
 )  # fmt: skip
 
 
@@ -2298,9 +2304,13 @@ def test_every_tool_of_the_bundled_cli_has_a_declared_risk_or_is_not_offered() -
     assert {"RemoteTrigger", "CronCreate"} <= set(OUTLIVES_THE_QUERY)
     assert {"ListAgents", "SendMessage"} <= set(UNHELD_AGENTS) and not off & offered
     reads = ("ToolSearch", "WaitForMcpServers", "LSP", "SubagentHandback", "ReportFindings")
+    reads = (*reads, "OfferChromeSetup", "propose_skills", "ReadMcpResourceDirTool")
     assert {BUILTIN_SIDE_EFFECTS[name] for name in reads} == {"read"}
     writes = ("TaskStop", "PowerShell", "Monitor", "EnterWorktree", "Artifact", "REPL")
+    writes = (*writes, "ClaudeDesign", "Projects", "ProposeGoal")
     assert {BUILTIN_SIDE_EFFECTS[name] for name in writes} == {"write"}
+    # the placeholder that keeps deferred tools loading is never to be called: no word of it
+    assert "DeferredToolPlaceholder" not in offered | off
 
 
 async def test_schedules_stay_disallowed_in_a_live_session(

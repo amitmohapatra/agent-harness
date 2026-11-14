@@ -109,6 +109,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import (
     JournalSessions,
+    deciding_matcher,
     harness_matcher,
     session_store,
     with_context,
@@ -140,17 +141,21 @@ log = logging.getLogger("trellis.harness")
 if TYPE_CHECKING:
     from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
-#: Claude Code's built-in tools — every one the bundled CLI (2.1.283) has, those its ``init``
+#: Claude Code's built-in tools — every one the bundled CLI (2.1.325) has, those its ``init``
 #: message lists and those it offers where it is set up for them — and what each does as
 #: governance sees it (the tool catalog's word overrides it). Reads run: looking things up,
 #: listing, loading a deferred tool (``ToolSearch``), waiting for MCP servers to connect
-#: (``WaitForMcpServers``), code intelligence (``LSP``), the tools Claude keeps its own work
-#: with (its task list, plan mode, a structured answer, a subagent's hand-back), and a
+#: (``WaitForMcpServers``), code intelligence (``LSP``), a card shown to the user (a
+#: suggestion, ``OfferChromeSetup``, ``propose_skills``: nothing is written), the tools Claude
+#: keeps its own work with (its task list, plan mode, a structured answer, a subagent's
+#: hand-back), and a
 #: subagent's or a workflow's call (``Agent``, ``Task``, ``Workflow``), which only hands work
 #: on — its agents' calls are governed one by one. Writes run and are announced, Claude Code's
 #: own permission check asking first where it would: a file changed, a shell (``Bash``,
 #: ``PowerShell``, ``REPL``, ``Monitor``'s command), a worktree entered or left, a task
-#: stopped, a page published, a notification, a file or feedback sent, the session ended.
+#: stopped, a page published, a notification, a file or feedback sent, the session ended, a
+#: claude.ai design or project changed (``ClaudeDesign``, ``Projects``), a goal that keeps
+#: the session working (``ProposeGoal``).
 #: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
 #: or an ``approve_when``, in the tool catalog. What Claude Code asks its user about although
 #: it only reads — leaving plan mode with a plan, the network, a skill (:data:`CLAUDE_ASKS`)
@@ -179,6 +184,7 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
             "AskUserQuestion",
             "ListMcpResourcesTool",
             "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
             "ListConnectors",
             "ReadNotifications",
             "ReportFindings",
@@ -191,6 +197,8 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
             "SuggestPluginInstall",
             "SuggestSkills",
             "ShowOnboardingRolePicker",
+            "OfferChromeSetup",
+            "propose_skills",
             "LSP",
             "ToolSearch",
             "WaitForMcpServers",
@@ -218,6 +226,9 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
             "SendUserFile",
             "ShareOnboardingGuide",
             "EndConversation",
+            "ClaudeDesign",
+            "Projects",
+            "ProposeGoal",
         ),
         "write",
     ),
@@ -309,6 +320,10 @@ TASK_STOPPED: Final = "stopped"
 #: the worker's own, and auto memory — which the memory service does not see — is off.
 CONFIG_ENV: Final = "CLAUDE_CONFIG_DIR"
 AUTO_MEMORY_ENV: Final = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+#: Claude Code's setting for what a session does with a message another Claude session of the
+#: same OS user sends it, and the value that refuses them: every run on a worker is that one
+#: user's, other tenants' among them.
+INBOUND: Final = {"crossSessionInbound": "refuse"}
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -1254,13 +1269,15 @@ def _options(
     env.setdefault(AUTO_MEMORY_ENV, "1")
     shell = _shell(options, env)
     hooks = _with_governance(options.hooks, steps, shell)
+    prompt, context = _told(options.system_prompt, context)
     changes: dict[str, Any] = {
         "hooks": with_context(hooks, context or "") if context or kept else hooks,
-        "system_prompt": _told(options.system_prompt),
+        "system_prompt": prompt,
         # what Claude Code asks its user about, the harness answers (the team's own first)
         "can_use_tool": _asked(options.can_use_tool, steps, shell),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
         "env": env,
+        "settings": _settings(options),
         # a user's text is delivered as written: an ``@path`` in it reads no file, a
         # ``/command`` runs nothing — unless the app says so for the run
         "verbatim_prompts": runtime.framework_options.get("verbatim_prompts", True),
@@ -1286,6 +1303,22 @@ def _options(
     return dataclasses.replace(options, **changes)
 
 
+def _settings(options: Any) -> str:
+    """The options' ``settings`` with other Claude sessions' messages refused
+    (:data:`INBOUND`), as inline JSON: theirs as given — inline, or a file read as the CLI
+    reads it (relative to its ``cwd``, with or without a BOM). Settings that cannot be read
+    start no query: sent without them, the team's rules would be gone."""
+    given = (options.settings or "").strip()
+    try:
+        if given and not (given.startswith("{") and given.endswith("}")):
+            given = (Path(options.cwd or "") / given).read_text(encoding="utf-8-sig")
+        return json.dumps({**json.loads(given or "{}"), **INBOUND})
+    except (OSError, ValueError, TypeError) as exc:
+        raise ConfigurationError(
+            f"the options' settings ({options.settings!r}) could not be read: {exc}"
+        ) from exc
+
+
 def config_folder(tenant: str, user: str) -> str:
     """The Claude Code config folder of ``tenant``'s ``user`` on this worker: under the XDG data
     folder (``$XDG_DATA_HOME/trellis/claude``, else ``~/.local/share/trellis/claude``), made
@@ -1296,24 +1329,26 @@ def config_folder(tenant: str, user: str) -> str:
     return str(folder)
 
 
-def _told(given: Any) -> Any:
-    """The options' system prompt with what Claude is told of its folder's ``outputs/``
-    (``sandbox.DELIVERS_HERE``: the user's), after it — appended to a preset (``append``), to
-    a custom prompt or text, or as the prompt when there is none (the SDK's empty one). A
-    prompt read from a file is left as it is: the CLI takes no text beside it."""
+def _told(given: Any, context: str | None) -> tuple[Any, str | None]:
+    """The options' system prompt and the turn's context, one of them with what Claude is told
+    of its folder's ``outputs/`` (``sandbox.DELIVERS_HERE``: the user's, as every run's is —
+    ``sandbox.delivered``): after the team's prompt — appended to a preset (``append``), to a
+    custom prompt or a text — or, where there is none to append to, with the context: no
+    prompt stays none (the SDK's default), and one read from a file is left as it is (the CLI
+    takes no text beside it)."""
     from trellis.harness.sandbox import DELIVERS_HERE
 
     def after(text: str | None) -> str:
         return f"{text}\n\n{DELIVERS_HERE}" if text else DELIVERS_HERE
 
-    if given is None or isinstance(given, str):
-        return after(given)
-    kind = given.get("type")
+    kind = given.get("type") if isinstance(given, Mapping) else None
     if kind == "preset":
-        return {**given, "append": after(given.get("append"))}
+        return {**given, "append": after(given.get("append"))}, context
     if kind == "custom":
-        return {**given, "prompt": after(given.get("prompt"))}
-    return given
+        return {**given, "prompt": after(given.get("prompt"))}, context
+    if isinstance(given, str) and given:
+        return after(given), context
+    return given, after(context)
 
 
 def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
@@ -1383,65 +1418,69 @@ def _steering() -> Any:
 
 
 def _governance(steps: Steps) -> Any:
-    """The ``PreToolUse`` hook every tool call goes through, in every permission mode: a
-    harness tool runs (the bridge decides about it); any other is the run's decision
-    (``bridge.permitted``: hooks, governance), then Claude Code's own — its permission mode and
-    rules, and :func:`_asked` when it would ask — with the arguments as they were decided (a
-    call a hook rewrote is asked about as rewritten). A subagent's call is let through with
-    its prompt briefed (:func:`_briefed`). Before Claude takes a step, the run's progress is
-    saved — its session as mirrored so far among it — so a worker that dies during the step
-    continues the session from there, not from an earlier step."""
-    from trellis.harness.tools.convert.claude import SERVER, WAITING
+    """The ``PreToolUse`` hook every tool call goes through, in every permission mode
+    (:func:`_decide`). A call it cannot decide — the catalog or the run store out of reach —
+    is refused, saying why; were the refusal to fail too, Claude Code blocks the call (the
+    matcher's ``on_failure``)."""
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         try:
-            return await decide(given, tool_use_id)
+            return await _decide(steps, given, tool_use_id)
         except Exception as exc:
-            # Claude Code goes on with a call whose hook failed as if nothing had decided it
-            # (ungoverned, under bypassPermissions): a call governance cannot decide is refused
             log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
             steps.helped.pop(tool_use_id or "", None)
             return _decided("deny", UNDECIDED.format(why=f"{type(exc).__name__}: {exc}"))
 
-    async def decide(given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
-        runtime = current()
-        assert runtime is not None  # the CLI asks inside the run it works for
-        await runtime.progress(now=True)
-        name, args = given["tool_name"], dict(given.get("tool_input") or {})
-        call_id = tool_use_id or str(given.get("tool_use_id") or name)
-        if name.startswith(f"mcp__{SERVER}__"):
-            steps.started(call_id, name, args)  # the bridge records it
-            return _decided("allow")
-        assert runtime.helpers is not None  # the query runs with the attempt's helpers
-        helper = await steps.helper_of(call_id, given)
-        try:
-            # a subagent's call is decided as its helper's work: an approval names the helper
-            with approvals_read() as approved, runtime.helpers.working(helper):
-                decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
-        except Paused:  # the run pauses: Claude stops here, and the resume goes on
-            steps.helped.pop(call_id, None)
-            return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
-        if isinstance(decided, ToolOutcome):
-            steps.helped.pop(call_id, None)
-            return _decided("deny", str(decided.output))
-        if any(c.tool == name for c in approved):
-            # a person answered the approval of this call, whatever made governance ask (a
-            # hook's own question, answered meanwhile, approves nothing)
-            steps.answered.add(call_id)
-        if name in SUBAGENT_TOOLS:
-            ran = await _briefed(runtime, call_id, name, decided.args)
-            steps.started(call_id, name, ran)
-            return _decided("allow", updated=ran)
-        if name == WORKFLOW_TOOL:  # its child run, open from here as a background subagent's
-            flow = decided.args.get("script") or decided.args.get("name")
-            task = str(flow or decided.args.get("scriptPath") or "")
-            await runtime.helpers.start(call_id, kind=Kind.WORKFLOW, name=WORKFLOW, task=task)
-        steps.started(call_id, name, decided.args)
-        if decided.args != args:
-            return _decided("ask", updated=decided.args)
-        return {}  # Claude Code's own permission check decides
+    return deciding_matcher(pre_tool_use)
 
-    return harness_matcher(pre_tool_use)
+
+async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
+    """What the run decides about a tool call before Claude Code does: a harness tool runs
+    (the bridge decides about it); any other is the run's decision (``bridge.permitted``:
+    hooks, governance), then Claude Code's own — its permission mode and rules, and
+    :func:`_asked` when it would ask — with the arguments as they were decided (a call a hook
+    rewrote is asked about as rewritten). A subagent's call is let through with its prompt
+    briefed (:func:`_briefed`), and a workflow's opens its child run. Before Claude takes a
+    step, the run's progress is saved — its session as mirrored so far among it — so a worker
+    that dies during the step continues the session from there, not from an earlier step."""
+    from trellis.harness.tools.convert.claude import SERVER, WAITING
+
+    runtime = current()
+    assert runtime is not None  # the CLI asks inside the run it works for
+    await runtime.progress(now=True)
+    name, args = given["tool_name"], dict(given.get("tool_input") or {})
+    call_id = tool_use_id or str(given.get("tool_use_id") or name)
+    if name.startswith(f"mcp__{SERVER}__"):
+        steps.started(call_id, name, args)  # the bridge records it
+        return _decided("allow")
+    assert runtime.helpers is not None  # the query runs with the attempt's helpers
+    helper = await steps.helper_of(call_id, given)
+    try:
+        # a subagent's call is decided as its helper's work: an approval names the helper
+        with approvals_read() as approved, runtime.helpers.working(helper):
+            decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
+    except Paused:  # the run pauses: Claude stops here, and the resume goes on
+        steps.helped.pop(call_id, None)
+        return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
+    if isinstance(decided, ToolOutcome):
+        steps.helped.pop(call_id, None)
+        return _decided("deny", str(decided.output))
+    if any(c.tool == name for c in approved):
+        # a person answered the approval of this call, whatever made governance ask (a
+        # hook's own question, answered meanwhile, approves nothing)
+        steps.answered.add(call_id)
+    if name in SUBAGENT_TOOLS:
+        ran = await _briefed(runtime, call_id, name, decided.args)
+        steps.started(call_id, name, ran)
+        return _decided("allow", updated=ran)
+    if name == WORKFLOW_TOOL:  # its child run, open from here as a background subagent's
+        flow = decided.args.get("script") or decided.args.get("name")
+        task = str(flow or decided.args.get("scriptPath") or "")
+        await runtime.helpers.start(call_id, kind=Kind.WORKFLOW, name=WORKFLOW, task=task)
+    steps.started(call_id, name, decided.args)
+    if decided.args != args:
+        return _decided("ask", updated=decided.args)
+    return {}  # Claude Code's own permission check decides
 
 
 def _shell(options: Any, env: Mapping[str, str]) -> Shell:

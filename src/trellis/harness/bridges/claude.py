@@ -21,6 +21,7 @@ to put it behind.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import weakref
@@ -52,6 +53,14 @@ def harness_matcher(hook: Any) -> HookMatcher:
 
     _OURS.add(hook)
     return HookMatcher(hooks=[hook])
+
+
+def deciding_matcher(hook: Any) -> HookMatcher:
+    """A :func:`harness_matcher` whose ``hook`` decides whether a call runs: Claude Code
+    blocks the call when the hook fails (the SDK's ``on_failure="block"``; unset, a failed
+    hook decides nothing and the call goes on to Claude Code's permission mode), and the SDK
+    starts no query on a Claude Code too old to block."""
+    return dataclasses.replace(harness_matcher(hook), on_failure="block")
 
 
 def ours(matcher: Any) -> bool:

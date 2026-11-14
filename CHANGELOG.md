@@ -276,6 +276,40 @@ turn); a graph with neither `middleware()` nor a checkpointer loses the task of 
 cancelled after its start (the task is cancelled with it). See
 [docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
 
+### Changed: Claude Code through the harness as Claude Code does it, governed and isolated
+
+`claude-agent-sdk` 0.2.182 (Claude Code 2.1.325), from 0.2.160.
+
+- **A user's text is text.** The run's input is sent with the SDK's `verbatim_prompts`: an
+  `@/path` in a message read that file of the worker, and a `/command` ran, neither governed
+  nor recorded. `framework_options={"verbatim_prompts": False}` sends a slash command on
+  purpose.
+- **Each tenant's user has a Claude folder of their own** (`CLAUDE_CONFIG_DIR`), and Claude
+  Code's auto memory is off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY`): runs on one worker shared
+  `~/.claude` — its settings, sessions and memory files. The agent's own `settings`,
+  `skills`, `plugins` still apply; a folder set in the options' `env` stands.
+- **A call governance cannot decide does not run.** An error in the harness's `PreToolUse`
+  hook left the call to Claude Code's permission mode (it ran under `bypassPermissions`).
+  The hook refuses such a call, and its matcher is `on_failure="block"`.
+- **Every tool of Claude Code 2.1.325 is declared by what it does** or is not offered:
+  loading a deferred tool and waiting for MCP servers are reads, a shell, a worktree, a
+  published page and a claude.ai project are writes, `RemoteTrigger` is off with the
+  schedules and `ListAgents` with `SendMessage`; names the CLI no longer has are gone.
+- **Messages from other Claude sessions are refused** (`crossSessionInbound: refuse` in the
+  settings sent to the CLI): every Claude Code on a worker is one OS user's, so another
+  tenant's session could send a turn into this one.
+- **What Claude Code asks its user, a person is asked**: leaving plan mode, `WebFetch`,
+  `WebSearch` and a `Skill` ran unasked as reads. A rule for the tool in the catalog lets it
+  run.
+- **At its turn limit a run ends `PARTIAL`** with what Claude said, as Claude Code ends the
+  query (`error_max_turns`); the one more paid query for a last answer is gone.
+- **Options with no `system_prompt` keep none** (the SDK's default): the line about
+  `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
+  prompt where the options have one.
+- A resumed attempt is not cut at the options' `resume_session_at` again; the journal's
+  session store lists a session's subagent transcripts (`list_subkeys`); the live tests'
+  skip finds the bundled CLI.
+
 ### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
 
 Driving the bundled CLI (2.1.283) against a scripted model showed what it sends, and where a
