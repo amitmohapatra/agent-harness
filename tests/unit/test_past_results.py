@@ -126,6 +126,8 @@ def test_the_limits_hold_for_past_results(
     # sql alone: the figures it names, computed; no table is ``result`` then
     assert ask(sql="SELECT round(1250.50 / 37, 2) AS per_unit") == "per_unit\n33.8"
     assert "Table with name result does not exist" in ask(sql="SELECT * FROM result")
+    monkeypatch.setattr(query, "LOAD_CHARS", len(MONDAY))  # exactly what a query loads
+    assert ask(sql="SELECT 1 AS one", results=[ref]).endswith("\none\n1")
     monkeypatch.setattr(query, "LOAD_CHARS", len(MONDAY) - 1)
     assert "more than a query here loads" in ask(sql="SELECT 1", results=[ref])
 
