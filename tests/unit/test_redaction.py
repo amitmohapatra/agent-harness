@@ -34,6 +34,35 @@ def test_secret_names_and_credential_values_are_dropped() -> None:
     assert out["who"] == "mail me at a@b.co"  # personal data is the team's to mask
 
 
+def test_each_secret_word_and_phrase_in_a_name_redacts_it() -> None:
+    """A name holding any of the words, or two-word phrases, that mark a secret is redacted,
+    whatever separates its parts; a name with none of them is kept."""
+    words = [
+        "authorization",
+        "apikey",
+        "secret",
+        "secrets",
+        "password",
+        "passwd",
+        "token",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+        "bearer",
+        "ssn",
+        "cvv",
+        "pii",
+        "passphrase",
+    ]
+    phrases = ("api_key", "access-key", "secret_key", "private.key", "session_key", "card_number")
+    names = [f"x.{w}" for w in words] + [f"x.{p}" for p in phrases]
+    names += ["x.access_token", "x.refresh_token", "x.id_token"]
+    out = redact_attributes(dict.fromkeys([*names, "x.cardinal", "x.session"], "v"))
+    assert [n for n in names if out[n] != REDACTED] == []
+    assert out["x.cardinal"] == out["x.session"] == "v"
+
+
 def test_long_values_are_cut_and_payloads_redacted_recursively() -> None:
     assert redact_attributes({"text": "x" * 2000})["text"] == "x" * 2000  # 2000: kept whole
     cut = redact_attributes({"text": "x" * 2001})["text"]
