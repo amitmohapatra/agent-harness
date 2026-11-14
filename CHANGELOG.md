@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: two failures a busy machine showed
+
+- **A wide table can be queried.** Typing a saved result asks every column whether a cell
+  says it holds no value (`NA`, `N/A`, `-`...); asked as `IN` a list of words, DuckDB made
+  each column's question a join of its own, and the statement that casts every column ran
+  out of the database's 512 MiB: a CSV of 200 columns (of one row) could not be queried, and
+  one of 67 failed now and then. The question is one regular expression a column now
+  (`query._missing`): a table of a thousand columns loads.
+- **A sandbox is deleted once.** The reaper (in the background, when a process makes a
+  sandbox) could list a sandbox whose run had just ended in the same process while that
+  run's end deleted it, and delete it again: two deletes of one sandbox at once, which a
+  provider may refuse (stopping the reaper's round, and logging the run's end as not
+  deleted). Whichever begins first deletes it; the other passes it over.
+
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
 The LangGraph adapter was checked feature by feature against the installed libraries

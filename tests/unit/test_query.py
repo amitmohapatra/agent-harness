@@ -746,6 +746,25 @@ def test_a_very_wide_table_is_typed_in_bounded_statements() -> None:
         engine.load(db, {"wide": wide(columns + 1)}, "wide", until=time.monotonic() - 1)
 
 
+def test_a_table_of_hundreds_of_columns_loads_within_the_memory_limit() -> None:
+    """Whether a cell says it holds no value (``MISSING``) is asked of every column, in the
+    statements that count and the one that casts: asked as ``IN`` a list of words, DuckDB
+    made each column's question a join of its own, and a few hundred columns ran out of the
+    database's memory (``DB_BYTES``) — a 200-column CSV of one row could not be queried. Each
+    column's question is a function now, and a table that wide loads, typed."""
+    import time
+
+    columns = 400
+    names, values = (f"c{n}" for n in range(columns)), (f"{n}" for n in range(columns))
+    text = ",".join(names) + "\n" + ",".join(values) + "\n" + ",".join(["NA"] * columns)
+    engine = query.ENGINE
+    with engine.opened() as db:
+        engine.load(db, {"wide": text}, "wide", until=time.monotonic() + 600)
+        last = f"c{columns - 1}"
+        found = db.execute(f"SELECT typeof({last}), {last} FROM result ORDER BY {last}").fetchall()
+        assert found == [("BIGINT", columns - 1), ("BIGINT", None)]  # "NA": no value
+
+
 def amounts(seed: int, n: int = 6000) -> tuple[str, Decimal]:
     """``n`` two-decimal amounts as CSV, and their exact sum."""
     rng = random.Random(seed)
