@@ -1140,8 +1140,9 @@ class Agent:
             output(span, pushed.rendered)
         stale: list[str] = []
         if window is Window.MESSAGES:
+            said = from_window(pushed.conversation.messages if pushed.conversation else [])
             runtime.history, stale = snapshots.out_of_date(
-                from_window(pushed.conversation.messages if pushed.conversation else []),
+                await self.caught_up(runtime, said),
                 lambda name: snapshots.declared_max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
@@ -1191,6 +1192,52 @@ class Agent:
             data={"chars": len(rendered), "evidence_status": status},
         )
         return pushed
+
+    async def caught_up(self, runtime: Runtime, window: list[Said]) -> list[Said]:
+        """Memory's ``window`` with the conversation's latest turns it does not hold yet, from
+        the run store (``conversation.earlier``: each one's question and answer): a turn whose
+        transcript was still on its way when its run returned (past :data:`TURN_WRITE_SECONDS`,
+        queued), on whichever process ran it. Matched by message id — the window gives each
+        chat message's back (``history.from_window``) — so a turn memory holds is never said
+        twice: only the turns after the newest one it holds are added, and none when its
+        window names no turn the run store has (written before the window gave ids back). The
+        run store is read in full only when its newest turn is not memory's newest; one that
+        cannot be read is a warning, and the window is as memory gave it."""
+        thread = runtime.thread
+        known = {s.id for s in window if s.id is not None}
+        if runtime.parent is not None or thread is None or thread == runtime.run_id:
+            return window
+        if window and not known:
+            return window
+        try:
+            turns = await self._behind(runtime, thread, known)
+        except Exception as exc:
+            runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+            return window
+        held = [n for n, s in enumerate(turns) if s.id in known]
+        if window and not held:
+            return window
+        after = held[-1] + 1 if held else 0
+        return [*window, *(s for s in turns[after:] if s.id not in known)]
+
+    async def _behind(self, runtime: Runtime, thread: str, known: set[str]) -> list[Said]:
+        """The conversation's earlier turns from the run store — none when its newest (of this
+        agent, answered or cancelled) is one memory holds, or it has none."""
+        async for summary in self.harness.runs.iterate(
+            agent_id=self.id,
+            thread_id=thread,
+            tenant=runtime.tenant,
+            limit=conversation.EARLIER_RUNS,
+            max_pages=1,
+        ):
+            if summary.run_id != runtime.run_id and summary.status in conversation.ASKED:
+                said, newest = runtime.conversation, summary.run_id
+                held = {
+                    conversation.question_id(said, newest),
+                    conversation.answer_id(said, newest),
+                }
+                return [] if known & held else await conversation.earlier(runtime)
+        return []
 
     def conversation_budget(self, runtime: Runtime) -> int | None:
         """The tokens the conversation memory replays may take: what the run's next request

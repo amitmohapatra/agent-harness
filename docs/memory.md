@@ -118,12 +118,17 @@ said:
   each message's `custom_metadata` carries its harness id (`message_id`: the conversation's
   digest of `<run>:input`, `<run>:answer`, `result:<call>` or `call:<call>` — the same id the
   AG-UI stream says, across a resume), its `run_id` and the `tool_call_id` it answers or makes
-  ([ADR 0005](adr/0005-conversations-across-runs.md)).
+  ([ADR 0005](adr/0005-conversations-across-runs.md)); a chat message's (not a tool result's)
+  `run_record` carries its `message_id` too, the one part of a message the window gives back.
   A run started with no thread — a scheduled run — is its own thread (`thread = run_id`); a run
   with one writes to its conversation's thread — keyed by the tenant, the user and the thread
   (`h.conversation(user=, thread=)`), so two users' threads named alike are two threads. Where
   memory keeps the conversation the transcript is written before the run returns (at most 5 s,
-  then queued like the rest), so the next turn's window holds it wherever that turn runs;
+  then queued like the rest), so the next turn's window holds it wherever that turn runs; a turn
+  whose write is still on its way when the next turn starts (memory slow, or down) is taken from
+  the run store's record of it — its question and answer — after the window (a framework that
+  replays messages: LangGraph's graphs, `ReAct`), matched by message id so that a turn memory
+  holds is never given twice;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
   Mode's nested calls from Bifrost's log — their arguments and outputs as they are
   ([observability.md](observability.md#redaction)), in the order the log has them, each at

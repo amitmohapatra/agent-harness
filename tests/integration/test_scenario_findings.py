@@ -1,24 +1,31 @@
-"""The user-scenario suite's findings (SCN-2, SCN-3), each in its smallest form, in process (no
-service): a graph's run paused on one worker and continued on a worker of another harness on the
-same run store (``LoggedRuns``: agent-runs' event log in process). Each test's docstring says
-what was wrong and what holds now."""
+"""The user-scenario suite's findings (SCN-2, SCN-3, SCN-4), each in its smallest form,
+in process (no service): a graph's run paused on one worker and continued on a worker of
+another harness on the same run store (``LoggedRuns``: agent-runs' event log in process), and a
+memory service that is slow or down (the in-process fake behind a transport that delays or
+refuses). Each test's docstring says what was wrong and what holds now."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 import httpx
+import pytest
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from tests.support.arm import arm, native_tools
+from tests.support.memory import URL, FakeMemoryService
+from tests.support.models import ScriptedChat
 from tests.support.runlog import LoggedRuns
-from trellis import Harness, Settings, tool
+from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunEvent, RunEventType, RunStatus
+from trellis.harness import agent as agent_module
 from trellis.harness.agent import Agent
 from trellis.harness.agui.sse import decode
 from trellis.harness.middleware import RunCheckpointer
+from trellis.memory import MemoryClient
 
 # --------------------------------------------------------------------- calls across attempts
 
@@ -208,3 +215,157 @@ async def test_scn3_the_activity_line_of_a_run_resumed_where_it_paused_counts_ev
     resumed = await _served(LoggedRuns(), two_nodes(checkpointed=False), both)
     activity = [e for e in resumed if e["type"] == "ACTIVITY_SNAPSHOT"]
     assert activity[-1]["content"]["tools"] == 2, activity
+
+
+# --------------------------------------------------------------------- a slow or absent memory
+
+
+def _memory(
+    handler: Callable[[httpx.Request], Coroutine[None, None, httpx.Response]],
+) -> MemoryClient:
+    return MemoryClient(
+        URL,
+        api_key="test",
+        max_retries=0,
+        http_client=httpx.AsyncClient(base_url=URL, transport=httpx.MockTransport(handler)),
+    )
+
+
+def _slow_memory(service: FakeMemoryService, slow: dict[str, bool]) -> MemoryClient:
+    """``service`` behind a transport that keeps a turn slowly while ``slow["on"]``."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if slow["on"] and (request.method, request.url.path) == ("POST", "/v1/messages"):
+            await asyncio.sleep(0.6)
+        return service._checked(request)
+
+    return _memory(handler)
+
+
+async def test_scn4_the_next_turn_has_the_turn_before_when_memory_writes_slowly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SCN-4: a memory service that takes longer than ``TURN_WRITE_SECONDS`` (5 s; 0.2 here)
+    to keep a turn: the run returns with its transcript queued (``Agent.recorded_run``), and the
+    user's next message — sent at once, as people do — is answered from a window that has it
+    all the same: the turns memory does not have yet come from the run store's records. Seen on
+    the real stack under load: POST /v1/messages taking 3-7 s, a chat's third turn answered
+    without its second."""
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.2)
+    memory = _slow_memory(FakeMemoryService(), {"on": True})
+    async with Harness(config=Settings(), memory=memory) as h:
+        model = ScriptedChat(["Noted.", "I do not know."])
+        agent = h.wrap(ReAct(system_prompt="You help.", model=model), id="scn4")
+        first = await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        assert first.status.value == "SUCCESS"
+        second = await agent.run("What is the locker code?", user="ada", thread="t1")
+        assert second.status.value == "SUCCESS"
+        sent = str(model.requests[-1]["messages"])
+        assert "4242" in sent, "the turn before is not in the window"
+        assert sent.count("The locker code is 4242.") == 1, sent
+
+
+async def test_scn4_the_turn_before_is_said_once_when_memory_has_caught_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third turn, once memory kept the first two: each earlier turn once, not once from
+    memory and again from the run store."""
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.2)
+    slow = {"on": True}
+    async with Harness(config=Settings(), memory=_slow_memory(FakeMemoryService(), slow)) as h:
+        model = ScriptedChat(["Noted.", "Your code is 4242", "Yes."])
+        agent = h.wrap(ReAct(system_prompt="You help.", model=model), id="scn4b")
+        await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        await agent.run("What is the locker code?", user="ada", thread="t1")
+        await h.writes.drain()
+        slow["on"] = False
+        await agent.run("Is that right?", user="ada", thread="t1")
+        sent = str(model.requests[-1]["messages"])
+        for said in ("The locker code is 4242.", "What is the locker code?", "Your code is 4242"):
+            assert sent.count(said) == 1, (said, sent)
+
+
+async def test_scn4_the_turn_before_is_had_by_another_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The next message served by another replica (another harness on the same run store and
+    memory service) while the first replica's write of the turn is still on its way."""
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.2)
+    service, slow, runs = FakeMemoryService(), {"on": True}, LoggedRuns()
+    async with Harness(config=Settings(), memory=_slow_memory(service, slow), runs=runs) as one:
+        agent = one.wrap(ReAct(system_prompt="You help.", model=ScriptedChat(["Noted."])), id="r")
+        await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        memory = _slow_memory(service, slow)
+        async with Harness(config=Settings(), memory=memory, runs=runs) as other:
+            model = ScriptedChat(["4242."])
+            again = other.wrap(ReAct(system_prompt="You help.", model=model), id="r")
+            await again.run("What is the locker code?", user="ada", thread="t1")
+            sent = str(model.requests[-1]["messages"])
+            assert sent.count("The locker code is 4242.") == 1, "not in the other's window"
+
+
+async def test_scn4_a_window_that_names_no_message_is_given_as_memory_gave_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window whose messages name no id (kept before the window gave them back) says nothing
+    of which turns memory holds: nothing is added from the run store, so nothing is said
+    twice — the turn still on its way is missing, as it was before."""
+    from trellis.harness.history import MESSAGE_ID, RUN_RECORD
+
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.2)
+    service, slow = FakeMemoryService(), {"on": False}
+    async with Harness(config=Settings(), memory=_slow_memory(service, slow)) as h:
+        model = ScriptedChat(["Noted.", "Fine.", "I do not know."])
+        agent = h.wrap(ReAct(system_prompt="You help.", model=model), id="legacy")
+        await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        for kept in service.threads.values():
+            for message in kept:
+                message["custom_metadata"].get(RUN_RECORD, {}).pop(MESSAGE_ID, None)
+        slow["on"] = True
+        await agent.run("The gate code is 9191.", user="ada", thread="t1")
+        await agent.run("Which codes?", user="ada", thread="t1")
+        sent = str(model.requests[-1]["messages"])
+        assert sent.count("The locker code is 4242.") == 1 and "9191" not in sent, sent
+
+
+async def test_scn4_a_run_store_that_cannot_be_read_is_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run store failing while memory lacks the latest turn: a warning, and the window as
+    memory gave it — the run goes on."""
+    from trellis.harness import conversation
+
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.2)
+
+    async def unread(runtime: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("agent-runs is not answering")
+
+    service = FakeMemoryService()
+    async with Harness(config=Settings(), memory=_slow_memory(service, {"on": True})) as h:
+        model = ScriptedChat(["Noted.", "I do not know."])
+        agent = h.wrap(ReAct(system_prompt="You help.", model=model), id="unread")
+        await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        monkeypatch.setattr(conversation, "earlier", unread)
+        events = [e async for e in agent.stream("What is it?", user="ada", thread="t1")]
+        warned = [e.data for e in events if e.data.get("code") == "earlier_turns"]
+        assert warned and "agent-runs is not answering" in warned[0]["message"], warned
+        assert events[-1].type is RunEventType.RUN_FINISHED
+
+
+async def test_scn4_a_window_of_another_agents_turns_is_given_as_memory_gave_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two agents on one thread: the window holds the other agent's turn, which this agent's
+    runs in the run store do not have — nothing anchors them, so nothing is added."""
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.2)
+    service, slow = FakeMemoryService(), {"on": False}
+    async with Harness(config=Settings(), memory=_slow_memory(service, slow)) as h:
+        first = h.wrap(ReAct(system_prompt="You help.", model=ScriptedChat(["Noted."])), id="a")
+        await first.run("The locker code is 4242.", user="ada", thread="t1")
+        model = ScriptedChat(["Fine.", "I do not know."])
+        second = h.wrap(ReAct(system_prompt="You help.", model=model), id="b")
+        slow["on"] = True
+        await second.run("The gate code is 9191.", user="ada", thread="t1")
+        await second.run("Which codes?", user="ada", thread="t1")
+        sent = str(model.requests[-1]["messages"])
+        assert sent.count("The locker code is 4242.") == 1 and "9191" not in sent, sent

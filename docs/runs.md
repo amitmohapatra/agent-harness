@@ -282,7 +282,9 @@ its own (no checkpointer, no OpenAI `session`) and no session continued: each ea
 question and answer (a cancelled one's question), of the same agent, tenant, user and thread,
 the newest 10, oldest first. `ReAct`, a graph and an OpenAI agent get them as their own
 messages, a function as `agent.history`, Claude and Kimi in the context's text. With memory on,
-memory's window keeps the conversation as before ([memory.md](memory.md)).
+memory's window keeps the conversation as before ([memory.md](memory.md)); where that window
+comes as messages and lacks the conversation's latest turns (their writes still on their way),
+those turns come from the run store after it.
 
 A target that takes messages and fits each request to a known window (`ReAct` with
 `context_window=` or a model profile that says it) gets each earlier turn this process ran
