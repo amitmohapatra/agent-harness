@@ -282,8 +282,9 @@ asked for a chart, a model had saved an SVG there and told the user to open it.
 | `response_format`, parallel tool calls | LangChain's and LangGraph's |
 
 Deep Agents keeps `messages` and `files` as deltas (LangGraph's `DeltaChannel`); the run's
-checkpointer keeps the latest checkpoint only, with each delta channel's last snapshot and the
-writes since beside it, so a resume on any worker rebuilds them whole.
+checkpointer keeps each delta channel's last snapshot and the writes since beside the latest
+checkpoint, so a resume on any worker rebuilds them whole — and at any earlier checkpoint of
+the run's history ([below](#checkpoint-history-langgraphs-time-travel)).
 
 **The harness's** — [`middleware()`](#middleware-on-your-own-graph), in this order:
 
@@ -300,7 +301,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, the run's question kept ahead of a summary (not an earlier turn's replayed before it), and the day it is after the instructions ([tools.md](../tools.md#what-day-it-is)); a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
 
-The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
+The graph's checkpointer is `RunCheckpointer()`: every checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped.
 
 Last of what changes a request, where Deep Agents puts its own, both bases (and `middleware()`
@@ -319,8 +320,9 @@ A declarative sub-agent is given `StallGuard`, `ModelCallLimitMiddleware`, `Mode
 `ReAct`'s. One that names no `tools` has the run's tools, as Deep Agents gives such a sub-agent
 the main agent's (`HarnessTools` and `GovernTools` are given to it: `ReAct`'s tools are offered
 per model call, not built into the graph); one that names its own `tools` has exactly those.
-Deep Agents' general-purpose helper is given the same way, unless you name a sub-agent
-`general-purpose` yourself.
+Deep Agents' general-purpose helper is given the same way — with the agent's `skills`, as
+Deep Agents gives the one it builds itself — unless you name a sub-agent `general-purpose`
+yourself.
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
 harness's is refused, `middleware()` itself among them). Each works the same in any
@@ -692,6 +694,401 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
 | Skills | `ReAct(skills=src)`: a skill source (`trellis.skills`), pinned per run, read by Deep Agents' own skills middleware through a `/skills/` route of the backend — with `backend=sandbox()` too; or Deep Agents' own source paths ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `ReAct(middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); the loop's own turn limit is `max_steps`, and LangGraph's `recursion_limit` goes in `framework_options` |
+
+## What the other libraries have, in ReAct
+
+Each is the library's own piece, switched on the library's own way (its tool, its middleware,
+`framework_options`): the harness governs it, records it and counts it. None changes what a
+`ReAct` built without it sends its model (`tests/integration/test_react_golden.py`).
+
+### A provider's own tools: web search, web fetch, code execution
+
+A tool the provider runs itself, inside the model's step, is given as LangChain gives it — a
+`dict` in `tools=`, bound to the model as it is:
+
+```python
+ReAct(
+    "You answer with sources.",
+    "anthropic/claude-sonnet-4-5",
+    tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+)
+```
+
+`create_agent` binds it and runs none of it: the provider does, and its reply says what each
+call asked and found (LangChain's `server_tool_call` and `server_tool_result` content blocks).
+The harness adds (`trellis.harness.provider_tools`):
+
+* **the catalog's risk.** Each is a tool of the run's set and of the catalog. Before each model
+  call governance decides it: the catalog's risk, else what it is known to do (a search, a
+  fetch and a file search read; code runs in the provider's own sandbox, a write announced as
+  `sandbox_exec` is). No approval can stand before a call the provider makes inside its step,
+  so a tool whose decision asks a person (`irreversible`, an approval rule, a tool nobody
+  declared) is not offered to that call, said once on the run (`PROVIDER_TOOL_HELD`): the
+  catalog offers it by declaring a risk that needs none.
+* **records.** Each server call is the run's tool call: on its stream, traced, counted,
+  recorded in the memory service, with what it was asked and what it found (never the
+  provider's encrypted state). A sub-agent's are recorded the same way.
+
+A `dict` a client would have to run (a function's schema, Anthropic's `bash`, `text_editor`,
+`computer`, `memory`) is refused: the graph has no code for it — give a function. Whether a
+route passes a provider's tool on is the route's: Anthropic's tools need an Anthropic chat
+model (a name routed to its API, or `ChatAnthropic`), OpenAI's the Responses API.
+
+### Plan mode
+
+Read-only exploration, then a plan a person approves, then the work — Claude Code's and Kimi's
+plan mode, from LangChain's pieces (`trellis.harness.plan_mode`):
+
+```python
+from trellis.harness.plan_mode import PlanMode
+
+agent = h.wrap(
+    ReAct("You handle refunds.", "gpt-4o", tools=[order, refund], middleware=[PlanMode()]),
+    id="refunds",
+)
+await agent.run("refund o1", user="u", framework_options={"configurable": {"plan_mode": True}})
+```
+
+It is **entered on request, never by default**, as theirs is: the Claude Agent SDK's
+`permission_mode` is unset unless a caller sets `"plan"` (`ClaudeAgentOptions.permission_mode:
+PermissionMode | None = None`), and Kimi's plan mode is the user's to enter (from 2.4.0 the
+agent can no longer enter it itself; `default_plan_mode` is off). A run enters it through its
+`framework_options` — LangGraph's `configurable`, per run or for every run at `h.wrap` — where
+Claude's `permission_mode` and Kimi's `mode` go. A run that did not enter it is sent what it
+always was.
+
+* The plan is LangChain's `write_todos`, offered from the run's first call.
+* Its approval is LangChain's `HumanInTheLoopMiddleware` on `write_todos`, with its own `when`
+  predicate: one question (approve, edit the plan, or reject saying what to change — the model
+  then revises it and asks again), the harness's approval like any other.
+* Until it is approved, a call runs only if governance rates it a read (the catalog's risk,
+  else the tool's own). Any other — a write, a tool that says nothing, a hand-over to another
+  agent (`task`, a wrapped agent: its own calls are not this run's to bind) — is answered with
+  what to do instead, never run, and recorded as the run's rejected call.
+* Approved, the plan is in the graph's state (kept in the run: a resume in any worker keeps
+  it) and each call is governed as ever: a write still asks.
+
+### Checkpoint history: LangGraph's time travel
+
+`RunCheckpointer` keeps every checkpoint, as LangGraph's own savers do (`InMemorySaver` stores
+each under its id and prunes none; the Postgres saver likewise) — the Claude Agent SDK's file
+checkpoints are the opt-in one (`enable_file_checkpointing: bool = False`, which
+`rewind_files` needs). So LangGraph's own API works on a `ReAct` graph, and on a
+`middleware()` graph, as on any saver:
+
+```python
+graph = ReAct("...", model, tools=[...])
+config = {"configurable": {"thread_id": "t"}}
+states = [s async for s in graph.aget_state_history(config)]  # newest first
+await graph.ainvoke(None, states[3].config)  # continue from an earlier one
+await graph.aupdate_state(states[3].config, {"messages": [...]})  # or fork it
+```
+
+In a harness run the thread is the run, and its history is the run's: kept in its journal,
+saved with its pause and with a worker's progress, until the run ends — the run store clears a
+run's checkpoint with its ending, so there is no setting of its own, and nothing kept past the
+run. It is read with the same `aget_state_history` from code in the run (a tool, a hook, a
+node), on the run's id, and from outside it with `agent.checkpoints` (below).
+
+What it costs, measured on a scripted run (`ReAct`, no sub-agent): about 7 checkpoints a tool
+step and 10 a turn, each about 2 KB in the journal (its checkpoint and metadata, base64 in
+JSON), and what each step wrote, once. One tool call and an answer: 17 checkpoints, 36 KB
+against 4.5 KB for the latest alone; eleven tool calls: 87 checkpoints, 217 KB against 17 KB.
+A save still sends what the step added; the journal is compared in memory at each save, and
+written whole every 16th.
+
+#### Rewinding a paused run
+
+```python
+states = [s async for s in agent.checkpoints(run_id)]  # LangGraph's StateSnapshots, newest first
+result = await agent.rewind(
+    run_id, states[5].config["configurable"]["checkpoint_id"], reviewer="ada"
+)
+```
+
+`agent.checkpoints(run_id)` reads the history the run store keeps of a paused run (or of one a
+worker is running: what it last saved), read-only, a page of 20 at a time. `agent.rewind`
+continues the run's conversation from one of those checkpoints, as LangGraph's time travel
+does — `values=` applied to that state first, as LangGraph's `update_state` applies them — in
+a **new run** of the same user and thread, to its end or its first pause:
+
+* **on record.** The new run's `metadata["rewound"]` names the run and the checkpoint it
+  continues, who rewound it (`reviewer`) and when. The run rewound is left as it was — paused
+  on its question, its history readable: answer it, or cancel it.
+* **nothing done twice unasked.** What the run did in the world is not undone. A call that did
+  more than read past the checkpoint asks a person before the new run makes it again —
+  whatever "allow for this conversation" or "always allow" said before, since it is a second
+  effect — and runs once when approved; rejected, it does not run. A read is made again
+  freely. Asked about once, the call is decided as any call is from then on.
+* **the budget.** What the run spent before the rewind stays counted in the new run.
+* **refused**, changing nothing: a run at work (queued or running, on any server); a run
+  that has ended; a `reviewer` who is not the run's user; a checkpoint that is none of the
+  run's (another run's, another thread's); a run that is not this agent's in the caller's
+  tenant, as for every read of a run; and an agent whose runs keep no checkpoints (Claude,
+  Kimi, OpenAI Agents, a function, a graph with a checkpointer of its own), which answers
+  that checkpoints and rewind are not supported for it.
+
+**An ended run cannot be rewound.** The run store clears a run's checkpoint when the run
+ends (agent-runs: "the checkpoint ... is cleared when the run finishes"), so only a paused
+run has a history to go back in. A graph with a checkpointer of its own keeps LangGraph's
+time travel across runs ([langgraph.md](langgraph.md)). From code inside a run, a fork of the
+run's own thread is still refused (`RewindRefused`): a rewind starts from outside the run.
+
+Claude's own file checkpoints (`enable_file_checkpointing`, `rewind_files`) are a different
+feature — files on disk restored to a user message, opt-in in the Claude Agent SDK — and this
+API does not drive them.
+
+### Handoffs: `langgraph-swarm`
+
+Control passes to another agent, which answers the user — an OpenAI agent's handoff — with
+LangChain's own library for it, `langgraph-swarm` (in the `react` extra), used as it is: its
+`create_handoff_tool` among an agent's tools, its `SwarmState` and its router:
+
+```python
+from langgraph.graph import StateGraph
+from langgraph_swarm import SwarmState, add_active_agent_router, create_handoff_tool
+from trellis.harness.middleware import RunCheckpointer
+
+desk = ReAct("You are the front desk.", model, tools=[create_handoff_tool(agent_name="billing")])
+billing = ReAct("You do refunds.", model, tools=[refund, create_handoff_tool(agent_name="desk")])
+builder = (
+    StateGraph(SwarmState)
+    .add_node("desk", desk, destinations=("billing",))
+    .add_node("billing", billing, destinations=("desk",))
+)
+team = add_active_agent_router(builder, route_to=["desk", "billing"], default_active_agent="desk")
+agent = h.wrap(team.compile(checkpointer=RunCheckpointer()), id="support")
+```
+
+(`create_swarm([...])` builds the same graph from agents that have names of their own:
+`create_agent(..., middleware=middleware(), name="desk")`.) What the harness adds:
+
+* **governed and recorded.** A handoff tool is a hand-over, as Deep Agents' `task` is: the
+  call is the run's tool call (`transfer_to_billing`: its stream, its trajectory, the memory
+  record, a span), it only reads, so it asks nobody unless the catalog says otherwise — and
+  each call the agent handed to then makes is governed on its own (its refund still asks).
+* **whose turn it is.** The hand-over call says who takes over within a turn; the
+  conversation's next turn starts with the agent it was last handed to (langgraph-swarm's
+  `active_agent`, carried from turn to turn for the tenant's, the user's conversation as Deep
+  Agents' task list is — kept in the file store, so on any server) and says so on its stream
+  (the `CUSTOM` event `active_agent`).
+* **memory.** The conversation, its memory and its records are the wrapped agent's
+  (`id="support"`): the agents of the graph share them, as they share langgraph-swarm's
+  `messages`.
+* **a pause resumes in place.** With `RunCheckpointer()` the graph's checkpoints are the
+  run's: after an approval neither the hand-over nor the steps before it are asked of a model
+  again, on any worker.
+
+The agents' own tools are LangChain tools (their tool nodes run them, governed by what each
+declares in its `metadata`, else the catalog); the functions given to an inner `ReAct`'s
+`tools=` are the run's only when the graph wrapped is that `ReAct`.
+
+### Fan-out: many sub-agents at once (a recipe)
+
+Kimi's `AgentSwarm` — one sub-agent an item, all at once — is LangGraph's `Send` over the
+items, given to `ReAct` as a sub-agent of its own (Deep Agents' `CompiledSubAgent`). It needs
+no harness code: a wrapped agent run from a node is the run's child
+([Sub-agents and child runs](#sub-agents-and-child-runs)), so each item has a run record of
+its own (its parent, its thread, its spend counted to the parent's budget), governed as any
+run, and they work at once only as far as the harness's admission limit lets them (4 at
+first, up to 16, fewer under load: `trellis.harness.admission`).
+
+```python
+import operator
+from typing import Annotated, TypedDict
+
+import trellis
+from langchain_core.messages import AIMessage, AnyMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.types import Send
+
+researcher = h.wrap(ReAct("You research one item.", model, tools=[search]), id="researcher")
+
+
+class Fan(TypedDict, total=False):
+    messages: Annotated[list[AnyMessage], add_messages]
+    item: str
+    found: Annotated[list[str], operator.add]
+
+
+def items(state: Fan) -> list[Send]:  # one Send a line of the task
+    return [
+        Send("work", {"item": line}) for line in str(state["messages"][-1].content).splitlines()
+    ]
+
+
+async def work(state: Fan) -> Fan:
+    result = await researcher.run(state["item"], user=trellis.current().user)  # a child run
+    return {"found": [str(result.answer)]}
+
+
+def gather(state: Fan) -> Fan:
+    return {"messages": [AIMessage("\n".join(state["found"]))]}
+
+
+builder = StateGraph(Fan)
+builder.add_node("work", work)
+builder.add_node("gather", gather)
+builder.add_conditional_edges(START, items, ["work"])
+builder.add_edge("work", "gather")
+builder.add_edge("gather", END)
+
+lead = ReAct(
+    "You lead the research.",
+    model,
+    subagents=[
+        {
+            "name": "fan_out",
+            "description": "Researches many items at once: give one item a line.",
+            "runnable": builder.compile(),
+        }
+    ],
+)
+```
+
+Tested in `tests/integration/test_react_fan_out.py`.
+
+### Compaction on request
+
+Claude's and Kimi's `/compact`, the model's own way: Deep Agents' `SummarizationToolMiddleware`
+(its `compact_conversation` tool), opt-in through `middleware=`:
+
+```python
+from deepagents.middleware.summarization import create_summarization_tool_middleware
+from trellis.harness.automatic import JournalBackend
+
+backend = JournalBackend()
+ReAct(
+    "...", model, backend=backend, middleware=[create_summarization_tool_middleware(model, backend)]
+)
+```
+
+The tool is the graph's own machinery — a summary in the history's place, the history kept in
+the backend as Deep Agents' automatic summarization keeps it — so it is declared a read (on
+any wrapped graph that has it, `middleware()`'s too): the model compacts without a person
+approving it. Deep Agents refuses a compaction that is too early (under half its automatic
+trigger); the run's question stays ahead of the summary, as with the automatic one.
+
+### A goal loop: the answer graded and revised (a recipe)
+
+Kimi's goal mode and Claude's `/loop`, as Deep Agents has it: `RubricMiddleware`, opt-in
+through `middleware=`. A run whose input names a `rubric` has its answer graded by a model of
+its own and revised until the grader is satisfied; a run that names none is sent what it
+always was.
+
+```python
+from deepagents.middleware.rubric import RubricMiddleware
+
+agent = h.wrap(
+    ReAct(
+        "You answer with units.", model, tools=[mast], middleware=[RubricMiddleware(model=grader)]
+    ),
+    id="surveyor",
+)
+await agent.run(
+    {"messages": [{"role": "user", "content": "how high is the mast?"}], "rubric": "Says the unit"},
+    user="u",
+)
+```
+
+It needs no harness code: the grader's calls count to the run's budget and spend as every
+model call of the graph does, and the revisions are model steps under `max_steps`. It adds
+model calls to every graded run, so it is never a default
+(`tests/integration/test_react_rubric.py`).
+
+### Guardrails: input and output (a recipe)
+
+An OpenAI agent's input and output guardrails are LangChain's `@before_agent` and
+`@after_agent` hooks with `jump_to`, given through `middleware=`:
+
+```python
+from langchain.agents.middleware import after_agent, before_agent
+from langchain_core.messages import AIMessage
+
+
+@before_agent(can_jump_to=["end"])
+def no_card_numbers(state, runtime):
+    if holds_a_card_number(state["messages"][-1].content):
+        return {"messages": [AIMessage("I cannot help with card numbers.")], "jump_to": "end"}
+
+
+@after_agent
+def no_cards_out(state, runtime):
+    answer = state["messages"][-1]
+    if holds_a_card_number(answer.content):
+        return {"messages": [AIMessage("The answer was withheld.", id=answer.id)]}
+
+
+ReAct("You help with accounts.", model, tools=[account], middleware=[no_card_numbers, no_cards_out])
+```
+
+A blocked input reaches no model and no tool; the guard's message is the turn's answer. It
+needs no harness code, and the blocked turn is the run's as any other: its record (`SUCCESS`,
+the guard's answer its output), its stream, the conversation's memory — so the next turn's
+model reads that the request was refused — and every tool call made before an output guard
+stays recorded. For a policy model as the guard, LangChain's `OpenAIModerationMiddleware` and
+`PIIMiddleware` go in `middleware=` the same way (`tests/integration/test_react_guardrails.py`).
+
+### Model fallback and routing, through the gateway
+
+LangChain's `ModelFallbackMiddleware` and `ModelRouterMiddleware` take chat models; a name
+given to them as text is LangChain's to make (`init_chat_model`: the provider's own SDK and
+key, past the gateway). Give them the harness's routed chat model of the name — what `ReAct`
+makes of its own `model` name — and the fallback, or the model the router picks, goes through
+the gateway as the main model does: the route's form of the name, its key, the gateway's
+headers for the run (its MCP tools, its attribution), the run's budget:
+
+```python
+from langchain.agents.middleware import ModelFallbackMiddleware
+from trellis.harness.gateways import routed_chat_model
+
+ReAct(
+    "...",
+    "anthropic/claude-sonnet-4-5",
+    middleware=[ModelFallbackMiddleware(routed_chat_model("openai/gpt-4o"))],
+)
+```
+
+(`tests/integration/test_react_routed_fallback.py`.)
+
+### The capabilities, against the other libraries
+
+What each library has, and where `ReAct` gets it. Columns: C = Claude Agent SDK / Claude Code,
+K = Kimi Code, O = OpenAI Agents, L = LangChain / LangGraph / Deep Agents. The source of each
+row is the library's own class or tool and, for `ReAct`, the code and its test.
+
+| Capability | C | K | O | L | `ReAct` | Source |
+|---|---|---|---|---|---|---|
+| Function tools, governed | yes | yes | yes | yes | yes: `tools=` | `react._split`; `test_react.py` |
+| MCP tools, resources, elicitation | yes | yes | yes | yes | yes: `mcp(...)`, the gateway's | [tools.md](../tools.md); `test_mcp_resources.py`, `test_mcp_elicitation.py` |
+| File tools | `Read`/`Write`/`Edit` | `Read`/`Write` | sandbox | Deep Agents `FilesystemMiddleware` | yes: Deep Agents', held until a long task | `automatic.LongTaskTools`; `test_react_long_tasks.py` |
+| Shell / code in a sandbox | `Bash` | `Bash` | `ShellTool`, sandbox | Deep Agents `execute` | yes: `backend=sandbox()` | `sandbox.backend`; `test_sandbox_backend.py` |
+| Provider tools: web search, web fetch, code execution | `WebSearch`, `WebFetch` | `WebSearch`, `FetchURL` | `WebSearchTool`, `CodeInterpreterTool` | provider `dict` tools | yes: `tools=[{...}]`, governed and recorded | `provider_tools.py`; `test_react_provider_tools.py` |
+| Computer use | Chrome | no | `ComputerTool` | no executor (the tool is only formatted) | no: refused, saying to give a function | `provider_tools.CLIENT_RUN`; `test_react_provider_tools.py` |
+| Sub-agents | `Agent` | `Agent` | agent tools | Deep Agents `task` | yes: `subagents=`, each a child run | `react._subagents`; `test_react_helpers.py` |
+| Background sub-agents | yes | yes | no | Deep Agents async sub-agents | yes: Deep Agents' five task tools | `bridges.background_tasks`; `test_react_background.py` |
+| Many sub-agents at once | `Workflow` | `AgentSwarm` | no | `Send` | yes: the `Send` recipe, each a child run | [above](#fan-out-many-sub-agents-at-once-a-recipe); `test_react_fan_out.py` |
+| Handoffs | no | no | `handoffs=` | `langgraph-swarm` | yes: `create_handoff_tool` | `middleware._hands_off`, `adapters.langgraph.ACTIVE_AGENT`; `test_react_handoffs.py` |
+| Planning (a todo list) | `TodoWrite` | `TodoList` | no | `TodoListMiddleware` | yes: on a long task | `automatic.Planning`; `test_react_long_tasks.py` |
+| Plan mode | `permission_mode="plan"`, on request | `mode=plan`, on request | no | no | yes: `PlanMode()`, on request | `plan_mode.py`; `test_react_plan_mode.py` |
+| Skills | yes | yes | sandbox | Deep Agents `SkillsMiddleware` | yes: `skills=`, the helper too | `skills.py`; `test_skills.py` |
+| Memory files (`AGENTS.md`) | `CLAUDE.md` | `AGENTS.md` | no | Deep Agents `MemoryMiddleware` | yes: `memory_files=` | `react.ReAct`; `test_react_deep_agents.py` |
+| Long-term memory | auto memory | no | sandbox memory | store | yes: the memory service | [memory.md](../memory.md); `test_memory_pipeline.py` |
+| Summarization near the window's end | yes | yes | Responses compaction | `SummarizationMiddleware` | yes: Deep Agents', with a capability; `FitWindow` alone | `react._middleware`; `test_react_context.py`, `test_fit_window.py` |
+| Compaction on request | `/compact` | `/compact` | no | Deep Agents `SummarizationToolMiddleware` | yes: opt-in, asks nobody | `middleware.COMPACT`; `test_react_compaction_tool.py` |
+| Approvals | `can_use_tool` | permission requests | `needs_approval` | `HumanInTheLoopMiddleware` | yes: the catalog, one question | [governance.md](../governance.md); `test_approvals.py`, `test_hitl_middleware.py` |
+| Ask the user | `AskUserQuestion` | `AskUserQuestion` | no | `interrupt` | yes: `ask_user` | `tools.ask`; `test_ask_user.py` |
+| Guardrails | hooks | hooks | input/output guardrails | `@before_agent`/`@after_agent`, `jump_to` | yes: the recipe, the blocked turn recorded | [above](#guardrails-input-and-output-a-recipe); `test_react_guardrails.py` |
+| Goal loop / self-evaluation | `/loop` | goal mode | no | Deep Agents `RubricMiddleware` | yes: opt-in | [above](#a-goal-loop-the-answer-graded-and-revised-a-recipe); `test_react_rubric.py` |
+| Model fallback and routing | `fallback_model` | no | no | `ModelFallbackMiddleware`, `ModelRouterMiddleware` | yes: routed through the gateway | `gateways.routed_chat_model`; `test_react_routed_fallback.py` |
+| Structured output | yes | no | `output_type` | `response_format` | yes: `response_format=` | `react.ReAct`; `test_react.py` |
+| Checkpoint history / time travel | `rewind_files` (opt-in), `fork_session` | `session/fork` | no | `get_state_history`, `update_state` | history kept and read; a run is not rewound yet | `middleware.RunCheckpointer`; `test_react_rewind.py` |
+| Steering a running turn | yes | TUI only | no | no | yes: `mode="steer"` | `middleware.HarnessTools`; `test_inbox.py` |
+| Step limit, stall guard, budget | `max_turns`, `max_budget_usd` | repeat breaker | `max_turns` | `ModelCallLimitMiddleware` | yes: `max_steps`, `max_repeats`, `budget=` | `middleware.AnswerAtLimit`, `StallGuard`; `test_react.py`, `test_budget.py` |
+| Prompt caching | yes | yes | yes | `AnthropicPromptCachingMiddleware` | yes: `PromptCache` | `middleware.PromptCache`; `test_react_spending.py` |
+| Scheduling | cron | cron | no | no | yes: the harness's schedule tools | `schedules.py`; `test_schedules.py` |
+| Slash commands, agent teams, realtime voice | yes | yes | realtime | no | no: text dispatch is a way past approvals; teams and voice have no LangChain piece to borrow | [claude-agent-sdk.md](claude-agent-sdk.md), [kimi.md](kimi.md) |
 
 ## Limits
 

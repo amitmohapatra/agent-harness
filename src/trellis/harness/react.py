@@ -64,6 +64,7 @@ from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import (
     MODEL_METADATA,
     PROMPT_METADATA,
+    PROVIDER_TOOLS,
     TOOLS_ATTRIBUTE,
     WINDOW_METADATA,
     context_window,
@@ -349,19 +350,16 @@ def ReAct(
     else:
         log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
     own, run = _split(tools)
+    provided = _provided(own)
     strategies = _strategies(subagents)
     native, helpers = _subagents(
-        subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
-    )
-    tasks = _background(native, helpers, strategies, max_steps=max_steps)
-    # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
-    # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's
-    general = _native(
-        dict(GENERAL_PURPOSE_SUBAGENT),
+        subagents,
         call_timeout=call_timeout,
         max_steps=max_steps,
         max_repeats=max_repeats,
+        provided=provided,
     )
+    tasks = _background(native, helpers, strategies, max_steps=max_steps)
     own_helpers = {s.get("name") for s in native}
     profiled = _profiled(chat, window)
     cached, middleware = ours.prompt_cache(middleware)
@@ -379,6 +377,16 @@ def ReAct(
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
         fed = sourced.deep_agent(files_backend)
         graph_backend, skills = fed["backend"], fed["skills"]
+    # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
+    # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's,
+    # and the agent's skills, as Deep Agents gives the one it builds itself
+    general = _native(
+        {**GENERAL_PURPOSE_SUBAGENT, **({"skills": skills} if skills else {})},
+        call_timeout=call_timeout,
+        max_steps=max_steps,
+        max_repeats=max_repeats,
+        provided=provided,
+    )
     # a Deep Agents capability asked for: Deep Agents' tools from the first step (files
     # outside the graph's state — a disk, a store, a sandbox — governed) and its summarization
     # of the older turns, unless the window is known to have no room for them
@@ -423,6 +431,7 @@ def ReAct(
         middleware=[
             _nothing(SUMMARIZATION),
             *([tasks] if tasks is not None else []),
+            *([provided] if provided is not None else []),
             *stacked(defaults, middleware),
             cached,
         ],
@@ -448,7 +457,19 @@ def ReAct(
     )
     if tasks is not None:
         tasks.compiled(_compiled(graph))
-    return _described(graph, named, window, instructions, [*run, *helpers])
+    described = _described(graph, named, window, instructions, [*run, *helpers])
+    if provided is not None:  # of the run's tool set, beside what its tool nodes run
+        setattr(described, PROVIDER_TOOLS, list(provided.specs.values()))
+    return described
+
+
+def _provided(own: Sequence[Any]) -> Any:
+    """The middleware that governs and records the provider's own tools among ``own`` (each a
+    ``dict``: ``provider_tools.ProviderTools``); none when there are none."""
+    from trellis.harness.provider_tools import ProviderTools, checked
+
+    given = [t for t in own if isinstance(t, dict)]
+    return ProviderTools(checked(given)) if given else None
 
 
 #: What Deep Agents' ``update_strategy`` says a follow-up does with the task's run at work, as
@@ -577,12 +598,19 @@ def _split(tools: Sequence[Any]) -> tuple[list[Any], list[Any]]:
             raise ConfigurationError(
                 f"an agent is a sub-agent: ReAct(subagents=[...]), not tools= ({given!r})"
             )
-    own = [t for t in tools if isinstance(t, BaseTool)]
-    return own, [t for t in tools if not isinstance(t, BaseTool)]
+    # a provider's own tool (a ``dict``: web search, code execution) is the graph's, bound to
+    # the model as LangChain binds it (``provider_tools``)
+    own = [t for t in tools if isinstance(t, BaseTool | dict)]
+    return own, [t for t in tools if not isinstance(t, BaseTool | dict)]
 
 
 def _subagents(
-    subagents: Sequence[Any], *, call_timeout: float | None, max_steps: int, max_repeats: int
+    subagents: Sequence[Any],
+    *,
+    call_timeout: float | None,
+    max_steps: int,
+    max_repeats: int,
+    provided: Any,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     """``subagents=`` as Deep Agents' (its ``SubAgent``, ``CompiledSubAgent`` and
     ``AsyncSubAgent`` dicts, :func:`_native`) and the harness's (wrapped agents and
@@ -604,6 +632,7 @@ def _subagents(
                     call_timeout=call_timeout,
                     max_steps=max_steps,
                     max_repeats=max_repeats,
+                    provided=provided,
                 )
             )
         elif isinstance(given, Pregel):
@@ -621,7 +650,12 @@ def _subagents(
 
 
 def _native(
-    spec: dict[str, Any], *, call_timeout: float | None, max_steps: int, max_repeats: int
+    spec: dict[str, Any],
+    *,
+    call_timeout: float | None,
+    max_steps: int,
+    max_repeats: int,
+    provided: Any = None,
 ) -> dict[str, Any]:
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
@@ -634,7 +668,9 @@ def _native(
     run's, as Deep
     Agents gives it the main agent's: ``ReAct``'s are offered per model call
     (``HarnessTools``, governed: ``GovernTools``), so it is given those two; one that names
-    its own tools has exactly those."""
+    its own tools has exactly those. The provider's own tools it is given — its own, else the
+    main agent's (``provided``), which Deep Agents hands it — are governed and recorded as the
+    main agent's are (``provider_tools.ProviderTools``)."""
     if "graph_id" in spec:  # an async sub-agent on a server: what it is told to call
         return _remote(spec)
     if "runnable" in spec:
@@ -645,8 +681,10 @@ def _native(
         spec["model"] = routed_chat_model(spec["model"])
     cache, given = ours.prompt_cache(spec.get("middleware") or [])
     names = {m.name for m in given}
+    served = _provided(spec["tools"]) if "tools" in spec else provided
     guards = [
         *([] if "tools" in spec else [ours.HarnessTools(), ours.GovernTools()]),
+        *([] if served is None else [served]),
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),

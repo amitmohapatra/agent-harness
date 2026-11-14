@@ -91,11 +91,19 @@ from trellis.harness.tools.base import (
 )
 
 log = logging.getLogger("trellis.run")
+#: The key of an observed call's metadata saying who of its framework's own made it (a Claude
+#: workflow's agent: its ``agent_id`` and ``agent_type``), kept on its result's event.
+MADE_BY: Final = "made_by"
 #: The tenants whose tool permissions could not be read, said once each (of the most recent).
 _UNREAD: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
 
 #: Why a person is asked about a call its framework asks about (:func:`asked`).
 FRAMEWORK_ASKS: Final = "{framework} asks before it runs this call."
+#: Why a call that did more than read asks again in a run rewound past it (``Journal.repeats``).
+REWOUND_PAST: Final = (
+    "{tool} already ran with these arguments before the rewind: running it again is a second "
+    "effect."
+)
 #: The ``error_class`` of a call whose arguments did not fit the tool's schema.
 INVALID_ARGUMENTS: Final = "InvalidArguments"
 #: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
@@ -417,6 +425,8 @@ async def _called(
     if not again:
         budget.count_tool_call(runtime)
         _started(runtime, ref, tool.name, tool_call.args)
+        if decision.risk != "read":  # what a rewind past this step would make again
+            runtime.replay.effected(content_key("call", tool.name, tool_call.args))
     try:
         outcome, owed = await _ran(
             runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
@@ -717,12 +727,14 @@ async def _decided(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
     ours = tool is not None
+    decision, repeat = _rewound_past(runtime, spec, call, decision)
     # a call answered already in this run keeps its answer: a denial stays the call's (a new
     # call its framework names by another id is asked: ``Replay.answer``)
     answered = runtime.replay.answered(content_key("approve", spec.name, call.args))
     if (
         decision.asks
         and not answered
+        and repeat is None
         and (why := await _allowed(runtime, decision, ours=ours, hooked=asked is not None))
         is not None
     ):
@@ -739,6 +751,7 @@ async def _decided(
         resolution = await _answered(
             runtime, call, decision, ours=ours, hooked=hooked, deciding=deciding
         )
+        runtime.replay.journal.asked_again(repeat)
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
         remembered = runtime.replay.journal.remembered
         covered = reach(spec.name, decision.assignee)
@@ -768,6 +781,20 @@ async def _decided(
     elif decision.announces:
         events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
+
+
+def _rewound_past(
+    runtime: Runtime, spec: ToolSpec, call: ToolCall, decision: Decision
+) -> tuple[Decision, str | None]:
+    """A call the run it continues made past the checkpoint it was rewound to
+    (``Journal.repeats``) and that does more than read: a second effect in the world, so the
+    decision asks a person whatever was allowed for the run or the conversation — with the
+    call's key there; any other call: its decision as it is, and no key."""
+    repeats = runtime.replay.journal.repeats
+    key = content_key("call", spec.name, call.args) if repeats else None
+    if decision.risk == "read" or key not in repeats:
+        return decision, None
+    return decision.asking(REWOUND_PAST.format(tool=spec.name)), key
 
 
 def _said_before(*_args: Any, **_kwargs: Any) -> None:
@@ -973,9 +1000,19 @@ def _filed(recorded: Any, key: str) -> dict[str, Any] | None:
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
     """A call that did not run here (refused, rejected, its effect unknown, run by its
-    framework) still appears on the stream, so a UI sees every step."""
+    framework) still appears on the stream, so a UI sees every step — with who made it, when
+    its framework said (:data:`MADE_BY`)."""
     _started(runtime, ref, call.tool, call.args)
-    _ended(runtime, ref, call.tool, status=outcome.status.value, output=outcome.output)
+    by = {MADE_BY: outcome.metadata[MADE_BY]} if MADE_BY in outcome.metadata else {}
+    _ended(
+        runtime,
+        ref,
+        call.tool,
+        status=outcome.status.value,
+        cached=outcome.cached,
+        output=outcome.output,
+        **by,
+    )
 
 
 def _cut(runtime: Runtime, ref: str, tool: str, status: str) -> None:

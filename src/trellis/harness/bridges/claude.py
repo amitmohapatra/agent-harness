@@ -21,6 +21,9 @@ to put it behind.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import dataclasses
 import functools
 import logging
 import weakref
@@ -54,9 +57,187 @@ def harness_matcher(hook: Any) -> HookMatcher:
     return HookMatcher(hooks=[hook])
 
 
+def deciding_matcher(hook: Any) -> HookMatcher:
+    """A :func:`harness_matcher` whose ``hook`` decides whether a call runs: Claude Code
+    blocks the call when the hook fails (the SDK's ``on_failure="block"``; unset, a failed
+    hook decides nothing and the call goes on to Claude Code's permission mode), and the SDK
+    starts no query on a Claude Code too old to block."""
+    return dataclasses.replace(harness_matcher(hook), on_failure="block")
+
+
 def ours(matcher: Any) -> bool:
     """Whether a hook matcher is the harness's own (:func:`harness_matcher`)."""
     return bool(matcher.hooks) and all(hook in _OURS for hook in matcher.hooks)
+
+
+class SessionCost:
+    """One Claude session's running cost, as the last of its results that was charged carried
+    it. A result's ``total_cost_usd`` is its session's running total — its turns and the
+    attempts before it included, on whatever process — so a result is charged what the total
+    grew by since. One object owns that for a session: a query's spending
+    (``adapters.claude.Spending``) and the conversation's live session
+    (``claude_live.LiveSession``) share it, and the run's journal keeps its ``total``
+    (``Journal.session_cost``) for an attempt elsewhere."""
+
+    __slots__ = ("total",)
+
+    def __init__(self, total: float = 0.0) -> None:
+        self.total = total
+
+    def grew_by(self, total: float) -> float:
+        """What a result that carries ``total`` is charged, the total now the last charged. A
+        total lower than the last is a reset — Claude Code zeroes its totals when the
+        conversation is replaced (the SDK's ``ConversationResetMessage``) — and all of the
+        new total is charged: counted as nothing, the spend would escape the budget."""
+        more = total - self.total if total >= self.total else total
+        self.total = total
+        return more
+
+    def owed(self, share: float) -> None:
+        """``share`` of what a result was charged went to nobody (a turn no run was served
+        for): it is in what the session's next result is charged."""
+        self.total -= share
+
+
+#: The ``task_type`` of a dynamic workflow's task (it names no ``is_backgrounded``: it is
+#: always in the background).
+WORKFLOW_TASK: Final = "local_workflow"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TaskStarted:
+    """A task Claude Code started (its ``task_started``): its id — the ``agent_id`` its
+    worker's calls name —, the tool call that started it, how the call described it, and
+    whether it works in the background of that call (a subagent that says so,
+    ``is_backgrounded``; a dynamic workflow, always)."""
+
+    task_id: str
+    call_id: str | None
+    described: str
+    background: bool
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TaskEnded:
+    """A task that ended: its status and — ``final``, its ``task_notification`` — its
+    summary; a ``task_updated`` to a terminal status, which may be all that comes, has
+    none and may be followed by the notification."""
+
+    task_id: str
+    status: str
+    summary: str
+    final: bool
+
+
+def task_said(message: Any) -> TaskStarted | TaskEnded | None:
+    """What a message of Claude's stream says of a task (``None``: nothing): the one reader
+    of its task messages, for a query's helpers and a live session's background runs."""
+    from claude_agent_sdk import (
+        TERMINAL_TASK_STATUSES,
+        TaskNotificationMessage,
+        TaskStartedMessage,
+        TaskUpdatedMessage,
+    )
+
+    if isinstance(message, TaskStartedMessage):
+        data = message.data
+        background = bool(data.get("is_backgrounded")) or data.get("task_type") == WORKFLOW_TASK
+        return TaskStarted(message.task_id, message.tool_use_id, message.description, background)
+    if isinstance(message, TaskNotificationMessage):
+        return TaskEnded(message.task_id, str(message.status), message.summary or "", True)
+    if isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES:
+        return TaskEnded(message.task_id, str(message.status), "", False)
+    return None
+
+
+#: How long Claude Code waits for a hook whose matcher sets no ``timeout`` (seconds).
+HOOK_SECONDS: Final = 60.0
+#: The events at which a team's hook may put something in the place of what the call's other
+#: hooks were given: the keys of its answer that do, and the key of the hook's input they
+#: replace — a call's arguments before it runs, its result after.
+REPLACES: Final[dict[str, tuple[tuple[str, ...], str]]] = {
+    "PreToolUse": (("updatedInput",), "tool_input"),
+    "PostToolUse": (("updatedToolOutput", "updatedMCPToolOutput"), "tool_response"),
+}
+
+
+class _Theirs:
+    """The team's own hooks asked about one call at one event: when each has answered (and
+    how long Claude Code waits for it), and what they said, in the order the answers came."""
+
+    __slots__ = ("asked", "said")
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[asyncio.Future[None], float]] = []
+        self.said: list[Any] = []
+
+
+def after_theirs(hooks: Mapping[str, Sequence[Any]]) -> dict[str, list[Any]]:
+    """``hooks`` with the harness's own hooks of a tool call (:func:`ours`) answering after
+    the team's. Claude Code asks every hook of an event at once, in the order they are
+    registered — the team's first — and takes the arguments (``updatedInput``) of the one
+    that answers last (seen with the bundled CLI, 2.1.325): asked beside them, the harness
+    decided and recorded the call as the model made it, not as the team's hook left it. Here
+    a harness hook waits for the team's hooks asked about the same call (no longer than
+    Claude Code waits for them), reads the call as they left it — its arguments before it
+    runs, its result after (:data:`REPLACES`) — and says nothing of a call one of them
+    refused: Claude Code refuses it. Kept per call until the harness's hook read it."""
+    calls: dict[tuple[str, str], _Theirs] = {}
+
+    def theirs(event: str, callback: Any, seconds: float) -> Any:
+        async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+            ref = tool_use_id or given.get("tool_use_id")
+            answered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            found = calls.setdefault((event, ref), _Theirs()) if ref else _Theirs()
+            found.asked.append((answered, seconds))
+            try:
+                answer = await callback(given, tool_use_id, hook)
+                found.said.append(answer)
+                return answer
+            finally:
+                answered.set_result(None)
+
+        return relay
+
+    def own(event: str, callback: Any) -> Any:
+        keys, replaced = REPLACES[event]
+
+        async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+            ref = tool_use_id or given.get("tool_use_id")
+            found = calls.pop((event, ref), None) if ref else None
+            for answered, seconds in found.asked if found is not None else ():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(answered), seconds)
+            said = [a for a in (found.said if found is not None else ()) if isinstance(a, dict)]
+            if any(_refuses(answer) for answer in said):
+                return {}
+            specific = [answer.get("hookSpecificOutput") or {} for answer in said]
+            left = [out[key] for out in specific for key in keys if key in out]
+            if left:
+                given = {**given, replaced: left[-1]}
+            return await callback(given, tool_use_id, hook)
+
+        _OURS.add(relay)
+        return relay
+
+    def ordered(event: str, matcher: Any) -> Any:
+        if ours(matcher):
+            return dataclasses.replace(matcher, hooks=[own(event, c) for c in matcher.hooks])
+        seconds = matcher.timeout or HOOK_SECONDS
+        return dataclasses.replace(
+            matcher, hooks=[theirs(event, c, seconds) for c in matcher.hooks]
+        )
+
+    return {
+        event: [ordered(event, m) if event in REPLACES else m for m in matchers]
+        for event, matchers in hooks.items()
+    }
+
+
+def _refuses(answer: Mapping[str, Any]) -> bool:
+    """Whether a hook's answer about a call refuses it, or stops the turn."""
+    decided = (answer.get("hookSpecificOutput") or {}).get("permissionDecision")
+    return decided == "deny" or answer.get("continue_") is False
 
 
 def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dict[str, Any]:
@@ -138,6 +319,14 @@ class JournalSessions:
     async def load(self, key: Mapping[str, Any]) -> list[dict[str, Any]] | None:
         kept = self.journal.transcripts.get(_name(key))
         return list(kept) if kept else None
+
+    async def list_subkeys(self, key: Mapping[str, Any]) -> list[str]:
+        """The ``subpath`` of each transcript the session's subagents keep beside its own: a
+        resume restores them with it (the SDK asks when the store has this)."""
+        under = f"{key['session_id']}/"
+        return [
+            name.removeprefix(under) for name in self.journal.transcripts if name.startswith(under)
+        ]
 
 
 def _name(key: Mapping[str, Any]) -> str:

@@ -22,6 +22,7 @@ from trellis.contracts import RunStatus
 from trellis.harness.bridges.claude import JournalSessions, _said_local
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
+from trellis.harness.sandbox import DELIVERS_HERE
 from trellis.runs import Job
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -196,7 +197,8 @@ async def test_a_memory_service_that_is_down_leaves_the_prompt_without_context(
     memory_service.fail.add("context")
     agent = memory_harness.wrap(machine(tmp_path, "one", [{"text": "[{context}]"}]), id="down")
     events = [e async for e in agent.stream("hi", user="ada")]
-    assert events[-1].data["result"] == "[]"
+    # no context of memory's: only what Claude is told of outputs/ (no system prompt to say it)
+    assert events[-1].data["result"] == f"[{DELIVERS_HERE}]"
     assert [e.data["code"] for e in events if e.data.get("name") == "warning"] == [
         "memory_unavailable"
     ]
@@ -220,3 +222,6 @@ async def test_the_journal_keeps_each_entry_once_by_its_uuid() -> None:
     sub = {"project_key": "here", "session_id": "s1", "subpath": "subagents/agent-1"}
     await store.append(sub, [{"type": "user", "uuid": "u2"}])
     assert list(journal.transcripts) == ["s1", "s1/subagents/agent-1"]
+    # a session's subagents' transcripts, listed for a resume to restore with it
+    assert await store.list_subkeys(elsewhere) == ["subagents/agent-1"]
+    assert await store.list_subkeys({"project_key": "here", "session_id": "s2"}) == []

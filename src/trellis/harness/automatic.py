@@ -38,6 +38,7 @@ from langchain.agents.middleware import (
 from langchain.agents.middleware.todo import TodoListMiddleware
 from langchain_core.messages import HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
+from langgraph.config import get_config
 
 from trellis.harness import budget
 from trellis.harness.middleware import _named, no_tool
@@ -55,6 +56,9 @@ MIN_WINDOW: Final = 32_000
 LONG_AT: Final = 0.5
 #: ``write_todos``: the planning tool.
 TODOS: Final = "write_todos"
+#: The ``configurable`` key of a run in plan mode (``framework_options={"configurable":
+#: {"plan_mode": True}}``: ``plan_mode.PlanMode``), whose plan is ``write_todos``.
+PLAN_MODE: Final = "plan_mode"
 #: Deep Agents' scratch file tools a long task is offered (``read_file`` reads saved results
 #: anyway: ``ReadTools``).
 SCRATCH: Final = frozenset({"ls", "write_file", "edit_file", "delete", "glob", "grep"})
@@ -74,6 +78,12 @@ def long_task(request: ModelRequest[Any], window: int) -> bool:
     run's own behaviour, never the request's wording, and it holds for the rest of the thread:
     a conversation only grows."""
     return count_tokens_approximately(request.messages) > int(LONG_AT * window)
+
+
+def plan_mode_asked() -> bool:
+    """Whether the graph run this is called in (a middleware's hook, a node) entered plan mode
+    (:data:`PLAN_MODE`, in its config)."""
+    return bool((get_config().get("configurable") or {}).get(PLAN_MODE))
 
 
 class _LongTasks:
@@ -141,7 +151,7 @@ class Planning(_LongTasks, TodoListMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> Any:
-        if self.always or self.wanted(request):
+        if self.always or self.wanted(request) or plan_mode_asked():
             return await handler(request)  # the tool, its description its guidance
         return await handler(without_tools(request, {TODOS}))
 

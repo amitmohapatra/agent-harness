@@ -44,8 +44,8 @@ LIMIT: Final = (
     "This run has reached its limit of {limit} steps. Do not call tools: answer now with what "
     "you found, and say what is left undone."
 )
-#: The same, told in a framework's session that the conversation's next turn continues (Claude
-#: Agent SDK, ACP): kept there, :data:`LIMIT` read as still in force, and a later turn answered
+#: The same, told in a framework's session that the conversation's next turn continues (ACP):
+#: kept there, :data:`LIMIT` read as still in force, and a later turn answered
 #: "I've reached the tool-call limit" without calling a tool.
 TURN_LIMIT: Final = (
     "This turn has reached its limit of {limit} steps. Do not call tools now: answer with what "

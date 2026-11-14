@@ -598,6 +598,17 @@ def test_the_readers_of_a_kept_result_stay_offered_when_the_tools_are_narrowed()
     assert whole == {QUERY_RESULT, READ_FILE} and len(floor.tools) == 2 + 8  # the first 8
 
 
+def test_a_providers_own_tool_stays_whole_when_the_tools_are_narrowed() -> None:
+    """A provider's own tool (``provider_tools``: a ``dict`` with a type of its own) is the
+    provider's definition, not a schema of ours to cut to a signature: it stays as given, and
+    a function's schema given as a ``dict`` is narrowed as any tool."""
+    search = {"type": "web_search_20250305", "name": "web_search", "max_uses": 2}
+    schema = {"type": "function", "function": {"name": "f", "description": "d", "parameters": {}}}
+    tools: list[Any] = [*(lc(f"tool_{n}") for n in range(12)), search, schema]
+    out = ours._narrowed(request([HumanMessage("x")], tools), 1, None, least=0, signed=0)
+    assert out.tools == [search]
+
+
 def _calls(message: Any) -> list[Any]:
     return message.tool_calls if isinstance(message, AIMessage) else []
 

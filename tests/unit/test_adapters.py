@@ -31,13 +31,16 @@ from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
+    AUTO_MEMORY_ENV,
     CLI_MESSAGE_BYTES,
+    CONFIG_ENV,
     MCP_OUTPUT_ENV,
     MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
     UNHELD_AGENTS,
     ClaudeAdapter,
     ClaudeRunError,
+    config_folder,
     configured_servers,
 )
 from trellis.harness.adapters.function import FunctionAdapter
@@ -143,8 +146,23 @@ def test_a_failed_cli_run_raises_with_its_errors() -> None:
     adapter = ClaudeAdapter()
     with pytest.raises(ClaudeRunError, match="rate limited; retry later"):
         adapter.extract(None, [_result(is_error=True, errors=["rate limited", "retry later"])])
-    with pytest.raises(ClaudeRunError, match="error_max_turns"):
-        adapter.extract(None, [_result(is_error=True, subtype="error_max_turns")])
+    with pytest.raises(ClaudeRunError, match="error_max_budget_usd"):
+        adapter.extract(None, [_result(is_error=True, subtype="error_max_budget_usd")])
+
+
+def test_at_the_turn_limit_the_answer_is_what_claude_said_in_the_turn() -> None:
+    """``error_max_turns`` is no failure: the run ends ``PARTIAL`` with the turn's last text
+    of the main agent (a subagent's is not; an earlier turn's is not)."""
+    earlier = AssistantMessage(content=[TextBlock(text="an injected turn's")], model="m")
+    said = AssistantMessage(content=[TextBlock(text="half done")], model="m")
+    inner = AssistantMessage(
+        content=[TextBlock(text="a subagent's")], model="m", parent_tool_use_id="t1"
+    )
+    limited = _result(is_error=True, subtype="error_max_turns")
+    adapter = ClaudeAdapter()
+    assert adapter.extract(None, [said, inner, limited]).answer == "half done"
+    injected = _result(result="x", origin={"kind": "task-notification"})
+    assert adapter.extract(None, [earlier, injected, limited]).answer is None
 
 
 def test_structured_output_outranks_the_result_text() -> None:
@@ -198,6 +216,8 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
         offered=None,
+        tenant="default",
+        user="u1",
         agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderSDK())),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
@@ -223,8 +243,16 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
     assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
-    assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
+    # the harness keeps large results; the user's own Claude folder, no auto memory
+    assert sent.env == {
+        MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS),
+        CONFIG_ENV: config_folder("default", "u1"),
+        AUTO_MEMORY_ENV: "1",
+    }
+    assert sent.verbatim_prompts  # the user's text, as written
+    assert sent.settings == '{"crossSessionInbound": "refuse"}'  # no peer's messages
     unchanged = {
+        "settings": None,
         "hooks": None,
         "can_use_tool": None,
         "system_prompt": "Mine.",  # told of outputs/ after it (``sandbox.DELIVERS_HERE``)
@@ -232,6 +260,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         "session_store": None,
         "disallowed_tools": [],
         "env": {},
+        "verbatim_prompts": False,
     }
     assert dataclasses.replace(sent, session_store_flush="batched", **unchanged) == options
 
@@ -612,18 +641,23 @@ def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() 
 
 
 def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> None:
-    """``sandbox.DELIVERS_HERE`` after the team's prompt in every form the SDK takes; a prompt
-    read from a file is left as it is (the CLI takes no text beside it)."""
+    """``sandbox.DELIVERS_HERE`` after the team's prompt in every form that has one; no prompt
+    (the SDK's default) stays none, and a prompt read from a file is left as it is (the CLI
+    takes no text beside it): :func:`_told` then says it with the turn's context instead."""
     from trellis.harness.adapters.claude import _told
     from trellis.harness.sandbox import DELIVERS_HERE
 
     preset = {"type": "preset", "preset": "claude_code"}
-    assert _told(None) == DELIVERS_HERE and _told("") == DELIVERS_HERE
-    assert _told("Mine.") == f"Mine.\n\n{DELIVERS_HERE}"
-    assert _told(preset) == {**preset, "append": DELIVERS_HERE}
-    assert _told({**preset, "append": "Be brief."})["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
-    assert _told({"type": "custom", "prompt": "Mine."})["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
-    assert _told({"type": "file", "path": "p.md"}) == {"type": "file", "path": "p.md"}
+    file = {"type": "file", "path": "p.md"}
+    assert _told(None, "ctx") == (None, f"ctx\n\n{DELIVERS_HERE}")
+    assert _told(file, None) == (file, DELIVERS_HERE)
+    assert _told("", None) == ("", DELIVERS_HERE)
+    assert _told("Mine.", "ctx") == (f"Mine.\n\n{DELIVERS_HERE}", "ctx")
+    assert _told(preset, None) == ({**preset, "append": DELIVERS_HERE}, None)
+    appended = _told({**preset, "append": "Be brief."}, None)[0]
+    assert appended["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
+    custom = _told({"type": "custom", "prompt": "Mine."}, None)[0]
+    assert custom["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
 
 
 def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> None:
@@ -634,12 +668,13 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
     from trellis.harness import budget
     from trellis.harness.adapters.claude import Spending
     from trellis.harness.bounded import LRU
+    from trellis.harness.bridges.claude import SessionCost
     from trellis.harness.journal import Journal
 
     charged: list[dict[str, Any]] = []
     journal = Journal()
     runtime = SimpleNamespace(replay=SimpleNamespace(journal=journal))
-    costs: LRU[str, float] = LRU()
+    costs: LRU[str, SessionCost] = LRU()
     spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
     account = budget.account
     try:
@@ -651,6 +686,49 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
         budget.account = account
     assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]
     assert journal.session_cost == 0.0 and "" not in costs
+
+
+def test_a_sessions_cost_grows_is_reset_and_grows_again() -> None:
+    """ARCH-13: a result carries its session's running total, and is charged what the total
+    grew by since the last one charged. A total lower than the last seen is a reset (Claude
+    Code zeroes its totals when the conversation is replaced): the whole new total is
+    charged — never nothing, which would hide spend from the budget."""
+    from trellis.harness.bridges.claude import SessionCost
+
+    cost = SessionCost(0.5)  # what the session cost before, as its journal kept it
+    assert cost.grew_by(1.25) == 0.75 and cost.total == 1.25
+    assert cost.grew_by(1.25) == 0.0  # a turn that cost nothing
+    assert cost.grew_by(0.25) == 0.25 and cost.total == 0.25  # a reset: all of it
+    assert cost.grew_by(1.0) == 0.75  # and growth from there
+    cost.owed(0.5)  # a share nobody was charged stays for the next result
+    assert cost.grew_by(1.0) == 0.5
+
+
+def test_the_budget_stops_a_run_at_its_limit_across_a_reset() -> None:
+    """ARCH-13: three results of one run, the session reset between them (0.6, then 0.2,
+    then 0.5): the run spent 0.6 + 0.2 + 0.3 and is past its 1.0, where counting a lower
+    total as nothing spent left it at 0.9, under its limit. The journal keeps the total."""
+    from types import SimpleNamespace
+
+    from trellis.harness import budget
+    from trellis.harness.adapters.claude import Spending
+    from trellis.harness.bounded import LRU
+    from trellis.harness.bridges.claude import SessionCost
+    from trellis.harness.journal import Journal
+
+    journal = Journal()
+    runtime = SimpleNamespace(
+        replay=SimpleNamespace(journal=journal), budget=budget.Budget(max_cost=1.0), parent=None
+    )
+    costs: LRU[str, SessionCost] = LRU()
+    spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
+    for total in (0.6, 0.2, 0.5):
+        assert budget.reached(runtime) is None  # type: ignore[arg-type]
+        ended = SimpleNamespace(total_cost_usd=total, session_id="s1", usage={}, num_turns=1)
+        spending.ended(ended, None)
+    assert journal.spent["cost"] == pytest.approx(1.1)
+    assert budget.reached(runtime) is not None  # type: ignore[arg-type]
+    assert journal.session_cost == 0.5 and costs["s1"].total == 0.5
 
 
 def test_the_question_is_the_last_user_message_the_harness_put_after_the_context() -> None:

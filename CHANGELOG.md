@@ -5,6 +5,67 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a provider's own tools in `ReAct`
+
+`ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web
+search, web fetch or code execution, given as LangChain's `dict` tool and bound to the model as
+it is (it was refused as "not a tool"). Each server call the reply reports is the run's tool
+call, and the catalog's risk decides whether the tool is offered: one that would ask a person
+is held back, since no approval can stand before a call the provider makes inside its step
+([react.md](docs/frameworks/react.md#a-providers-own-tools-web-search-web-fetch-code-execution)).
+
+### Added: plan mode for `ReAct`
+
+`ReAct(middleware=[PlanMode()])` (`trellis.harness.plan_mode`), entered on request with
+`framework_options={"configurable": {"plan_mode": True}}` — never by default, as Claude's and
+Kimi's is not. The run reads only, presents its plan with LangChain's `write_todos`, a person
+approves it once (LangChain's `HumanInTheLoopMiddleware`), then it acts under the usual
+governance ([react.md](docs/frameworks/react.md#plan-mode)).
+
+### Changed: `RunCheckpointer` keeps every checkpoint
+
+As LangGraph's own savers do: `get_state_history`, `update_state` and a thread continued from
+a `checkpoint_id` work on a `ReAct` or `middleware()` graph. In a harness run the history is in
+the run's journal (about 2 KB a checkpoint, 17 checkpoints for a one-tool turn) until the run
+ends (the run store clears a run's checkpoint with its ending); a journal written by an
+earlier release is read as it is, and an earlier release reads this one's (the latest
+checkpoint's record is unchanged). A run's own thread forked from an earlier checkpoint by
+code inside the run is refused (`RewindRefused`)
+([react.md](docs/frameworks/react.md#checkpoint-history-langgraphs-time-travel)).
+
+### Added: `agent.checkpoints` and `agent.rewind`
+
+`agent.checkpoints(run_id)` lists a paused `ReAct` (or `middleware()`) run's checkpoints,
+newest first, as LangGraph's `StateSnapshot`s. `agent.rewind(run_id, checkpoint_id, *,
+values=None, reviewer, tenant=None)` continues the run's conversation from one of them in a new
+run the run store records (`metadata["rewound"]`: the run, the checkpoint, who, when); the run
+rewound stays as it was. A call that did more than read past the checkpoint asks a person
+before it is made again, whatever was allowed before; what was spent stays counted. Refused:
+a run at work or ended, a reviewer who is not the run's user, a checkpoint of another run, an
+agent with no checkpoint history. Claude's file checkpoints are not driven by this API
+([react.md](docs/frameworks/react.md#rewinding-a-paused-run)).
+
+### Added: handoffs between agents, with `langgraph-swarm`
+
+`langgraph-swarm` (`>=0.1,<0.2`, in the `react` extra) used as it is: a `create_handoff_tool`
+among a `ReAct`'s tools is a governed, recorded hand-over that asks nobody; the agent handed to
+answers, governed as ever; the conversation's next turn is that agent's (`active_agent` carried
+from turn to turn), said on the run's stream; a pause resumes in place
+([react.md](docs/frameworks/react.md#handoffs-langgraph-swarm)).
+
+### Changed: Deep Agents' `compact_conversation` asks nobody
+
+Deep Agents' `SummarizationToolMiddleware`, given to `ReAct(middleware=)` or a graph of your
+own, compacts the conversation when the model asks: its tool is declared a read (it had
+declared nothing, so every call asked a person)
+([react.md](docs/frameworks/react.md#compaction-on-request)).
+
+### Changed: `ReAct`'s general-purpose helper has the agent's skills
+
+With `skills=`, the general-purpose helper (`task`) is given the agent's skills, as Deep
+Agents gives the one it builds itself: its instructions list them and it reads them. Without
+`skills=` nothing changes.
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts
@@ -612,6 +673,67 @@ turn); a graph with neither `middleware()` nor a checkpointer loses the task of 
 cancelled after its start (the task is cancelled with it). See
 [docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
 
+### Changed: Claude Code through the harness as Claude Code does it, governed and isolated
+
+`claude-agent-sdk` 0.2.182 (Claude Code 2.1.325), from 0.2.160.
+
+- **A user's text is text.** The run's input is sent with the SDK's `verbatim_prompts`: an
+  `@/path` in a message read that file of the worker, and a `/command` ran, neither governed
+  nor recorded. `framework_options={"verbatim_prompts": False}` sends a slash command on
+  purpose.
+- **Each tenant's user has a Claude folder of their own** (`CLAUDE_CONFIG_DIR`), and Claude
+  Code's auto memory is off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY`): runs on one worker shared
+  `~/.claude` — its settings, sessions and memory files. The agent's own `settings`,
+  `skills`, `plugins` still apply; a folder set in the options' `env` stands.
+- **A call governance cannot decide does not run.** An error in the harness's `PreToolUse`
+  hook left the call to Claude Code's permission mode (it ran under `bypassPermissions`).
+  The hook refuses such a call, and its matcher is `on_failure="block"`.
+- **Every tool of Claude Code 2.1.325 is declared by what it does** or is not offered:
+  loading a deferred tool and waiting for MCP servers are reads, a shell, a worktree, a
+  published page and a claude.ai project are writes, `RemoteTrigger` is off with the
+  schedules and `ListAgents` with `SendMessage`; names the CLI no longer has are gone.
+- **Messages from other Claude sessions are refused** (`crossSessionInbound: refuse` in the
+  settings sent to the CLI): every Claude Code on a worker is one OS user's, so another
+  tenant's session could send a turn into this one.
+- **What Claude Code asks its user, a person is asked**: leaving plan mode, `WebFetch`,
+  `WebSearch` and a `Skill` ran unasked as reads. A rule for the tool in the catalog lets it
+  run.
+- **At its turn limit a run ends `PARTIAL`** with what Claude said, as Claude Code ends the
+  query (`error_max_turns`); the one more paid query for a last answer is gone.
+- **An approval is carried for the call it answered only** (SEC-R-7): with no call id from
+  the CLI the carry fell back to the tool's name, so one approved `Bash` let every later one
+  through unasked. Only a real id is carried, and it is dropped when the call ends.
+- **A conversation's kept process names no single run to the gateway**: it sent its first
+  turn's run id and `traceparent` with every later turn's model calls (booked to the wrong
+  run). It carries the dimensions that hold for all its turns.
+- **No more than 16 kept Claude processes in a server process** (PERF-3): the cap was
+  checked before the process started and counted per agent, so a hundred first turns at once
+  kept a hundred. The place is taken first and counted over all agents; the idle session
+  that gives its place is the one used longest ago of the user who holds the most.
+- **A harness tool's call in a kept process is the run's its id names** (ARCH-16): two
+  background runs making the same call with the same arguments were told apart by "the first
+  that matches". Claude Code names the call in the MCP request (`_meta`), which the
+  `trellis` server now reads (the `claude-agent-sdk` extra pins `mcp>=2.2,<3` for it).
+- **The team's hooks answer before governance decides.** Claude Code asks all `PreToolUse`
+  hooks at once: governance decided, and the run recorded, the arguments the model gave
+  while the call ran with the ones a team's hook rewrote; a call a team's hook refused was
+  still put to a person; and the record kept the result a team's `PostToolUse` hook had
+  replaced. The harness's hooks now wait for the team's about the same call.
+- **What Claude Code says beside its replies is on the run's stream**: its rate limit, a
+  retried model call, a compacted context, a model fallback, a session-store miss and a
+  failed reply were dropped; each is a warning with its own code.
+- **A conversation reset is charged what the session cost since** (ARCH-13). A result
+  carries its session's running cost, which Claude Code zeroes when the conversation is
+  replaced: a turn in a process of its own counted the lower total as nothing spent, so the
+  spend escaped the run's budget. One `SessionCost` owns the rule for a query and for a
+  kept process: all of a total lower than the last seen is charged.
+- **Options with no `system_prompt` keep none** (the SDK's default): the line about
+  `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
+  prompt where the options have one.
+- A resumed attempt is not cut at the options' `resume_session_at` again; the journal's
+  session store lists a session's subagent transcripts (`list_subkeys`); the live tests'
+  skip finds the bundled CLI.
+
 ### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
 
 Driving the bundled CLI (2.1.283) against a scripted model showed what it sends, and where a
@@ -652,14 +774,20 @@ wrapped agent did not get what the SDK gives:
 - **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
   takes it with `--resume` only to fork), and options with `continue_conversation` failed at
   once (the SDK asked the journal's store for the latest session): both work.
-- **Workflows and messages to other agents.** The bundled CLI offers a dynamic workflow
-  (`Workflow`) with no server flag: one background task whose agents have no task of their
-  own, an agent's first tool call reaching the harness before any frame names it, so its
-  calls were taken for the main agent's (and the launch asked a person as an undeclared
-  tool). `SendMessage` resumed a finished background subagent as a new task no child run
-  held, or reached another Claude session. Both are disallowed, as the schedules are, with
-  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`; 2.1.283 has none and
-  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing of what it sends).
+- **Dynamic workflows.** The bundled CLI offers `Workflow` with no flag: one background
+  task (`local_workflow`, no `is_backgrounded`) whose agents have no task of their own, an
+  agent's first call reaching the harness before any frame names it. The launch asked a
+  person as an undeclared tool, and its agents' calls were taken for the main agent's. A
+  workflow is now one child run, kept as a background subagent's and ended as its task
+  ends; its agents' calls are its run's by their kind (`workflow-subagent`) while it is the
+  one at work, and, while several are, those of a run the workflows share (`workflows`, a
+  child run of the turn that made them concurrent), which decides them in and between turns
+  — a person's question asked once, an approved call run once — and records them marked
+  with the agent that made them.
+- **Messages to other agents.** `SendMessage` resumed a finished background subagent as a
+  new task no child run held, or reached another Claude session: it is disallowed, as the
+  schedules are, with the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`;
+  2.1.283 has none and `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing it sends).
 
 Tested through the harness on the query path and in a live session: every hook event of the
 options' own, `can_use_tool` with its suggestions and permission updates, every option's

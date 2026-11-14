@@ -8,7 +8,10 @@ gateway's MCP tools, memory's); your options object is never changed.
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
 "ANTHROPIC_API_KEY": "<virtual key>"}` is set on the run's copy of the options by the harness
 when Bifrost is the route (`LLM_GATEWAY=bifrost`, its `Capability.ANTHROPIC_ROUTE`; unless your `env` names a base URL), with Bifrost's headers — the
-deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines.
+deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines. Claude Code reads
+them once, as it starts: a conversation's kept process (below) serves many runs, so it names
+the tenant, the agent and the user's hash, and no run or trace; the run's own records say
+what each turn spent.
 
 This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
 the blocks (memory, `can_use_tool` from governance, the session as the run's checkpoint in
@@ -72,6 +75,18 @@ the user Claude Code would ask:
   yours), decides each built-in call as a harness tool call is: the run's `before_tool` hooks
   ([hooks.md](../hooks.md)), then governance by the tool's risk and the tool catalog's rules.
   A call they refuse, or ask a person about, stops there.
+* **Your hooks answer first.** Claude Code asks every `PreToolUse` hook at once and runs the
+  call with the arguments of the one that answers last (seen with the bundled CLI, 2.1.325).
+  The harness's hook waits for yours about the same call, then decides the call as your hook
+  left it (its `updatedInput`); a call your hook refuses is not put to a person. The same
+  after the call: what your `PostToolUse` hook put in the place of the result
+  (`updatedToolOutput`) is what the run records, as the model read it.
+* **A call that cannot be decided does not run.** If the harness's hook fails (the tool
+  catalog or the run store out of reach), the call is refused, saying why. The hook's matcher
+  is also registered `on_failure="block"`, so Claude Code itself blocks a call whose hook
+  failed instead of passing it on to its permission mode (under `bypassPermissions` it would
+  run); the SDK starts no query on a Claude Code too old to do that. Your own hooks keep
+  the `on_failure` you set.
 * **Then Claude Code's own.** A call they let through goes to Claude Code's own permission
   check: its `permission_mode`, its rules (`allowed_tools`, `disallowed_tools`, its settings
   files: your allowlist, passed through as it is) and its own read-only checks. What it lets
@@ -91,36 +106,90 @@ the user Claude Code would ask:
   them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
   recommended with its description as why, another answer in words); Claude reads the answers
   by question.
-* **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
-  `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash` write (announced; Claude Code asks
-  first where it would). The tools Claude keeps its own work with run too: its task list
-  (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`: `TodoWrite`'s successors in the bundled
-  CLI), `EnterPlanMode`, and `StructuredOutput`, which its answer in an `output_format` is
-  handed to. Your in-process server's tool is what its annotations say; any other tool (an
-  MCP server's of yours the CLI reaches itself, a tool of the CLI's the harness has no word
-  on) says nothing of what it does: a person approves each call, until its risk is in the
-  tool catalog.
+* **Risk.** Every tool the bundled CLI has is declared by what it does. Reads run: `Read`,
+  `Glob`, `Grep`, `LSP`, the listing and look-up tools, loading a deferred MCP tool
+  (`ToolSearch`), waiting for MCP servers (`WaitForMcpServers`), the tools Claude keeps its
+  own work with (its task list `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`, and
+  `TodoWrite`; `EnterPlanMode`; `StructuredOutput`, which its answer in an `output_format` is
+  handed to; a subagent's `SubagentHandback`), and a subagent's or a workflow's call. Writes
+  are announced and run, Claude Code asking first where it would: `Write`, `Edit`,
+  `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`, `REPL`, `Monitor`, `EnterWorktree`,
+  `ExitWorktree`, `TaskStop`, and what reaches outside the session (`Artifact`,
+  `PushNotification`, `SendUserFile`, `SendFeedback`, `ShareOnboardingGuide`,
+  `EndConversation`). Claude Code asks its user before `ExitPlanMode` (the plan's approval),
+  `WebFetch` and `WebSearch` (the network) and `Skill`: a person answers there too, as Claude
+  Code would have asked, unless the tool catalog has a rule for the tool that lets it run.
+  Your in-process server's tool is what its annotations say; any other tool (an MCP server's
+  of yours the CLI reaches itself, a tool of a newer CLI's the harness has no word on) says
+  nothing of what it does: a person approves each call, until its risk is in the tool
+  catalog. `PowerShell` gets no read-only analysis (`Bash` does).
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)): a team that wants every shell command approved, even
   one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
   `true`) there.
-* **Not offered: schedules.** A scheduled prompt (`CronCreate`) or a wake-up
-  (`ScheduleWakeup`) fires only in a CLI that is running then. A query's own process ends
+* **Not offered: schedules.** A scheduled prompt (`CronCreate`), a wake-up
+  (`ScheduleWakeup`) or a claude.ai scheduled task (`RemoteTrigger`) fires with no run to
+  check its calls: the first two only in a CLI that is running then. A query's own process ends
   with it; a conversation's process (below) outlives the turn, but only until it is idle,
   and the turn a schedule fires has no run: its tool calls are refused and its answer reaches
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
-  would send.
-* **Not offered: workflows and messages to other agents.** A dynamic workflow (`Workflow`)
-  runs its agents in the background as one task: none has a task of its own, and an agent's
-  first tool call can reach the harness before anything names that agent, so its calls
-  could only be taken for the main agent's. `SendMessage` resumes a finished background
-  subagent as a new task, or reaches another Claude session on the machine or in the cloud.
-  No run holds that work, so `Workflow`, `SendMessage` and the agent-teams tools older CLIs
-  have (`TeamCreate`, `TeamDelete`) are added to `disallowed_tools` too, whatever
-  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the bundled CLI's named agents are
-  background subagents, each a child run: below). A slash command that runs a workflow
-  (`/deep-research`) finds no `Workflow` tool to call.
+  would send. `RemoteTrigger`'s task runs in Anthropic's cloud, outside the run's governance,
+  memory and thread. A disallowed tool is hidden from the model by Claude Code itself, the
+  ones it defers behind `ToolSearch` included (seen with the bundled CLI, 2.1.325). The
+  harness's own `schedule_task` is the schedule: stored in the run store, each firing a run.
+* **A dynamic workflow is one child run.** A `Workflow` call (a script that runs agents in
+  the background; the bundled CLI offers it with no flag) only hands work on, as `Agent`
+  does: it runs, and each workflow is a child run of the turn, kept open as a background
+  subagent's (below) until its own task ends — `SUCCESS` with what its notification says,
+  `ERROR` when it failed or was cut off, `CANCELLED` when it was stopped or its turn was
+  cancelled. Its agents have no task of their own and name only their kind in their calls
+  (`agent_type` `workflow-subagent`, an `agent_id` of each agent's own), and an agent's
+  first call can reach the harness before anything names that agent. So:
+  * while **one workflow** works in the session, its agents' calls are its run's: decided by
+    its run's hooks and governance and recorded under it;
+  * while **several** work at once, an agent first seen then cannot be told apart. In a
+    conversation's session its calls are those of a run the workflows share, `workflows`: a
+    child run of the turn that made them concurrent, kept as a background subagent's run is
+    (below). It decides and records them, in a turn and between turns; a call that needs a
+    person waits in Claude Code, its question asked once, in the conversation's next turn
+    (as a background subagent's is): approved it runs once, edited it runs once as edited,
+    rejected it never runs. It ends `SUCCESS` once one workflow at most is left, saying how
+    many calls it decided and of which tools, or as a background run ends when its turn is
+    cancelled (`CANCELLED`) or its session is lost (`ERROR`); then the remaining workflow's
+    agents' calls are its run's, an agent first seen together included. In a run with no
+    conversation (its query's own process) such a call is the run's own. Either way the
+    result's event says which agent made it (`made_by`: `agent_id`, `agent_type`; a harness
+    tool's call names no agent). An agent seen while its workflow was the one at work stays
+    that workflow's. Nothing is refused at launch: Claude Code starts as many workflows as
+    it does.
+  What the workflows' agents spend is in no reply the stream carries: the process's cost
+  grows by it, and it is charged to the turn (below), not to a workflow's run. The tool
+  catalog's risk for `Workflow` still decides its launch.
+* **Not offered: messages to other agents.** `SendMessage` resumes a finished background
+  subagent as a new task whose messages carry the call that first started it, or reaches
+  another Claude session on the machine or in the cloud. No run holds that work, so it, `ListAgents` (the sessions it reaches: on a shared
+  worker, other tenants' runs) and the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`) are added to
+  `disallowed_tools`, whatever `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the
+  bundled CLI's named agents are background subagents, each a child run: below). Messages
+  other Claude sessions send in are refused too (Claude Code's `crossSessionInbound`
+  setting is sent as `refuse`, over your `settings`' own word: every Claude Code a worker
+  starts is one OS user's, another tenant's among them); the rest of your `settings` reach
+  the CLI as given.
+* **A user's text is text.** The run's input reaches Claude Code as written (the SDK's
+  `verbatim_prompts`): an `@/path` in a user's message reads no file of the worker and a
+  `/command` runs nothing — neither would go through governance or be recorded. An app that
+  means a slash command (or a file mention) sends it on purpose, with the run's
+  `framework_options={"verbatim_prompts": False}`.
+* **Each user's own Claude folder, no auto memory.** Claude Code keeps settings, sessions and
+  its auto memory in its config folder (`~/.claude` by default), which every run on a worker
+  would share. Each tenant's user gets a folder of their own instead (`CLAUDE_CONFIG_DIR`,
+  under `$XDG_DATA_HOME/trellis/claude`), and auto memory is off
+  (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`): two users share no settings and no memory, and the
+  worker's own `~/.claude` is not read or written. What you configure on the agent — its
+  `settings`, `skills`, `plugins`, `agents` — still reaches the CLI; a `CLAUDE_CONFIG_DIR`
+  (or the switch) in your `env` stands. The folder holds no login: the CLI authenticates with
+  the gateway's key (or your own `ANTHROPIC_API_KEY`), not a `claude login` of the worker.
 * **One call, one question.** A call whose approval a person answered before it ran
   (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
   about again when Claude Code asks too: it runs. Another question answered while the call
@@ -147,7 +216,7 @@ the user Claude Code would ask:
 | Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
-| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it the run answers once more (its session resumed, told the limit is reached, one turn and no tool; in a conversation's live session, a turn of that session whose tool calls are refused), as `ReAct` does at `max_steps` (a `step_limit` warning) |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far, no query more (a `step_limit` warning) |
 
 ## Native or ours: skills, prompts, sandbox
 
@@ -166,9 +235,10 @@ the user Claude Code would ask:
 
 | | |
 |---|---|
-| Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks; the options' `system_prompt` is left as you wrote it |
+| Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks. The options' `system_prompt` keeps what you wrote, with one line after it: that files written in `outputs/` of the working directory are given to the user (every run's are: [sandbox.md](../sandbox.md)). Options with no `system_prompt`, or one read from a file, are left as they are (none stays the SDK's default) and that line goes with the context |
+| What Claude Code says beside its replies | its rate limit near or reached (`rate_limit`), a model call tried again (`model_retry`), the session's context compacted (`compaction`), another model answering (`model_fallback`), a step its session store did not take (`session_store`) and a reply that failed (`model_error`) are warnings on the run's stream |
 | Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
-| Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn, a resumed attempt and the one last answer at the turn limit are each charged once |
+| Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn and a resumed attempt are each charged once |
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
@@ -360,7 +430,11 @@ turn the session runs by itself (a finished task's notification) is never a user
   memory's), whatever time has passed since its first.
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
-* The process is one per conversation, in one server process, at most 16 per agent. It closes
+* The process is one per conversation, in one server process, at most 16 in that server
+  process over all its agents (each is a CLI process; the place is taken before the process
+  starts, so turns that start together start no more). With every place taken, an idle
+  session gives its own — of the user who holds the most, the one used longest ago — and
+  with none idle the turn runs in a process of its own, as a run with no `thread` does. It closes
   5 minutes after its last activity when nothing works in it (no background task, and no turn
   of its own for a finished one due or under way), 6 hours after its last turn
   whatever does, when a turn's options are not the ones it was started with
@@ -368,11 +442,11 @@ turn the session runs by itself (a finished task's notification) is never a user
   (`Harness.aclose`). Background work that ends with it is said in the conversation's next
   run (`claude_session`), and a background subagent's run ends saying so; a restart loses
   it.
-* The last answer at the turn limit of a turn the session served is asked in the session,
-  as its next turn (the process, its session and its background work go on: Claude Code's
-  process answers the next prompt after its `error_max_turns` result): told the limit is
-  reached, and every tool call it makes refused, since a live process keeps the tools it
-  started with.
+* A turn that reaches its turn limit (`max_turns`) ends with Claude Code's own
+  `error_max_turns` result, and the harness leaves it there, as Claude Code does: the run
+  ends `PARTIAL` with what Claude said before the limit (its error `BUDGET_EXCEEDED` names
+  the limit, a `step_limit` warning says so), no query more is made, and the session and
+  its background work go on — the conversation's next turn has its tools.
 * Not kept: a run with no `thread`, a sub-agent's run, and options with a `ClaudeSkills` plugin, an in-process MCP server of your own
   (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn)
   or a budget of their own (`max_budget_usd`: Claude Code counts it for a process — in one

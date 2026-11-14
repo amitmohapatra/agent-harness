@@ -92,6 +92,7 @@ class Kind(StrEnum):
     AGENT_TOOL = "agent_tool"  # an OpenAI agent called as a tool (``Agent.as_tool``)
     SUBAGENT = "subagent"  # Claude's ``agents=`` (its ``Agent``/``Task`` tool)
     ASYNC_TASK = "async_task"  # Deep Agents' ``start_async_task``: a task on a server of yours
+    WORKFLOW = "workflow"  # Claude Code's dynamic workflow (its ``Workflow`` tool)
 
 
 @dataclass
@@ -167,6 +168,23 @@ def held(runtime: Runtime) -> dict[str, Any] | None:
 
 def _naming(helper: Helper | None) -> dict[str, Any] | None:
     return None if helper is None else {HELPER: {"run_id": helper.run_id, "name": helper.name}}
+
+
+def ended(
+    events: Any, *, run_id: str, name: str, framework: str, status: RunStatus, began: float
+) -> None:
+    """A helper's end, said on the stream ``events`` of the run it worked for (its
+    ``helper_finished``): the one place that says it, for a helper an attempt ends
+    (:meth:`Helpers.finished`) and one that outlived its attempt
+    (``claude_live.Background``). ``began``: when it started (``time.monotonic()``)."""
+    events.helper(
+        "finished",
+        run_id=run_id,
+        agent_id=name,
+        framework=framework,
+        status=status.value.lower(),
+        seconds=round(time.monotonic() - began, 3),
+    )
 
 
 class Helpers:
@@ -308,6 +326,21 @@ class Helpers:
         found = [h for h in self._open.values() if h.name == name]
         return found[-1] if found else None
 
+    def of_kind(self, kind: Kind, worker: str) -> Helper | None:
+        """The open helper ``worker`` works for, where the framework says what kind of helper
+        a call is the work of, not which (Claude Code's workflow agents): the one it was found
+        working for before, else the one helper of ``kind`` open now (remembered for the
+        worker). ``None`` — the run's own call — when several are open and the worker was
+        never found working for one: its call cannot be told apart."""
+        if worker in self._workers:
+            return self._open.get(self._workers[worker])
+        found = [(key, h) for key, h in self._open.items() if h.kind is kind]
+        if len(found) != 1:
+            return None
+        [(key, helper)] = found
+        self._workers[worker] = key
+        return helper
+
     def attribute(self, worker: str, key: str | None, *, background: bool = False) -> None:
         """The framework's own id of who works for the helper ``key`` (Claude Code's task
         id, the ``agent_id`` of the subagent's hooks; ``None``: for the run itself).
@@ -326,14 +359,19 @@ class Helpers:
         itself, or a helper no longer open. A worker not heard of yet, while a helper
         called ``name`` is open, is waited for (:data:`ATTRIBUTED_SECONDS`: the framework
         said whose it is before the call, and the run reads that as it goes); never heard
-        of, it is the helper called ``name`` started last (:meth:`named`)."""
+        of, it is the helper called ``name`` started last, remembered as that: its next
+        calls do not wait again."""
         if worker not in self._workers and self.named(name) is not None:
             learning = self._learning.setdefault(worker, asyncio.Event())
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(ATTRIBUTED_SECONDS):
                     await learning.wait()
+            if worker not in self._workers:  # never told: the one of that name started last
+                self._learning.pop(worker, None)
+                last = [key for key, helper in self._open.items() if helper.name == name]
+                self._workers[worker] = last[-1] if last else ""
         key = self._workers.get(worker)
-        return self.named(name) if key is None else self._open.get(key)
+        return None if key is None else self._open.get(key)
 
     def begun_again(self) -> dict[str, int] | None:
         """Where the run had read its journal when the first of its open subagents started
@@ -415,13 +453,13 @@ class Helpers:
                 error=None if error is None else AgentError(code=UNFINISHED, message=error),
                 tenant=self.runtime.tenant,
             )
-        self.runtime.events.helper(
-            "finished",
+        ended(
+            self.runtime.events,
             run_id=helper.run_id,
-            agent_id=helper.name,
+            name=helper.name,
             framework=self.framework,
-            status=status.value.lower(),
-            seconds=round(time.monotonic() - helper.began, 3),
+            status=status,
+            began=helper.began,
         )
         await self._recorded(helper)
         await self._outcome(helper, error)

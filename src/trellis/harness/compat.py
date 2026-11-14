@@ -28,8 +28,9 @@ TESTED: Final[Mapping[str, tuple[str, str]]] = {
     "langchain-core": ("1.8", "1.9"),
     "langchain-openai": ("1.6", "1.7"),
     "deepagents": ("0.7.38", "0.8"),
+    "langgraph-swarm": ("0.1", "0.2"),
     "openai-agents": ("0.24", "0.25"),
-    "claude-agent-sdk": ("0.2.160", "0.3"),
+    "claude-agent-sdk": ("0.2.182", "0.3"),
     "a2a-sdk": ("1.1", "1.2"),
     "agent-client-protocol": ("0.12.1", "0.13"),
 }
@@ -47,7 +48,14 @@ INSTALL: Final[Mapping[str, str]] = {
 #: The distributions each adapter runs on (by the adapter's name), checked when a target of
 #: its type is wrapped; one that is not installed is not checked.
 FRAMEWORKS: Final[Mapping[str, tuple[str, ...]]] = {
-    "langgraph": ("langgraph", "langchain-core", "langchain", "deepagents", "langchain-openai"),
+    "langgraph": (
+        "langgraph",
+        "langchain-core",
+        "langchain",
+        "deepagents",
+        "langchain-openai",
+        "langgraph-swarm",
+    ),
     "openai_agents": ("openai-agents",),
     "claude_agent_sdk": ("claude-agent-sdk",),
     "acp": ("agent-client-protocol",),

@@ -822,6 +822,15 @@ def gateway_headers() -> dict[str, str]:
     return headers
 
 
+def lasting_headers(runtime: Any) -> dict[str, str]:
+    """The headers a process that serves many of a conversation's runs gives the gateway, read
+    once as it starts (Claude Code's live session): the dimensions that hold for every one of
+    them — its tenant, agent and user — and neither the run's nor a ``traceparent``, which
+    would book each later run's model calls to the run that started the process."""
+    dims = {k: v for k, v in attribution(runtime).items() if k != "run"}
+    return {f"{DIMENSION_PREFIX}{k}": v for k, v in dims.items()}
+
+
 def exporting() -> bool:
     """Whether an OpenTelemetry tracer provider is installed (the harness's, or the app's)."""
     return not isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
