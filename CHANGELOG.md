@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a conversation's messages one at a time, in the order sent, on every replica
+
+Two messages of one chat that reached two server processes both ran, writing the same thread:
+only queued runs (`start`) waited across processes. Now a turn of a conversation started with
+`run`, `stream`, `serve_chat` or `serve_a2a`, or continued after its answer, takes the
+conversation's `concurrency_key` and waits in the run store's line (`trellis.harness.line`): one
+turn at a time, in the order the messages were sent, whichever replica each reaches; queued and
+direct turns take turns too. `interrupt` cancels the working run wherever it works (its process
+stops it at its next event or heartbeat); `steer` to a run in another process waits its turn,
+said once. A burst of messages in one process kept its order only by luck: a conversation's
+starts now reach the run store in the order they were sent, and a turn's earlier turns are read
+back until ten answered ones (a burst's waiting turns crowded them out). A process killed while
+it holds a turn frees it once its hold lapses. Needs agent-runs with `RunStore._placed` (same
+wire). [runs.md](docs/runs.md#queue-order-and-busy-conversations).
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

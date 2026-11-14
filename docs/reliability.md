@@ -410,6 +410,7 @@ reason=...)` with `RunsClient`, and `trellis.runs.Worker` stops your handler. Ev
 | queued, or paused for a person | `CANCELLED` at once; no worker will claim it |
 | running in this process (`run`, `stream`, a worker of this process) | its task is cancelled now: `CANCELLED`; `run` returns a `CANCELLED` result, `stream` ends with `RUN_FINISHED` (outcome `cancelled`, `data.reason`) |
 | running on a worker elsewhere | agent-runs asks that worker to stop: its next heartbeat (within 20 s) says `cancel_requested`, the worker cancels the attempt, and the run ends `CANCELLED`; a worker that never answers loses the run when its lease runs out |
+| running in another process's `run`, `stream`, `serve_chat` or `serve_a2a` | `CANCELLED` in agent-runs at once; that process stops its attempt when agent-runs refuses the run's next event or its next hold heartbeat (within 20 s) |
 | already ended | `ConflictError` |
 
 **Automatic.** agent-runs keeps the reason and who asked; the pipeline ends the attempt as a
@@ -418,9 +419,10 @@ run is never retried. Who may cancel: whoever may answer the run (agent-runs' ru
 [sub-agents](subagents.md)' runs that have not ended are cancelled with it (one paused for a
 person at once), and theirs.
 
-**On failure.** A run kept in *another* process's `run`/`stream` (no worker, so no heartbeat)
-is cancelled in agent-runs at once, but that process learns only at its next write, which is
-refused (`ConflictError`): cancel such runs where they run, or `start` them for a worker.
+**On failure.** A run kept in *another* process's `run`/`stream` stops only once that process
+hears from agent-runs: a run in one long call that sends no event works on for up to 20 s after
+its cancel (what it writes then is refused, `ConflictError`). Without agent-runs (`LocalRuns`)
+there is no other process.
 
 ## Releasing on shutdown
 
@@ -488,7 +490,8 @@ line naming both versions.
   pass the bridge: no timeouts, retries, keys or unknown outcomes from the harness — give them
   their framework's own.
 * **MCP servers** do not receive the idempotency key (the protocol has no field for it).
-* **Cancelling an in-process run from another process** ([cancel](#cancel)).
+* **Cancelling an in-process run from another process** stops it at its next event or heartbeat,
+  not at once ([cancel](#cancel)).
 * **Without `RUNS_URL`**, `LocalRuns` keeps the working time, leases, cancels and releases as
   agent-runs does, but nothing survives a restart and nothing enforces a limit for a run no
   attempt is working on (the attempts themselves still stop on time). It keeps the last 1,000

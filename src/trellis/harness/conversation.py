@@ -341,8 +341,10 @@ class Turns:
     def __init__(self) -> None:
         self._held: dict[str, tuple[asyncio.Lock, int]] = {}
         self._live: dict[str, Live] = {}
-        #: set as a turn of the conversation ends here: the runs waiting in its line look again
+        #: set as a run of the conversation leaves its line here: the runs behind it look again
         self._ended: dict[str, asyncio.Event] = {}
+        #: the runs of each conversation waiting for, or holding, its turn here
+        self._here: dict[str, set[str]] = {}
         #: the messages of a conversation being recorded here, one at a time (:meth:`accepting`)
         self._accepting: dict[str, tuple[asyncio.Lock, int]] = {}
 
@@ -370,9 +372,12 @@ class Turns:
     ) -> AsyncIterator[Live | None]:
         lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
         self._held[key] = (lock, waiting + 1)
+        here = self._here.setdefault(key, set())
+        if run_id is not None:
+            here.add(run_id)
         try:
             if line is not None:
-                await line.turn(lambda: self._ended.setdefault(key, asyncio.Event()))
+                await line.turn(lambda: self._ended.setdefault(key, asyncio.Event()), here)
             async with lock:
                 if run_id is None:
                     yield None
@@ -383,13 +388,13 @@ class Turns:
                 finally:
                     del self._live[key]
                     live.ended.set()
-                    if (ended := self._ended.pop(key, None)) is not None:
-                        ended.set()
         finally:
+            here.discard(run_id or "")
+            if (ended := self._ended.pop(key, None)) is not None:
+                ended.set()  # a run left the line here: the ones behind it look again
             lock, waiting = self._held[key]
             if waiting == 1:
-                del self._held[key]
-                self._ended.pop(key, None)
+                del self._held[key], self._here[key]
             else:
                 self._held[key] = (lock, waiting - 1)
 

@@ -60,6 +60,21 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
 
    `start()` queues as before, through its `concurrency_key`. A worker's run is not held in
    process, so `mode` has nothing to act on there.
+
+   *Amended (chat order across processes):* the turn is the run store's, not only the
+   process's. A direct turn of a conversation takes the conversation's `concurrency_key` too,
+   and waits in the conversation's line in the run store (`trellis.harness.line`): its place is
+   when it started running — its `created_at`, or its latest answer's `recorded_at` — which
+   agent-runs sets after every running run of the key, in the order the starts commit
+   (`RunStore._placed`, under the key's transaction lock; the wire is unchanged). A
+   conversation's starts leave one process in the order they were sent (`Turns.accepting`).
+   `interrupt` cancels the run first in the line wherever it works; its process stops it when
+   agent-runs refuses its next event or heartbeat (`Harness._lost`). `steer` cannot reach a run
+   in another process — nothing carries a message there — so it waits as `queue` does, said once
+   per agent. Two alternatives were set aside: a run started `QUEUED` and claimed by its own
+   process needs a claim of one named run (a contract change: `ClaimRequest` names agents, not
+   runs); and the waiting process taking the hold only on its turn leaves a process that dies
+   while waiting with a run nothing ends.
 3. **One id per message**, `msg_` followed by a digest of the conversation and the message's
    native name: `<run>:input` for the question, `<run>:answer` for the answer,
    `result:<call>` for a tool result, `call:<first call>` for an assistant message that calls
@@ -93,4 +108,6 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
   per model call. It does nothing when nothing was steered.
 * Tests: `tests/integration/test_conversation.py` covers every adapter × mode, follow-up
   continuity with memory on and off, the session continued, id stability, and steering; the
-  scoping tests are in `test_conversation_scope.py`.
+  scoping tests are in `test_conversation_scope.py`; the line across servers in
+  `test_conversation_line.py` (two harnesses on one store, bursts of 5 and 20 on every adapter)
+  and `tests/live/test_live_chat_order.py` (separate processes on agent-runs and PostgreSQL).

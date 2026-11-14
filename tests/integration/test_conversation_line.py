@@ -21,13 +21,21 @@ import pytest
 
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
+from tests.support.runlog import LoggedRuns
 from trellis import Harness, Runtime, Settings, current, tool
-from trellis.contracts import InterruptDecision, InterruptResolution, RunStart, RunStatus
+from trellis.contracts import (
+    Interrupt,
+    InterruptDecision,
+    InterruptResolution,
+    RunStart,
+    RunStatus,
+)
 from trellis.harness import holding
 from trellis.harness.agent import Agent
 from trellis.harness.conversation import EARLIER_RUNS
 from trellis.harness.line import Line, placed
 from trellis.harness.runs import LocalRuns
+from trellis.runs import Page, ResolutionEntry, RunsError
 
 THREAD = "chat-9"
 
@@ -290,3 +298,87 @@ async def test_a_burst_of_messages_is_answered_in_the_order_it_was_sent(
         if history is not None:  # (a session the framework continued holds it instead)
             asked = [said for said in history if said.startswith("message ")]
             assert asked == questions[max(0, n - EARLIER_RUNS) : n]
+
+
+async def test_a_run_cancelled_elsewhere_stops_at_its_next_event() -> None:
+    """With agent-runs' event log, the run's next event is refused once it was cancelled on
+    another server: it stops then, long before its next heartbeat."""
+    runs = LoggedRuns()
+    cancelled: list[str] = []
+
+    async def chatty(input: str, agent: Runtime) -> str:
+        try:
+            while True:  # it says something every 20 ms, and never ends on its own
+                agent.events.warning("working", input)
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            cancelled.append(input)
+            raise
+
+    async with (
+        Harness(config=Settings(), runs=runs) as a,
+        Harness(config=Settings(), runs=runs) as b,
+    ):
+        a.wrap(chatty, id="other")  # another agent of the server: not the run's
+        working = asyncio.create_task(
+            a.wrap(chatty, id="chat").run("one", user="ada", thread=THREAD)
+        )
+        async with asyncio.timeout(10):
+            while not runs.logs:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        [run_id] = runs.logs
+        await b.wrap(chatty, id="chat").cancel(run_id, reason="from b")
+        stopped = await asyncio.wait_for(working, 5)  # a hold heartbeat is 20 s away
+    assert stopped.status is RunStatus.CANCELLED and cancelled == ["one"]
+    await runs.aclose()
+
+
+async def test_a_refused_hold_stops_only_a_run_cancelled_in_the_store(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runs = LocalRuns()
+    async with Harness(config=Settings(), runs=runs) as h:
+        await h._lost("run_nowhere", "default")  # not in the store: nothing to stop
+        record = await runs.start(RunStart(tenant_id="default", agent_id="chat", user_id="ada"))
+        await h._lost(record.run_id, "default")  # still running (held by another): goes on
+
+        async def unreachable(*args: Any, **kwargs: Any) -> None:
+            raise RunsError("agent-runs is away", code="DEPENDENCY_UNAVAILABLE", status=503)
+
+        h.runs.get = unreachable  # type: ignore[method-assign]
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            await h._lost(record.run_id, "default")
+    assert "not read back after its hold was refused" in caplog.text
+    await runs.aclose()
+
+
+async def test_a_place_reads_every_page_of_answers_and_a_run_ended_is_behind_nobody(
+    servers: tuple[Harness, Harness],
+) -> None:
+    runs = servers[0].runs
+    started = RunStart(tenant_id="default", agent_id="chat", user_id="ada", thread_id=THREAD)
+    record = await runs.start(started)
+    answers = [
+        ResolutionEntry(
+            interrupt=Interrupt(tenant_id="default", run_id=record.run_id, question=f"q{n}"),
+            resolution=InterruptResolution(
+                interrupt_id=f"i{n}", run_id=record.run_id, decision=InterruptDecision.APPROVE
+            ),
+            attempt=n + 1,
+            recorded_at=record.created_at + timedelta(seconds=n + 1),
+        )
+        for n in range(3)
+    ]
+    answered = record.model_copy(update={"last_resolution": answers[-1].resolution})
+    pages = Page[ResolutionEntry]
+
+    async def paged(run_id: str, *, cursor: str | None = None, **kw: Any) -> Any:
+        n = int(cursor or 0)
+        return pages(items=answers[n : n + 1], next_cursor=str(n + 1) if n < 2 else None)
+
+    runs.resolutions = paged  # type: ignore[method-assign]
+    assert await placed(runs, answered) == answers[-1].recorded_at
+    ended = await runs.finish(record.run_id, RunStatus.SUCCESS)
+    same = await runs.start(started.model_copy(update={"run_id": "run_next"}))
+    assert same.status is RunStatus.RUNNING
+    assert await Line(runs, ended).ahead() == []  # it no longer runs: nothing is ahead of it

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Final
@@ -90,16 +90,19 @@ class Line:
             return []
         return [run for _, run in sorted(p for p in places.values() if p is not None and p < mine)]
 
-    async def turn(self, ended: Callable[[], asyncio.Event]) -> None:
-        """Wait until no run is placed before this one. ``ended`` is the event a turn of the
-        conversation ending in this process sets; a turn held elsewhere is read again every
-        :data:`POLL_SECONDS`."""
+    async def turn(self, ended: Callable[[], asyncio.Event], here: Collection[str]) -> None:
+        """Wait until no run is placed before this one. ``ended`` is the event a run of the
+        conversation leaving its line in this process sets, ``here`` the runs of it this
+        process holds: behind them only, the run waits for that event; behind a run elsewhere
+        (another process's, a worker's) it reads the line again every :data:`POLL_SECONDS`."""
         while True:
-            woken = ended()  # taken first: a turn ending while the line is read wakes it
-            if not await self.ahead():
+            woken = ended()  # taken first: a run leaving while the line is read wakes it
+            ahead = await self.ahead()
+            if not ahead:
                 return
+            elsewhere = not set(ahead) <= set(here)
             with contextlib.suppress(TimeoutError):
-                async with asyncio.timeout(POLL_SECONDS):
+                async with asyncio.timeout(POLL_SECONDS if elsewhere else None):
                     await woken.wait()
 
     async def _place(self, run_id: str) -> Place | None:
