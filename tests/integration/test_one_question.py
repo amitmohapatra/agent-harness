@@ -456,6 +456,12 @@ async def test_one_question_a_call(
 GATES: Final = {"both": pay, "library": look}
 
 
+def always(decision: str) -> Callable[[Any], dict[str, Any]]:
+    """A person answering every question with ``decision`` (an edit: the amount 3)."""
+    edited = {"answer": {"amount": 3}} if decision == "edit" else {}
+    return lambda _interrupt: {"decision": decision, **edited}
+
+
 async def _gated(h: Harness, lib: str, fn: Any, plan: list[Call], saver: Any) -> Any:
 
     name = fn.spec.name
@@ -484,10 +490,6 @@ async def test_the_librarys_own_gate_is_the_one_question(
     decision = flow if flow in ("reject", "edit") else "approve"
     saver, watch, asked = InMemorySaver(), Watch(), Asked()
 
-    def answer(interrupt: Any) -> dict[str, Any]:
-        edited = {"answer": {"amount": 3}} if decision == "edit" else {}
-        return {"decision": decision, **edited}
-
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         graph = await _gated(h, lib, fn, plan, saver)
         agent = arm(h.wrap(graph, id=f"gated-{lib}", hooks=[watch]), [fn])
@@ -498,10 +500,10 @@ async def test_the_librarys_own_gate_is_the_one_question(
             ) as other:
                 again = await _gated(other, lib, fn, plan, saver)
                 resumer = arm(other.wrap(again, id=f"gated-{lib}", hooks=[watch]), [fn])
-                done = await settled(agent, first, asked, answer, resumer=resumer)
+                done = await settled(agent, first, asked, always(decision), resumer=resumer)
                 await other.writes.drain()
         else:
-            done = await settled(agent, first, asked, answer)
+            done = await settled(agent, first, asked, always(decision))
         assert done.status is RunStatus.SUCCESS, done
         ran = {"approve": list(amounts), "reject": [], "edit": [3]}[decision]
         await ledger(h, memory_service, watch, asked, name, questions=len(amounts), ran=len(ran))
@@ -540,13 +542,10 @@ async def test_the_librarys_gate_on_a_tool_of_the_graphs_own_is_the_one_question
     graph = create_agent(model, tools=[wire], middleware=[gate], checkpointer=InMemorySaver())
     watch, asked = Watch(), Asked()
 
-    def answer(interrupt: Any) -> dict[str, Any]:
-        edited = {"answer": {"amount": 3}} if decision == "edit" else {}
-        return {"decision": decision, **edited}
-
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         agent = h.wrap(graph, id=f"own-{mode}-{side}", hooks=[watch])
-        done = await settled(agent, await agent.run("go", user="ada", thread=THREAD), asked, answer)
+        first = await agent.run("go", user="ada", thread=THREAD)
+        done = await settled(agent, first, asked, always(decision))
         assert done.status is RunStatus.SUCCESS, done
         ran = {"approve": list(amounts), "reject": [], "edit": [3]}[decision]
         await ledger(h, memory_service, watch, asked, "wire", questions=len(amounts), ran=len(ran))

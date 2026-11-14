@@ -68,6 +68,7 @@ from trellis.harness.adapters.langgraph import (
     FOREIGN,
     HITL,
     carries,
+    hitl_approved,
     hitl_calls,
     holds,
     is_hitl,
@@ -1038,7 +1039,10 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     pending = journal.pending
     goes_on = False
     if resolution is not None and pending is not None:
-        journal.approved_in_framework(resolution)
+        held = pending.interrupt.payload or {}
+        journal.approved_in_framework(
+            resolution, hitl_approved(held, resolution) if is_hitl(held) else None
+        )
         # from the framework's serialised run, the attempt goes on where the run paused
         goes_on = bool(pending.native_state)
         if goes_on and not governance_held(pending):

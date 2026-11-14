@@ -81,6 +81,15 @@ async def state_of(harness: Harness, graph: Any, thread: str) -> dict[str, Any]:
     return (await graph.aget_state({"configurable": {"thread_id": key}})).values
 
 
+def one_node(state: Any, node: Any, **compiled: Any) -> Any:
+    """A graph of ``state`` whose one node is ``node``, compiled (``compiled``: its options)."""
+    graph = StateGraph(state)
+    graph.add_node("node", node)
+    graph.add_edge(START, "node")
+    graph.add_edge("node", END)
+    return graph.compile(**compiled)
+
+
 # ------------------------------------------------------------------ a node's Command, Send
 class Route(TypedDict):
     topic: str
@@ -487,11 +496,7 @@ def reviewing() -> Any:
         given = interrupt({"question": "Approve the draft?"}, response_schema=Verdict)
         return {"verdict": given.model_dump()}
 
-    graph = StateGraph(Reviewed)
-    graph.add_node("review", review)
-    graph.add_edge(START, "review")
-    graph.add_edge("review", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    return one_node(Reviewed, review, checkpointer=InMemorySaver())
 
 
 async def test_an_interrupts_response_schema_is_what_the_question_expects(
@@ -582,11 +587,9 @@ async def test_a_graph_whose_model_writes_its_state_answers_with_that_state(
     async def summarize(state: Summary) -> dict[str, Any]:
         return {"summary": (await model.ainvoke(state["topic"])).text}
 
-    graph = StateGraph(Summary)
-    graph.add_node("summarize", summarize)
-    graph.add_edge(START, "summarize")
-    graph.add_edge("summarize", END)
-    result = await harness.wrap(graph.compile(), id="summary").run({"topic": "tides"}, user="u")
+    result = await harness.wrap(one_node(Summary, summarize), id="summary").run(
+        {"topic": "tides"}, user="u"
+    )
     assert result.status is RunStatus.SUCCESS
     assert result.answer == {"topic": "tides", "summary": "a summary"}
 
@@ -606,11 +609,7 @@ async def test_a_graph_of_a_pydantic_state_answers_with_its_models_reply(
     async def think(state: Chat) -> dict[str, Any]:
         return {"messages": [await model.ainvoke(state.messages)], "turns": state.turns + 1}
 
-    graph = StateGraph(Chat)
-    graph.add_node("think", think)
-    graph.add_edge(START, "think")
-    graph.add_edge("think", END)
-    result = await harness.wrap(graph.compile(), id="pydantic").run("hi", user="u")
+    result = await harness.wrap(one_node(Chat, think), id="pydantic").run("hi", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "hello"
 
 
@@ -627,11 +626,7 @@ async def test_a_graph_of_a_dataclass_state_answers_with_that_state(harness: Har
     def note(state: Notes) -> dict[str, Any]:
         return {"note": f"on {state.topic}"}
 
-    graph = StateGraph(Notes)
-    graph.add_node("note", note)
-    graph.add_edge(START, "note")
-    graph.add_edge("note", END)
-    agent = harness.wrap(graph.compile(), id="notes")
+    agent = harness.wrap(one_node(Notes, note), id="notes")
     result = await agent.run({"topic": "tides"}, user="u")
     assert result.status is RunStatus.SUCCESS
     assert result.answer == Notes(topic="tides", note="on tides")
@@ -678,11 +673,7 @@ def asking(model: ScriptedChatModel) -> Any:
     def summarize(state: Summary) -> dict[str, Any]:
         return {"summary": model.invoke(state["topic"]).text}
 
-    graph = StateGraph(Summary)
-    graph.add_node("summarize", summarize)
-    graph.add_edge(START, "summarize")
-    graph.add_edge("summarize", END)
-    return graph.compile()
+    return one_node(Summary, summarize)
 
 
 async def test_a_model_called_in_a_sync_node_is_accounted_and_watched(

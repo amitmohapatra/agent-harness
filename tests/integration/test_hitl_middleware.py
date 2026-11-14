@@ -10,6 +10,7 @@ import pytest
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
+from langchain.agents.middleware.human_in_the_loop import InterruptMode
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -34,12 +35,16 @@ def _reset() -> None:
 
 
 async def mailer(
-    harness: Harness, model: ScriptedChatModel, review: InterruptOnConfig | None = None
+    harness: Harness,
+    model: ScriptedChatModel,
+    review: InterruptOnConfig | None = None,
+    mode: InterruptMode = "batched",
 ) -> Any:
+    gate = HumanInTheLoopMiddleware(interrupt_on={"email": review or True}, interrupt_mode=mode)
     graph = create_agent(
         model,
         tools=await native_tools(harness, email, framework="langgraph"),
-        middleware=[HumanInTheLoopMiddleware(interrupt_on={"email": review or True})],
+        middleware=[gate],
         checkpointer=InMemorySaver(),
     )
     return harness.wrap(graph, id="mailer")
@@ -223,24 +228,12 @@ async def test_a_deep_agent_interrupt_on_is_answered_with_harness_decisions(
 
 
 # ------------------------------------------------------------------------------ per call
-async def per_call(
-    harness: Harness, model: ScriptedChatModel, review: InterruptOnConfig | None = None
-) -> Any:
-    graph = create_agent(
-        model,
-        tools=await native_tools(harness, email, framework="langgraph"),
-        middleware=[HumanInTheLoopMiddleware({"email": review or True}, interrupt_mode="per_call")],
-        checkpointer=InMemorySaver(),
-    )
-    return harness.wrap(graph, id="per-call")
-
-
 async def test_a_per_call_pause_is_an_approval_of_its_one_call(harness: Harness) -> None:
     """``interrupt_mode="per_call"`` pauses once a call, as the call starts: an approval of it,
     the decisions it takes in its payload (the request's ``response_schema``); an approval runs
     it, and governance does not ask about the write again."""
     model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
-    agent = await per_call(harness, model)
+    agent = await mailer(harness, model, mode="per_call")
     paused = await agent.run("email ada", user="u1", thread="t1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     interrupt = paused.interrupt
@@ -265,7 +258,7 @@ async def test_a_per_call_pause_takes_each_decision(
     harness: Harness, decision: str, answer: Any, expected: list[Any], told: str | None
 ) -> None:
     model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "done"])
-    agent = await per_call(harness, model)
+    agent = await mailer(harness, model, mode="per_call")
     paused = await agent.run("email ada", user="u1", thread="t1")
     assert paused.interrupt is not None
     done = await agent.resume(paused.interrupt.interrupt_id, decision, answer=answer, reviewer="l")
@@ -283,7 +276,7 @@ async def test_a_per_call_decision_the_tool_does_not_take_is_refused_before_resu
     LangGraph would refuse it on the resume."""
     model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
     allowed = InterruptOnConfig(allowed_decisions=["approve", "reject"])
-    agent = await per_call(harness, model, allowed)
+    agent = await mailer(harness, model, allowed, mode="per_call")
     paused = await agent.run("email ada", user="u1", thread="t1")
     assert paused.interrupt is not None
     with pytest.raises(ConfigurationError, match="does not take the decision"):
