@@ -144,7 +144,12 @@ class FakeMemoryService:
     #: ``Retry-After`` on a 429/503), ``"timeout"`` (no answer in time) or ``"malformed"`` (a
     #: 200 whose body is not JSON)
     failures: dict[str, int | str] = field(default_factory=dict)
-    #: the ``Retry-After`` (seconds) a 429 or 503 carries
+    #: names of the calls the service's request deadline (``api/deadline.py``) answers ``504
+    #: TIMEOUT`` this many times: before the route runs (``deadline_times``), or after it did
+    #: its work, a write stored (``deadline_after``: the deadline firing past the commit)
+    deadline_times: dict[str, int] = field(default_factory=dict)
+    deadline_after: dict[str, int] = field(default_factory=dict)
+    #: the ``Retry-After`` (seconds) a 429, 503 or 504 carries
     retry_after: str = "0"
     #: whether model endpoints can be registered (the service's credential encryption is
     #: configured); without, ``PUT /v1/agents/model-key`` answers what the service does
@@ -228,6 +233,8 @@ class FakeMemoryService:
                     return refused
                 self.calls.append(call)
                 answer = getattr(self, f"_{name}")(call)
+                if self._spent(self.deadline_after, name):  # done, then past its deadline
+                    answer = self._past_deadline(request)
                 if isinstance(answer, httpx.Response):  # the call refused, as the service does
                     return answer
                 status, answer = (
@@ -240,8 +247,25 @@ class FakeMemoryService:
                 return httpx.Response(status, json=answer)
         return problem(404, request.url.path)
 
+    @staticmethod
+    def _spent(counts: dict[str, int], name: str) -> bool:
+        """Whether one of ``name``'s counted failures is due now (and counts it)."""
+        if counts.get(name, 0) <= 0:
+            return False
+        counts[name] -= 1
+        return True
+
+    def _past_deadline(self, request: httpx.Request) -> httpx.Response:
+        """The deadline middleware's answer: its route class's budget in its detail."""
+        read = request.method == "GET" or request.url.path in READ_POSTS
+        kind, budget = ("read", 5) if read else ("write", 15)
+        detail = f"The request exceeded its {budget} s {kind} deadline"
+        return problem(504, request.url.path, detail=detail, retry_after=self.retry_after)
+
     def _refusal(self, name: str, request: httpx.Request) -> httpx.Response | None:
         """How the call fails, when a test said it does (``None``: it is answered)."""
+        if self._spent(self.deadline_times, name):
+            return self._past_deadline(request)
         if name in self.fail or self.fail_times.get(name, 0) > 0:
             if name in self.fail_times:
                 self.fail_times[name] -= 1
@@ -863,6 +887,9 @@ def _waits_for_review(call: Call) -> bool:
     return not (body.get("source") == "system" and own_run and not body.get("evidence_refs"))
 
 
+#: The POSTs the service's deadline counts as reads (its ``api/deadline.py``).
+READ_POSTS: Final = frozenset({"/v1/context", "/v1/recall", "/v1/tools/hints"})
+
 #: The service's problem codes by status (its ``api/errors.py``), and whether a retry may pass.
 PROBLEMS: Final[dict[int, tuple[str, bool]]] = {
     401: ("AUTHENTICATION", False),
@@ -902,7 +929,7 @@ def problem(
     if details is not None:
         body["details"] = details
     headers = {"content-type": "application/problem+json"}
-    if retryable and status in (429, 503):
+    if retryable and status in (429, 503, 504):
         headers["retry-after"] = retry_after
     return httpx.Response(status, content=json.dumps(body).encode(), headers=headers)
 

@@ -18,6 +18,11 @@ real memory service and agent-runs, models scripted ([docs/research/FEATURE_COVE
   `query_result(save_as="csv")` writes for one text column (`line` over its values) was read
   back as lines, its header among them: one row too many. A kept `.csv` is now read under its
   first line whatever its columns hold; `read_file` still shows the file as kept.
+- **A memory `504` (its request deadline) is proven handled, against the document that now
+  lists it.** The fake memory service answers the middleware's `504 TIMEOUT` before a route
+  runs or after a write is stored: a context is asked again and reaches the run (or is a
+  warning when it stays `504`), and a turn stored then answered `504` is sent again under the
+  same `Idempotency-Key` and kept once (`test_memory_outage.py`, `test_memory_window.py`).
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
