@@ -71,6 +71,12 @@ async def test_a_structured_question_renders_and_reads_back(
         assert entry["metadata"]["component"] == "ask_user"
         assert entry["metadata"]["props"] == {"kind": kind, "options": []}
         assert entry["responseSchema"] == EXPECTS[kind]  # a structured value, or text
+        widgets = {
+            "date": {"ui:widget": "date"},
+            "date_range": {"start": {"ui:widget": "date"}, "end": {"ui:widget": "date"}},
+            "number": {"ui:widget": "updown"},
+        }
+        assert entry["metadata"]["ui_schema"] == widgets[kind]  # the form's widget hints
         resume = [{"interruptId": entry["id"], "payload": answer}]
         done = (await post(http, {"resume": resume}))[-1]
     assert done["outcome"] == {"type": "success"}
