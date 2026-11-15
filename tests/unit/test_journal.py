@@ -685,3 +685,31 @@ def test_a_field_a_newer_server_wrote_is_kept_and_saved_again() -> None:
     dumped = journal.dump()
     assert dumped["from_the_future"] == {"kept": [1, 2]}
     assert dumped["used"] == ["refund", "lookup"]
+
+
+def test_in_a_step_made_again_an_answer_filed_for_another_call_is_not_this_ones() -> None:
+    """One model step's identical calls, made again after a pause (a graph's step: ``here``):
+    the answer filed under another call's id is that call's — a call of another id with no
+    answer of its own finds none, whichever of the calls looks first."""
+    journal = Journal()
+    journal.answers["k"] = [resolution("yes").model_dump(mode="json")]
+    journal.answered_by["k"] = ["call_a"]
+    again = Replay(journal)
+    again.where = lambda: "step-1"
+    with again.calling("k", ident="call_b"):
+        assert again.answer("k") is None
+    with again.calling("k", ident="call_a"):
+        found = again.answer("k")
+    assert found is not None and found.answer == "yes"
+
+
+def test_an_attempt_that_goes_on_takes_the_record_made_for_its_call_by_id() -> None:
+    """An attempt that goes on from the framework's own state (its serialised run): a call
+    takes the record filed under its own id, wherever it stands among identical calls' — not
+    the first one in order."""
+    journal = Journal()
+    journal.calls["k"] = [{"output": "the first's"}, {"output": "the second's"}]
+    journal.called_by["k"] = ["call_a", "call_b"]
+    goes_on = Replay(journal, goes_on=True)
+    with goes_on.calling("k", ident="call_b"):
+        assert goes_on.occurrence("k") == 1

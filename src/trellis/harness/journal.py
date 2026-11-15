@@ -465,9 +465,8 @@ class Journal(BaseModel):
         a call whichever gate asks. ``gated``: the calls a gate of several runs as decided,
         each as approved or edited (LangChain's ``HumanInTheLoopMiddleware``, read by its
         adapter); else the one call of the pause's own approval, with its edited arguments on
-        an edit."""
-        if self.pending is None:
-            return
+        an edit. Called with the pause open: its answer is what resolves it."""
+        assert self.pending is not None  # the attempt files an open pause's answer
         interrupt = self.pending.interrupt
         if gated is not None:
             calls = list(gated)
