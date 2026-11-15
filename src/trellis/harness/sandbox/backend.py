@@ -76,7 +76,7 @@ class SandboxBackend(BaseSandbox):
         await self.source.with_results(runtime, box)  # the results the run keeps, there too
         bounds = [s for s in (timeout, self.call_timeout, runtime.remaining()) if s is not None]
         result = await box.exec(command, timeout=min(bounds))
-        why = hint(result.exit_code, result.stderr, self.source.spec)
+        why = hint(result.exit_code, result.stderr, self.source.spec, result.limit)
         output = "\n".join(part for part in (result.stdout, result.stderr, why) if part)
         return ExecuteResponse(output=output, exit_code=result.exit_code)
 

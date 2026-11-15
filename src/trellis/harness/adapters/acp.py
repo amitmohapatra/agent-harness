@@ -2005,10 +2005,16 @@ class Sandboxed:
 
     async def box(self, *, changes: bool = False) -> Any:
         """The run's sandbox, its copy of the agent's working directory made the first time
-        (the agent names its files by that path)."""
+        (the agent names its files by that path) — in a workspace of the isolation layer's
+        (``sandbox.isolation.Workspace.alias``), that path is the run's workspace, and where
+        its commands start."""
         box = await self.source.opened(self.runtime, changes=changes)
         if not self._made:
-            await box.exec(f"mkdir -p {shlex.quote(self.work)}")
+            alias = getattr(box, "alias", None)
+            if alias is not None:  # a workspace of the isolation layer's: the agent's folder
+                alias(self.work)
+            else:
+                await box.exec(f"mkdir -p {shlex.quote(self.work)}")
             self._made = True
         return box
 
