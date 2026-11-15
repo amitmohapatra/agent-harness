@@ -49,7 +49,9 @@ def _streamed(block: dict[str, Any]) -> str:
     }
     out = [_event("message_start", message=message)]
     if block["type"] == "text":
-        out.append(_event("content_block_start", index=0, content_block={"type": "text", "text": ""}))
+        out.append(
+            _event("content_block_start", index=0, content_block={"type": "text", "text": ""})
+        )
         delta = {"type": "text_delta", "text": block["text"]}
         stop = "end_turn"
     else:

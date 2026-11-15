@@ -72,16 +72,16 @@ ROUTES: Final = (
     "python3 -I -c '"
     "import socket, struct, sys\n"
     "for addr in sys.argv[1:]:\n"
-    "    fam = socket.AF_INET6 if \":\" in addr else socket.AF_INET\n"
+    '    fam = socket.AF_INET6 if ":" in addr else socket.AF_INET\n'
     "    dst = socket.inet_pton(fam, addr)\n"
-    "    body = struct.pack(\"BBBBBBBBI\", fam, len(dst) * 8, 0, 0, 254, 4, 0, 6, 0)\n"
-    "    body += struct.pack(\"HH\", 4 + len(dst), 1) + dst\n"
+    '    body = struct.pack("BBBBBBBBI", fam, len(dst) * 8, 0, 0, 254, 4, 0, 6, 0)\n'
+    '    body += struct.pack("HH", 4 + len(dst), 1) + dst\n'
     "    s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0)\n"
-    "    s.sendto(struct.pack(\"IHHII\", 16 + len(body), 24, 0x405, 1, 0) + body, (0, 0))\n"
-    "    err = -struct.unpack(\"i\", s.recv(4096)[16:20])[0]\n"
+    '    s.sendto(struct.pack("IHHII", 16 + len(body), 24, 0x405, 1, 0) + body, (0, 0))\n'
+    '    err = -struct.unpack("i", s.recv(4096)[16:20])[0]\n'
     "    if err not in (0, 17, 95, 97):\n"
-    "        sys.exit(f\"the metadata server {addr} could not be refused: errno {err}\")\n"
-    "' \"$@\""
+    '        sys.exit(f"the metadata server {addr} could not be refused: errno {err}")\n'
+    '\' "$@"'
 )
 #: Runs ``$@`` with the staged file ``$0`` as its input, then removes it.
 STAGED: Final = '"$@" < "$0"; s=$?; rm -f "$0"; exit $s'

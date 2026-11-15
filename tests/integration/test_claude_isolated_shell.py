@@ -281,7 +281,9 @@ async def test_a_conversations_working_files_carry_to_its_next_turn_and_to_no_on
     async with Harness(config=Settings()) as first:
         await ran(first, model, tmp_path, [bash(made), {"text": "x"}], thread="t1")
     async with Harness(config=Settings()) as second:  # another worker, the same file store
-        events = await ran(second, model, tmp_path, [bash("cat data/a.txt; ls"), {"text": "x"}], thread="t1")
+        events = await ran(
+            second, model, tmp_path, [bash("cat data/a.txt; ls"), {"text": "x"}], thread="t1"
+        )
         [listed] = said(model)
         told = model.sent[-1]
         await ran(second, model, tmp_path, [bash("cat data/a.txt"), {"text": "x"}], thread="t2")

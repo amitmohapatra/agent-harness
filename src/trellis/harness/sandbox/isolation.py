@@ -57,22 +57,22 @@ from pydantic import BaseModel, ConfigDict, Field
 from trellis.contracts import ConfigurationError, ToolError, stable_id
 from trellis.harness.runtime import current
 from trellis.harness.sandbox.base import (
+    AUDIT,
+    AUDIT_CHARS,
+    COMMAND_EVENT,
     RUN,
     TENANT,
     ExecResult,
     SandboxLost,
     SandboxRef,
     SandboxSpec,
+    record_command,
 )
 from trellis.harness.sandbox.docker import OUTPUT_BYTES, Sink, _Tail
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 
 log = logging.getLogger("trellis.sandbox")
 
-#: The logger every command is recorded on, one JSON object a line.
-AUDIT: Final = "trellis.sandbox.audit"
-#: The ``CUSTOM`` event a run's command is recorded with on its stream.
-COMMAND_EVENT: Final = "sandbox_command"
 #: What the layer launches a command with (util-linux).
 TOOLS: Final = ("unshare", "setpriv", "prlimit")
 #: The first uid a run gets, the uids each tenant has, and the most tenants one root holds.
@@ -116,8 +116,6 @@ UNISOLATED_HERE: Final = (
     "the command was not run: commands cannot be isolated on this machine, and the harness "
     "never runs them as the service's own user"
 )
-#: The longest command an audit record keeps.
-AUDIT_CHARS: Final = 8_192
 #: A path the layer passes to its scripts: absolute, nothing a shell would split.
 SAFE_PATH: Final = re.compile(r"/[A-Za-z0-9_./-]*")
 NAME: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
@@ -517,7 +515,11 @@ class Isolation:
 
 class Workspace:
     """A run's workspace, as its tools use it (the ``Sandbox`` protocol): ``uid`` the run's,
-    ``home`` its folder. Every command is audited (:data:`AUDIT`, :data:`COMMAND_EVENT`)."""
+    ``home`` its folder. Every command is audited, once, here (:data:`AUDIT`,
+    :data:`COMMAND_EVENT`, the tool call's span: ``base.record_command``)."""
+
+    #: it audits its own commands (``base.audited`` leaves them to it)
+    audits = True
 
     def __init__(
         self,
@@ -613,23 +615,25 @@ class Workspace:
         return posixpath.normpath(posixpath.join(self.cwd, path))
 
     def _audit(self, command: str, code: int | None, started: float, limit: str | None) -> None:
-        """The command recorded: in the log, always; on its run's stream, inside a run."""
+        """The command's one audit record (``base.record_command``: the log, the run's stream,
+        the tool call's span): where it ran, this machine's layer (``host``) or a container's
+        (``sandbox``)."""
         runtime = current()
         labels = self._ref.labels
-        record = {
-            "user": labels.get(USER) or (runtime.user if runtime is not None else None),
-            "tenant": labels.get(TENANT),
-            "run": labels.get(RUN),
-            "sandbox": self._ref.id,
-            "uid": self.uid,
-            "command": command[:AUDIT_CHARS],
-            "exit_code": code,
-            "duration_ms": _since(started),
-            "limit": limit,
-        }
-        logging.getLogger(AUDIT).info(json.dumps(record))
-        if runtime is not None:
-            runtime.events.custom(COMMAND_EVENT, **record)
+        record_command(
+            {
+                "user": labels.get(USER) or (runtime.user if runtime is not None else None),
+                "tenant": labels.get(TENANT),
+                "run": labels.get(RUN),
+                "sandbox": self._ref.id,
+                "uid": self.uid,
+                "command": command[:AUDIT_CHARS],
+                "exit_code": code,
+                "duration_ms": _since(started),
+                "limit": limit,
+                "where": "host" if isinstance(self.isolation.runner, HostRunner) else "sandbox",
+            }
+        )
 
 
 class HostSandbox:

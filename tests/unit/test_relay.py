@@ -45,9 +45,7 @@ def serve(frames: bytes) -> tuple[str, threading.Thread, list[bytes]]:
 def test_the_client_writes_each_stream_and_exits_with_the_commands_code(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    frames = (
-        HEADER.pack(1, 3) + b"out" + HEADER.pack(2, 3) + b"err" + HEADER.pack(0, 1) + b"7"
-    )
+    frames = HEADER.pack(1, 3) + b"out" + HEADER.pack(2, 3) + b"err" + HEADER.pack(0, 1) + b"7"
     path, thread, got = serve(frames)
     assert main(path, "token") == 7
     thread.join()

@@ -444,12 +444,12 @@ async def test_names_and_paths_a_shell_would_split_are_refused(layer: HostSandbo
 #: A command that tries the cloud metadata server: what it got, or why it could not.
 METADATA_TRY: Final = (
     "python3 -I -c 'import socket, sys\n"
-    "for host in (\"169.254.169.254\", \"metadata.google.internal\"):\n"
+    'for host in ("169.254.169.254", "metadata.google.internal"):\n'
     "    s = socket.socket(); s.settimeout(3)\n"
     "    try:\n"
-    "        s.connect((host, 80)); print(host, \"REACHED\")\n"
+    '        s.connect((host, 80)); print(host, "REACHED")\n'
     "    except OSError as exc:\n"
-    "        print(host, \"refused\", type(exc).__name__)\n'"
+    '        print(host, "refused", type(exc).__name__)\n\''
 )
 
 
@@ -465,10 +465,23 @@ async def test_the_cloud_metadata_server_is_out_of_every_commands_reach(
     finally:
         if network == "open":  # the rules stay for the layer's uids: removed after the test
             for wall, address in (("iptables", "169.254.169.254"), ("ip6tables", "fd00:ec2::254")):
-                top = layer.isolation.uid_base + layer.isolation.tenants * layer.isolation.tenant_uids
+                top = (
+                    layer.isolation.uid_base + layer.isolation.tenants * layer.isolation.tenant_uids
+                )
                 as_root(
-                    helper, wall, "-w", "-D", "OUTPUT", "-m", "owner", "--uid-owner",
-                    f"{layer.isolation.uid_base}-{top - 1}", "-d", address, "-j", "REJECT",
+                    helper,
+                    wall,
+                    "-w",
+                    "-D",
+                    "OUTPUT",
+                    "-m",
+                    "owner",
+                    "--uid-owner",
+                    f"{layer.isolation.uid_base}-{top - 1}",
+                    "-d",
+                    address,
+                    "-j",
+                    "REJECT",
                 )
     assert "REACHED" not in said.stdout
     assert said.stdout.count("refused") == 2, said

@@ -138,10 +138,10 @@ from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
+from trellis.harness.host import cannot_isolate
 from trellis.harness.journal import Pending, call_key
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of, within
-from trellis.harness.host import cannot_isolate
 from trellis.harness.sandbox import carry, sandbox
 from trellis.harness.sandbox.isolation import host_layer
 from trellis.harness.tools import bridge, results
@@ -1582,7 +1582,7 @@ class Attempt:
         usage = getattr(answer, "usage", None)
         if usage is None or self.usage is not None:
             return
-        budget.account(
+        budget.reported(
             self.runtime,
             model=self.target.model or ACP_MODEL,
             input_tokens=usage.input_tokens,

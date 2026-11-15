@@ -152,9 +152,8 @@ async def risks(agent: Agent) -> dict[str, Any]:
 
 async def t1_and_t2(agent: Agent, server: StandIn) -> None:
     """T1: the task starts and the turn ends with its id. T2: the next message is answered
-    while the task runs. The task cannot end until both did (``StandIn.hold``): neither
-    waited for it. Then it ends."""
-    server.hold()
+    while the task runs. The task cannot end until both did (the stand-in ends it only once
+    released, ``StandIn.release``): neither waited for it. Then it ends."""
     first = await say(agent, "run the optimization")
     assert first.status is RunStatus.SUCCESS, first.error
     assert server.task_id in first.answer
@@ -193,7 +192,6 @@ async def test_a_langgraph_graph_starts_a_task_chats_on_and_gets_its_result(
     assert run_scoped(agent.target) is carried  # where the list is kept from turn to turn
     assert await risks(agent) == RISKS
     await t1_and_t2(agent, server)
-    await server.finished()
     await t3_list_and_another_user(agent, server, model)
 
 
@@ -211,7 +209,6 @@ async def test_a_a_graph_with_no_middleware_and_no_checkpointer_keeps_the_task_l
     assert getattr(agent.target, "checkpointer", None) is None
     assert await risks(agent) == RISKS
     await t1_and_t2(agent, server)
-    await server.finished()
     await t3_list_and_another_user(agent, server, model)
 
 
@@ -242,7 +239,6 @@ async def test_a_today_such_a_graphs_cancelled_turn_leaves_its_task_out_of_the_l
     cancelled after the start has no end to read it from: the next turn's list does not have
     the task (a graph with ``middleware()`` checkpoints each step into its run, and keeps it:
     ``test_react_async_subagent``). The task itself is cancelled with its turn."""
-    server.seconds = 60
     model = Model(turns=[START, "never said"], hold_from=1)
     agent = harness.wrap(create_deep_agent(model, subagents=[subagent(server)]), id="bg")
     turn = asyncio.create_task(say(agent, "run the optimization"))
@@ -293,7 +289,6 @@ async def test_a3_another_server_sharing_the_graphs_checkpointer_gets_the_result
             await t1_and_t2(here, server)
         await first.aclose()
         assert written_in(tmp_path) == {"storage", "writes", "blobs"}
-        await server.finished()
         model = Model(turns=[])  # the id is read in the thread the checkpointer holds
         with kept_in(tmp_path) as saver:
             there = second.wrap(deep_agent(model, server, checkpointer=saver), id="bg")
@@ -645,7 +640,6 @@ async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapte
     agent and a function on the same harness, asked by the same user in a thread of the same
     name, start their turns with no carried state (``Runtime.carried``), keep none, and
     answer; the Deep Agents graph's own next turn still finds its task."""
-    server.seconds = 60
     model = Model(turns=[START, reports_the_id])
     deep = chat(harness, server, model)
     await say(deep, "run the optimization")
@@ -705,7 +699,6 @@ async def test_e_an_async_sub_agent_and_a_live_claude_session_side_by_side_on_on
     its task list (and no CLI process), Claude's session its background task and its own
     prompts (and no task list). Closing the harness ends Claude's process; the sub-agent's
     task is its server's, and goes on."""
-    server.seconds = 60
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
     async with Harness(config=Settings(host_execution="allow")) as harness:
         model = Model(turns=[START, reports_the_id])

@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import copy
 import json
 import logging
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Hashable, Sequence
-import contextvars
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -211,6 +211,10 @@ class Runtime:
     offered: set[str] | None = None
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
+    #: governance's action (``run``, ``announce``, ``ask``) on each call its framework runs
+    #: itself, by the call's key (``journal.call_key``), as decided before it ran
+    #: (``bridge.permitted``): what its ``execute_tool`` span says once it ran (``observed``)
+    governed: dict[str, str] = field(default_factory=dict)
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
@@ -289,6 +293,9 @@ class Runtime:
     #: what the model is told of the working files its conversation's earlier turns left, given
     #: back into the run's workspace (``sandbox.carry``), until a result says it
     restored: str | None = None
+    #: the audit records of commands a framework's own shell call ran (in the run's workspace),
+    #: until that call is reported and its span takes its own (``sandbox.base.record_command``)
+    commands: list[dict[str, Any]] = field(default_factory=list)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None

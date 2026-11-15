@@ -69,6 +69,7 @@ from trellis.harness.sandbox.base import (
     SandboxSpec,
     SupportsPause,
     SupportsSnapshot,
+    audited,
     hint,
 )
 from trellis.harness.sandbox.docker import DockerSandbox, docker_host
@@ -391,7 +392,7 @@ class SandboxSource:
         await self.with_results(runtime, box)
         command = str(args["command"])
         await self.seen(runtime, box)
-        result = await box.exec(command, timeout=runtime.remaining())
+        result = await audited(box, command, timeout=runtime.remaining())
         why = hint(result.exit_code, result.stderr, self.spec, result.limit)
         kept = await self.outputs_said(runtime, box, command)
         told = {"hint": why, OUTPUTS: kept, "restored": carry.told(runtime)}
