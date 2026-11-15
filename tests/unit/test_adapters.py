@@ -216,6 +216,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         conversation="run_1",
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
+        raise_stopped=lambda: None,  # no call stopped by the process's end
         offered=None,
         tenant="default",
         user="u1",
@@ -230,7 +231,8 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert isinstance(items[-1], Output) and items[-1].value == messages
     # the query's usage and cost, read from its ResultMessage (cache reads and writes are input)
     assert spent == [
-        {"model": None, "input_tokens": 17, "output_tokens": 5, "cached": 4, "cost": 0.25}
+        {"model": None, "input_tokens": 17, "output_tokens": 5, "cached": 4, "written": 3}
+        | {"cost": 0.25}
     ]
     # the query watched for a stall from its start, anew at each message, until it ended
     assert watched[0] == ("started", "claude_agent_sdk") and watched[-1][0] == "ended"
