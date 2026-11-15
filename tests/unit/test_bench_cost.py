@@ -238,6 +238,20 @@ def test_the_meter_counts_every_call_its_tokens_and_failures() -> None:
     assert (meter.cached_tokens, meter.written_tokens, meter.cache_reported) == (60, 10, True)
 
 
+async def test_the_benchmark_harness_keeps_the_run_store_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The environment's agent-runs (``RUNS_URL``) is off unless ``runs=True`` asks for it, so
+    a run can be measured on the product's run store (which needs the memory service on: it
+    accepts the keys memory issues)."""
+    given = Settings(runs_url="http://runs.test", memory_url="http://memory.test", api_key="k")
+    monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: given))
+    async with run.harness(memory=True) as h:
+        assert h.settings.runs_url is None
+    async with run.harness(memory=True, runs=True) as h:
+        assert h.settings.runs_url == "http://runs.test"
+
+
 def test_an_adapter_not_on_langchain_is_metered_by_what_the_harness_accounts() -> None:
     """OpenAI Agents, Claude and Kimi report their usage to the run's budget, not LangChain's
     callbacks: ``metered(adapter=)`` counts it there, a sub-agent's reply once, through its

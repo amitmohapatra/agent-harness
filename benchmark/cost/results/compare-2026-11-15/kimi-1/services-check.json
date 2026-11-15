@@ -1,0 +1,51 @@
+{
+ "turns": 137,
+ "runs_unique": 138,
+ "runs_found": 138,
+ "runs_ended": 137,
+ "runs_with_started_and_finished": 138,
+ "events": 3063,
+ "cases_with_fewer_runs_than_turns": [],
+ "spend_token_mismatches": [
+  "long57md:long-flow-04: agent-runs 123676 vs rows 212303"
+ ],
+ "problems": [
+  "run_0901d093ca714c188b8f6ada43776726: {'found': True, 'status': 'QUEUED', 'started': True, 'finished': True, 'events': 25, 'tokens': 28611}"
+ ],
+ "memory_requests": 3717,
+ "memory_per_turn": 27.13,
+ "memory_reads": 2745,
+ "memory_writes": 972,
+ "memory_failed": [
+  "long57:multihop-04 PUT /v1/agents/model-key ValidationError",
+  "long57:long-multi-02 GET /v1/messages/msg_units NotFoundError",
+  "long57md:long-flow-04 PUT /v1/agents/model-key ValidationError",
+  "long57md:long-flow-04 PUT /v1/agents/model-key ValidationError",
+  "long57md:long-flow-04 PUT /v1/agents/model-key ValidationError",
+  "ordinary:multihop-01 PUT /v1/agents/model-key ValidationError",
+  "sw16:advdata-02 PUT /v1/agents/model-key ValidationError",
+  "sw8:long-data-03 PUT /v1/agents/model-key ValidationError",
+  "swown:advconv-05 PUT /v1/agents/model-key ValidationError"
+ ],
+ "cases_without_memory_read": [],
+ "cases_without_memory_write": [],
+ "turns_with_context_read": 138,
+ "turns_with_transcript_write": 138,
+ "context_reads": 149,
+ "transcript_writes": 155,
+ "memory_paths": {
+  "GET /v1/tools/approval-suggestions": 2334,
+  "POST /v1/tools/invocations": 640,
+  "GET /v1/tools": 218,
+  "POST /v1/messages": 155,
+  "POST /v1/context": 149,
+  "POST /v1/feedback": 139,
+  "GET /v1/tool-permissions": 21,
+  "PUT /v1/tools/catalog": 18,
+  "POST /v1/verify": 12,
+  "GET /v1/keys/self": 11,
+  "GET /v1/agent-tools": 11,
+  "PUT /v1/agents/model-key": 8,
+  "GET /v1/messages/msg_units": 1
+ }
+}
