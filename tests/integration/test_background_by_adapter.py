@@ -85,6 +85,7 @@ from tests.integration.test_react_async_subagent import (
     reports_the_id,
     say,
     says_what_the_tool_said,
+    stops_answering,
     subagent,
 )
 from tests.support.arm import arm, declaring
@@ -242,9 +243,7 @@ async def test_a_today_such_a_graphs_cancelled_turn_leaves_its_task_out_of_the_l
     model = Model(turns=[START, "never said"], hold_from=1)
     agent = harness.wrap(create_deep_agent(model, subagents=[subagent(server)]), id="bg")
     turn = asyncio.create_task(say(agent, "run the optimization"))
-    while not server.runs or len(model.seen) < 1:  # noqa: ASYNC110 - the server's own thread
-        await asyncio.sleep(0.01)
-    await asyncio.sleep(0.1)  # the start returned; the model's next call hangs
+    await stops_answering(model)  # the start returned; the model's next call hangs
     [run_id] = agent.running
     await agent.cancel(run_id, reason="the user stopped the turn")
     assert (await turn).status is RunStatus.CANCELLED
