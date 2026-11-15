@@ -113,7 +113,13 @@ case "${1:-status}" in
         rm -rf "$H/memwork" "$H/runswork" "$H/redis" "$H/keys.env" ;;
   test) shift
     . "$H/keys.env"
-    cd "$HERE" && env -i PATH="$PATH" HOME="$H/home" LANG=C.UTF-8 NO_PROXY='*' TMPDIR="$H/tmp" HF_HUB_OFFLINE=1 \
+    # the stack's settings go to the tests too: a test that stops or starts a service
+    # (SC_STACK stop-one / start-one) runs this script again, and must reach this stack
+    settings=()
+    for v in SCEN_HOME SCEN_PG_PORT SCEN_REDIS_PORT SCEN_MEM_PORT SCEN_RUNS_PORT SCEN_MEM_ROOT \
+             SCEN_RUNS_ROOT SCEN_CONTRACTS SCEN_BIFROST SCEN_SVC_PY SCEN_RUNS_PY SCEN_PY SCEN_MODELS \
+             SCEN_DB_MEM SCEN_DB_RUNS SCEN_TENANT; do settings+=("$v=${!v}"); done
+    cd "$HERE" && env -i "${settings[@]}" PATH="$PATH" HOME="$H/home" LANG=C.UTF-8 NO_PROXY='*' TMPDIR="$H/tmp" HF_HUB_OFFLINE=1 \
       PYTHONPATH="$HERE/src:$SCEN_MEM_ROOT/sdk/python/src:$SCEN_RUNS_ROOT/sdk/python/src:$SCEN_CONTRACTS:$SCEN_BIFROST" \
       MEMORY_URL=http://127.0.0.1:$SCEN_MEM_PORT RUNS_URL=http://127.0.0.1:$SCEN_RUNS_PORT \
       TRELLIS_API_KEY="$SCEN_KEY" TRELLIS_ADMIN_KEY="$SCEN_ADMIN_KEY" TRELLIS_API_KEY_OTHER="$SCEN_KEY2" \
