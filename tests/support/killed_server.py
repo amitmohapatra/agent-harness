@@ -134,7 +134,8 @@ async def running(store: FileRuns) -> list[str]:
 async def main(store_path: Path, folder: Path, scenario: str) -> None:
     setattr(holding, "HOLD_SECONDS", HOLD_SECONDS)  # noqa: B010 - a Final, for this process
     store = FileRuns(store_path)
-    async with Harness(config=Settings(), runs=store) as harness:
+    # Claude Code runs its shell in a folder of this machine: this deployment allows it
+    async with Harness(config=Settings(host_execution="allow"), runs=store) as harness:
         if scenario == "asked":
             await asked(harness, store, folder)
             await asyncio.Event().wait()  # until killed
