@@ -142,6 +142,9 @@ class StandIn:
         self.seconds = seconds
         #: every task runs until :meth:`release`, whatever the clock says (:meth:`hold`)
         self.held = False
+        #: a task's time over, it ends only once this says so too, and stays ended (``None``:
+        #: at once) — what a test's order of events, not the clock, says it waits for
+        self.ends_after: Callable[[], bool] | None = None
         #: why every task fails once its time is over (``None``: it succeeds)
         self.fails: str | None = None
         #: the server refuses to cancel a run
@@ -212,6 +215,10 @@ class StandIn:
         run = self.runs[task_id]
         over = not self.held and time.monotonic() - run["started"] >= self.seconds
         ended = "success" if self.fails is None else "error"
+        if run["status"] == "running" and over and self.ends_after is not None:
+            if not self.ends_after():
+                return "running"
+            run["status"] = ended  # ended for good: whatever the test's condition says later
         return ended if run["status"] == "running" and over else run["status"]
 
     def hold(self) -> None:
@@ -1954,6 +1961,9 @@ async def test_i_remote_task_outcomes_start_three_tasks_in_a_row_and_the_fourth_
         turns += [START, f"Started task {n + 1}."]
     model = Model(turns=[*turns, START, says_what_the_tool_said])
     agent = chat(harness, server, model)
+    # each task ends once no turn works — after the turn that started it ended: one that ended
+    # first (a loaded machine) is read by that turn itself, which the script does not plan
+    server.ends_after = lambda: not agent.running
     await say(agent, "run the optimization")
 
     async def chained() -> list[RunRecord]:
