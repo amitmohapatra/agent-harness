@@ -394,7 +394,10 @@ class World:
         sample = 1.0 if {"grounding", "judges"} & set(on) else 0.0
         self.monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", sample)
         self.monkeypatch.setattr(evals, "JUDGE_SAMPLE", sample)
+        # the matrix runs Claude Code and Kimi Code in folders of this machine: its deployment
+        # allows commands here (TRELLIS_HOST_EXECUTION=allow)
         settings = Settings(
+            host_execution="allow",
             llm_api_key="vk" if "gateway" in on else None,
             llm_base_url=GATEWAY_URL if "gateway" in on else None,
             llm_gateway="bifrost" if "gateway" in on else None,

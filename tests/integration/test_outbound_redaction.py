@@ -235,7 +235,8 @@ async def test_every_framework_shows_its_answer_through_the_hooks(
         "openai_agents": lambda: OpenAIAgent(name="o", model=ScriptedModel([said])),
         "claude": lambda: options(tmp_path, [{"text": said}]),
     }[framework]()
-    async with Harness(config=Settings()) as harness:
+    # Claude Code works in a folder of this machine: this test's deployment allows it
+    async with Harness(config=Settings(host_execution="allow")) as harness:
         agent = harness.wrap(target, id=f"show-{framework}", hooks=[Mask()])
         result = await agent.run("hi", user="u")
     assert result.answer == "write to [email]"

@@ -120,7 +120,7 @@ async def test_an_answer_to_a_background_subagent_a_killed_server_left_waiting_e
     waiting = await store.get(said["child"], tenant="default")
     assert waiting is not None and waiting.status is RunStatus.PAUSED
 
-    async with Harness(config=Settings(), runs=store) as other:
+    async with Harness(config=Settings(host_execution="allow"), runs=store) as other:
         target = killed_server.claude(tmp_path, [{"text": "carried on"}])
         agent = arm(other.wrap(target, id=killed_server.AGENT_ID), [killed_server.refund])
         events: list[RunEvent] = []

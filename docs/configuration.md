@@ -138,7 +138,7 @@ route:
 | `TRELLIS_FILES_URL` | `files_url` | the XDG data folder (`$XDG_DATA_HOME/trellis/files`, else `~/.local/share/trellis/files`) | `gs://acme-trellis/files` | the files runs make for their users (exports, sandbox outputs), stored only, under `<tenant>/<user>/<conversation>/<run>/`, on fsspec: `gs://`, `s3://`, `az://` need `gcsfs`, `s3fs`, `adlfs` (each reads its cloud's own credentials); served over AG-UI to the run's user, as a link signed for 5 minutes where the store signs, else streamed ([surfaces.md](surfaces.md)); and, under `.carried/<tenant>/<user>/<conversation>/<agent>/`, the list of background tasks a conversation carries from turn to turn ([frameworks/react.md](frameworks/react.md#a-task-in-the-background)): servers that share the store share the list |
 | `TRELLIS_SCHEDULE_MIN_INTERVAL` | `schedule_min_interval` | `300` (5 minutes; agent-runs' own floor is one run an hour) | `3600` | the least seconds between two runs of a schedule a user sets in chat: the `schedule_task` tool refuses a `when` that fires more often, in a sentence the model tells the user; `Harness(schedule_limits=)` overrides it per user ([runs.md](runs.md#schedules)) |
 | `TRELLIS_SCHEDULE_MAX_PER_USER` | `schedule_max_per_user` | `20` | `5` | how many schedules one user may set in chat, per agent ("You have 20 of 20 schedules..."); `Harness(schedule_limits=)` overrides it per user or plan ([runs.md](runs.md#schedules)) |
-| `TRELLIS_REQUIRE_SANDBOX` | `require_sandbox` | `false` | `true` | refuse to wrap an agent that runs a shell of its own without a sandbox: Claude Code without `ClaudeAgentOptions(sandbox={'enabled': True})` (or with unsandboxed commands allowed), an `ACPAgent` (Kimi Code) without `sandbox=` — `h.wrap` raises `ConfigurationError` saying how; off, they run in the run's own folder and governance asks before their writes and shell commands ([sandbox.md](sandbox.md)) |
+| `TRELLIS_HOST_EXECUTION` | `host_execution` | `allow`: shell commands run — the harness's own through its isolation layer (`sandbox()`: Docker, else this machine's `HostSandbox`, else refused with the reason), Claude Code's and Kimi Code's own shells as they run (as the service's user, without the harness's isolation); Deep Agents' `LocalShellBackend` (no isolation) is refused at `h.wrap`, naming `sandbox()` | `deny` | the administrator's switch: every shell outside a sandbox off — Claude Code's and Kimi's own on the host, an OpenAI local shell tool or Unix-local sandbox, LangChain's host shell, refused at `h.wrap` naming this variable; the isolation layer's commands refused at the call; commands in a sandbox unaffected ([governance.md](governance.md#commands-on-the-host)) |
 
 The tools' own variables, read by their own SDKs (not `Settings` fields): `LANGFUSE_PUBLIC_KEY`
 and `LANGFUSE_SECRET_KEY` (and `LANGFUSE_BASE_URL`, unset: Langfuse Cloud) — its scores and
@@ -155,7 +155,8 @@ Retired with no alias (a variable left set is not read; `trellis doctor` lists w
 (`llm_judge(model=)`, or the gateway's judge alias), `TRELLIS_EVAL_SAMPLE`,
 `TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_SAMPLE` (a fixed tenth of runs is grounded; each
 judge's share is `llm_judge(sample=)`), `LANGFUSE_HOST` (`LANGFUSE_BASE_URL`, read by Langfuse's
-own names).
+own names), `TRELLIS_REQUIRE_SANDBOX` (`TRELLIS_HOST_EXECUTION=deny` switches shells outside a sandbox off;
+`Settings(require_sandbox=)` is refused, naming `host_execution`).
 
 A working local setup (the memory service's and agent-runs' development stacks; the key is the
 memory service's development key, which speaks for the tenant `default`):

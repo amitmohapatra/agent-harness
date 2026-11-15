@@ -16,6 +16,7 @@ from trellis.contracts import RunStatus
 from trellis.harness.bridges import live as shared
 
 
+@pytest.mark.host_execution
 async def test_with_no_place_to_keep_the_process_its_background_work_ends_with_it(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

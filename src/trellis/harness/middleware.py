@@ -160,7 +160,7 @@ from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.skills import serves_skills
-from trellis.harness.telemetry import gateway_headers, model_span, usage
+from trellis.harness.telemetry import failed, gateway_headers, model_span, tool_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
@@ -580,7 +580,8 @@ async def governed_call(
     if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
     if call["name"] in STATE_TOOLS and framework_made(own) and scratch(own, call):
-        return _scratch_said(runtime, call["name"], await handler(request))
+        traced = await _scratch_traced(runtime, own, request, handler)
+        return _scratch_said(runtime, call["name"], traced)
     if converted.made(own) or call["name"] in runtime.toolbox:
         # the harness's own: its call goes through the bridge, a repeat of its step's too
         first = _repeats(_step_of(request)[1]).get(str(call["id"]))
@@ -1255,6 +1256,35 @@ async def _helped(
 
 #: The arguments Deep Agents' sub-agent tool (:data:`TASK_TOOL`) takes (``SubAgentMiddleware``).
 TASK_ARGUMENTS: Final = frozenset({"description", "subagent_type"})
+
+
+async def _scratch_traced(
+    runtime: Runtime,
+    own: BaseTool,
+    request: ToolCallRequest,
+    handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+) -> ToolMessage | Command[Any]:
+    """A state tool's call (the graph's own state: not governed), still a step of the run:
+    traced as every call is, its governance action ``run``."""
+    call = request.tool_call
+    spec = runtime.native.get(call["name"]) or spec_of(own)
+    with tool_span(
+        call["name"], str(call["id"]), call["args"], source=spec.source, action="run"
+    ) as span:
+        done = await handler(request)
+        told = text_of(_told(done))
+        span_output(span, told, key="gen_ai.tool.call.result")
+        if _errored(done):
+            failed(span, ToolOutcome(tool=call["name"], status=ToolStatus.ERROR, output=told))
+    return done
+
+
+def _errored(done: Any) -> bool:
+    """Whether a tool's result is a failed message: its own, or a ``Command``'s last one."""
+    if isinstance(done, Command):
+        update = done.update if isinstance(done.update, Mapping) else {}
+        done = (update.get("messages") or [None])[-1]
+    return isinstance(done, ToolMessage) and done.status == "error"
 
 
 def _told(done: Any) -> Any:
@@ -2321,6 +2351,7 @@ def _replied(span: Any, reply: ModelResponse[Any]) -> None:
         finish_reasons=[reason] if isinstance(reason, str) else [],
         cached_tokens=details.get("cache_read"),
         written_tokens=details.get("cache_creation"),
+        cost=budget.gateway_cost(metadata),
     )
     span_output(span, message.text or _spoken(message).get("tool_calls"))
 

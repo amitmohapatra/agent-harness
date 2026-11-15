@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server
 from claude_agent_sdk import tool as sdk_tool
 
@@ -50,6 +51,7 @@ def tidying(n: int) -> dict[str, Any]:
     return {"tool": "tidy", "server": "ledger", "args": {"n": n}}
 
 
+@pytest.mark.host_execution
 async def test_a_claude_servers_tool_that_says_nothing_offers_every_choice_and_always_holds(
     memory_harness: Harness, tmp_path: Path
 ) -> None:
@@ -71,6 +73,7 @@ async def test_a_claude_servers_tool_that_says_nothing_offers_every_choice_and_a
     assert again.status is RunStatus.SUCCESS and ran == [1, 2, 3], again
 
 
+@pytest.mark.host_execution
 async def test_claude_codes_own_question_offers_the_choices_of_the_risk(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -91,6 +94,7 @@ async def test_claude_codes_own_question_offers_the_choices_of_the_risk(
     assert [json.loads(line)["args"]["n"] for line in written] == [1, 2]
 
 
+@pytest.mark.host_execution
 async def test_the_catalogs_risk_decides_before_claude_codes_own_question(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:

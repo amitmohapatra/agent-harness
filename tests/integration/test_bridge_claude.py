@@ -76,10 +76,11 @@ SCRIPT = [
 ]
 
 
+@pytest.mark.host_execution
 async def test_a_paused_session_continues_on_another_machine(tmp_path: Path) -> None:
     runs = LocalRuns()
-    first = Harness(config=Settings(), runs=runs)
-    second = Harness(config=Settings(), runs=runs)
+    first = Harness(config=Settings(host_execution="allow"), runs=runs)
+    second = Harness(config=Settings(host_execution="allow"), runs=runs)
     try:
         here = arm(first.wrap(machine(tmp_path, "one", SCRIPT), id="refunder"), [refund])
         there = arm(second.wrap(machine(tmp_path, "two", SCRIPT), id="refunder"), [refund])
@@ -104,6 +105,7 @@ class Crash(BaseException):
     """The worker process dies: nothing more is written, the lease lapses."""
 
 
+@pytest.mark.host_execution
 async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Path) -> None:
     crashes = [Crash()]
 
@@ -120,8 +122,8 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
         {"text": "done: {last}"},
     ]
     runs = LocalRuns()
-    first = Harness(config=Settings(), runs=runs)
-    second = Harness(config=Settings(), runs=runs)
+    first = Harness(config=Settings(host_execution="allow"), runs=runs)
+    second = Harness(config=Settings(host_execution="allow"), runs=runs)
     try:
         dying = arm(first.wrap(machine(tmp_path, "one", script), id="r"), [boom])
         taking_over = arm(second.wrap(machine(tmp_path, "two", script), id="r"), [boom])
@@ -162,6 +164,7 @@ def said(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if "Claude's session is kept" in r.getMessage()]
 
 
+@pytest.mark.host_execution
 async def test_options_with_their_own_store_keep_it(
     harness: Harness, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -180,6 +183,7 @@ async def test_options_with_their_own_store_keep_it(
     assert in_ram._store and durable.kept._store  # each team's store got its session
 
 
+@pytest.mark.host_execution
 async def test_file_checkpointing_keeps_the_session_on_the_local_disk_and_says_so(
     harness: Harness, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -192,6 +196,7 @@ async def test_file_checkpointing_keeps_the_session_on_the_local_disk_and_says_s
     assert warning.__dict__["store"] == "enable_file_checkpointing"
 
 
+@pytest.mark.host_execution
 async def test_a_memory_service_that_is_down_leaves_the_prompt_without_context(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:

@@ -5,6 +5,53 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: shell commands on the host — isolated where the harness runs them, one switch to turn them off (`TRELLIS_HOST_EXECUTION`)
+
+Shell commands stay allowed by default (`TRELLIS_HOST_EXECUTION=allow`), with isolation as the
+guard where the harness runs them:
+
+* **`sandbox()` with no provider** works in the tenant's shared Docker container when the
+  daemon answers, else in this machine's isolation layer (`HostSandbox`: a per-tenant base, a
+  per-run uid and 0700 workspace, limits, a scrubbed environment, the network off, audit) when
+  it can isolate here, else it has no shell: each command is refused with the reason, said once
+  (`NoShell`). The model sees the same command tool either way. A deployment's own layer is
+  installed with `trellis.harness.host.install(HostSandbox(...))`, refused at start when it
+  cannot isolate.
+* **Breaking: Deep Agents' `execute` on a `LocalShellBackend` is refused at `h.wrap`**
+  (alone, a `CompositeBackend`'s default, a sub-agent's; `ReAct(backend=)` too), whatever the
+  setting, naming `sandbox()`. Before, it ran on the host as the service's user.
+* **The frameworks' own shells run as before** — Claude Code's and Kimi Code's, an OpenAI local
+  shell tool or Unix-local sandbox, LangChain's host `ShellToolMiddleware` — as the service's
+  user, without
+  the harness's isolation; a team's own Claude `SandboxSettings` is honoured as given (on Linux
+  it needs bubblewrap and socat: without them the CLI runs the command unsandboxed, warning on
+  its stderr). `kimi(sandbox=sandbox())` and Claude's own sandbox are the ways to isolate them.
+* **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
+  sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
+  host, an OpenAI local shell tool or Unix-local sandbox and LangChain's host shell are refused at `h.wrap` (and for a run whose own
+  `framework_options` would make one), naming the setting; the isolation layer's own commands
+  are refused at the call. Commands in a sandbox are not affected. `TRELLIS_REQUIRE_SANDBOX` is
+  gone (`Settings(require_sandbox=)` is refused, naming `host_execution`)
+  ([governance.md](docs/governance.md#commands-on-the-host)).
+
+**Claude Code and Kimi Code, tool by tool** (breaking where noted). Reads in the workspace run
+unasked and writes stay the user's under the one rule, as before. **The shell in the sandbox
+runs unasked**, announced and recorded: Claude Code's and Kimi's own permission question about
+a command is no longer the user's (on the host the same, unless the deployment says `deny`).
+**The network out is closed by default** — Claude's `WebFetch`, `WebSearch`, Kimi's
+`FetchURL`, `WebSearch`: refused, and the model told why, until the tool catalog gives the tool
+a risk or an `approve_when` (before, Claude's asked the user and Kimi's ran unasked); the
+harness publishes them with no risk of its own, and a run's Kimi is configured to ask about
+them so the catalog decides. **MCP servers, Claude's `allowed_tools` and a permission mode
+that lets calls through** (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) are the
+deployment's: a run's own `framework_options` that change them are refused, naming
+`h.wrap(framework_options=)` ([governance.md](docs/governance.md#who-decides-what)).
+
+**Who decides what** is now said in one place: the end user only the actions taken in their
+name; infrastructure — shells on the host, a tool's risk, who answers an infrastructure tool's approval
+(`before_tool`'s `Ask(assignee="role:…")`, the catalog's `risk` and `approve_when`) — the
+administrator's, always audited ([governance.md](docs/governance.md#who-decides-what)).
+
 ### Changed: commands run in the tenant's shared sandbox, with a workspace and a uid per run
 
 `sandbox()` now works in **one container per tenant** (`SharedDockerSandbox`), never shared
@@ -18,10 +65,37 @@ the call's timeout; the limit hit is in the result, `limit`), with an environmen
 way it ends, a crash's takeover included — delivers its `outputs/`, then kills its processes,
 deletes its workspace and frees its uid; the reaper does so for runs that died. Every command is
 audited (`sandbox_command` on the run's stream, the `trellis.sandbox.audit` log). The same
-layer runs commands on the host when an administrator allows it (`HostSandbox`,
+layer runs commands on the host (allowed by default; `TRELLIS_HOST_EXECUTION=deny` switches them off) (`HostSandbox`,
 `isolated_run(tenant, user, run, command, limits)`), and refuses to when the service cannot
 switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
 `duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).
+
+### Added: every step of every run in Langfuse
+
+* **A framework's own tool calls are `execute_tool` spans,** with a harness tool's attributes
+  and governance's action (`ask` for a call a person approved): Claude Code's built-ins and MCP
+  tools, Kimi Code's tools, Deep Agents' file tools (on its state backend too), `execute` and
+  `task`, OpenAI Agents' function and hosted tools, a LangChain tool in a graph of your own.
+* **Every shell command is a span** — the harness's `sandbox_exec`, Deep Agents' `execute`,
+  Claude Code's `Bash`/`Monitor`, Kimi's `Bash`, OpenAI Agents' shell tools: the command
+  (redacted), where it ran (sandbox, host isolation, the framework's own), its exit code,
+  duration and the limit that stopped it, from the command's audit record where the harness
+  ran it (the isolation layer's `sandbox_command` record is the span's).
+* **A sub-agent its framework spawns is an agent span** (`invoke_agent <helper>`) its calls
+  and replies nest under; **a framework's own model replies are `chat` generations** with
+  their usage, cache tokens and cost (Claude, Kimi, OpenAI Agents); a `ReAct` generation
+  carries the cost the gateway reported (`gen_ai.usage.cost`).
+* **An approval is an `interrupt` event** (who is asked, the question, the call) **and its
+  answer a `decision` event** (the choice: once, conversation, always, deny); a resumed
+  attempt says so (`trellis.resumed`).
+* **The attempt's span says how it ended** — `trellis.run.status`, the spend (and, on the
+  run's trace, `langfuse.trace.metadata.status` and `spent_*`), a failure's status and
+  message, the step limit, a budget, a time-out or a cancellation with its reason (a level, a
+  status message and an event) — and **a pause is no longer an error span**.
+* **Redaction:** an error raised out of a span was recorded with its message as it was (the
+  OTel SDK's `record_exception`), and a credential inside longer text (a command line, an
+  error message) was kept; both are masked now. [observability.md](docs/observability.md#what-reaches-langfuse-by-adapter)
+  lists what reaches Langfuse by adapter, and what goes elsewhere.
 
 ### Fixed: what the framework comparison of 2026-11-15 found
 
@@ -66,12 +140,14 @@ switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` g
   the dead worker's run, before agent-runs' ticker had queued it again, and nothing asked
   again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
   a worker process does) until the run pauses or ends.
-* **A remote task that ends while its turn is finishing is told.** A Deep Agents async task
-  (`AsyncSubAgent`) that ended after its turn's graph last read it, but before the turn let go
-  of the chat, was read by the process holding its run, which ended the run and found the chat
-  busy: the outcome was told to nobody until the user's next message (a loaded machine lost the
-  chain of outcomes this way). That read now waits for the turn at work in its process to end,
-  then tells the chat by a turn of its own; one that finds the outcome told already stays quiet.
+* **A background task that ends while its turn is finishing is told.** A task that ended after
+  its turn last looked at it, but before the turn let go of the chat, found the chat busy and
+  was told to nobody until the user's next message — a Deep Agents async task (`AsyncSubAgent`,
+  read by the process holding its run: a loaded machine lost the chain of outcomes this way) and
+  a task of the harness's own alike (one that ended after the turn's last look,
+  `background.left`). An outcome told while a turn of the chat holds its turn in the process is
+  now told again by that turn's own task once it lets go (`background.delivered`), by a turn of
+  the chat's own; one that finds the outcome told already stays quiet.
 
 ### Fixed: gaps the SDK full-stack pass found
 

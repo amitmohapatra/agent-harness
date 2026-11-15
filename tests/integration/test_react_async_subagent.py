@@ -267,9 +267,12 @@ class Model(ScriptedChatModel):
     answering from its ``hold_from``-th call (a turn still working)."""
 
     hold_from: int | None = None
+    #: its calls that stopped answering (from its ``hold_from``-th on)
+    stopped: int = 0
 
     async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
         if self.hold_from is not None and len(self.seen) >= self.hold_from:
+            self.stopped += 1
             await asyncio.sleep(3600)
         return await super()._agenerate(messages, *args, **kwargs)
 
@@ -277,6 +280,14 @@ class Model(ScriptedChatModel):
         if self.turns and callable(self.turns[0]):
             self.turns[0] = self.turns[0](messages)
         return super()._generate(messages, *args, **kwargs)
+
+
+async def stops_answering(model: Model) -> None:
+    """Waits until ``model``'s ``hold_from``-th call has begun, and stopped answering: every step
+    of the turn before it is done — a tool's result (a task's start, its follow-up) recorded and
+    in the graph's state."""
+    while not model.stopped:  # noqa: ASYNC110 - the turn's own progress
+        await asyncio.sleep(0.01)
 
 
 _ID: Final = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
@@ -525,9 +536,7 @@ async def test_h_new_instructions_keep_it_running_and_a_cancel_reaches_the_new_r
     model = Model(turns=[START, update, "never said"], hold_from=2)
     agent = chat(harness, server, model)
     turn = asyncio.create_task(say(agent, "run the optimization, then minimise cost"))
-    while len(model.seen) < 2 or len(server.bodies) < 3:  # noqa: ASYNC110 - the server's thread
-        await asyncio.sleep(0.01)
-    await asyncio.sleep(0.1)  # the update returned; the model's next call hangs
+    await stops_answering(model)  # the update returned; the model's next call hangs
     [task] = await task_runs(harness)
     assert task.status is RunStatus.RUNNING
     [run_id] = agent.running
@@ -1588,9 +1597,7 @@ async def test_e_cancelling_the_turn_cancels_the_task_it_started(
     model = Model(turns=[START, "never said"], hold_from=1)
     agent = chat(harness, server, model)
     turn = asyncio.create_task(say(agent, "run the optimization"))
-    while not server.runs or len(model.seen) < 1:  # noqa: ASYNC110 - the server's own thread
-        await asyncio.sleep(0.01)
-    await asyncio.sleep(0.1)  # the start returned; the model's next call hangs
+    await stops_answering(model)  # the start returned; the model's next call hangs
     [run_id] = agent.running
     await agent.cancel(run_id, reason="the user stopped the turn")
     cancelled = await turn
@@ -2007,9 +2014,7 @@ async def test_i_a_tasks_run_cancelled_elsewhere_cancels_the_task_on_its_server(
     model = Model(turns=[START, "never said"], hold_from=1)
     here, there = (chat(h, server, model) for h in workers)
     turn = asyncio.create_task(say(here, "run the optimization"))
-    while not server.runs or len(model.seen) < 1:  # noqa: ASYNC110 - the server's own thread
-        await asyncio.sleep(0.01)
-    await asyncio.sleep(0.1)
+    await stops_answering(model)  # the start returned; the model's next call hangs
     [run_id] = here.running
     await there.cancel(run_id, reason="stopped on another server")
     async with asyncio.timeout(10):
