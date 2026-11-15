@@ -4,6 +4,7 @@ backend to read, and its calls are then governed (it fails closed)."""
 
 from __future__ import annotations
 
+import types
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -12,15 +13,27 @@ from trellis.harness import middleware
 
 
 def _closing_over_nothing_readable() -> Any:
-    """A tool's code whose closure holds an empty cell (a name it reads that was never
-    bound) and nothing else: what a tool of another middleware may close over."""
+    """A tool's code whose closure holds an empty cell (a name it reads that is never bound)
+    and nothing else: what a tool of another middleware may close over."""
 
     def read_file(file_path: str) -> str:
         """Read a file."""
-        return f"{never} {file_path}"
+        return file_path
+
+    empty = types.CellType()  # a cell with no value: reading it raises ValueError
+    return types.FunctionType(
+        _reads_a_free_name().__code__, read_file.__globals__, "read_file", None, (empty,)
+    )
+
+
+def _reads_a_free_name() -> Any:
+    unbound = None
+
+    def read_file(file_path: str) -> str:
+        """Read a file."""
+        return f"{unbound} {file_path}"
 
     return read_file
-    never = "bound too late"  # never reached: the cell stays empty
 
 
 async def _read_file(file_path: str) -> str:

@@ -44,7 +44,7 @@ from trellis.harness.identity import conversation_key
 from trellis.harness.line import Followers, Line
 from trellis.harness.runlog import RunLog
 from trellis.harness.runs import LocalRuns, place
-from trellis.runs import ConflictError, Page, ResolutionEntry, RunsError
+from trellis.runs import ConflictError, Page, ResolutionEntry, RunsError, RunSummary
 
 THREAD = "chat-9"
 
@@ -417,6 +417,68 @@ async def test_arch15_a_line_is_ordered_by_the_stores_places_reading_no_answers(
     assert runs.answers_read == []  # (before: every page of its answers)
     ended = await runs.finish(mine.run_id, RunStatus.SUCCESS)
     assert await Line(runs, ended, LRU(), Followers(lambda: None)).ahead() is None  # it left
+    await runs.aclose()
+
+
+class Lagging(LocalRuns):
+    """A store whose listings lag behind its records: a run listed as it was when the listing
+    was made (``listed``), whatever it is when it is read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listed: list[RunSummary] = []
+        self.gone: set[str] = set()
+
+    async def get(self, run_id: str, *, tenant: str | None = None) -> Any:
+        return None if run_id in self.gone else await super().get(run_id, tenant=tenant)
+
+    async def iterate(
+        self,
+        *,
+        status: RunStatus | None = None,
+        assignee: str | None = None,
+        agent_id: str | None = None,
+        thread_id: str | None = None,
+        concurrency_key: str | None = None,
+        parent_run_id: str | None = None,
+        limit: int = local_runs.PAGE_LIMIT,
+        tenant: str | None = None,
+        max_pages: int | None = None,
+    ) -> AsyncIterator[RunSummary]:
+        for summary in self.listed:
+            if status is None or summary.status is status:
+                yield summary
+        async for summary in super().iterate(
+            status=status,
+            assignee=assignee,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            concurrency_key=concurrency_key,
+            parent_run_id=parent_run_id,
+            limit=limit,
+            tenant=tenant,
+            max_pages=max_pages,
+        ):
+            yield summary
+
+
+async def test_a_run_listed_in_the_line_but_ended_when_read_holds_nobody_up() -> None:
+    """The line is the store's listing, each run then read once: a run the listing still
+    shows running that has ended when it is read — or is gone — is behind nobody, and the run
+    after it is first in the line."""
+    runs = Lagging()
+    ended = await runs.start(turn_of("ada"))
+    gone = await runs.start(turn_of("ada"))
+    mine = await runs.start(turn_of("ada"))
+    await runs.finish(ended.run_id, RunStatus.SUCCESS)
+    runs.listed = [
+        RunSummary.model_validate({**record.model_dump(), "status": RunStatus.RUNNING})
+        for record in (ended, gone)
+    ]
+    runs.gone.add(gone.run_id)  # read back: no such run
+    line = Line(runs, mine, LRU(), Followers(lambda: None))
+    assert await line.ahead() == []
+    assert await line.holder() == mine.run_id
     await runs.aclose()
 
 
