@@ -26,6 +26,8 @@ from it is the one asked by. Offline, on the suite's stand-ins: the planned mode
 scripted Claude CLI, Kimi Code on a planned endpoint, the stand-in gateway and MCP server.
 
 Sharded with the generated matrix (``make matrix``): every row runs in CI, not in ``make test``.
+A Kimi row is given the time its turns take, each a ``kimi acp`` process of its own
+(:data:`KIMI_TURN_SECONDS`), not the suite's one limit.
 """
 
 from __future__ import annotations
@@ -696,6 +698,46 @@ async def _kimi(d: Deployment, row: Row, plan: list[Call]) -> Any:
     return kimi_target(endpoint, d.tmp, mcp_servers=servers)
 
 
+def _rule(row: Row, overrides: dict[str, str] | None) -> Rule:
+    return Rule({kind: kind for kind in ALL_KINDS} | dict(WAYS[row.way].risks) | (overrides or {}))
+
+
+def _runs(row: Row, script: Script) -> list[tuple[int, str, str, list[Step]]]:
+    """The runs of ``script`` the row makes: each one's number, its conversation, the scope of
+    what is allowed for it, and the steps its way can say (a later run of a conversation only
+    where runs carry one)."""
+    found = []
+    for number, (label, planned) in enumerate(script):
+        steps = [s for s in planned if s[0] in WAYS[row.way].kinds]
+        if steps and (label != LATER or row.conversations):
+            conversation = "c1" if label == LATER else label
+            scope = conversation if row.conversations else f"run-{number}"
+            found.append((number, conversation, scope, steps))
+    return found
+
+
+#: What a turn of Kimi's may take in a shard of ``make matrix``: each is a ``kimi acp``
+#: process of its own (a pause ends the process, its resume starts one: ``adapters.acp``),
+#: about 2.5 s on a free machine, 6-15 s with the matrix's eight shards on four cores.
+KIMI_TURN_SECONDS: Final = 15
+#: A Kimi row's harness, stand-ins and first launch, beside its turns.
+KIMI_ROW_SECONDS: Final = 60
+
+
+def _limited(row: Row, script: Script, overrides: dict[str, str] | None = None) -> Any:
+    """The row as a test case: a Kimi row given the time its turns take (its runs, and a
+    resume after each time a person is asked) beside :data:`KIMI_ROW_SECONDS`."""
+    if row.adapter != "kimi":
+        return pytest.param(row, id=row.id)
+    rule = _rule(row, overrides)
+    turns = sum(
+        1 + sum(bool(rule.call(kind, scope, answer)[0]) for kind, _, answer in steps)
+        for _, _, scope, steps in _runs(row, script)
+    )
+    limit = KIMI_ROW_SECONDS + turns * KIMI_TURN_SECONDS
+    return pytest.param(row, id=row.id, marks=pytest.mark.timeout(limit))
+
+
 async def walked(
     row: Row, tmp: Path, script: Script, overrides: dict[str, str] | None = None
 ) -> None:
@@ -703,24 +745,19 @@ async def walked(
     call asked (with what it is offered) or not, and its body run or not, as :class:`Rule`
     says; ``overrides``: the risks an administrator set in the catalog."""
     way = WAYS[row.way]
-    rule = Rule({kind: kind for kind in ALL_KINDS} | dict(way.risks) | (overrides or {}))
+    rule = _rule(row, overrides)
     async with deployed(row, tmp) as d:
         for kind, risk in (overrides or {}).items():
             if kind in way.kinds:
                 name = way.named(kind)
                 d.memory.catalog[name] = {"name": name, "side_effects": risk}
         said: dict[str, list[Call]] = {}
-        for number, (label, planned) in enumerate(script):
-            steps = [s for s in planned if s[0] in way.kinds]
-            if not steps or (label == LATER and not row.conversations):
-                continue
-            conversation = "c1" if label == LATER else label
+        for number, conversation, scope, steps in _runs(row, script):
             thread = conversation if row.conversations else None
             calls = [(way.named(kind), way.args(kind, n)) for kind, n, _ in steps]
             earlier = [] if row.turn_by_turn or thread is None else said.get(thread, [])
             if thread is not None:
                 said[thread] = [*earlier, *calls]
-            scope = conversation if row.conversations else f"run-{number}"
             plan = [*earlier, *calls]
             await _ran(
                 d, row, rule, plan=plan, steps=steps, thread=thread, scope=scope, number=number
@@ -799,11 +836,11 @@ def _asked(
     )
 
 
-@pytest.mark.parametrize("row", ROWS, ids=lambda r: r.id)
+@pytest.mark.parametrize("row", [_limited(row, SCRIPT) for row in ROWS])
 async def test_one_rule(row: Row, tmp_path: Path) -> None:
     await walked(row, tmp_path, SCRIPT)
 
 
-@pytest.mark.parametrize("row", CATALOGUED, ids=lambda r: r.id)
+@pytest.mark.parametrize("row", [_limited(row, OVERRIDDEN, OVERRIDES) for row in CATALOGUED])
 async def test_the_catalogs_risk_wins(row: Row, tmp_path: Path) -> None:
     await walked(row, tmp_path, OVERRIDDEN, OVERRIDES)
