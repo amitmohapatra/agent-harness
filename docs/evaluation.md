@@ -470,7 +470,9 @@ stops the run at a spend (from the usage the replies report), `--cases` and `--r
 pick what runs. `--adapter` picks the framework wrapped: `react`, `langgraph` (`create_agent`),
 `deepagents` (`create_deep_agent`), `openai` (the OpenAI Agents SDK on the endpoint's chat
 completions), `claude` (the Claude Agent SDK) or `kimi` (Kimi Code over ACP); `--history memory`
-turns the memory service on for any of them. `--scripted` drives Kimi too: the scripted model is
+turns the memory service on for any of them, and `--runs` keeps the environment's agent-runs
+(`RUNS_URL`) as the run store in place of the in-process one (it needs the memory service on:
+agent-runs accepts the keys memory issues). `--scripted` drives Kimi too: the scripted model is
 served as a chat completions endpoint Kimi calls, and every request Kimi sent it is kept, so the
 checks of what the model was sent (`Turn.sent`) hold there as on the LangChain adapters. With a
 real model the Claude and Kimi CLIs call it themselves: what they send is not seen, so those

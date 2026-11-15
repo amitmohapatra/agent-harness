@@ -232,6 +232,26 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
     assert [m["role"] for m in other["messages"]] == ["system", "user"]
 
 
+async def test_runs_puts_the_environments_run_store_under_the_run(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--runs``: the harness the run makes keeps the environment's agent-runs (``RUNS_URL``);
+    without it the run store is the in-process one, as before."""
+    asked: list[dict[str, Any]] = []
+    made = run.harness
+
+    def harness(**kw: Any) -> Any:
+        asked.append(kw)
+        return made(**kw)
+
+    monkeypatch.setattr(cx.runner, "harness", harness)
+    assert cx.arguments(["--scripted"]).runs is False
+    await cx.bench(_args(tmp_path / "off", cases="multihop-01"), progress=lambda _: None)
+    await cx.bench(_args(tmp_path / "on", cases="multihop-01", runs=True), progress=lambda _: None)
+    assert asked == [{"memory": False, "runs": False}, {"memory": False, "runs": True}]
+    assert cx.arguments(["--scripted", "--runs"]).runs is True
+
+
 async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> None:
     out = tmp_path / "cap"
     # the scripted model reports each request's own size in and 50 out: the run stops at the
