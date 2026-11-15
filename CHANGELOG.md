@@ -88,6 +88,9 @@ chat's own on its thread stream when it is idle; its questions asked through the
   `glob`, `grep` under `/skills/`) is a call of the run — on its stream, traced, in memory's
   record of its calls — governed as a read, never asked. It was taken for the graph's own
   scratch and left no record.
+- Claude: a subagent's reasoning is a `reasoning` event naming its child run, and a tool the
+  API ran in a subagent's step (web search, the advisor) is recorded under that child run.
+  Before, only the main agent's were.
 
 ### Fixed: each library's own skills, through the harness
 
