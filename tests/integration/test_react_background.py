@@ -317,6 +317,46 @@ async def test_an_outcome_a_turn_already_told_is_quiet_when_a_turn_of_its_own_te
     assert len(model.seen) == calls  # no model call
 
 
+async def test_one_outcome_told_by_two_servers_at_once_is_one_turn_run_by_one(
+    workers: tuple[Harness, Harness], gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two servers sharing the run store tell a task's outcome to the idle chat at the same
+    moment: both find no turn for it and start one — the run store answers the second start
+    with the first's run, which names the server that made it — so one server runs the turn
+    and the other leaves it: one turn for the outcome."""
+    monkeypatch.setattr(background, "idle", _busy)
+    first_h, second_h = workers
+    model = Model(turns=[START, "Started.", "Back: success."])
+    here, there = (chat(h, gate, model) for h in workers)
+    first = await chatted(here, "research lighthouses")
+    task = await task_run(first_h, first.run_id)
+    gate.opened.set()
+    await until(lambda: _final(first_h, task.run_id))
+    assert (await chatted(here, "anything new?")).answer == "Back: success."
+    ended = await first_h.runs.get(task.run_id)
+    assert ended is not None
+    update = background.update_of({"task_id": task.thread_id, "agent_name": "research"}, ended)
+    assert update is not None
+    origin = ended.metadata[background.BACKGROUND]
+    store = first_h.runs
+    read = store.get
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:  # a store across the network: both read
+        found = await read(*args, **kwargs)
+        await asyncio.sleep(0.01)  # before either starts it
+        return found
+
+    monkeypatch.setattr(store, "get", slow)
+    await asyncio.gather(
+        background.notify(here, ended, update, user=USER, thread=THREAD, origin=origin),
+        background.notify(there, ended, update, user=USER, thread=THREAD, origin=origin),
+    )
+    monkeypatch.setattr(store, "get", read)
+    await until(lambda: _all_final(first_h))
+    assert await _own_turns(first_h) == 1
+    assert not second_h.background._at_work and not first_h.background._at_work
+
+
 async def _own_turns(harness: Harness) -> int:
     runs = [r async for r in harness.runs.iterate(agent_id="chat", thread_id=THREAD)]
     found = [await harness.runs.get(r.run_id) for r in runs]
