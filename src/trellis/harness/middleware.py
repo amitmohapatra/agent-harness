@@ -2498,14 +2498,21 @@ async def _answer_now(
     warning: str = "stalled",
 ) -> ModelResponse[Any]:
     """The model called once more, told ``told`` and offered no tool; its answer (``warning``
-    on the run's stream), or the run stopped (``ModelError(stopped)``) when it gives none."""
-    last = request.override(
-        messages=[*request.messages, HumanMessage(content=told)],
-        tool_choice=no_tool(request.model) if request.tools else request.tool_choice,
-    )
+    on the run's stream), or the run stopped (``ModelError(stopped)``) when it gives none.
+    A run whose answer is a schema (``response_format``) is offered none of its tools instead:
+    LangChain forces a tool call for a structured answer (``tool_choice`` ``any``, beside the
+    schema's own tool), so ``no_tool`` would not reach the model, and its answer is the
+    schema's (``structured_response``), a call of the schema's tool."""
+    told_now = [*request.messages, HumanMessage(content=told)]
+    if request.response_format is not None:
+        last = request.override(messages=told_now, tools=[])
+    else:
+        choice = no_tool(request.model) if request.tools else request.tool_choice
+        last = request.override(messages=told_now, tool_choice=choice)
     reply = await handler(last)
     message = _ai(reply)
-    if message is None or message.tool_calls or not message.text:
+    in_schema = reply.structured_response is not None
+    if message is None or (not in_schema and (message.tool_calls or not message.text)):
         raise ModelError(stopped, source="langgraph")
     runtime = current()
     log.warning("run %s %s", runtime.run_id if runtime else "-", stopped)
