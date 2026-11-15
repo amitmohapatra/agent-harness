@@ -144,7 +144,11 @@ and `approve_when` stay the administrator's.
 A write the run keeps to itself is announced as before, not asked: the harness's own schedule
 tools (a schedule is confirmed when it is made, below), its memory tools (`memory_forget` of
 the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub-agent's call
-(the sub-agent's own calls are governed) and Deep Agents' file tools and `execute`. A
+(the sub-agent's own calls are governed) and Deep Agents' `execute` in the run's sandbox. Deep
+Agents' file tools on the graph's own state are its scratch, not a call of the run; on a disk, a
+store or a sandbox (a backend, or a route of a `CompositeBackend`) they change real files, so
+`write_file`, `edit_file` and `delete` ask as any write — allow once, for this conversation,
+always — and `ls`, `read_file`, `glob`, `grep` run as reads. A
 framework's own tools under its own permission flow — Claude Code's and Kimi's built-ins, an
 OpenAI agent's hosted tools — keep their own way: a `write` there is announced, and Claude
 Code or Kimi asks its own way, the person picking from the rule's choices. An MCP tool, an
@@ -330,9 +334,15 @@ one (`tool.metadata["side_effects"]`, or MCP-style `annotations`), else none (it
 asked when governance asks, journaled (a resume does not run it again), timed and traced. The
 graph's state tools (`write_todos`, Deep Agents' file tools on its default
 `StateBackend`) are let through: they change only the run's own state. Deep Agents' file tools
-on a backend that writes to a real disk are not seen: give the graph governed tools instead.
+on a backend outside the state (a disk, a store, a sandbox) are governed as any tool: a write
+asks, a read runs.
 Claude Code's built-ins go through the CLI's `PreToolUse` hook, where the harness decides them
 by risk (`Read` runs; `Write` and `Bash` are announced), then Claude Code's own permission check;
-what it would ask its user, a person is asked, unless the call only reads (a `Bash` command the
-harness reads as read-only runs)
+what it would ask its user, a person is asked — with the rule's choices — unless the call only
+reads (a `Bash` command the harness reads as read-only runs). In its default permission mode
+Claude Code asks before `Write` and `Edit`, so they ask as any write; a team that sets
+`acceptEdits` or `bypassPermissions` has chosen to let them through, as Kimi lets its own
+writes inside a git working tree through (ACP gives the harness no hook before them): those
+are the frameworks' own permission settings, and the catalog's risk (`irreversible`, an
+`approve_when`) is the way to have them asked
 ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md#claude-codes-built-in-tools)).

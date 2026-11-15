@@ -26,6 +26,11 @@ memory service (Claude Code's question offered no choice at all, and asked again
 call). What is allowed for the conversation or always holds as Claude Code's own "don't ask
 again" would. The tool catalog's word on such a tool (a risk, an `approve_when`) decides before
 the framework's own question, as for every tool.
+Deep Agents' own `write_file`, `edit_file` and `delete` on a disk, a store or a sandbox (a
+backend, or a route of a `CompositeBackend`) now **ask** as any write — allow once, for this
+conversation, always — where they were only announced (a framework's own tool), while a tool
+of yours that writes in the same graph asked; `ls`, `read_file`, `glob`, `grep` still run, and
+the file tools on the graph's own state stay its scratch. `ReAct(backend=)` alike.
 `tests/matrix/test_approval_rule.py` walks every adapter × way × risk × answer
 ([governance.md](docs/governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)).
 
