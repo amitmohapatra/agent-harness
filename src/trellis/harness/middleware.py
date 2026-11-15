@@ -3135,7 +3135,8 @@ def _narrowed(
     kept (``before``: the same set call after call, so a prompt cache keeps its prefix), those
     the tool hints chose, then by the words they share with the user's latest message — and
     kept in that order while they fit what the messages leave, ``least`` of them at least
-    besides those it must keep.
+    besides those it must keep — which are set aside first by their first sentence
+    (:func:`_compact`), and kept whole only where that leaves the others room.
 
     A tool it does not keep is still offered while its signature fits (:func:`_signature`:
     its name and arguments, what a call takes), and whatever the room when the tool hints chose
@@ -3168,11 +3169,19 @@ def _narrowed(
     aside = {name: (len(name) + 2) / 4 for name in offered if name not in must}
     room = budget - _size(request.override(tools=[])) - (_HELD_SIZE + sum(aside.values()))
     kept: dict[int, BaseTool | dict[str, Any]] = {}
+    ranked = sorted(enumerate(tools), key=rank)
+    # those it must keep take their compacted room first, and are kept whole only where the
+    # others still fit beside them (``write_todos`` whole held back the task's tools at 8,000)
+    musts = {n: tool for n, tool in ranked if _named(tool) in must}
+    least_of = {n: count_tokens_approximately([], tools=[_compact(t)]) for n, t in musts.items()}
+    room -= sum(least_of.values())
     more = 0  # kept, or offered by signature, beside those it must keep
-    for n, tool in sorted(enumerate(tools), key=rank):
+    for n, tool in ranked:
         name = _named(tool)
+        if n in musts:
+            continue
         cost = count_tokens_approximately([], tools=[tool]) - aside.get(name, 0)
-        if name in must or more < least or cost <= room:
+        if more < least or cost <= room:
             kept[n] = tool
         else:
             bare = _signature(tool)
@@ -3180,8 +3189,13 @@ def _narrowed(
             if not (name in hinted or more < signed or cost <= room):
                 continue  # held back: named in the instructions
             kept[n] = bare
-        more += name not in must
+        more += 1
         room -= cost
+    for n, tool in musts.items():
+        extra = count_tokens_approximately([], tools=[tool]) - least_of[n]
+        whole = extra <= room
+        kept[n] = tool if whole else _compact(tool)
+        room -= extra if whole else 0
     if all(kept.get(n) is tool for n, tool in enumerate(tools)):
         return incoming
     out = request.override(tools=[kept[n] for n in sorted(kept)])  # the offered order kept
