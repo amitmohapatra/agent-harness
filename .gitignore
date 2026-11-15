@@ -21,3 +21,12 @@ htmlcov/
 !.env.example
 secrets*
 *.pem
+
+# raw benchmark and research outputs: per-case results, request logs, transcripts, recordings.
+# Keep a run's summary (README, tables, summary.json) and a MANIFEST.md on main; the raw files
+# go to the data/research-archive branch (benchmark runs write to build/ by default).
+benchmark/cost/results/*/**/*.json
+benchmark/cost/results/**/*.jsonl
+benchmark/cost/results/**/*.gz
+benchmark/cost/results/**/*.log
+docs/research/*/data/*/

@@ -4,7 +4,8 @@ One like-for-like run of every adapter `benchmark/cost/complex.py` wraps, on the
 model, on the product path: the memory service on (`--history memory`), agent-runs as the run
 store (`--runs`, new on this branch), `trellis.contracts` between them, all from main
 (harness `0047ecf`, memory service `c835844`, agent-runs `7dfe8df`, contracts `27a818d`) plus
-the two fixes below. Data: [benchmark/cost/results/compare-2026-11-15](../../../benchmark/cost/results/compare-2026-11-15/);
+the two fixes below. Data: [benchmark/cost/results/compare-2026-11-15](../../../benchmark/cost/results/compare-2026-11-15/)
+(the table; the raw files are on the `data/research-archive` branch, each listed with its sha256 in the folder's `MANIFEST.md`);
 scripts: [scripts](scripts/). Spend: about **$5.25** of the $10 cap.
 
 ## The set and the run
