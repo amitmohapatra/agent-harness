@@ -331,6 +331,60 @@ async def test_a_run_in_this_process_is_cancelled_with_its_reason(harness: Harne
     assert events[-1].data["spent"]["model_calls"] == 0  # a function: no model
 
 
+async def test_a_run_stopped_twice_ends_once_with_the_first_reason(harness: Harness) -> None:
+    """Two stops of a run at work here before it has ended (a cancel, and its hold refused
+    meanwhile): one cancellation of its attempt — the second waits on the same end — and the
+    run ends ``CANCELLED`` with the first one's reason."""
+    started = asyncio.Event()
+    runs: list[str] = []
+
+    async def waits(input: str, agent: Runtime) -> str:
+        runs.append(agent.run_id)
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    agent = harness.wrap(waits, id="waits")
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("x", user="u"):
+            events.append(event)
+
+    streaming = asyncio.create_task(watch())
+    await started.wait()
+    first = agent.stop(runs[0], "the first reason")
+    second = agent.stop(runs[0], "the second reason")
+    assert first is not None and second is first  # the same end
+    await streaming
+    assert events[-1].outcome is RunOutcome.CANCELLED
+    assert events[-1].data["reason"] == "the first reason"
+
+
+async def test_a_run_whose_open_children_cannot_be_listed_keeps_its_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A run's end is final before its open children are ended with it: a run store that
+    cannot list them then is said in the log, and the run's result stands."""
+    from trellis.harness.runs import LocalRuns
+    from trellis.runs import RunsError
+
+    class Unlisted(LocalRuns):
+        def iterate(self, **kwargs: Any) -> Any:
+            if kwargs.get("parent_run_id") is not None:
+                raise RunsError("the run store is down", code="UNAVAILABLE", status=503)
+            return super().iterate(**kwargs)
+
+    async def answers(input: str, agent: Runtime) -> str:
+        return f"re: {input}"
+
+    async with Harness(config=Settings(), runs=Unlisted()) as h:
+        with caplog.at_level(logging.WARNING, logger="trellis.run"):
+            result = await h.wrap(answers, id="answers").run("x", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "re: x"
+    assert "its open children could not be ended" in caplog.text
+
+
 async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(
     harness: Harness,
 ) -> None:

@@ -158,6 +158,7 @@ from trellis.harness.outbound import TargetRefused
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
+from trellis.harness.skills import serves_skills
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
@@ -327,14 +328,23 @@ def files_backend(tool: Any) -> Any | None:
     return None
 
 
+def _state(backend: Any) -> bool:
+    """Whether ``backend`` keeps its files in the graph's state: a ``StateBackend`` — not the
+    run's skills (``skills.serves_skills``), which it reads as one, from their store: reading
+    a skill is a call of the run."""
+    from deepagents.backends import StateBackend  # noqa: PLC0415 - an extra
+
+    return isinstance(backend, StateBackend) and not serves_skills(backend)
+
+
 def _all_state(backend: Any) -> bool:
-    """Whether every file of ``backend`` is kept in the graph's state: a ``StateBackend``, or
-    a composite of nothing else."""
-    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+    """Whether every file of ``backend`` is kept in the graph's state (:func:`_state`), or a
+    composite of nothing else."""
+    from deepagents.backends import CompositeBackend  # noqa: PLC0415 - an extra
 
     if isinstance(backend, CompositeBackend):
         return all(_all_state(b) for b in (backend.default, *backend.routes.values()))
-    return isinstance(backend, StateBackend)
+    return _state(backend)
 
 
 def in_state(backend: Any, args: Mapping[str, Any]) -> bool:
@@ -379,11 +389,11 @@ def _file_marks(tool: Any, name: str) -> dict[str, Any]:
 
 
 def _routes_some_to_state(backend: Any) -> bool:
-    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+    from deepagents.backends import CompositeBackend  # noqa: PLC0415 - an extra
 
     if isinstance(backend, CompositeBackend):
         return any(_routes_some_to_state(b) for b in (backend.default, *backend.routes.values()))
-    return isinstance(backend, StateBackend)
+    return _state(backend)
 
 
 def scratch(tool: Any, call: Mapping[str, Any]) -> bool:
@@ -511,14 +521,15 @@ def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[An
 
 async def _remote_tasks(runtime: Runtime, call: Any, own: Any, args: Mapping[str, Any]) -> Any:
     """The adapter's record of Deep Agents' tasks on a server (``bridges.async_tasks``), when
-    ``call`` is of one of Deep Agents' own task tools (``own``) — a start checked first: a
-    webhook that leads somewhere private fails the call, and its server is sent nothing.
+    ``call`` is of one of Deep Agents' own task tools (``own``) — a start checked first: past
+    the chain of outcomes, or a webhook that leads somewhere private, fails the call, and its
+    server is sent nothing.
     ``None`` for any other call."""
     tasks = getattr(runtime.agent.adapter, "tasks", None)
     if tasks is None or call["name"] not in task_tools.TOOLS or not framework_made(own):
         return None
     try:
-        await tasks.starting(own, args)
+        await tasks.starting(runtime, own, args)
     except TargetRefused as exc:
         refused = f"{call['name']} was not run: its webhook: {exc}"
         raise ToolError(refused, source="tools") from exc
@@ -3852,11 +3863,15 @@ def _configurable(config: RunnableConfig) -> dict[str, Any]:
     return dict(config.get("configurable") or {})
 
 
-def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfig:
-    configurable: dict[str, Any] = {"thread_id": thread_id, "checkpoint_ns": ns}
-    if checkpoint_id is not None:
-        configurable["checkpoint_id"] = checkpoint_id
-    return {"configurable": configurable}
+def _config(thread_id: str, ns: str, checkpoint_id: str) -> RunnableConfig:
+    """A kept checkpoint's config: every caller names the checkpoint."""
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": ns,
+            "checkpoint_id": checkpoint_id,
+        }
+    }
 
 
 __all__ = [

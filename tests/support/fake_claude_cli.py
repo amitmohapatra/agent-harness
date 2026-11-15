@@ -1063,7 +1063,8 @@ class Cli:
     def subagent(
         self, session: str, step: int, item: dict[str, Any]
     ) -> tuple[str, bool, bool, int]:
-        """One subagent (``{"agent", "prompt", "steps"}``) — or several at work at once
+        """One subagent (``{"agent", "prompt", "steps"}``; a step ``{"blocks": [...]}`` is a
+        reply of those content blocks, a thinking or a server tool's) — or several at work at once
         (``{"agents": [...]}``) — as the bundled CLI runs one of ``agents=`` whose call says
         ``run_in_background: false``: its ``Agent`` tool call (through the hooks and the
         permission rules, as any call), its task's start (``task_started``, not
@@ -1139,6 +1140,9 @@ class Cli:
                     sub["last"] = inner["text"]
                     said = [{"type": "text", "text": inner["text"]}]
                     send(assistant(session, said, parent=tool_id))
+                    continue
+                if "blocks" in inner:  # a reply's blocks as given: thinking, a server tool's
+                    send(assistant(session, inner["blocks"], parent=tool_id))
                     continue
                 _, _, interrupted = self.tool(
                     session, step, inner, tool_id=f"{tool_id}_{n}", parent=tool_id
