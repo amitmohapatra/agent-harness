@@ -1917,43 +1917,6 @@ async def test_i_an_idle_chat_is_told_how_its_task_ended(
     assert len(server.calls) == asked
 
 
-async def test_i_a_task_whose_run_the_store_no_longer_has_is_ended_and_told_to_nobody(
-    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The task ends while no turn works in the chat, and the run store no longer has its run
-    once ended (its retention removed it): the run is ended as the task did, and no turn of the
-    chat's own is started for an outcome whose run cannot be read back — the next turn's pull
-    reads what the conversation carries."""
-    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
-    model = Model(turns=[START, reports_the_id, "Nothing else."])
-    agent = chat(harness, server, model)
-    server.hold()
-    await say(agent, "run the optimization")
-    [task] = await task_runs(harness)
-    store = harness.runs
-    read, ended = store.get, asyncio.Event()
-
-    async def retained(run_id: str, **kwargs: Any) -> Any:
-        found = await read(run_id, **kwargs)
-        if run_id == task.run_id and found is not None and found.status.final:
-            ended.set()
-            return None  # removed by the store's retention
-        return found
-
-    monkeypatch.setattr(store, "get", retained)
-    server.release()
-    await asyncio.wait_for(ended.wait(), 10)
-    monkeypatch.setattr(store, "get", read)
-    finished = await store.get(task.run_id)
-    assert finished is not None and (finished.status, finished.output) == (
-        RunStatus.SUCCESS,
-        RESULT,
-    )
-    runs = [r async for r in store.iterate(agent_id="bg", thread_id=THREAD)]
-    assert len(runs) == 1  # the turn that started it: none of the chat's own
-    assert len(model.seen) == 2
-
-
 async def test_i_a_tasks_run_cancelled_elsewhere_cancels_the_task_on_its_server(
     workers: tuple[Harness, Harness], server: StandIn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2047,6 +2010,43 @@ async def test_i_a_tasks_run_another_server_ended_is_held_here_no_more(
 
 
 @pytest.mark.parametrize("memory", [False, True])
+async def test_i_a_task_whose_run_the_store_no_longer_has_is_ended_and_told_to_nobody(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task ends while no turn works in the chat, and the run store no longer has its run
+    once ended (its retention removed it): the run is ended as the task did, and no turn of the
+    chat's own is started for an outcome whose run cannot be read back — the next turn's pull
+    reads what the conversation carries."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    model = Model(turns=[START, reports_the_id, "Nothing else."])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    store = harness.runs
+    read, ended = store.get, asyncio.Event()
+
+    async def retained(run_id: str, **kwargs: Any) -> Any:
+        found = await read(run_id, **kwargs)
+        if run_id == task.run_id and found is not None and found.status.final:
+            ended.set()
+            return None  # removed by the store's retention
+        return found
+
+    monkeypatch.setattr(store, "get", retained)
+    server.release()
+    await asyncio.wait_for(ended.wait(), 10)
+    monkeypatch.setattr(store, "get", read)
+    finished = await store.get(task.run_id)
+    assert finished is not None and (finished.status, finished.output) == (
+        RunStatus.SUCCESS,
+        RESULT,
+    )
+    runs = [r async for r in store.iterate(agent_id="bg", thread_id=THREAD)]
+    assert len(runs) == 1  # the turn that started it: none of the chat's own
+    assert len(model.seen) == 2
+
+
 async def test_i_an_outcome_read_into_a_turn_the_model_never_got_is_told_at_the_next(
     harness: Harness, memory_harness: Harness, server: StandIn, memory: bool
 ) -> None:
