@@ -196,6 +196,15 @@ chat's own on its thread stream when it is idle; its questions asked through the
   `[permission]` rules are written inline is asked over (a `[[permission.ask]]` rule after it)
   instead of refusing the run; only a `permission = { ... }` inline table is still refused.
 
+### Fixed: what the framework comparison on Haiku found
+
+- `middleware(context_window=)` below the model's own window (a team's `create_agent` or
+  `create_deep_agent` given 16,000 tokens for a model of 200,000 that replies up to 64,000)
+  reserves the reply out of the model's own window, as `ReAct(context_window=)` does. Before,
+  it was taken out of the window given, which left 0 tokens for the input: every request of
+  such a run was refused (`ContextTooLarge`), 10 scored turns of the comparison's small-window
+  cases on LangGraph ([compare-2026-11-15](docs/research/compare-2026-11-15/README.md)).
+
 ### Fixed: what the real-model (Haiku) acceptance found
 
 - Claude: the turn a live session runs by itself once a background task ended is charged in

@@ -1,0 +1,270 @@
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+multihop-04      tier 3 [True] $0.0022
+multihop-05      tier 3 [True] $0.0047
+multihop-08      tier 3 [True] $0.0067
+multihop-10      tier 3 [True] $0.0081
+aggregate-03     tier 3 [True] $0.0124
+aggregate-04     tier 3 [False] $0.0150
+aggregate-07     tier 3 [True] $0.0169
+formula-04       tier 3 [True] $0.0196
+formula-06       tier 3 [True] $0.0237
+stats-03         tier 3 [True] $0.0261
+stats-04         tier 3 [True] $0.0280
+stats-07         tier 3 [True] $0.0321
+whatif-02        tier 3 [True] $0.0342
+whatif-03        tier 3 [True] $0.0382
+conversation-08  tier 3 [True, True] $0.0443
+conversation-10  tier 3 [True, True] $0.0479
+explain-04       tier 3 [True, None] $0.0508
+freshness-03     tier 3 [True, False] $0.0536
+conflict-02      tier 3 [True] $0.0553
+edge-05          tier 3 [True] $0.0568
+edge-07          tier 3 [True] $0.0583
+planning-02      tier 3 [True] $0.0614
+planning-03      tier 3 [True] $0.0635
+planning-05      tier 3 [True] $0.0650
+long-chain-01    tier 3 [True] $0.0676
+long-chain-02    tier 3 [True] $0.0706
+long-chain-03    tier 3 [True] $0.0724
+long-chain-04    tier 3 [True] $0.0755
+long-chain-05    tier 3 [True] $0.0780
+long-chain-06    tier 3 [True] $0.0819
+long-chain-07    tier 3 [True] $0.0842
+long-data-01     tier 3 [True] $0.0858
+long-data-02     tier 3 [True] $0.0912
+long-data-03     tier 3 [True] $0.0930
+long-data-04     tier 3 [True] $0.0945
+long-data-05     tier 3 [True] $0.0963
+long-data-06     tier 3 [True] $0.1130
+long-data-07     tier 3 [True] $0.1151
+long-data-08     tier 3 [False] $0.1171
+long-data-09     tier 3 [True] $0.1194
+long-multi-01    tier 3 [True] $0.1230
+long-multi-02    tier 3 [True] $0.1286
+long-multi-03    tier 3 [True] $0.1307
+long-multi-04    tier 3 [True] $0.1335
+long-multi-05    tier 3 [True] $0.1351
+long-multi-06    tier 3 [True, True] $0.1382
+long-multi-07    tier 3 [True] $0.1402
+long-multi-08    tier 3 [True] $0.1415
+the turn could not be written before the run returned; it is queued
+trellis write: memory.transcript failed and is lost: ValidationError: Request validation failed (said once as an error; later failures of memory.transcript are warnings)
+long-flow-01     tier 3 [True] $0.1573
+long-flow-02     tier 3 [] $0.1573
+long-flow-03     tier 3 [True] $0.1628
+long-flow-04     tier 3 [False] $0.1675
+long-flow-05     tier 3 [True, True, True, True, True, True, True, True, True, True, True, True] $0.1797
+long-flow-06     tier 3 [True] $0.1833
+long-flow-07     tier 3 [True] $0.1873
+long-flow-08     tier 3 [True] $0.1911
+the turn could not be written before the run returned; it is queued
+long-flow-09     tier 3 [True] $0.1958
+trellis write: memory.transcript failed and is lost: ValidationError: Request validation failed
+trellis write: memory.verify failed and is lost: still undelivered when the process stopped (said once as an error; later failures of memory.verify are warnings)
+trellis write: memory.verify failed and is lost: still undelivered when the process stopped
+  + Exception Group Traceback (most recent call last):
+  |   File "/var/tmp/cons/compare/agent-harness/docs/research/compare-2026-11-15/scripts/cx_compare.py", line 100, in <module>
+  |     sys.exit(cx.main(sys.argv[1:]))
+  |              ~~~~~~~^^^^^^^^^^^^^^
+  |   File "/var/tmp/cons/compare/agent-harness/benchmark/cost/complex.py", line 4426, in main
+  |     report = asyncio.run(bench(arguments(argv)))
+  |   File "/usr/local/lib/python3.13/asyncio/runners.py", line 196, in run
+  |     return runner.run(main)
+  |            ~~~~~~~~~~^^^^^^
+  |   File "/usr/local/lib/python3.13/asyncio/runners.py", line 119, in run
+  |     return self._loop.run_until_complete(task)
+  |            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  |   File "/usr/local/lib/python3.13/asyncio/base_events.py", line 726, in run_until_complete
+  |     return future.result()
+  |            ~~~~~~~~~~~~~^^
+  |   File "/var/tmp/cons/compare/agent-harness/benchmark/cost/complex.py", line 4342, in bench
+  |     await h.aclose()
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/harness.py", line 480, in aclose
+  |     raise failed[0]
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/agent.py", line 435, in aclose
+  |     await close()
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/adapters/claude.py", line 445, in aclose
+  |     await self.live.aclose()
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 819, in aclose
+  |     raise failed
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 722, in close
+  |     await self._disconnect()
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/claude_live.py", line 826, in _disconnect
+  |     with contextlib.suppress(Exception):
+  |          ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  |   File "/usr/local/lib/python3.13/contextlib.py", line 468, in __exit__
+  |     raise rest
+  |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/claude_live.py", line 827, in _disconnect
+  |     await self.client.disconnect()
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/client.py", line 615, in disconnect
+  |     await self._query.close()
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/query.py", line 1211, in close
+  |     await self._close_impl()
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/query.py", line 1222, in _close_impl
+  |     await bridge.aclose()
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/sdk_mcp_bridge.py", line 384, in aclose
+  |     await session.aclose()
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/sdk_mcp_bridge.py", line 327, in aclose
+  |     await self._task.wait()
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/_task_compat.py", line 91, in wait
+  |     raise exc
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/sdk_mcp_bridge.py", line 145, in _run
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 847, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | BaseExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anyio/_core/_tasks.py", line 327, in _run_coro
+    |     retval = await self._coro
+    |              ^^^^^^^^^^^^^^^^
+    |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/sdk_mcp_bridge.py", line 185, in _serve
+    |     await self._server.run(
+    |     ...<4 lines>...
+    |     )
+    |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/lowlevel/server.py", line 712, in run
+    |     await serve_dual_era_loop(
+    |     ...<6 lines>...
+    |     )
+    |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 627, in serve_dual_era_loop
+    |     async with _replay_from_opening_request(read_stream) as (opening, replayed):
+    |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+    |   File "/usr/local/lib/python3.13/contextlib.py", line 235, in __aexit__
+    |     await self.gen.athrow(value)
+    |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 707, in _replay_from_opening_request
+    |     async with anyio.create_task_group() as tg:
+    |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+    |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 847, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | BaseExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Exception Group Traceback (most recent call last):
+      |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 709, in _replay_from_opening_request
+      |     yield opening_request, replayed
+      |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 636, in serve_dual_era_loop
+      |     await _serve_legacy_stream(
+      |     ...<7 lines>...
+      |     )
+      |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 750, in _serve_legacy_stream
+      |     await dispatcher.run(on_request, runner.on_notify)
+      |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 493, in run
+      |     async with anyio.create_task_group() as tg:
+      |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+      |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 847, in __aexit__
+      |     raise BaseExceptionGroup(
+      |         "unhandled errors in a TaskGroup", self._exceptions
+      |     ) from None
+      | BaseExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+      +-+---------------- 1 ----------------
+        | Traceback (most recent call last):
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anyio/_core/_tasks.py", line 327, in _run_coro
+        |     retval = await self._coro
+        |              ^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+        |     result = await on_request(dctx, req.method, req.params)
+        |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 747, in on_request
+        |     return await runner.on_request(dctx, method, params)
+        |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+        |     result = _dump_result(await call(ctx))
+        |                           ^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+        |     result = await call_next(ctx)
+        |              ^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/claude.py", line 64, in named_call
+        |     return await call_next(ctx)
+        |            ^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+        |     result = await entry.handler(ctx, typed_params)
+        |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/_internal/_mcp_compat.py", line 127, in on_call_tool
+        |     return await run_tool(params.name, params.arguments or {})
+        |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/claude_agent_sdk/__init__.py", line 633, in run_tool
+        |     result = await tool_def.handler(arguments)
+        |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/claude.py", line 139, in relayed_call
+        |     return await call(tool.name, args)
+        |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/claude_live.py", line 582, in _call
+        |     return await turn.within(called())
+        |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+        |     return task.result()
+        |            ~~~~~~~~~~~^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/claude_live.py", line 579, in called
+        |     return await own(args)
+        |            ^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/claude.py", line 149, in handler
+        |     outcome = await bridge.call(tool, dict(args))
+        |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+        |     outcome = await _called(
+        |               ^^^^^^^^^^^^^^
+        |         runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |     )
+        |     ^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 454, in _called
+        |     outcome, owed = await _ran(
+        |                     ^^^^^^^^^^^
+        |         runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
+        |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |     )
+        |     ^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 508, in _ran
+        |     outcome, error = await execute(tool, args, reads=reads, within=within)
+        |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/base.py", line 370, in execute
+        |     output = await retried(
+        |              ^^^^^^^^^^^^^^
+        |     ...<3 lines>...
+        |     )
+        |     ^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/base.py", line 436, in retried
+        |     async for attempt in AsyncRetrying(
+        |     ...<7 lines>...
+        |             return await call()
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/tenacity/asyncio/__init__.py", line 170, in __anext__
+        |     do = await self.iter(retry_state=self._retry_state)
+        |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/tenacity/asyncio/__init__.py", line 157, in iter
+        |     result = await action(retry_state)
+        |              ^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/tenacity/_utils.py", line 111, in inner
+        |     return call(*args, **kwargs)
+        |   File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 393, in <lambda>
+        |     self._add_action_func(lambda rs: rs.outcome.result())
+        |                                      ~~~~~~~~~~~~~~~~~^^
+        |   File "/usr/local/lib/python3.13/concurrent/futures/_base.py", line 453, in result
+        |     return self.__get_result()
+        |            ~~~~~~~~~~~~~~~~~^^
+        |   File "/usr/local/lib/python3.13/concurrent/futures/_base.py", line 402, in __get_result
+        |     raise self._exception
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/base.py", line 444, in retried
+        |     return await call()
+        |            ^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/base.py", line 362, in once
+        |     return await tool.run(args)
+        |            ^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/sources.py", line 115, in _run
+        |     returned = await invoked(self.fn, **values)
+        |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/base.py", line 502, in invoked
+        |     result = await asyncio.to_thread(fn, **kwargs)
+        |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/usr/local/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+        |     return await loop.run_in_executor(None, func_call)
+        |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |   File "/usr/local/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+        |     result = self.fn(*self.args, **self.kwargs)
+        |   File "/var/tmp/cons/compare/agent-harness/benchmark/cost/longtasks.py", line 248, in carrier_quote
+        |     raise WorkerDied(f"the worker died while {supplier}'s quote was read")
+        | benchmark.cost.longtasks.WorkerDied: the worker died while SUP-22's quote was read
+        +------------------------------------

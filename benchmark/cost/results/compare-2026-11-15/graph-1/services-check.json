@@ -1,0 +1,48 @@
+{
+ "turns": 137,
+ "runs_unique": 137,
+ "runs_found": 137,
+ "runs_ended": 136,
+ "runs_with_started_and_finished": 137,
+ "events": 2999,
+ "cases_with_fewer_runs_than_turns": [],
+ "spend_token_mismatches": [
+  "long57:long-flow-04: agent-runs 5547 vs rows 11919"
+ ],
+ "problems": [
+  "run_20d2f48c6f344f6f9f0fac2ff5e00d75: {'found': True, 'status': 'QUEUED', 'started': True, 'finished': True, 'events': 57, 'tokens': 5547}"
+ ],
+ "memory_requests": 4251,
+ "memory_per_turn": 31.03,
+ "memory_reads": 3299,
+ "memory_writes": 952,
+ "memory_failed": [
+  "long57:multihop-04 PUT /v1/agents/model-key ValidationError",
+  "long57md:long-flow-05 PUT /v1/agents/model-key ValidationError",
+  "long57md:long-flow-05 POST /v1/context TimeoutError",
+  "ordinary:multihop-01 PUT /v1/agents/model-key ValidationError",
+  "sw16:advdata-02 PUT /v1/agents/model-key ValidationError",
+  "sw8:long-data-03 PUT /v1/agents/model-key ValidationError",
+  "swown:advconv-05 PUT /v1/agents/model-key ValidationError"
+ ],
+ "cases_without_memory_read": [],
+ "cases_without_memory_write": [],
+ "turns_with_context_read": 136,
+ "turns_with_transcript_write": 137,
+ "context_reads": 146,
+ "transcript_writes": 155,
+ "memory_paths": {
+  "GET /v1/tools/approval-suggestions": 2873,
+  "POST /v1/tools/invocations": 633,
+  "GET /v1/tools": 252,
+  "POST /v1/messages": 155,
+  "POST /v1/context": 146,
+  "POST /v1/feedback": 145,
+  "POST /v1/verify": 12,
+  "GET /v1/tool-permissions": 12,
+  "GET /v1/keys/self": 8,
+  "GET /v1/agent-tools": 8,
+  "PUT /v1/agents/model-key": 6,
+  "POST /v1/tools/hints": 1
+ }
+}

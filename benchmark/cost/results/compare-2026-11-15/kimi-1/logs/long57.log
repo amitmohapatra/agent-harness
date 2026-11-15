@@ -1,0 +1,614 @@
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+multihop-04      tier 3 [True] $0.0045
+multihop-05      tier 3 [True] $0.0069
+multihop-08      tier 3 [True] $0.0090
+multihop-10      tier 3 [True] $0.0103
+aggregate-03     tier 3 [True] $0.0151
+aggregate-04     tier 3 [True] $0.0176
+aggregate-07     tier 3 [True] $0.0195
+formula-04       tier 3 [True] $0.0222
+formula-06       tier 3 [True] $0.0257
+stats-03         tier 3 [True] $0.0278
+stats-04         tier 3 [True] $0.0293
+stats-07         tier 3 [True] $0.0341
+whatif-02        tier 3 [True] $0.0363
+whatif-03        tier 3 [True] $0.0405
+conversation-08  tier 3 [True, True] $0.0505
+conversation-10  tier 3 [True, True] $0.0546
+explain-04       tier 3 [True, None] $0.0578
+freshness-03     tier 3 [False, False] $0.0632
+conflict-02      tier 3 [False] $0.0656
+edge-05          tier 3 [True] $0.0669
+edge-07          tier 3 [True] $0.0683
+the turn could not be written before the run returned; it is queued
+planning-02      tier 3 [True] $0.0714
+the turn could not be written before the run returned; it is queued
+planning-03      tier 3 [True] $0.0737
+planning-05      tier 3 [True] $0.0755
+the turn could not be written before the run returned; it is queued
+long-chain-01    tier 3 [True] $0.0784
+long-chain-02    tier 3 [True] $0.0819
+the turn could not be written before the run returned; it is queued
+long-chain-03    tier 3 [True] $0.0838
+long-chain-04    tier 3 [True] $0.0868
+long-chain-05    tier 3 [True] $0.0893
+long-chain-06    tier 3 [True] $0.0935
+long-chain-07    tier 3 [True] $0.0955
+long-data-01     tier 3 [True] $0.0973
+long-data-02     tier 3 [True] $0.1005
+long-data-03     tier 3 [True] $0.1022
+long-data-04     tier 3 [True] $0.1037
+long-data-05     tier 3 [True] $0.1056
+long-data-06     tier 3 [True] $0.1083
+long-data-07     tier 3 [True] $0.1103
+long-data-08     tier 3 [True] $0.1124
+long-data-09     tier 3 [True] $0.1157
+the turn could not be written before the run returned; it is queued
+long-multi-01    tier 3 [True] $0.1192
+long-multi-02    tier 3 [True] $0.1249
+the turn could not be written before the run returned; it is queued
+long-multi-03    tier 3 [True] $0.1271
+long-multi-04    tier 3 [True] $0.1300
+long-multi-05    tier 3 [True] $0.1316
+long-multi-06    tier 3 [True, True] $0.1375
+long-multi-07    tier 3 [True] $0.1395
+long-multi-08    tier 3 [True] $0.1407
+the turn could not be written before the run returned; it is queued
+long-flow-01     tier 3 [True] $0.1571
+long-flow-02     tier 3 [] $0.1571
+long-flow-03     tier 3 [True] $0.1666
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 454, in _called
+    outcome, owed = await _ran(
+                    ^^^^^^^^^^^
+        runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 501, in _ran
+    if not await runtime.saved_start():
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 701, in saved_start
+    await self.progress(now=True)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 433, in _called
+    return await _interrupted(runtime, ref, tool_call, key)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 995, in _interrupted
+    await runtime.progress(now=True)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 470, in _called
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 558, in _ended_or_owed
+    await finish()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 555, in finish
+    await _record(runtime, tool_call, outcome, decision, key=key)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 702, in _record
+    await runtime.progress(now=not decision.runs)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 470, in _called
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 558, in _ended_or_owed
+    await finish()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 555, in finish
+    await _record(runtime, tool_call, outcome, decision, key=key)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 702, in _record
+    await runtime.progress(now=not decision.runs)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 470, in _called
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 558, in _ended_or_owed
+    await finish()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 555, in finish
+    await _record(runtime, tool_call, outcome, decision, key=key)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 702, in _record
+    await runtime.progress(now=not decision.runs)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 470, in _called
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 558, in _ended_or_owed
+    await finish()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 555, in finish
+    await _record(runtime, tool_call, outcome, decision, key=key)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 702, in _record
+    await runtime.progress(now=not decision.runs)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 470, in _called
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 558, in _ended_or_owed
+    await finish()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 555, in finish
+    await _record(runtime, tool_call, outcome, decision, key=key)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 702, in _record
+    await runtime.progress(now=not decision.runs)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+handler for 'tools/call' raised
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/shared/jsonrpc_dispatcher.py", line 720, in _handle_request
+    result = await on_request(dctx, req.method, req.params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 230, in _on_request
+    result = _dump_result(await call(ctx))
+                          ^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/_otel.py", line 44, in __call__
+    result = await call_next(ctx)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/mcp/server/runner.py", line 217, in _inner
+    result = await entry.handler(ctx, typed_params)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 61, in call_tool
+    return await called(params.name, dict(params.arguments or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/acp_live.py", line 705, in call
+    return await turn.within(turn.tools.called(name, args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/bridges/live.py", line 227, in within
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/convert/mcp.py", line 117, in called
+    outcome = call.result()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 177, in call
+    outcome = await _called(
+              ^^^^^^^^^^^^^^
+        runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 470, in _called
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 558, in _ended_or_owed
+    await finish()
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 555, in finish
+    await _record(runtime, tool_call, outcome, decision, key=key)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/tools/bridge.py", line 702, in _record
+    await runtime.progress(now=not decision.runs)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 650, in progress
+    await self._saved(now=now or behind)
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/runtime.py", line 664, in _saved
+    save = await journal.save(
+           ^^^^^^^^^^^^^^^^^^^
+        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/journal.py", line 437, in save
+    ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/artifacts.py", line 76, in put_payload
+    body = await self._transport.json(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 137, in json
+    return (await self.send(method, path, **kwargs)).json()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-runs/sdk/python/src/trellis/runs/_transport.py", line 130, in send
+    raise error
+trellis.runs.errors.LeaseLostError: agent-runs POST /v1/runs/run_634c250d85e747cb8946c22f7b48ad73/payloads: HTTP 409 LEASE_LOST: run run_634c250d85e747cb8946c22f7b48ad73 is QUEUED; worker vm:19120:7f13478edd10 holds no lease
+long-flow-04     tier 3 [False] $0.1750
+long-flow-05     tier 3 [True, True, True, True, True, True, True, True, True, True, True, True] $0.1905
+long-flow-06     tier 3 [True] $0.1990
+long-flow-07     tier 3 [True] $0.2030
+long-flow-08     tier 3 [True] $0.2068
+the turn could not be written before the run returned; it is queued
+long-flow-09     tier 3 [True] $0.2138
+# complex: claude-haiku-5-5 (kimi, memory history)
+
+Spend: $0.2138 (cap $0.6)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 57 | 72 | 0.94 ± 0.05 | 1 | 0 | 3 | 7 of 108 |
+| multihop | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| aggregate | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| formula | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| stats | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| whatif | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| conversation | 2 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 10 |
+| explain | 1 | 2 | 1.00 | 1 | 0 | 0 | 0 of 2 |
+| freshness | 1 | 2 | 0.00 ± 0.00 | 0 | 0 | 2 | 2 of 2 |
+| conflict | 1 | 1 | 0.00 | 0 | 0 | 0 | 0 of 1 |
+| edge | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| planning | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| long_chain | 7 | 7 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 7 |
+| long_data | 9 | 9 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 9 |
+| long_multi | 8 | 9 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 9 |
+| long_flow | 9 | 19 | 0.95 ± 0.11 | 0 | 0 | 1 | 5 of 49 |
+| tier 3 | 57 | 72 | 0.94 ± 0.05 | 1 | 0 | 3 | 7 of 108 |

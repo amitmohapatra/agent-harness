@@ -170,15 +170,19 @@ class Called(Hooks):
         return outcome
 
 
-def harness(*, memory: bool = False) -> Harness:
+def harness(*, memory: bool = False, runs: bool = False) -> Harness:
     """The environment's harness with nothing but the model: memory, the run store, tracing
     and the gateway's MCP tools off, so no service's data is read or written — ``memory``:
-    the environment's memory service on (its context and tool hints)."""
+    the environment's memory service on (its context and tool hints); ``runs``: the
+    environment's agent-runs (``RUNS_URL``) the run store."""
     config = Settings.from_env()
     # the suite runs Claude Code and Kimi Code in work folders of this machine: its deployment
     # allows commands here (TRELLIS_HOST_EXECUTION=allow)
-    off = {"runs_url": None, "otlp_endpoint": None, "host_execution": "allow"}
-    off |= {} if memory else {"memory_url": None}
+    off = (
+        {"otlp_endpoint": None, "host_execution": "allow"}
+        | ({} if runs else {"runs_url": None})
+        | ({} if memory else {"memory_url": None})
+    )
     config = config.model_copy(update=off)
     if memory:
         return Harness(config=config, gateway=False)
