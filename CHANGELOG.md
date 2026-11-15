@@ -91,6 +91,9 @@ chat's own on its thread stream when it is idle; its questions asked through the
 - Claude: a subagent's reasoning is a `reasoning` event naming its child run, and a tool the
   API ran in a subagent's step (web search, the advisor) is recorded under that child run.
   Before, only the main agent's were.
+- Deep Agents' tasks on a server of yours: the outcomes of such tasks, told by turns of the
+  chat's own, may start or update a task three times in a row, as a harness task's may; the
+  fourth fails saying so. Each outcome counted as the first, so a chain never ended.
 
 ### Fixed: each library's own skills, through the harness
 

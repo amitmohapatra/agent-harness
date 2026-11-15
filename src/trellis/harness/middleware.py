@@ -521,14 +521,15 @@ def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[An
 
 async def _remote_tasks(runtime: Runtime, call: Any, own: Any, args: Mapping[str, Any]) -> Any:
     """The adapter's record of Deep Agents' tasks on a server (``bridges.async_tasks``), when
-    ``call`` is of one of Deep Agents' own task tools (``own``) — a start checked first: a
-    webhook that leads somewhere private fails the call, and its server is sent nothing.
+    ``call`` is of one of Deep Agents' own task tools (``own``) — a start checked first: past
+    the chain of outcomes, or a webhook that leads somewhere private, fails the call, and its
+    server is sent nothing.
     ``None`` for any other call."""
     tasks = getattr(runtime.agent.adapter, "tasks", None)
     if tasks is None or call["name"] not in task_tools.TOOLS or not framework_made(own):
         return None
     try:
-        await tasks.starting(own, args)
+        await tasks.starting(runtime, own, args)
     except TargetRefused as exc:
         refused = f"{call['name']} was not run: its webhook: {exc}"
         raise ToolError(refused, source="tools") from exc

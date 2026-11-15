@@ -444,6 +444,7 @@ async def test_h_a_started_task_is_a_child_run_of_its_turn_held_while_it_runs(
         "name": "optimizer",
         "task_id": server.task_id,
         "thread": THREAD,
+        "depth": "0",  # a message began the turn: no outcome before it (BG-CHAIN-R)
         "url": server.url,
         "graph_id": "optimizer",
     }
@@ -1915,6 +1916,41 @@ async def test_i_an_idle_chat_is_told_how_its_task_ended(
     later = await say(agent, "anything else?")
     assert later.answer == "Nothing else."  # told once: Deep Agents recorded it
     assert len(server.calls) == asked
+
+
+async def test_i_remote_task_outcomes_start_three_tasks_in_a_row_and_the_fourth_is_refused(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BG-CHAIN-R: a remote task's outcome, told by a turn of the chat's own, is one further
+    from the user's last message than the turn that started the task — carried in the task's
+    run (``depth``), as a harness task's is. Each outcome turn starts another task: three in a
+    row start (depths 1, 2, 3), the fourth outcome's start is refused as a harness task's is
+    (``background.CHAINED``), and its server is sent nothing."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    server.seconds = 0.1
+    turns: list[Any] = [START, reports_the_id]  # the user's turn
+    for n in (1, 2, 3):  # each outcome's turn starts another task
+        turns += [START, f"Started task {n + 1}."]
+    model = Model(turns=[*turns, START, says_what_the_tool_said])
+    agent = chat(harness, server, model)
+    await say(agent, "run the optimization")
+
+    async def chained() -> list[RunRecord]:
+        found = [r async for r in harness.runs.iterate(agent_id="bg", thread_id=THREAD)]
+        records = [await harness.runs.get(r.run_id) for r in found]
+        return [r for r in records if r is not None and r.status.final]
+
+    async with asyncio.timeout(20):
+        while len(await chained()) < 5:  # noqa: ASYNC110 - the keeper's progress
+            await asyncio.sleep(0.05)
+    told = [r for r in await chained() if "trellis_notified" in r.metadata]
+    depths = sorted(r.metadata["trellis_notified"]["depth"] for r in told)
+    assert depths == [1, 2, 3, 4]
+    tasks = await task_runs(harness)
+    assert sorted(t.metadata[HELPER]["depth"] for t in tasks) == ["0", "1", "2", "3"]
+    assert len(server.runs) == 4  # the fourth outcome's start reached no server
+    [last] = [r for r in told if r.metadata["trellis_notified"]["depth"] == 4]
+    assert last.output is not None and "3 times in a row" in str(last.output)
 
 
 async def test_i_a_tasks_run_cancelled_elsewhere_cancels_the_task_on_its_server(
