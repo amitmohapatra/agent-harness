@@ -5,6 +5,27 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: security audit — scope, approvals and what reaches the service's own files
+
+* **AG-UI:** the data a paused run's question carries (`GET .../runs/{run_id}/artifacts/{id}`)
+  is its run's user's only, as the run's events and files are; a client `runId` the run store
+  already has (another replica's run, one this replica's buffers forgot) is refused (`422`),
+  never attempted again under the caller's name.
+* **Approvals:** a question a rule assigned to someone else (a `before_tool` hook's
+  `Ask(assignee="role:finance")`) is theirs, answered through the inbox (`agent.resume`): the
+  run's own user answering it over AG-UI is `409`, over A2A the task keeps waiting.
+* **Claude Code:** a run's own `framework_options` cannot set the CLI's flags (`extra_args`) or
+  its `settings` (they carry its permission mode and rules: the deployment's, as
+  `permission_mode` and `allowed_tools` are); a run's own `can_use_tool` may refuse a call,
+  never approve it for the user.
+* **Files:** a link in a framework's `outputs/` is never followed into the file store (it could
+  lead to any file the service may read); an Excel file is read into at most
+  `stored.MAX_CELLS` cells (a few kilobytes could say millions).
+* **Kimi Code:** a sandboxed run's Kimi is configured to ask about `FetchURL`, `WebSearch` and
+  `Skill` as any run's is (it fetched from this machine's network unasked); `Glob`, `Grep` and
+  `ReadMediaFile`, which read this machine's files in Kimi's own process, are asked about, and
+  one outside the run's folders is refused.
+
 ### Changed: shell commands on the host — isolated where the harness runs them, one switch to turn them off (`TRELLIS_HOST_EXECUTION`)
 
 Shell commands stay allowed by default (`TRELLIS_HOST_EXECUTION=allow`), with isolation as the
