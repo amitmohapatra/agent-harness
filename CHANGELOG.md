@@ -48,6 +48,24 @@ name; infrastructure — the host, a tool's risk, who answers an infrastructure 
 (`before_tool`'s `Ask(assignee="role:…")`, the catalog's `risk` and `approve_when`) — the
 administrator's, always audited ([governance.md](docs/governance.md#who-decides-what)).
 
+### Changed: commands run in the tenant's shared sandbox, with a workspace and a uid per run
+
+`sandbox()` now works in **one container per tenant** (`SharedDockerSandbox`), never shared
+across tenants, instead of a container per run. Inside it one isolation layer
+(`trellis.harness.sandbox.isolation`) gives each run a workspace (mode 0700) and an
+unprivileged uid of its own; each command runs in process and mount namespaces of its own (it
+sees and can signal only its own processes), with every filesystem but its workspace read-only,
+within per-command limits (`Limits`: CPU time, memory, processes, file size, open files, and
+the call's timeout; the limit hit is in the result, `limit`), with an environment of its own
+(no secret of the service's) and the container's network (none by default). A run's end — any
+way it ends, a crash's takeover included — delivers its `outputs/`, then kills its processes,
+deletes its workspace and frees its uid; the reaper does so for runs that died. Every command is
+audited (`sandbox_command` on the run's stream, the `trellis.sandbox.audit` log). The same
+layer runs commands on the host when an administrator allows it (`HostSandbox`,
+`isolated_run(tenant, user, run, command, limits)`), and refuses to when the service cannot
+switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
+`duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).
+
 ### Fixed: what the framework comparison of 2026-11-15 found
 
 * **Claude Agent SDK: a model call for each reply.** A run's `model_calls` counted one per
@@ -91,6 +109,47 @@ administrator's, always audited ([governance.md](docs/governance.md#who-decides-
   the dead worker's run, before agent-runs' ticker had queued it again, and nothing asked
   again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
   a worker process does) until the run pauses or ends.
+
+### Fixed: gaps the SDK full-stack pass found
+
+* **A run cancelled in its own process keeps its end in agent-runs' log.** `agent.cancel`
+  had agent-runs end the run `CANCELLED` before its attempt stopped, so the attempt's last
+  events — the call cut short (`TOOL_CALL_RESULT`, `cancelled`) and `RUN_FINISHED` with the
+  reason — were refused, and the log stopped at the call's arguments (every in-process
+  adapter, and a run cancelled while it waited its turn). The attempt now stops first, its
+  log takes its last events, and agent-runs' own cancel ends it, keeping the reason and who
+  asked. A run a worker holds is asked to stop through agent-runs first, as before.
+* **Kimi: a background command's result read in a later turn answers that turn.** A turn
+  that waited for a task it had started (`WaitFor`) while the task ended failed `NO_ANSWER`:
+  Kimi steers the task's notification into the turn, ends it after the wait, and answers in
+  a turn of its own that ACP does not forward. The harness now waits for that turn and takes
+  its answer from Kimi's log, as `kimi -p` does; its tokens are that run's, counted once
+  ([kimi.md](docs/frameworks/kimi.md#background-work)).
+* **A run's own framework objects survive its pause in its process.** An OpenAI Agents
+  `RunHooks` or `context` object given to one run (`agent.run(framework_options=...)`) was lost
+  when governance paused the run (a tool that declares nothing asks): the resume ran with the
+  agent's options. The process the run started in now keeps them for its resume; a resume in
+  another process runs with the agent's, as documented — an object is not stored
+  ([configuration.md](docs/configuration.md#the-frameworks-own-run-options)).
+* **Claude and Kimi: a file the user places is written where they said.** The line the
+  harness adds about `outputs/` ("save a file the user asks for there") made Claude write a
+  `hello.txt` the user asked for in the working folder into `outputs/` instead (1 run of 2 on
+  Haiku). It now says a file the user names (a bare name: the working folder) or places goes where
+  they said, and `outputs/` is for a file made to give the user with no place named
+  ([sandbox.md](docs/sandbox.md)).
+* **Docs: a framework's own helper's events are on its parent's stream.** subagents.md said
+  every child run's events are on its own stream; a Deep Agents `task`, an `Agent.as_tool`, a
+  Claude `agents=` subagent and a Kimi `Agent` are steps of the parent's framework run, their
+  tool calls on the parent's stream as the library streams them, their child run without
+  events of its own ([subagents.md](docs/subagents.md#limits)).
+* **Docs: Kimi offers its model an MCP server over HTTP, not a stdio one.** Kimi 2.6.2 starts
+  a stdio MCP server and lists its tools but leaves them out of its model's requests, given in
+  ACP's `session/new` or in its own `mcp.json` alike; one over HTTP is offered at once
+  ([kimi.md](docs/frameworks/kimi.md#models-swarms-and-limits)).
+* **Structured output in memory.** With LangChain's tool strategy (`ToolStrategy`) the turn
+  kept in memory ended with the schema's call and LangChain's `Returning structured response:
+  ...` message, and no assistant text; it now ends with the structured answer (its JSON) as
+  the assistant's message, as with the provider strategy.
 
 ### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
 

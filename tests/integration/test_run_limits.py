@@ -21,6 +21,7 @@ from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call
+from tests.support.runlog import LoggedRuns
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import (
     ConfigurationError,
@@ -359,6 +360,49 @@ async def test_a_run_stopped_twice_ends_once_with_the_first_reason(harness: Harn
     await streaming
     assert events[-1].outcome is RunOutcome.CANCELLED
     assert events[-1].data["reason"] == "the first reason"
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_a_run_cancelled_in_its_process_has_its_end_in_the_runs_log_on_every_adapter(
+    framework: str, tmp_path: Path
+) -> None:
+    """RUN-CANCEL-LOG: ``agent.cancel`` of a run whose tool works in this process, against a
+    run store that keeps runs' events as agent-runs does (appended only while the run runs):
+    the run's log in the store ends as the caller's stream does — the call cut short
+    (``TOOL_CALL_RESULT``, ``cancelled``) and ``RUN_FINISHED`` ``CANCELLED`` with the reason —
+    and the store's cancel ended it, keeping that reason."""
+    started = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def wait(seconds: int) -> str:
+        """Wait a while."""
+        started.set()
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    runs = LoggedRuns()
+    events: list[RunEvent] = []
+    async with Harness(config=Settings(), runs=runs) as h:
+        target, tools = await BUILDERS[framework](h, [wait], tmp_path, [("wait", {"seconds": 60})])
+        agent = arm(h.wrap(target, id=f"cancel-{framework}"), tools)
+
+        async def watch() -> None:
+            async for event in agent.stream("wait", user="u"):
+                events.append(event)
+
+        streaming = asyncio.create_task(watch())
+        await asyncio.wait_for(started.wait(), 30)
+        record = await agent.cancel(events[0].run_id, reason="enough")
+        await asyncio.wait_for(streaming, 30)
+    run_id = record.run_id
+    assert record.status is RunStatus.CANCELLED
+    logged = runs.logged(run_id)
+    assert [(e.type, e.sequence) for e in logged] == [(e.type, e.sequence) for e in events]
+    [cut] = [e for e in logged if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert cut.data["status"] == "cancelled"
+    assert logged[-1].type is RunEventType.RUN_FINISHED
+    assert logged[-1].outcome is RunOutcome.CANCELLED and logged[-1].data["reason"] == "enough"
+    assert runs.cancelled == {run_id: "enough"}
 
 
 async def test_a_run_whose_open_children_cannot_be_listed_keeps_its_result(

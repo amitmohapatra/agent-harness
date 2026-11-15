@@ -1,7 +1,10 @@
 # Sandboxes: where the model runs code
 
-A sandbox is a container (or a hosted microVM) of its run's own, made at the run's first command
-and deleted when the run ends. One entry, `sandbox()`, given where each engine takes it — one
+A sandbox is where a run's commands run, away from the service: by default a **workspace of
+the run's own, with a uid of its own, in its tenant's shared container** ([the shared
+sandbox](#the-shared-sandbox-one-per-tenant-isolated-per-run)), made at the run's first command
+and deleted when the run ends; or a container (or a hosted microVM) of the run's own, from a
+provider you give. One entry, `sandbox()`, given where each engine takes it — one
 sandbox behind every way:
 
 | Engine | Where `sandbox()` goes |
@@ -103,7 +106,120 @@ box = sandbox(DockerSandbox(), spec=spec, call_timeout=300)
 | `SandboxRef(provider, id, labels, snapshot)` | which sandbox, as a run's journal keeps it: never a secret or a host path |
 
 Nothing is configured in the environment: `sandbox()` is Docker (the daemon `DOCKER_HOST`
-names, Docker's own variable), `sandbox(image=)` its image.
+names, Docker's own variable) — the tenant's shared container (`SharedDockerSandbox`, below);
+`sandbox(DockerSandbox())` a container of each run's own — and `sandbox(image=)` its image.
+
+## The shared sandbox: one per tenant, isolated per run
+
+Commands run in a **shared** sandbox, not a container per user: one container per tenant
+(`SharedDockerSandbox`, `sandbox()`'s default), and inside it the harness enforces the user and
+run boundaries itself, through one isolation layer
+([`isolation.py`](../src/trellis/harness/sandbox/isolation.py)) — the same layer commands on the
+host itself go through when an administrator allows them ([`isolated_run`](#commands-on-the-host-the-same-boundaries)).
+
+**One container per tenant, never shared across tenants.** Its name is a digest of the tenant
+and of what it is made of (image, network, CPU, memory: `trellis-pool-<digest>`), and it is
+labelled with the tenant (`trellis.pool`). Two tenants never get the same container, so
+nothing one tenant's code does — a kernel-level trick, a file left in a shared folder, a
+process — reaches another's; the per-run boundaries below are the second wall, inside one
+tenant. The container stays for the tenant's next run (no start-up per run); its CPU and memory
+(`SandboxSpec(cpu=, memory=)`) are the tenant's together. Each tenant also gets a range of uids
+of its own (a digest of the tenant), so no two tenants' runs share a uid on the machine.
+
+**Inside it, each run:**
+
+| Boundary | How |
+|---|---|
+| a workspace of its own | `/workspaces/t-<tenant digest>/trellis-<run id>`, mode 0700, owned by the run's uid; the tenant's folder 0711 (no listing) |
+| an OS identity of its own | an unprivileged uid per run, from the tenant's range, made on demand and freed at the run's end (no `/etc/passwd` entry: a number) |
+| cannot read, list or write another run's workspace | its owner and mode; `cat`, `ls` and a write into another workspace fail (`Permission denied`) |
+| cannot see or signal another run's processes | each command runs in a process namespace of its own with a `/proc` of its own (`ps` shows its own processes only), as another uid (`kill` fails) |
+| cannot read the service's files | the layer's registry (`/workspaces/.trellis`: uids, labels, pid files) is root's alone (0700); every filesystem but the workspace is read-only to the command; on the host, the service's working folder, its home, `/root` and `/home` are covered (`hidden=`) |
+| no secret | a command's environment is `PATH`, `HOME` and `TMPDIR` (in its workspace), `LANG`, `USER` and what its caller passes (Kimi's terminal `env`, Way 2's `env=`) — never the service's (`env -i`); the container never receives the service's environment, keys or credentials |
+| network | the container's: none unless the spec opens it (`SandboxSpec(network="open")`); a list of hosts is refused (Docker cannot enforce one) |
+| limits | per command (`Limits`, below); a runaway command is stopped and its result says which limit (`limit`, and a `hint`); other runs go on |
+| `/tmp`, `/var/tmp`, `/dev/shm` | the workspace's own `.tmp` (nothing left behind in a shared folder) |
+| nothing outlives its command | a command's process namespace goes with it: a background process (`cmd &`) ends when the command does |
+
+**Limits** (`Limits`, given to the provider: `SharedDockerSandbox(limits=Limits(...))`,
+`HostSandbox(limits=...)`, or per call to `isolated_run`):
+
+| Setting | Default | What it bounds |
+|---|---|---|
+| `cpu_seconds` | 120 | CPU time of each process (`limit: "cpu"`, exit 152) |
+| `memory_mib` | 2048 | address space of each process (`limit: "memory"`: `MemoryError`, `Cannot allocate memory`) |
+| `processes` | 256 | processes of the run's uid at once, every command of the run together (`limit: "processes"`) |
+| `file_mib` | 1024 | the largest file a command writes (`limit: "file"`, exit 153) |
+| `open_files` | 1024 | files one process has open (`limit: "files"`) |
+| wall-clock | the call's timeout | `sandbox(call_timeout=)` (120 s) and what is left of the run's time: past it the command is killed with everything it started |
+
+The tenant's container: at most 4096 processes (`POOL_PIDS`), the spec's CPU and memory. A
+process the kernel kills for memory is the largest of the tenant's (each command's
+`oom_score_adj` is 1000): the runaway one, not the layer.
+
+**Clean-up, right after each run.** When a run ends — success, error, time out, cancel, a run
+taken over after its worker crashed — what must outlive it is kept first, as without the
+shared sandbox: each file in `outputs/` is delivered to the user (the file store) when the run
+succeeds, and the results its conversation carries stay in the run's journal (`tools.results`),
+written into the next turn's fresh workspace at the path the model was told. Then its
+processes are killed, its workspace deleted and its uid freed. A run taken over after a crash
+kills what the dead attempt left running when it attaches (the same workspace, the same uid).
+**The reaper** removes the workspaces (and processes) of runs that ended without it — a
+process that died — when a process first makes a sandbox for a tenant, then at most every 10
+minutes (`REAP_SECONDS`), and by hand: `reap(provider, runs, tenant=)`.
+
+**Audit.** Every command is recorded: the run's stream gets a `sandbox_command` event (`user`,
+`tenant`, `run`, `sandbox`, `uid`, `command`, `exit_code`, `duration_ms`, `limit`), the log
+`trellis.sandbox.audit` the same as one JSON line, and the command's result (journaled with the
+call) its `duration_ms` and `limit`. No new store.
+
+**What the container holds.** The layer's own root commands need to switch uid, make the
+command's namespaces and mounts, own and remove a run's files and kill its processes, so the
+container keeps `SYS_ADMIN`, `SETUID`, `SETGID`, `SETPCAP`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`
+and `KILL` of its capabilities (every other dropped, no new privileges). A run's command has
+none (`setpriv --inh-caps=-all --bounding-set=-all --no-new-privs`). It needs util-linux
+(`unshare`, `setpriv`, `prlimit`) in the image (Debian's and Ubuntu's have it; Alpine's does
+not). Docker's default seccomp profile lets a process with `SYS_ADMIN` among the container's
+capabilities make a user namespace: a run's command can make one of its own (it gains nothing
+over another run's files or processes, but it is kernel surface) — for code nobody reviewed,
+run the daemon with gVisor (`runsc`).
+
+**Not kept from a container of its own:** a pause or snapshot (a workspace lost with its
+container is `SandboxLost`), and a background process across commands.
+
+### Commands on the host: the same boundaries
+
+When an administrator allows commands on the server itself (the `-hostshell` setting), they go
+through the same layer: `HostSandbox` and its one entry point —
+
+```python
+from trellis.harness.sandbox import HostSandbox, Limits, isolated_end, isolated_run
+
+result = await isolated_run(tenant, user, run_id, "python3 report.py", Limits(cpu_seconds=30))
+# result.exit_code, .stdout, .stderr, .duration_ms, .limit
+await isolated_end(run_id)  # outside a harness run; inside one, the run's end does it
+```
+
+The host's workspaces are under `HostSandbox(root=)` (`/var/lib/trellis/workspaces`): a base
+folder and a uid range per tenant, a workspace (0700) and uid per run, the same limits, an
+environment of its own, the network off (a network namespace of its own; `HostSandbox(network=
+"open")` is the administrator's to give), the service's working folder, home, `/root` and
+`/home` covered (`hidden=`), clean-up at the run's end and the reaper, the same audit. It needs
+root: the service itself, or a helper that runs a command as root (`HostSandbox(helper=("sudo",
+"-n"))`). **Without it, host execution refuses to start** (`cannot_isolate()` says why;
+`isolated_run` raises `ConfigurationError`), never running a command as the service's own user.
+Kept results are bound at `/large_tool_results` (an empty mount point the layer makes once).
+
+### Where the harness cannot enforce it
+
+| Adapter | Commands through the layer |
+|---|---|
+| `ReAct(backend=sandbox())`, `create_deep_agent(**sandbox().deep_agent())` | yes (`execute` and the file tools) |
+| a function or LangGraph agent with `sandbox().tools()`, any framework given those tools | yes |
+| Kimi Code, `kimi(sandbox=sandbox())` | its `Bash` and file writes: yes (its working folder is the workspace); its own reads are not isolated (they read the host) |
+| Claude Agent SDK's own `Bash` (its `SandboxSettings`) | no: the CLI's own sandbox on the machine it runs on; give it `sandbox().tools()` for commands the layer runs |
+| OpenAI Agents SDK's `SandboxAgent` and its clients | no: the SDK's own sandbox (Docker, Unix-local, hosted); give it a hosted or Docker client, or `sandbox().tools()` |
+| Deep Agents with a backend of its own (`LocalShellBackend`) | no: refused unless the administrator allows host commands |
 
 ## The image: build in the libraries the agent needs
 
@@ -185,7 +301,12 @@ Claude Code and Kimi Code work in a folder of their own on this machine (their `
 shells unsandboxed only where the deployment allows commands on this machine
 (`TRELLIS_HOST_EXECUTION=allow`, [governance.md](governance.md#commands-on-the-host-the-deployments-to-allow)). Its
 `outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
-so after its system prompt, Kimi in a block before its prompt; when the run succeeds each file
+so after its system prompt, Kimi in a block before its prompt — "Files you write in outputs/ of
+your working directory are given to the user when you finish. Write a file the user names, or
+gives a path or folder for, exactly there (a bare name is in your working directory); use
+outputs/ for a file you make to give the user that they named no place for." — so a file the
+user names (`hello.txt`: the working folder) is written where they said, as the SDK's own
+`Write` does without the harness; when the run succeeds each file
 directly in that `outputs/` is kept, announced and served as above, then removed from the folder
 (so a later run does not give it again); the rest of the folder is left alone. Runs that share a
 working folder share its `outputs/`: give each user's runs a folder of their own. A sandboxed
@@ -374,7 +495,8 @@ temporary directory, with no isolation) that shows the whole interface working.
 
 ## Limits
 
-* One sandbox per run: a thread's next run gets a new one.
+* One sandbox per run (a workspace in the shared container, by default): a thread's next run
+  gets a new one.
 * Docker: one daemon — a run resumed by a worker that reaches another daemon finds its sandbox
   lost; a shared kernel — for code nobody reviewed, run the daemon with gVisor (`runsc`) or use
   a microVM provider; no list of reachable hosts; a snapshot keeps the filesystem, not the

@@ -435,3 +435,12 @@ writes inside a git working tree through (ACP gives the harness no hook before t
 are the frameworks' own permission settings, and the catalog's risk (`irreversible`, an
 `approve_when`) is the way to have them asked
 ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md#claude-codes-built-in-tools)).
+
+## Who decides what: where a run's commands run
+
+The person a run is for decides each tool call (above). Where its commands run, and within
+what, is the deployment's: one shared sandbox per tenant, a workspace and a uid of its own per
+run, limits, no network and no secret, clean-up at the run's end and the reaper, every command
+audited — and on the host only where an administrator allows it, through the same isolation
+layer ([sandbox.md](sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run)). A run's
+user cannot widen any of it.

@@ -16,7 +16,7 @@ signatures.
 | `agent.run` / `agent.stream` | `RUNNING` (recorded in process), then `PAUSED` or an ending |
 | `agent.start` | `QUEUED`; `RunHandle.result()` waits for a pause or an ending |
 | `agent.resume` | the next attempt: `RUNNING` for an in-process run, `QUEUED` again for one that came from the queue; `CANCELLED` on cancel |
-| `agent.cancel(run_id, reason=)` (a handle's: `agent.cancel(handle.id)`) | `CANCELLED`: at once when queued or paused; a run running here stops now; one on a worker elsewhere is stopped by that worker at its next heartbeat |
+| `agent.cancel(run_id, reason=)` (a handle's: `agent.cancel(handle.id)`) | `CANCELLED`: at once when queued or paused; a run running here stops now — its attempt first, so its log in agent-runs ends with the call cut short and `RUN_FINISHED`, then agent-runs' cancel ends it, keeping the reason and who asked; one on a worker elsewhere is stopped by that worker at its next heartbeat |
 | `agent.schedule(cron, user=, input=, tz=, tenant=, ...)` | a `Schedule`; each fire queues a run for `user`, with the run options `start` takes (below) |
 
 `run`, `stream` and `start` take `run_timeout=` (the most working time, in seconds, across every

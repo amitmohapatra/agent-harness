@@ -619,6 +619,53 @@ async def test_the_runs_own_run_hooks_see_the_run_beside_the_harnesss(harness: H
     assert events[-1].data["spent"]["model_calls"] == 3  # counted by the harness's hooks
 
 
+class Asker:
+    """A run's own context object (not JSON: the run's record cannot keep it)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+@function_tool
+def who(context: RunContextWrapper[Any], order: str) -> str:
+    """Say who asks about an order."""
+    return f"{getattr(context.context, 'name', 'nobody')} asks about {order}"
+
+
+@pytest.mark.parametrize("where", ["here", "another process"])
+async def test_a_runs_own_hooks_and_context_objects_survive_a_governance_pause_in_its_process(
+    where: str,
+) -> None:
+    """OAI-RUN-OBJECTS: ``RunHooks`` and a ``context`` object given to one run (objects, not
+    JSON) and a pause governance inserted (a tool that declares nothing asks): the resume in
+    the run's process runs with that run's hooks and context; in another process (two
+    harnesses sharing one run store) they cannot be had — the record keeps JSON only — and
+    the resume runs with the agent's options."""
+    seen = Seen()
+    runs = LocalRuns()
+    model = ScriptedModel([("who", {"order": "o1"}), "done"])
+    target = Agent(name="desk", model=model, tools=[who])
+    async with (
+        Harness(config=Settings(), runs=runs) as a,
+        Harness(config=Settings(), runs=runs) as b,
+    ):
+        own = {"hooks": seen, "context": Asker("ada")}
+        started = a.wrap(target, id="desk")
+        paused = await started.run("who?", user="u", framework_options=own)
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        agent = started if where == "here" else b.wrap(target, id="desk")
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+        assert done.status is RunStatus.SUCCESS and done.answer == "done"
+    if where == "here":
+        assert outputs(model) == ["ada asks about o1"]
+        assert ("tool_end", "who", "ada asks about o1") in seen.events
+        assert seen.events[-1] == ("agent_end", "desk", "done")
+        assert paused.run_id not in started.run_objects  # let go of once the run ended
+    else:
+        assert outputs(model) == ["nobody asks about o1"]
+        assert not any(event[0] == "tool_start" for event in seen.events)
+
+
 async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_turn_limit() -> None:
     """With the run's own ``RunHooks``: a token budget still stops the run, and a run at its
     turn limit ends ``PARTIAL`` with the SDK's outcome, no model call past it."""

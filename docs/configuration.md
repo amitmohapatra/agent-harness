@@ -283,8 +283,11 @@ middle of a run. A run keeps its own options with its record (`RunStart.metadata
 `without=`; a schedule's in its `ScheduleSpec.metadata`, copied into each run it fires), so its
 resume and a worker that continues it run with the same: a queued or scheduled run's must be
 JSON, and an object (a `RunConfig`, a callback) is refused there — give it on `h.wrap`, which
-every worker's agent has; on `run`/`stream` an object reaches that call only, and the record
-keeps the JSON ones.
+every worker's agent has; on `run`/`stream` the record keeps the JSON ones, and an object (an
+OpenAI Agents `RunHooks` or `context`) is kept in the process the run was started in: a resume
+there — after a pause governance inserted, or any other — runs with it, while a resume in another
+process (a worker, a replica) cannot have it (an object is not stored, nor pickled) and runs
+with the agent's. Give an object every attempt must have on `h.wrap`.
 
 ## What code passes
 

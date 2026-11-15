@@ -338,7 +338,14 @@ then — `SUCCESS` with what it said, `ERROR` when its task failed or was stoppe
 with no conversation the SDK keeps the query's process while such a task works, so the run
 ends when the task has (and the session ran its turn for it): the run's answer is its own
 turn's result, and a subagent the process ended before (it died, or exited) is an `ERROR`
-saying it was cut off, never a success. A subagent that works in the background of a
+saying it was cut off, never a success. So when Claude answers before the subagent ends ("I
+started it; I'll report when it finishes"), that answer lacks the subagent's result (measured
+on Haiku: [sdk-full-stack-2026-11-15](../research/sdk-full-stack-2026-11-15/README.md), O3).
+The result is always the child run's output (`h.runs.iterate(parent_run_id=run_id)`). To have
+an answer carry it: ask in a conversation (`thread=`) — the task's end reaches the session, and
+the conversation's next turn answers with it ([below](#conversations)) — or have Claude wait
+for it: an `Agent` call with `run_in_background: false` (ask for it in the prompt or the
+subagent's instructions) runs the subagent in the foreground, and its result is that turn's. A subagent that works in the background of a
 conversation's process keeps its child run open across the turns
 ([below](#conversations)). A wrapped agent called from a tool of yours
 (`await other.run(...)`) is a child run too, and the wrapped options are a `ReAct`'s sub-agent
