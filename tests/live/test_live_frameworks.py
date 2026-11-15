@@ -196,6 +196,12 @@ class Checked:
     user: str
 
 
+def calls_of(message: Any) -> list[dict[str, Any]]:
+    """The tool calls a message of the memory service's history made (the service's field
+    beside the SDK's own)."""
+    return (message.model_extra or {}).get("tool_calls") or []
+
+
 async def checked(h: Harness, name: str, built: Built, wiki: str, tenant: str) -> Checked:
     """``built`` run once on the question, with memory to push, and what the harness did
     checked: the run ended, as the harness may end it; the context pushed (and, where it is
@@ -231,7 +237,13 @@ async def checked(h: Harness, name: str, built: Built, wiki: str, tenant: str) -
     history = await scope.history()
     assert history and history[0].role == "USER" and history[0].content == QUESTION
     if run.finished.outcome is RunOutcome.SUCCESS and run.finished.data.get("result"):
-        assert [m.role for m in history] == ["USER", "ASSISTANT"]  # the transcript, once
+        # the transcript, once: the question and the answer, and between them the assistant's
+        # messages that made the run's calls (kept with the transcript, ``conversation``; a
+        # function's own calls are made by no model message)
+        assert [m.role for m in history if not calls_of(m)] == ["USER", "ASSISTANT"]
+        assert {m.role for m in history if calls_of(m)} <= {"ASSISTANT"}
+        called = {c["name"] for m in history for c in calls_of(m)}
+        assert called <= set(run.started()), (called, run.started())
     return Checked(run, proof, agent, user)
 
 
@@ -266,7 +278,9 @@ async def test_a_target_runs_with_memory_and_tools(
         assert [t.name for t in toolbox if t.spec.source == "mcp"] == [f"{deepwiki}-{WIKI_TOOL}"]
         if framework == "claude_agent_sdk":
             started = json.loads((tmp_path / "cli.json").read_text())
-            assert "Berlin" in started["system_prompt"]
+            # the memory context goes with the prompt, as the CLI's ``UserPromptSubmit`` hook
+            # adds it (``bridges.claude.with_context``), not in the system prompt
+            assert "Berlin" in started["context"]
         scope = await memory_scope(h, user=proven.user, agent_id=proven.agent.id)
 
         # the tool records reach the catalog's statistics

@@ -9,7 +9,8 @@ about what the assistant can do — among its 11 tools, and again among 51 (40 u
 added). Then the same kinds of item on two **held-out** sets (``heldout.py``: an IT help desk,
 travel expenses), written apart and never used to tune the harness, reported apart. Each item
 is scored by ``tool_coverage`` (and, with an expected answer, ``contains`` and ``picks``),
-``ReAct`` as it is built.
+``ReAct`` as it is built — through the gateway, or directly at the model's endpoint when there is
+none.
 
 **MCP through Bifrost** — the local MCP servers (``mcp_fixture.py``, declared in the gateway):
 the definitions the model is sent are the servers' own (descriptions and schemas), the same
@@ -40,7 +41,15 @@ import pytest
 from langchain.agents.middleware import AgentMiddleware
 
 from tests.live import heldout
-from tests.live.conftest import MODEL, OPS, _virtual_key, live_harness, needs_gateway, settings
+from tests.live.conftest import (
+    MODEL,
+    OPS,
+    _virtual_key,
+    live_harness,
+    needs_gateway,
+    needs_model,
+    settings,
+)
 from tests.live.proof import MODEL_FAILURES, RUN_SECONDS
 from tests.live.support import Sent as Wire
 from tests.live.support import gateway_model
@@ -80,7 +89,7 @@ MAX_STEPS: Final = 8
 #: The tools whose every call fails (an error; a timeout after 2 s).
 FAILING: Final = {"supplier_eta", "transfer_status"}
 RUNS: Final = max(len(v[1]) for v in SETS.values()) * REPEATS + 10
-pytestmark = [pytest.mark.live, needs_gateway]
+pytestmark = [pytest.mark.live]
 
 
 class Sent(AgentMiddleware):
@@ -190,6 +199,7 @@ def harness_part(rows: list[dict[str, Any]], writes: set[str]) -> None:
                 assert f"every call failed: {tool}" in (row["comment"] or ""), row
 
 
+@needs_model
 @pytest.mark.parametrize("toolset", list(SETS))
 @pytest.mark.timeout(int(RUNS * RUN_SECONDS))
 async def test_tool_coverage_of_function_tools(toolset: str) -> None:
@@ -257,13 +267,14 @@ MCP_ITEMS: Final = [
 
 
 def untitled(schema: Any) -> Any:
-    """A JSON Schema without its ``title`` keywords or an empty ``properties``, ``required`` in
-    name order: what the gateway normalizes (seen live) — the same schema."""
+    """A JSON Schema without its ``title`` keywords or an empty ``properties`` or ``required``,
+    ``required`` in name order: what the gateway normalizes (seen live; Bifrost 2.5 adds an
+    empty ``required``) — the same schema."""
     if isinstance(schema, dict):
         return {
             k: sorted(v) if k == "required" else untitled(v)
             for k, v in schema.items()
-            if k != "title" and not (k == "properties" and v == {})
+            if k != "title" and not (k in ("properties", "required") and not v)
         }
     return [untitled(v) for v in schema] if isinstance(schema, list) else schema
 
@@ -277,6 +288,7 @@ def definitions(wire: Wire) -> dict[str, dict[str, Any]]:
     }
 
 
+@needs_gateway
 @pytest.mark.timeout(int(10 * RUN_SECONDS))
 async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
     store_key: str, wikis: list[str]

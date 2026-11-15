@@ -1,9 +1,11 @@
-"""Kimi Code (the real ``kimi acp``) through the gateway's OpenAI route to the live model: the
+"""Kimi Code (the real ``kimi acp``) on the live model — through the gateway's OpenAI route, or,
+with no gateway, Kimi's own configuration naming the model's endpoint (``KIMI_MODEL_*``: the
+OpenAI-compatible ``LLM_BASE_URL`` and ``LLM_API_KEY``): the
 harness's tools reach it as an MCP server, the run's headers go with every model call, and —
 when the model calls the harness tool that asks for approval — the resumed run continues
 Kimi's session and the approved call runs once. Opt-in (``-m live``), like every live test; no
-Moonshot key: the model is the gateway's (``TRELLIS_LIVE_MODEL``, or a Kimi model the gateway
-serves). Skipped without the ``kimi`` program. Whether the model calls the tool at all is the
+Moonshot key: the model is the gateway's or the endpoint's (``TRELLIS_LIVE_MODEL``, or a Kimi
+model the gateway serves). Skipped without the ``kimi`` program. Whether the model calls the tool at all is the
 model's (the test says so when it does not)."""
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.live.conftest import GATEWAY_URL, MODEL, live_harness, needs_gateway
+from tests.live.conftest import DIRECT_URL, MODEL, live_harness, needs_model, settings
 from tests.support.arm import arm
 from tests.support.kimi import KIMI_BIN
 from trellis import kimi, tool
@@ -21,14 +23,13 @@ from trellis.contracts import RunStatus
 
 pytestmark = [
     pytest.mark.live,
-    needs_gateway,
+    needs_model,
     pytest.mark.skipif(KIMI_BIN is None, reason="the kimi program is not installed"),
 ]
 
 
 @pytest.mark.timeout(600)
-async def test_kimi_runs_through_the_gateway_and_resumes_its_session(tmp_path: Path) -> None:
-    assert GATEWAY_URL is not None
+async def test_kimi_runs_on_the_live_model_and_resumes_its_session(tmp_path: Path) -> None:
     closed: list[str] = []
 
     @tool(side_effects="irreversible")
@@ -40,11 +41,15 @@ async def test_kimi_runs_through_the_gateway_and_resumes_its_session(tmp_path: P
     home, work = tmp_path / "home", tmp_path / "work"
     home.mkdir()
     work.mkdir()
-    target = kimi(
-        model=MODEL,
-        cwd=str(work),
-        env={"KIMI_CODE_HOME": str(home), "KIMI_DISABLE_TELEMETRY": "1"},
-    )
+    env = {"KIMI_CODE_HOME": str(home), "KIMI_DISABLE_TELEMETRY": "1"}
+    if DIRECT_URL is not None:  # no gateway: Kimi's own configuration names the endpoint
+        env |= {
+            "KIMI_MODEL_PROVIDER_TYPE": "openai",
+            "KIMI_MODEL_BASE_URL": DIRECT_URL,
+            "KIMI_MODEL_API_KEY": settings().llm_api_key or "none",
+            "KIMI_MODEL_NAME": MODEL,
+        }
+    target = kimi(model=MODEL, cwd=str(work), env=env)
     async with live_harness() as h:
         agent = arm(h.wrap(target, id=f"live-kimi-{uuid.uuid4().hex[:8]}"), [close_ticket])
         first = await agent.run(
