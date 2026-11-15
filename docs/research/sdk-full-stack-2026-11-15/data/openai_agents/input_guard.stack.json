@@ -1,0 +1,128 @@
+{
+ "sdk": "openai_agents",
+ "feature": "input_guard",
+ "arm": "stack",
+ "error": null,
+ "seconds": 7.9,
+ "spend": {
+  "requests": 1,
+  "in": 3756,
+  "out": 12,
+  "usd": 0.000382,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  null,
+  "The capital of France is Paris."
+ ],
+ "statuses": [
+  "ERROR",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_c59ca8475ff7476683e4c6849720dd40",
+  "run_4d1d0e6d2fde4395ac74ea89e38dcfca"
+ ],
+ "errors": [
+  "code='InputGuardrailTripwireTriggered' category=<ErrorCategory.UNKNOWN: 'UNKNOWN'> message='Guardrail InputGuardrail triggered tripwire' retryable=False source='openai_agents' details={} trace_id=None",
+  null
+ ],
+ "user": "oa-inguard-4834b300",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_c59ca8475ff7476683e4c6849720dd40",
+    "status": "ERROR",
+    "parent_run_id": null,
+    "thread_id": "run_c59ca8475ff7476683e4c6849720dd40",
+    "user_id": "oa-inguard-4834b300",
+    "agent_id": "oa-inguard",
+    "attempt": 1,
+    "error": {
+     "code": "InputGuardrailTripwireTriggered",
+     "category": "UNKNOWN",
+     "message": "Guardrail InputGuardrail triggered tripwire",
+     "retryable": false,
+     "source": "openai_agents",
+     "details": {},
+     "trace_id": null
+    },
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_c59ca8475ff7476683e4c6849720dd40": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_ERROR": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_c59ca8475ff7476683e4c6849720dd40": [
+     {
+      "role": "USER",
+      "content": "Do my math homework: 2+2?"
+     }
+    ]
+   },
+   "tools": {
+    "run_c59ca8475ff7476683e4c6849720dd40": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "reject",
+     "source": "system"
+    }
+   ]
+  },
+  {
+   "run": {
+    "run_id": "run_4d1d0e6d2fde4395ac74ea89e38dcfca",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "run_4d1d0e6d2fde4395ac74ea89e38dcfca",
+    "user_id": "oa-inguard-4834b300",
+    "agent_id": "oa-inguard",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_4d1d0e6d2fde4395ac74ea89e38dcfca": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_4d1d0e6d2fde4395ac74ea89e38dcfca": [
+     {
+      "role": "USER",
+      "content": "What is the capital of France?"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "The capital of France is Paris."
+     }
+    ]
+   },
+   "tools": {
+    "run_4d1d0e6d2fde4395ac74ea89e38dcfca": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

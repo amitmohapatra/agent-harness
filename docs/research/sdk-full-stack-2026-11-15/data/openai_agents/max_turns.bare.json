@@ -1,0 +1,26 @@
+{
+ "sdk": "openai_agents",
+ "feature": "max_turns",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.1,
+ "spend": {
+  "requests": 1,
+  "in": 441,
+  "out": 150,
+  "usd": 0.000119,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [
+  "SKU-1"
+ ],
+ "answers": [
+  null
+ ],
+ "errors": [
+  "MaxTurnsExceeded: Max turns (1) exceeded"
+ ]
+}

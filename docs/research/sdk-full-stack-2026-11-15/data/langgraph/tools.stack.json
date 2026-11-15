@@ -1,0 +1,84 @@
+{
+ "sdk": "langgraph",
+ "feature": "tools",
+ "arm": "stack",
+ "error": null,
+ "seconds": 3.1,
+ "spend": {
+  "requests": 2,
+  "in": 1807,
+  "out": 68,
+  "usd": 0.000215,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "SKU-1 has 7 units in stock.",
+ "calls": [
+  "SKU-1"
+ ],
+ "status": "SUCCESS",
+ "run_id": "run_4cfb3f9215c94943ac66ea1ffab44078",
+ "records": {
+  "run": {
+   "run_id": "run_4cfb3f9215c94943ac66ea1ffab44078",
+   "status": "SUCCESS",
+   "parent_run_id": null,
+   "thread_id": "run_4cfb3f9215c94943ac66ea1ffab44078",
+   "user_id": "lc-c89d9001",
+   "agent_id": "lc-tools",
+   "attempt": 1,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_4cfb3f9215c94943ac66ea1ffab44078": {
+    "RUN_STARTED": 1,
+    "CONTEXT_LOADED": 1,
+    "TOOL_CALL_START": 1,
+    "TOOL_CALL_ARGS": 1,
+    "TOOL_CALL_END": 1,
+    "TOOL_CALL_RESULT": 1,
+    "RUN_FINISHED": 1
+   }
+  },
+  "messages": {
+   "run_4cfb3f9215c94943ac66ea1ffab44078": [
+    {
+     "role": "USER",
+     "content": "How many units of SKU-1 are in stock? Use the tool."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": ""
+    },
+    {
+     "role": "TOOL",
+     "content": "SKU-1: 7 units in stock"
+    },
+    {
+     "role": "ASSISTANT",
+     "content": "SKU-1 has 7 units in stock."
+    }
+   ]
+  },
+  "tools": {
+   "run_4cfb3f9215c94943ac66ea1ffab44078": [
+    {
+     "tool_name": "stock",
+     "status": "ok",
+     "output": "SKU-1: 7 units in stock"
+    }
+   ]
+  },
+  "feedback": [
+   {
+    "target_kind": "run",
+    "verdict": "confirm",
+    "source": "system"
+   }
+  ]
+ }
+}

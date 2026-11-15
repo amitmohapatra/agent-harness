@@ -1,0 +1,23 @@
+{
+ "sdk": "langgraph",
+ "feature": "tools",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.0,
+ "spend": {
+  "requests": 2,
+  "in": 907,
+  "out": 68,
+  "usd": 0.000125,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "SKU-1 has 7 units in stock.",
+ "calls": [
+  "SKU-1"
+ ],
+ "status": "SUCCESS",
+ "run_id": "run_7dc6b99de24f476cb45d09e6a5e4e057"
+}

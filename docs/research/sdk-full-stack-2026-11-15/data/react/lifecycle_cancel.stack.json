@@ -1,0 +1,56 @@
+{
+ "sdk": "react",
+ "feature": "lifecycle_cancel",
+ "arm": "stack",
+ "error": null,
+ "seconds": 4.0,
+ "spend": {
+  "requests": 1,
+  "in": 3952,
+  "out": 48,
+  "usd": 0.000131,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "CANCELLED",
+ "gate": "started-react",
+ "cancel_returned": "CANCELLED",
+ "last_event": "RUN_FINISHED",
+ "last_data": "{\"spent\": {\"tokens\": 4000, \"cached_tokens\": 3361, \"cost\": 0.0, \"model_calls\": 1, \"tool_calls\": 1}, \"reason\": \"enough\"}",
+ "records": {
+  "run": {
+   "run_id": "run_0e00420b2eaa451da89243dbe6dca415",
+   "status": "CANCELLED",
+   "parent_run_id": null,
+   "thread_id": "b8546097",
+   "user_id": "life-a0800327",
+   "agent_id": "lc-react-cancel",
+   "attempt": 1,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_0e00420b2eaa451da89243dbe6dca415": {
+    "RUN_STARTED": 1,
+    "CONTEXT_LOADED": 1,
+    "TOOL_CALL_START": 1,
+    "TOOL_CALL_ARGS": 1
+   }
+  },
+  "messages": {
+   "run_0e00420b2eaa451da89243dbe6dca415": [
+    {
+     "role": "USER",
+     "content": "Call the slow_report tool for region north, then tell me its result."
+    }
+   ]
+  },
+  "tools": {
+   "run_0e00420b2eaa451da89243dbe6dca415": []
+  },
+  "feedback": []
+ }
+}

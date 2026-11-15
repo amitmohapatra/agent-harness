@@ -1,0 +1,18 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "partial_stream",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.6,
+ "spend": {
+  "requests": 1,
+  "in": 15929,
+  "out": 105,
+  "usd": 0.000592,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "deltas": 36
+}

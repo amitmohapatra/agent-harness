@@ -1,0 +1,52 @@
+{
+ "sdk": "openai_agents",
+ "feature": "structured",
+ "arm": "off",
+ "error": null,
+ "seconds": 4.4,
+ "spend": {
+  "requests": 2,
+  "in": 4278,
+  "out": 72,
+  "usd": 0.000464,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "type": "Weather",
+ "answers": [
+  "city='Oslo' celsius=21.5"
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve temperature? temperature has not declared its side effects. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "temperature",
+    "args": {
+     "city": "Oslo"
+    },
+    "task": "What is the temperature in Oslo?",
+    "step": null,
+    "idempotency_key": "afcb7da8fe03f3466e5aa7b0"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_3c5a897790704cdcb3711eef342b78e9"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-structured-d3cba8d6",
+ "records": null
+}

@@ -1,0 +1,21 @@
+{
+ "sdk": "langgraph",
+ "feature": "lifecycle_pause",
+ "arm": "stack",
+ "error": null,
+ "seconds": 7.6,
+ "spend": {
+  "requests": 1,
+  "in": 959,
+  "out": 72,
+  "usd": 0.000132,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "PAUSED",
+ "run_id": "run_caa7b4b01710496fadfd0bc8f6f88980",
+ "asked": "Approve wire? wire is irreversible. Allow once, or deny.",
+ "wired": []
+}

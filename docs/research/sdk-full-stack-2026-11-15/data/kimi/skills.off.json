@@ -1,0 +1,32 @@
+{
+ "sdk": "kimi",
+ "feature": "skills",
+ "arm": "off",
+ "error": null,
+ "seconds": 6.2,
+ "spend": {
+  "requests": 2,
+  "in": 45227,
+  "out": 302,
+  "usd": 0.001022,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Gentle autumn rain,\npooling gold on the cold stones,\nthe maples let go.\n-- SKILL:HAIKU"
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_4cc2dbd3630c45db83c2a061b508dcce"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "ki-skills-a67e70f8",
+ "records": null
+}

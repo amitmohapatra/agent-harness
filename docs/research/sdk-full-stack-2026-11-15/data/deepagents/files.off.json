@@ -1,0 +1,40 @@
+{
+ "sdk": "deepagents",
+ "feature": "files",
+ "arm": "off",
+ "error": null,
+ "seconds": 6.6,
+ "spend": {
+  "requests": 4,
+  "in": 16656,
+  "out": 365,
+  "usd": 0.000418,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Done.",
+  "The launch code in /notes.md is ORCHID-42."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_bd98496aa2cb4ba48e4aa4835e721386",
+  "run_85550070639d4d8e80ebe7fdd49b504d"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "da-files-6d48e12b",
+ "records": null,
+ "todos": null,
+ "files": [
+  "/notes.md"
+ ]
+}

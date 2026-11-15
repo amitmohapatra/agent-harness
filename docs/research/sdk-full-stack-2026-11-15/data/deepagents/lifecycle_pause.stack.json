@@ -1,0 +1,21 @@
+{
+ "sdk": "deepagents",
+ "feature": "lifecycle_pause",
+ "arm": "stack",
+ "error": null,
+ "seconds": 7.8,
+ "spend": {
+  "requests": 1,
+  "in": 4527,
+  "out": 72,
+  "usd": 0.000602,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "PAUSED",
+ "run_id": "run_894c1283fe514df38c3642b19556ac81",
+ "asked": "Approve wire? wire is irreversible. Allow once, or deny.",
+ "wired": []
+}

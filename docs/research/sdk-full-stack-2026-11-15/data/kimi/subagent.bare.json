@@ -1,0 +1,26 @@
+{
+ "sdk": "kimi",
+ "feature": "subagent",
+ "arm": "bare",
+ "error": null,
+ "seconds": 10.8,
+ "spend": {
+  "requests": 5,
+  "in": 92462,
+  "out": 746,
+  "usd": 0.002788,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "delegated": true,
+ "answers": [
+  "The codename is **HERON**.\n\nThe explore sub-agent timed out twice, first on the initial run and then on the resume, so it never reported. I read `facts.txt` myself instead. Its only line is \"The project codename is HERON.\""
+ ],
+ "tools_used": [
+  "Agent",
+  "Agent",
+  "Read"
+ ]
+}

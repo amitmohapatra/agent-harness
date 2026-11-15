@@ -1,0 +1,20 @@
+{
+ "sdk": "langgraph",
+ "feature": "tool_retry",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.8,
+ "spend": {
+  "requests": 2,
+  "in": 901,
+  "out": 93,
+  "usd": 0.000137,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "tries": 2,
+ "answer": "The EUR/USD exchange rate is 1.0842, meaning one euro buys about 1.0842 US dollars.",
+ "status": "SUCCESS"
+}
