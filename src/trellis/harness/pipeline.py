@@ -226,7 +226,7 @@ async def attempt(
         else agent.harness.holds.holding(record.run_id, record.tenant_id)
     )
     async with held:
-        return await _turned(
+        result = await _turned(
             agent,
             record,
             input,
@@ -239,6 +239,9 @@ async def attempt(
             parent=parent,
             mode=mode,
         )
+    if result.status is not RunStatus.PAUSED:  # ended: its own objects are let go of
+        agent.run_objects.discard(record.run_id)
+    return result
 
 
 async def _turned(
@@ -1650,20 +1653,34 @@ async def _settle_cancelled(
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
     what it ``spent`` until then), and say whether it was ended here (not ended, or taken
     over, elsewhere already): its open children then end with it (:func:`_children_ended`,
-    its caller's to call)."""
-
+    its caller's to call). A run ``agent.cancel`` stopped here (``Agent.cancelling``) is
+    cancelled in the store once its log has its last events — the store keeps why, and who
+    asked — and ended by its holder, this process, when the store only asked it to stop (a
+    store that holds runs answers so for a held run)."""
+    runs = agent.harness.runs
     journal, parent = (None, None) if runtime is None else (runtime.replay.journal, runtime.parent)
-    kept = await _history_kept(agent, identity, worker_id, journal, parent)
+
+    async def finish() -> None:
+        kept = await _history_kept(agent, identity, worker_id, journal, parent)
+        await runs.finish(
+            identity.run_id,
+            RunStatus.CANCELLED,
+            worker_id=worker_id,
+            tenant=identity.tenant,
+            **kept,
+        )
+
+    async def end() -> None:
+        if identity.run_id in agent.cancelling:
+            asked = agent.cancelling[identity.run_id]
+            record = await runs.cancel(identity.run_id, reason=asked, tenant=identity.tenant)
+            if record.status.final:
+                return
+        await finish()
 
     async def write() -> bool:
         try:
-            await agent.harness.runs.finish(
-                identity.run_id,
-                RunStatus.CANCELLED,
-                worker_id=worker_id,
-                tenant=identity.tenant,
-                **kept,
-            )
+            await end()
         except (LeaseLostError, ConflictError):
             log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
             return False

@@ -11,6 +11,7 @@ around it. (``ToolRetryMiddleware`` and ``ToolErrorMiddleware``: ``test_tool_err
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, NotRequired
 
@@ -146,6 +147,29 @@ async def test_a_provider_strategy_answer_is_read_from_the_models_own_structured
     result = await harness.wrap(graph, id="count").run("how many a?", user="u")
     assert result.answer == Count(sku="a", units=7)
     assert "response_format" in model.requests[0]
+
+
+@pytest.mark.parametrize("strategy", ["tool", "provider"])
+async def test_a_structured_answer_is_the_turns_assistant_message_in_memory_whatever_the_strategy(
+    memory_harness: Harness, memory_service: FakeMemoryService, strategy: str
+) -> None:
+    """MEM-STRUCTURED: the turn kept in memory ends with the structured answer as the
+    assistant's message (its JSON), with either strategy — the tool strategy's schema call
+    and its ``Returning structured response`` message are no steps of the turn; the tool the
+    model called before is."""
+    answer = ("Count", {"sku": "a", "units": 7}) if strategy == "tool" else '{"sku":"a","units":7}'
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), answer])
+    chosen = ToolStrategy(Count) if strategy == "tool" else ProviderStrategy(Count)
+    graph = create_agent(model, tools=[stock], response_format=chosen)
+    agent = memory_harness.wrap(graph, id="count")
+    result = await agent.run("how many a?", user="u", thread="t1")
+    assert result.answer == Count(sku="a", units=7)
+    await memory_harness.writes.drain()
+    kept = memory_service.threads[await memory_harness.conversation(user="u", thread="t1")]
+    assert [m["role"] for m in kept] == ["USER", "ASSISTANT", "TOOL", "ASSISTANT"]
+    assert kept[1]["tool_calls"][0]["name"] == "stock"
+    assert json.loads(kept[-1]["content"]) == {"sku": "a", "units": 7}
+    assert not any("Returning structured response" in m["content"] for m in kept)
 
 
 # -------------------------------------------------------------- hooks, a jump, state, context

@@ -183,7 +183,12 @@ The same question gives the same figure with or without a sandbox.
 
 Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`). Its
 `outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
-so after its system prompt, Kimi in a block before its prompt; when the run succeeds each file
+so after its system prompt, Kimi in a block before its prompt — "Files you write in outputs/ of
+your working directory are given to the user when you finish. Write a file the user names, or
+gives a path or folder for, exactly there (a bare name is in your working directory); use
+outputs/ for a file you make to give the user that they named no place for." — so a file the
+user names (`hello.txt`: the working folder) is written where they said, as the SDK's own
+`Write` does without the harness; when the run succeeds each file
 directly in that `outputs/` is kept, announced and served as above, then removed from the folder
 (so a later run does not give it again); the rest of the folder is left alone. Runs that share a
 working folder share its `outputs/`: give each user's runs a folder of their own. A sandboxed

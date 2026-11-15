@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from tests.integration.test_mcp_servers import http_server  # noqa: F401 - a fixture
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.invariants import descendants
@@ -28,6 +29,7 @@ from tests.support.kimi import (
     needs_kimi,
     result_text,
     text_of,
+    unreminded,
 )
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Hooks, Settings, tool
@@ -98,6 +100,22 @@ def test_a_call_kimi_aborted_when_its_turn_was_stopped_did_not_run() -> None:
         ]
     }
     assert endpoint.next(body) == ("mcp__trellis__refund", {"order": "o1"})
+
+
+async def test_kimi_offers_its_model_an_mcp_server_over_http_in_its_first_request(
+    harness: Harness,
+    endpoint: PlannedEndpoint,
+    tmp_path: Path,
+    http_server: str,  # noqa: F811 - the fixture imported above
+) -> None:
+    """KIMI-MCP-FIRST (kimi.md, Limits): an MCP server over HTTP given in ``mcp_servers`` is in
+    the tools of Kimi's first model request — the way to give Kimi 2.6.2 an MCP server of your
+    own, whose stdio servers it lists but leaves out of its requests."""
+    server = {"type": "http", "name": "notes", "url": http_server}
+    headers = [{"name": "Authorization", "value": "Bearer t0k"}]
+    target = kimi_target(endpoint, tmp_path, mcp_servers=[{**server, "headers": headers}])
+    assert (await harness.wrap(target, id="kimi-mcp").run("hi", user="u1")).answer is not None
+    assert "mcp__notes__read_note" in endpoint.offered()[0]
 
 
 async def test_kimi_calls_a_harness_tool_and_answers(
@@ -1130,6 +1148,92 @@ async def test_a_command_kimi_runs_in_the_background_finishes_after_its_turn(
     async with asyncio.timeout(20):
         while not made.exists():  # noqa: ASYNC110 - a file the command writes
             await asyncio.sleep(0.1)
+
+
+#: What the scripted model says in the turn Kimi runs for a background command's end.
+NOTIFIED = "The background command said BG-77."
+
+
+def _waits_for_its_command(gate: Path) -> Any:
+    """Turn one starts a command in the background that ends once ``gate`` is there; turn two
+    waits for it (``WaitFor``), the gate made as the model asks to wait — so the command ends
+    while that turn is under way; the turn Kimi runs for the command's end (its notification)
+    reads what the command wrote and answers :data:`NOTIFIED`; any other turn answers
+    ``noted``. Each answers the latest of
+    those prompts, by the results that came after it."""
+
+    def turn(body: dict[str, Any]) -> Any:
+        messages = body["messages"]
+        said = [unreminded(text_of(m.get("content"))) for m in messages]
+        asked = [
+            i for i, m in enumerate(messages) if m["role"] == "user" and _PROMPT.search(said[i])
+        ]
+        prompt = _PROMPT.search(said[asked[-1]])[0]  # type: ignore[index]
+        ran = [
+            said[i] for i in range(asked[-1] + 1, len(messages)) if messages[i]["role"] == "tool"
+        ]
+        if prompt == "<notification":  # it reads what the command wrote, then answers
+            return NOTIFIED if ran else ("Read", {"path": str(gate.parent / "out.txt")})
+        if prompt == "start the command" and not any("task_id:" in r for r in ran):
+            command = {
+                "command": f"while [ ! -f {gate.name} ]; do sleep 0.1; done; echo BG-77 > out.txt",
+                "run_in_background": True,
+                "description": "wait for the gate",
+            }
+            return ("Bash", command)
+        if prompt == "wait for the command" and not ran:
+            [task] = re.findall(r"task_id: (\S+)", " ".join(said))[-1:]
+            gate.touch()
+            return ("WaitFor", {"task_id": task, "timeout": 30})
+        return "noted"
+
+    return turn
+
+
+#: The prompts :func:`_waits_for_its_command` answers.
+_PROMPT = re.compile(r"start the command|wait for the command|<notification|thanks")
+
+
+async def test_a_background_commands_end_read_in_a_later_turn_is_that_turns_answer(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KIMI-BG-ANSWER, real Kimi: a turn that waits for a command it ran in the background
+    (``WaitFor``) while the command ends — Kimi steers the command's notification into that
+    turn, ends the turn right after the wait, and answers in a turn of its own that ACP does
+    not forward — answers with what that turn said, as ``kimi -p`` does; its model request is
+    counted once, on that turn's run, and the next turn counts only its own."""
+    from trellis.harness import budget
+
+    counted: dict[str, int] = {}
+    account = budget.account
+
+    def counting(runtime: Any, **usage: Any) -> None:
+        tokens = usage["input_tokens"] + usage["output_tokens"]
+        counted[runtime.run_id] = counted.get(runtime.run_id, 0) + tokens
+        account(runtime, **usage)
+
+    monkeypatch.setattr(budget, "account", counting)
+    gate = tmp_path / "kimi-work" / "go"
+    async with PlannedEndpoint(turns=_waits_for_its_command(gate)).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-waits")
+        paused = await agent.run("start the command", user="u1", thread="t1")
+        assert paused.interrupt is not None  # Kimi asks before a command
+        started = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert started.status is RunStatus.SUCCESS, started.error
+        before = len(endpoint.requests)
+        waited = await agent.run(
+            "wait for the command and say what it printed", user="u1", thread="t1"
+        )
+        assert waited.status is RunStatus.SUCCESS, waited.error
+        assert waited.answer == NOTIFIED
+        # the wait, then the notification's turn: its read, its answer
+        assert len(endpoint.requests) - before == 3
+        after = len(endpoint.requests)
+        thanked = await agent.run("thanks", user="u1", thread="t1")
+        assert thanked.status is RunStatus.SUCCESS and thanked.answer == "noted"
+    assert counted[waited.run_id] == 15 * 3
+    assert counted[thanked.run_id] == 15 * (len(endpoint.requests) - after)
+    assert sum(counted.values()) == 15 * len(endpoint.requests)
 
 
 async def test_a_kept_kimi_whose_hold_lapses_ends_with_its_command_and_its_sessions_files(

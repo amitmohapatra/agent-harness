@@ -1,14 +1,15 @@
 """A run store that keeps runs' events as agent-runs does (``POST``/``GET /v1/runs/{id}/events``,
 ``…/events/stream``): ``LocalRuns`` and an event log per run — appended only while the run is
 ``RUNNING``, fenced like a heartbeat, an event added once per attempt and sequence, positions
-from 1 — so the harness's run log is driven exactly as against agent-runs."""
+from 1 — so the harness's run log is driven exactly as against agent-runs. A cancel that ends a
+run keeps why, as agent-runs keeps it with the run (``cancelled``)."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 
-from trellis.contracts import RunEvent, RunStatus
+from trellis.contracts import RunEvent, RunRecord, RunStatus
 from trellis.harness.runs import LocalRuns
 from trellis.runs import (
     ConflictError,
@@ -28,6 +29,23 @@ class LoggedRuns(LocalRuns):
         self.logs: dict[str, list[RunEventEntry]] = {}
         #: every append, as (run id, worker id, how many events)
         self.appends: list[tuple[str, str | None, int]] = []
+        #: the reason of the cancel that ended each run it ended (agent-runs' ``cancel_reason``)
+        self.cancelled: dict[str, str | None] = {}
+
+    async def cancel(
+        self,
+        run_id: str,
+        *,
+        reason: str | None = None,
+        tenant: str | None = None,
+        keep_checkpoint: bool = False,
+    ) -> RunRecord:
+        record = await super().cancel(
+            run_id, reason=reason, tenant=tenant, keep_checkpoint=keep_checkpoint
+        )
+        if record.status is RunStatus.CANCELLED:
+            self.cancelled.setdefault(run_id, reason)
+        return record
 
     async def append_events(
         self,
