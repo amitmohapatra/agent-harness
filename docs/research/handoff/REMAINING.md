@@ -1,4 +1,4 @@
-# What remains to be done (Trellis stack) — updated 2026-11-14 23:30 UTC
+# What remains to be done (Trellis stack) — updated 2026-11-15
 
 The owner asked for everything that is coded to go to main at once, without waiting for
 tests, and for this file to list everything that is done, left, found, and still to be
@@ -16,6 +16,64 @@ Status words: **done** = coded with its test and on main or in a branch below;
 **open** = not coded; **unconfirmed** = was assigned, no report seen, must be checked.
 
 ---
+
+## Session of 2026-11-15: what was done (read this before section 0)
+
+Done on a fresh local checkout (macOS, 8 GB) plus a Linux container that mirrors CI
+(Python 3.13, all extras, Kimi Code 2.6.2). GitHub Actions never ran: every run on main stays
+queued (no runner), so local runs are the only check. Everything below is pushed to main.
+
+**Verified state at the start:** `uv.lock` consistent (`uv lock --check`), ruff clean, pyright
+0 errors over the whole repo. agent-contracts 526 passed; bifrost-sdk 291 passed; agent-runs 622
+passed (one test made independent of machine speed: agent-runs `e1a2492`), its SDK 235 at 100%.
+Harness on the Mac: 6,619 passed, 16 failed, 168 skipped, 99% coverage — the failures traced to
+the bugs below, out-of-date tests, and Linux-only tests (`/proc`); most skips are missing extras
+and the real Kimi CLI (`make install` is `uv sync` without extras; CI uses `--all-extras`).
+
+**Bugs fixed (harness commits 2c4f495c … a6b1b08f, each with a test that fails without it):**
+1. The hanging test (section 4) was a deadlock: `Turns.cancel` waited for a run that held its
+   turn but had not begun its attempt (background runs got a conversation line at the fold).
+2. SCN-11: a failed harness read inside a node whose `RetryPolicy` retries the error raises it
+   once recorded; the node retries, the harness does not on top (`tools.base.NodeRetries`).
+   The scenario's strict xfail is removed (WF-07 still to run on a live stack).
+3. New: the "memory context reached nothing" warning had stopped firing for graph inputs with
+   no messages (the SEC-R-1 copy of the input broke `prepared is input`).
+4. Claude/Kimi live sessions: at most `KEPT_PER_OWNER` (4) of the 16 places per user.
+5. LangChain's own `SummarizationMiddleware`: the run's question and memory context are sent
+   ahead of the summary although it removed them from the state (`middleware._asked_again`).
+6. Prompt `cache_control` for routed Anthropic names: `PromptCache` hands the resolved model on,
+   so Deep Agents' memory block is cached (attribution headers are set before it).
+7. Kimi at its step limit ends `PARTIAL`, no paid last answer (D1).
+8. OpenAI `SandboxAgent` capability tools carry a risk (`CAPABILITY_SIDE_EFFECTS`): `load_skill`
+   and `view_image` read, `exec_command`, `write_stdin`, `apply_patch` write.
+9. A rewound run records its question once in memory (under the original run's question id).
+10. Owner decisions built: `Agent.checkpoints(reader=)` for the run's own user only; the journal
+    keeps unknown fields for rolling upgrades (`DECISIONS.md`, last section).
+
+**Tests brought up to date:** AG-UI event numbers (H-AGUI), the journal's per-write `effects`
+record (rewind), queued memory writes spooled at close (SCN-6), macOS sandbox path grants.
+
+**Checked, already fixed on main:** SEC-R-3, SEC-R-4, SEC-R-6, SEC-R-8 (each has its test), so
+`REVIEW_security.md` no longer exposes an open finding.
+
+**Out of scope by the owner:** the Kimi swarm (terminal-only `/swarm`, not reachable over ACP)
+and Claude `RemoteTrigger` (stays disallowed): neither is used in the enterprise deployment.
+
+**Still open after this session:**
+- Offline harness bugs: Kimi session/file cleanup when a hold lapses; Kimi `Skill` call cannot
+  ask; Kimi config with inline allow rules refused; Claude sub-agent thinking, server tools and
+  `compact_boundary` not recorded; a client's own `max_retries` not counted without
+  `ModelHooks`; a `SKILL.md` read through `/skills/` not a recorded call; remote background-task
+  chain depth.
+- Decision builds: rewind of ended runs (agent-runs `finish` keeps the checkpoint, opt-in);
+  `require_sandbox`.
+- Left by the owner for later: BG-11 and the live-stack suites (features, scenarios, real
+  memory recall); the memory-service bugs (section 5); security tests SEC-01..07; performance
+  (section 7); cleanup (section 8); the Haiku phase.
+- Note for the cleanup: ARCH-6 says delete `_node_retries` (now `middleware.graph_retries`); the
+  SCN-11 fix reads a node's `RetryPolicy` through it, so it cannot simply go.
+- Local runs: put `.venv/bin` first on `PATH` (the stand-in Claude CLI's `#!/usr/bin/env
+  python3` takes a system Python 3.9 otherwise); Linux-only tests need Linux (`/proc`).
 
 ## 0. Read this first
 
