@@ -549,6 +549,54 @@ async def test_a_run_cancelled_while_it_waits_its_turn_never_runs(
     assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
 
 
+async def test_a_run_the_store_ended_while_it_waited_its_turn_never_runs() -> None:
+    """A run waiting in its conversation's line that the run store ends meanwhile (its
+    deadline, its time limit): when the line reaches it, it runs nothing and ends as the store
+    says, and the line goes on past it. (Its hold is renewed far less often than the turn
+    ahead takes here: :func:`test_a_waiting_run_whose_hold_the_store_refuses_stops_and_
+    overwrites_nothing` is the renewal's refusal.)"""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    async with Harness(config=Settings()) as h:
+        a = chat(h, log, gates)
+        first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+        await started(log, "one")
+        second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+        waiting = await thread_run(h.runs, "two")
+        await h.runs.finish(waiting, RunStatus.TIMEOUT)
+        gates["one"].set()
+        assert (await first).status is RunStatus.SUCCESS
+        ended = await asyncio.wait_for(second, 10)
+        assert ended.status is RunStatus.TIMEOUT and ended.run_id == waiting
+        assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+        third = await a.run("three", user="ada", thread=THREAD)
+        assert third.status is RunStatus.SUCCESS  # the line goes on
+
+
+async def test_a_waiting_run_whose_hold_the_store_refuses_stops_and_overwrites_nothing(
+    servers: tuple[Harness, Harness],
+) -> None:
+    """A run waiting its turn is held in the run store; once the store has ended it (its
+    deadline), the next renewal of that hold is refused and the run stops waiting at once —
+    before the turn ahead ends — running nothing. The store's ending is not overwritten:
+    the run was ended there, not here."""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a = chat(servers[0], log, gates)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+    waiting = await thread_run(servers[0].runs, "two")
+    await servers[0].runs.finish(waiting, RunStatus.TIMEOUT)
+    await asyncio.wait_for(asyncio.shield(second), 10)  # the turn ahead still works
+    assert not first.done()
+    found = await servers[0].runs.get(waiting)
+    assert found is not None and found.status is RunStatus.TIMEOUT
+    gates["one"].set()
+    assert (await first).status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+
+
 async def test_a_run_waiting_behind_another_servers_run_follows_its_events_not_the_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
