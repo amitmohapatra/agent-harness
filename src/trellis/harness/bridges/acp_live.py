@@ -768,11 +768,17 @@ class ACPSession(Keeper[Background]):
         self.refused[name] += 1
         return mcp.refused(UNATTENDED)
 
-    # the agent's files and terminals: a sandboxed run's, whose process is never kept — its
-    # turn's attempt answers them (``adapters.acp.Sandboxed``)
+    # the agent's files and terminals, in the run's workspace: the turn's attempt answers them
+    # (``adapters.acp.Sandboxed``); with no turn's attempt under way (between turns, a
+    # background sub-agent's run) a command has no run's workspace to run in: refused
     def _boxing(self) -> Any:
-        assert self.turn is not None  # the requests of a sandboxed run's own turn
-        return self.turn.options
+        from acp import RequestError
+
+        options = None if self.turn is None else self.turn.options
+        if getattr(options, "boxed", None) is None:
+            self.refused["terminal"] += 1
+            raise RequestError.method_not_found(f"fs/terminal: {UNATTENDED}")
+        return options
 
     async def read_text_file(self, **kwargs: Any) -> Any:
         return await self._boxing().read_text_file(**kwargs)

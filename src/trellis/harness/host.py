@@ -29,6 +29,8 @@ The deployment may install the isolation layer it configured (:func:`install`: a
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -38,6 +40,8 @@ from trellis.contracts import ConfigurationError
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.sandbox.isolation import HostSandbox
+
+log = logging.getLogger("trellis.harness")
 
 #: The variable an administrator switches shell commands on this machine off with.
 HOST_EXECUTION_ENV: Final = "TRELLIS_HOST_EXECUTION"
@@ -101,6 +105,23 @@ def install(layer: HostSandbox | None) -> HostSandbox | None:
     return replaced
 
 
+def cannot_isolate() -> str | None:
+    """Why this machine's isolation layer cannot isolate a command here (``HostSandbox.
+    cannot_isolate``: said once in the log, the first time), else ``None``: a framework's own
+    shell is then off, never run as the service's own user."""
+    from trellis.harness.sandbox.isolation import host_layer
+
+    why = host_layer().cannot_isolate()
+    if why is not None:
+        _unisolated(why)
+    return why
+
+
+@functools.lru_cache(maxsize=1)
+def _unisolated(why: str) -> None:
+    log.warning("shell commands are off on this machine: they cannot be isolated here: %s", why)
+
+
 def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
     """Refuse ``agent`` run with framework ``options`` (its own, or a run's over them) when it
     would run commands here with no isolation the harness could give (:data:`UNISOLATED_SHELL`),
@@ -113,6 +134,7 @@ def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
         raise ConfigurationError(UNISOLATED_SHELL.format(agent=agent.id, **_said(held)))
     if agent.harness.settings.host_execution == "deny":
         raise ConfigurationError(REFUSED.format(agent=agent.id, **_said(shells)))
+    cannot_isolate()  # said at the start, once, when its shell will be off
 
 
 def _said(shells: list[HostShell]) -> dict[str, str]:

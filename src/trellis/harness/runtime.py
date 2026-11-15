@@ -16,6 +16,7 @@ import logging
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Hashable, Sequence
+import contextvars
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -135,6 +136,14 @@ _call: ContextVar[_Call | None] = ContextVar("trellis_call", default=None)
 def current() -> Runtime | None:
     """The run this code executes in, or ``None`` outside a harness run."""
     return _current.get()
+
+
+def within(runtime: Runtime) -> contextvars.Context:
+    """A copy of this context with ``runtime`` the run its code executes in: for work a
+    framework hands the harness outside the run's own task (a terminal Kimi Code asks for)."""
+    context = contextvars.copy_context()
+    context.run(_current.set, runtime)
+    return context
 
 
 class Paused(AgentPaused):
@@ -277,6 +286,9 @@ class Runtime:
     #: what the attempt keeps of the calls its framework carries out on this machine, made on
     #: first use by the code that governs them (``tools.convert.openai_local.Local``)
     local_calls: Any = field(default=None, repr=False)
+    #: what the model is told of the working files its conversation's earlier turns left, given
+    #: back into the run's workspace (``sandbox.carry``), until a result says it
+    restored: str | None = None
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None

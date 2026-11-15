@@ -19,6 +19,7 @@ import asyncio
 import importlib
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections import Counter
@@ -40,6 +41,7 @@ from trellis.harness.gateways import (
     model_gateway,
     provider_keys,
 )
+from trellis.harness.sandbox.isolation import SECRET_PATHS, host_layer
 from trellis.harness.settings import Settings, deployment_spool, service_version, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
@@ -70,6 +72,20 @@ MCP_LIST: Final = {"jsonrpc": "2.0", "id": "trellis-doctor", "method": "tools/li
 READY: Final = frozenset({"ready", "degraded"})
 #: The check of the memory writes that failed and wait in the spool.
 RECORDS: Final = "records failing"
+#: Where the Docker daemon's socket is, unless ``DOCKER_HOST`` names another (``unix://``).
+DOCKER_SOCKETS: Final = ("/var/run/docker.sock", "/run/docker.sock")
+#: What a mounted folder's path says when it holds secrets (Kubernetes', Docker's, a vault
+#: agent's).
+SECRET_WORDS: Final = ("secret", "credential", "vault")
+#: What doctor says of a secret file a command can read, and of a Docker socket it can reach.
+READABLE: Final = (
+    "a shell command can read the secret file {path}: hide it from commands (HostSandbox("
+    "hidden=...)), or make it unreadable to other users"
+)
+DOCKER_REACHED: Final = (
+    "a shell command can reach the Docker daemon at {paths}, which runs containers as root: "
+    "hide it from commands (HostSandbox(hidden=...)), or close it to other users"
+)
 #: How ``may_act_as`` names an agent a key may act as.
 AGENT_PRINCIPAL: Final = "agent:"
 
@@ -552,10 +568,58 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
     found = asyncio.run(checks(settings, agents=agents, docker=bool(env.get("DOCKER_HOST"))))
-    found += [_query_engine(), *graph_checks(graphs)]
-    said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
+    reach, warned = commands_see(env)
+    found += [_query_engine(), reach, *graph_checks(graphs)]
+    advice = [*suggestions(settings, env), *warned]
+    said = report(effective(env), found, advice, gateway_said(settings, env))
     sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1
+
+
+def commands_see(
+    environ: Mapping[str, str],
+    *,
+    mounts: str = "/proc/self/mounts",
+    sockets: Sequence[str] = DOCKER_SOCKETS,
+) -> tuple[Check, list[str]]:
+    """What a shell command on this machine could reach that it must not (the isolation
+    layer's commands: ``sandbox.isolation``): the Docker daemon's socket — any user may
+    connect to it, and it is not hidden from commands — fails the check (a command that
+    reaches it runs a container as root); a file any user can read in a secret folder a
+    command sees (the layer's ``SECRET_PATHS``, a mounted folder whose path says secrets:
+    :data:`SECRET_WORDS`), not hidden from commands, is a warning each."""
+    hidden = host_layer().isolation.hidden
+
+    def seen(path: str) -> bool:
+        return not any(path == h or path.startswith(f"{h.rstrip('/')}/") for h in hidden)
+
+    given = environ.get("DOCKER_HOST", "")
+    candidates = [
+        *sockets,
+        *([given.removeprefix("unix://")] if given.startswith("unix://") else []),
+    ]
+    reached = [
+        path
+        for path in dict.fromkeys(candidates)
+        if seen(path) and os.path.exists(path) and os.stat(path).st_mode & stat.S_IWOTH
+    ]
+    try:
+        mounted = [line.split()[1] for line in Path(mounts).read_text().splitlines() if line]
+    except OSError:
+        mounted = []
+    folders = [*SECRET_PATHS, *(m for m in mounted if any(w in m.lower() for w in SECRET_WORDS))]
+    readable = [
+        str(found)
+        for folder in dict.fromkeys(folders)
+        if seen(folder) and os.path.isdir(folder)
+        for found in sorted(Path(folder).rglob("*"))
+        if found.is_file() and found.stat().st_mode & stat.S_IROTH
+    ]
+    warned = [READABLE.format(path=path) for path in readable]
+    if reached:
+        said = DOCKER_REACHED.format(paths=", ".join(reached))
+        return Check("command reach", False, said), warned
+    return Check("command reach", True, "no Docker socket a command can reach"), warned
 
 
 def graph_checks(graphs: Sequence[str]) -> list[Check]:

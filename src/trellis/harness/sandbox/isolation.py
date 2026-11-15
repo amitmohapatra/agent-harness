@@ -17,7 +17,9 @@ command through :class:`Isolation`, the same scripts, so the same boundaries hol
   a runaway command is stopped, said in its result (``ExecResult.limit``), and the others go on;
 * **no secret** — a command gets an environment of its own (:data:`PATH`, its ``HOME`` and
   ``TMPDIR`` in its workspace, ``LANG``, and what its caller passes), never the service's;
-  the network is off (a network namespace of its own) unless the administrator opens it;
+  the network is off (a network namespace of its own) unless the administrator opens it, and
+  the cloud metadata server is out of reach either way (:data:`METADATA`); a Kubernetes pod's
+  secret folders are hidden (:data:`SECRET_PATHS`);
 * **clean-up** — a command's processes end with it (its process namespace goes); a run's end
   (:meth:`Isolation.release`) kills whatever of its uid is left, deletes its workspace and frees
   its uid; the reaper (``sandbox.reap``) does so for runs that ended without it;
@@ -62,7 +64,7 @@ from trellis.harness.sandbox.base import (
     SandboxRef,
     SandboxSpec,
 )
-from trellis.harness.sandbox.docker import OUTPUT_BYTES, _Tail
+from trellis.harness.sandbox.docker import OUTPUT_BYTES, Sink, _Tail
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 
 log = logging.getLogger("trellis.sandbox")
@@ -91,6 +93,29 @@ ROOT_ENV: Final = {"PATH": PATH, "LANG": "C.UTF-8"}
 READ_MAX_BYTES: Final = 64 * 1024 * 1024
 #: Kept results are read at this path (``tools.results``): the run's own, in its workspace.
 RESULTS_PATH: Final = "/large_tool_results"
+#: The cloud metadata server (169.254.169.254: AWS's, Google's — ``metadata.google.internal`` —
+#: and Azure's; ``fd00:ec2::254``: AWS's over IPv6): no command reaches it, whatever the
+#: network — with none, a command's network namespace has no route; open, the layer's uids are
+#: refused it (:data:`GUARD`).
+METADATA: Final = ("169.254.169.254", "fd00:ec2::254")
+#: What refuses the layer's uids the metadata server on the host's network (iptables' owner
+#: match: the service and every other user keep it).
+FIREWALL: Final = ("iptables", "ip6tables")
+#: Where a Kubernetes pod finds its secrets (its service account's token at
+#: ``/var/run/secrets/kubernetes.io/serviceaccount``, Docker's and Compose's at
+#: ``/run/secrets``): hidden from every command on the host.
+SECRET_PATHS: Final = ("/var/run/secrets", "/run/secrets")
+#: What the tools the layer needs are for (util-linux; and, with an open network, what keeps
+#: the metadata server from commands).
+MISSING: Final = (
+    "unshare, setpriv and prlimit (util-linux) run every command, and with an open network "
+    "iptables and ip6tables keep the cloud metadata server from it"
+)
+#: What a command on a machine the layer cannot isolate it on is refused with.
+UNISOLATED_HERE: Final = (
+    "the command was not run: commands cannot be isolated on this machine, and the harness "
+    "never runs them as the service's own user"
+)
 #: The longest command an audit record keeps.
 AUDIT_CHARS: Final = 8_192
 #: A path the layer passes to its scripts: absolute, nothing a shell would split.
@@ -134,6 +159,7 @@ OPEN: Final = (
     + r"""set -u
 R=$1 t=$2 n=$3 labels=$4 base=$5 per=$6 most=$7
 reg=$R/.trellis
+(umask 022 && mkdir -p "$R")  # its parents made for any uid to go through (a run's to its own)
 umask 077
 mkdir -p "$reg/ws" "$reg/uids" "$reg/blocks" "$reg/tenants" "$reg/stage" "$reg/pids" \
   && chmod 711 "$R" && chmod 700 "$reg" \
@@ -248,6 +274,15 @@ prlimit --cpu="$cpu:$cpuhard" --as="$mem" --nproc="$nproc" --fsize="$fsize" --no
   --core=0 -- setpriv --reuid="$u" --regid="$u" --clear-groups --inh-caps=-all \
   --bounding-set=-all --no-new-privs -- env -i "$@"
 """
+#: The metadata server refused to the uids ``lo``-``hi`` (``lo hi``): a rule each of
+#: :data:`FIREWALL`, added once (it stays: it holds for any layer of those uids).
+GUARD: Final = (
+    "lo=$1 hi=$2; for rule in "
+    + " ".join(f'"{wall} {address}"' for wall, address in zip(FIREWALL, METADATA, strict=True))
+    + '; do set -- $rule; r="OUTPUT -m owner --uid-owner $lo-$hi -d $2 -j REJECT"; '
+    '"$1" -w -C $r 2>/dev/null || "$1" -w -I $r '
+    '|| { echo "the metadata server could not be refused to commands ($1)" >&2; exit 70; }; done'
+)
 #: A file of the run's, as the run's uid (``path max``): exit 3, no such file; 4, not a file;
 #: 5, past ``max`` bytes.
 READ: Final = (
@@ -286,10 +321,15 @@ class Runner(Protocol):
     """Runs a command as root where the workspaces are (this machine, a container)."""
 
     async def run(
-        self, argv: Sequence[str], *, stdin: bytes | None = None, keep: int | None = OUTPUT_BYTES
+        self,
+        argv: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        keep: int | None = OUTPUT_BYTES,
+        sink: Sink | None = None,
     ) -> Ran:
         """Run ``argv`` as root, ``stdin`` its input (else none), each stream's last ``keep``
-        bytes kept (``None``: all)."""
+        bytes kept (``None``: all) and handed to ``sink`` as it comes."""
         ...
 
 
@@ -302,7 +342,12 @@ class HostRunner:
         self.helper = tuple(helper)
 
     async def run(
-        self, argv: Sequence[str], *, stdin: bytes | None = None, keep: int | None = OUTPUT_BYTES
+        self,
+        argv: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        keep: int | None = OUTPUT_BYTES,
+        sink: Sink | None = None,
     ) -> Ran:
         proc = await asyncio.create_subprocess_exec(
             *self.helper,
@@ -313,7 +358,7 @@ class HostRunner:
             env=ROOT_ENV,
             start_new_session=True,
         )
-        out, err = _Tail(keep), _Tail(keep)
+        out, err = _Tail(keep, sink, 1), _Tail(keep, sink, 2)
         assert proc.stdout is not None and proc.stderr is not None
         try:
             await asyncio.gather(
@@ -419,10 +464,12 @@ class Isolation:
         timeout: float | None = None,  # noqa: ASYNC109 - the command's, killed past it
         stdin: bytes | None = None,
         keep: int | None = OUTPUT_BYTES,
+        sink: Sink | None = None,
     ) -> Ran:
         """Run ``argv`` in ``box`` as its uid, in namespaces of its own (processes, mounts, and
-        the network unless open), within ``limits``; past ``timeout`` (or cancelled) it is
-        killed, with everything it started, and the error raised."""
+        the network unless open), within ``limits``, its output handed to ``sink`` as it comes;
+        past ``timeout`` (or cancelled) it is killed, with everything it started, and the error
+        raised."""
         given = dict(env or {})
         for name in given:
             if not VARIABLE.fullmatch(name):
@@ -455,7 +502,7 @@ class Isolation:
         ]
         try:
             async with asyncio.timeout(timeout):
-                return await self.runner.run(command, stdin=stdin, keep=keep)
+                return await self.runner.run(command, stdin=stdin, keep=keep, sink=sink)
         except BaseException:  # out of time, cancelled, cut off: stopped, not left running
             await asyncio.shield(self.runner.run(["sh", "-c", KILL_PID, pid_file]))
             raise
@@ -511,11 +558,20 @@ class Workspace:
         timeout: float | None = None,  # noqa: ASYNC109 - the command's, killed past it
         env: Mapping[str, str] | None = None,
         limits: Limits | None = None,
+        argv: Sequence[str] | None = None,
+        sink: Sink | None = None,
     ) -> ExecResult:
+        """Run ``command`` (``sh -c``; ``argv``: the program that runs it, a framework's own
+        shell's) in the workspace — its output handed to ``sink`` as it comes — audited."""
         started = time.monotonic()
         try:
             ran = await self.isolation.launch(
-                self, ["sh", "-c", command], limits=limits or self.limits, env=env, timeout=timeout
+                self,
+                argv or ["sh", "-c", command],
+                limits=limits or self.limits,
+                env=env,
+                timeout=timeout,
+                sink=sink,
             )
         except BaseException as exc:
             self._audit(command, None, started, "time" if isinstance(exc, TimeoutError) else None)
@@ -583,8 +639,9 @@ class HostSandbox:
     :data:`HOST_ROOT`); ``helper`` runs a command as root when the service is not root;
     ``limits`` each command's; ``network`` the administrator's (``"none"``, the default, or
     ``"open"``; a list of hosts is refused: nothing here can enforce one); ``hidden`` the paths
-    a command finds empty (else the service's working folder, its home, ``/root`` and
-    ``/home``, those that are not above ``root``)."""
+    a command finds empty (else the service's working folder, its home, ``/root``, ``/home``
+    and the secret folders :data:`SECRET_PATHS`, those that are not above ``root``). The cloud
+    metadata server is out of every command's reach (:data:`METADATA`)."""
 
     name = "host"
 
@@ -603,7 +660,7 @@ class HostSandbox:
         self.helper = tuple(helper)
         self.limits = limits or Limits()
         if hidden is None:
-            ours = [os.getcwd(), str(Path.home()), "/root", "/home"]
+            ours = [os.getcwd(), str(Path.home()), "/root", "/home", *SECRET_PATHS]
             given = _safe(root, "the workspaces' root")
             hidden = [
                 p for p in dict.fromkeys(ours) if SAFE_PATH.fullmatch(p) and not _within(given, p)
@@ -619,6 +676,8 @@ class HostSandbox:
         )
         self.key = stable_id("host", self.isolation.root)
         self._isolated = False
+        #: the metadata server is refused to this layer's uids (:data:`GUARD`)
+        self._guarded = False
         #: when this process last reaped each tenant's workspaces (``time.monotonic``)
         self._reaped: dict[str, float] = {}
         _LAYERS[self.key] = self
@@ -629,9 +688,11 @@ class HostSandbox:
         if not sys.platform.startswith("linux"):
             return f"commands are isolated on Linux only, and this is {sys.platform}"
         missing = [t for t in TOOLS if shutil.which(t) is None]
+        walls = [t for t in FIREWALL if shutil.which(t) is None]
+        if self.isolation.network == "open" and walls:
+            missing = [*missing, *walls]
         if missing:
-            needed = ", ".join(TOOLS)
-            return f"{needed} (util-linux) are needed, and {', '.join(missing)} are missing"
+            return f"{', '.join(missing)} are missing: {MISSING}"
         if self._isolated:
             return None
         if self.helper:
@@ -663,10 +724,13 @@ class HostSandbox:
         box = await self.create(SandboxRef(provider=self.name, id=name_of(run), labels=labels))
         runtime = current()
         if runtime is not None and runtime.run_id == run:
-            await self._recorded(runtime, box.ref)
+            await self._recorded(runtime, box)
         return box
 
     async def create(self, ref: SandboxRef, spec: SandboxSpec | None = None) -> Workspace:
+        why = self.cannot_isolate()
+        if why is not None:  # never run as the service's own user
+            raise ToolError(f"{UNISOLATED_HERE}: {why}", source="tools")
         given = spec or SandboxSpec(network=self.isolation.network)
         if isinstance(given.network, tuple):
             raise ConfigurationError(
@@ -681,6 +745,11 @@ class HostSandbox:
         if tenant is None:
             raise ConfigurationError(f"a host workspace is a tenant's: {ref.id} names none")
         labels = {**ref.labels, LAYER: self.key}
+        if self.isolation.network == "open" and not self._guarded:
+            layer = self.isolation
+            top = layer.uid_base + layer.tenants * layer.tenant_uids - 1
+            await layer._root(GUARD, str(layer.uid_base), str(top))
+            self._guarded = True
         uid, home, made = await self.isolation.open(tenant, ref.id, labels)
         box = self._box(ref.model_copy(update={"labels": labels}), uid, home, given.network)
         for path, content in given.files.items() if made else ():
@@ -704,16 +773,22 @@ class HostSandbox:
     def _box(self, ref: SandboxRef, uid: int, home: str, network: Any) -> Workspace:
         return Workspace(self.isolation, ref, uid, home, limits=self.limits, network=network)
 
-    async def _recorded(self, runtime: Any, ref: SandboxRef) -> None:
-        """The run's journal names its workspace (its end removes it: ``sandbox.ended``) unless
-        it names a sandbox already; the tenant's ended runs reaped, at most every
-        ``REAP_SECONDS``."""
-        from trellis.harness.sandbox import REAP_SECONDS, reap  # noqa: PLC0415 - imports this
+    async def _recorded(self, runtime: Any, box: Workspace) -> None:
+        """The run's journal names its workspace ``box`` (its end removes it:
+        ``sandbox.ended``) unless it names a sandbox already — made now, the working files of
+        the conversation's earlier turns given back into it (``sandbox.carry``); it is the
+        run's sandbox for its outputs and its working files, unless it has one; the tenant's
+        ended runs reaped, at most every ``REAP_SECONDS``."""
+        from trellis.harness.sandbox import REAP_SECONDS, carry, reap  # noqa: PLC0415
 
+        ref = box.ref
         journal = runtime.replay.journal
         if journal.sandbox is None:
             journal.sandbox = ref.model_dump(mode="json", exclude_none=True)
             await runtime.progress(now=True)
+            await carry.restored(runtime, box)
+        if runtime.sandbox is None:  # its outputs and working files are kept from it
+            runtime.sandbox = box
         tenant, now = runtime.tenant, time.monotonic()
         last = self._reaped.get(tenant)
         if last is not None and now - last < REAP_SECONDS:
@@ -768,15 +843,10 @@ async def isolated_run(
     """Run ``command`` on this machine for ``tenant``'s run ``run`` of ``user``: in the run's
     workspace, as its uid, within ``limits`` (else the layer's) and ``timeout`` seconds, with an
     environment of ``env`` and the layer's own only — the entry the host path calls. Refused
-    (``ConfigurationError``) when the layer cannot isolate it here: never run as the service's
-    own user. Inside the run, its end removes the workspace; outside one, :func:`isolated_end`."""
+    (``ToolError``, :meth:`HostSandbox.create`) when the layer cannot isolate it here: never run
+    as the service's own user. Inside the run, its end removes the workspace; outside one,
+    :func:`isolated_end`."""
     held = layer or host_layer()
-    why = held.cannot_isolate()
-    if why is not None:
-        raise ConfigurationError(
-            f"commands cannot be isolated on this machine: {why}. Host execution does not run "
-            "them as the service's own user"
-        )
     box = await held.workspace(tenant, user, run)
     return await box.exec(command, timeout=timeout, env=env, limits=limits)
 

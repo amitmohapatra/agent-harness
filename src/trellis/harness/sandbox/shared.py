@@ -26,11 +26,13 @@ from trellis.harness.sandbox.base import TENANT, SandboxLost, SandboxRef, Sandbo
 from trellis.harness.sandbox.docker import (
     OUTPUT_BYTES,
     DockerSandbox,
+    Sink,
     _checked,
     _put,
     _streams,
 )
 from trellis.harness.sandbox.isolation import (
+    METADATA,
     TENANT_UIDS,
     TENANTS,
     UID_BASE,
@@ -61,6 +63,26 @@ POOL_CAPS: Final = (
     "FOWNER",
     "KILL",
 )
+#: What keeps the cloud metadata server (``isolation.METADATA``) from a container whose
+#: network is open: a blackhole route for each of its addresses in the container's own network
+#: (its commands' alone), added over netlink by the image's Python as the layer's root, which
+#: has ``NET_ADMIN`` there (a command has no capability); an address of a family the container
+#: has no network of (errno 95, 97) is out of reach already.
+ROUTES: Final = (
+    "python3 -I -c '"
+    "import socket, struct, sys\n"
+    "for addr in sys.argv[1:]:\n"
+    "    fam = socket.AF_INET6 if \":\" in addr else socket.AF_INET\n"
+    "    dst = socket.inet_pton(fam, addr)\n"
+    "    body = struct.pack(\"BBBBBBBBI\", fam, len(dst) * 8, 0, 0, 254, 4, 0, 6, 0)\n"
+    "    body += struct.pack(\"HH\", 4 + len(dst), 1) + dst\n"
+    "    s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0)\n"
+    "    s.sendto(struct.pack(\"IHHII\", 16 + len(body), 24, 0x405, 1, 0) + body, (0, 0))\n"
+    "    err = -struct.unpack(\"i\", s.recv(4096)[16:20])[0]\n"
+    "    if err not in (0, 17, 95, 97):\n"
+    "        sys.exit(f\"the metadata server {addr} could not be refused: errno {err}\")\n"
+    "' \"$@\""
+)
 #: Runs ``$@`` with the staged file ``$0`` as its input, then removes it.
 STAGED: Final = '"$@" < "$0"; s=$?; rm -f "$0"; exit $s'
 
@@ -72,7 +94,8 @@ class _Pools(DockerSandbox):
     def _config(self, ref: SandboxRef, spec: SandboxSpec) -> dict[str, Any]:
         config = super()._config(ref, spec)
         config["WorkingDir"] = "/"
-        config["HostConfig"] |= {"CapAdd": list(POOL_CAPS), "PidsLimit": POOL_PIDS}
+        caps = [*POOL_CAPS, *(["NET_ADMIN"] if spec.network == "open" else [])]
+        config["HostConfig"] |= {"CapAdd": caps, "PidsLimit": POOL_PIDS}
         return config
 
 
@@ -86,7 +109,12 @@ class DockerRunner:
         self.stage = stage
 
     async def run(
-        self, argv: Sequence[str], *, stdin: bytes | None = None, keep: int | None = OUTPUT_BYTES
+        self,
+        argv: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        keep: int | None = OUTPUT_BYTES,
+        sink: Sink | None = None,
     ) -> Ran:
         name = self.container.id
         async with self.provider._client() as client:
@@ -104,7 +132,7 @@ class DockerRunner:
             }
             made = await client.post(f"/containers/{name}/exec", json=config)
             exec_id = _checked(made, self.container).json()["Id"]
-            out, err = await _streams(client, exec_id, self.container, keep)
+            out, err = await _streams(client, exec_id, self.container, keep, sink)
             ended = _checked(await client.get(f"/exec/{exec_id}/json"), self.container).json()
         return Ran(int(ended["ExitCode"]), out, err)
 
@@ -131,6 +159,8 @@ class SharedDockerSandbox:
         self.pools = _Pools(image, host=self.docker.host)
         self.limits = limits or Limits()
         self.root = root
+        #: the open containers the metadata server was refused in (:data:`ROUTES`)
+        self._routed: set[str] = set()
 
     @property
     def image(self) -> str:
@@ -166,6 +196,9 @@ class SharedDockerSandbox:
         pool = self.pool_of(tenant, spec)
         await self.pools.create(pool, spec.model_copy(update={"files": {}}))
         layer = self.isolation(pool)
+        if spec.network == "open" and pool.id not in self._routed:
+            await layer._root(ROUTES, *METADATA)
+            self._routed.add(pool.id)
         labels = {**ref.labels, POOL_OF: pool.id}
         uid, home, made = await layer.open(tenant, ref.id, labels)
         box = self._box(layer, ref.model_copy(update={"labels": labels}), uid, home)

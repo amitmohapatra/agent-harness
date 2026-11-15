@@ -142,10 +142,13 @@ from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.host import CLAUDE_SHELLS
+from trellis.harness.host import CLAUDE_SHELLS, cannot_isolate
 from trellis.harness.journal import Pending, approvals_read, call_key
 from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
+from trellis.harness.sandbox import carry
+from trellis.harness.sandbox.relay import SHELLS as RELAYED
+from trellis.harness.sandbox.relay import Relay
 from trellis.harness.telemetry import gateway_headers, lasting_headers
 from trellis.harness.tools import bridge
 from trellis.harness.tools.ask import ask_question
@@ -365,6 +368,25 @@ NOTICES: Final = {
     "model_fallback": "model_fallback",
     "mirror_error": "session_store",
 }
+#: Claude Code's tools that write a file themselves, in its process (its path in
+#: ``file_path``, a notebook's in ``notebook_path``): one written in the run's workspace is
+#: made the run's (``Relay.adopt``), so its commands may change it.
+FILE_TOOLS: Final = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+#: Claude Code's tool that runs code inside its own process (no shell the harness can run it
+#: in): left out while its shell runs through the isolation layer.
+IN_PROCESS: Final = ("REPL",)
+#: The settings sources a working folder that commands write in cannot be: the folder's own
+#: (``.claude/settings.json``, its hooks and skills, would run in the CLI as the service's user).
+FOLDER_SOURCES: Final = frozenset({"project", "local"})
+#: Why Claude Code's shell is off where the isolation layer works through a root helper.
+HELPER_ONLY: Final = (
+    "Claude Code works in the run's workspace as the service's own user, and only a service "
+    "that runs as root can enter a run's workspace (this one reaches root through a helper)"
+)
+#: What a run whose Claude Code shell is off is told (its tools are left out).
+SHELL_OFF: Final = "Claude Code's shell is off: commands cannot be isolated here ({why})"
+#: What a shell call whose command the harness cannot run in the workspace is refused with.
+NO_COMMAND: Final = "{tool} was not run: it gave no command the harness can run in its workspace."
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -577,7 +599,11 @@ class ClaudeAdapter:
 
     def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
         """Where the CLI works: the options' ``cwd`` (the run's own over the agent's), else
-        this process's working directory."""
+        this process's working directory; ``None`` while its shell runs through the isolation
+        layer — it works in the run's workspace, whose outputs are the run's sandbox's."""
+        given = dataclasses.replace(target, **options) if options else target
+        if _shells(given) and _unisolated() is None:
+            return None
         return Path(options.get("cwd") or target.cwd or os.getcwd())
 
     async def native(self, target: Any) -> list[ToolSpec]:
@@ -642,8 +668,7 @@ class ClaudeAdapter:
                     steps.waiting()
                     yield message
         finally:
-            steps.closed = True
-            runtime.model_ended(STEP)
+            await steps.finished()
 
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
@@ -727,9 +752,7 @@ class ClaudeAdapter:
         runtime = run.runtime
         given = runtime.framework_options
         target = dataclasses.replace(target, **given) if given else target
-        # a skill source's plugin written for this run (its pinned skills), removed after it
-        plugins, written = await skills.for_run(target.plugins)
-        target = dataclasses.replace(target, plugins=plugins) if written else target
+        target, written, box = await _prepared(runtime, target)
         steps = Steps(runtime, self)
         # a conversation's turn is served by its live session (``bridges.claude_live``); a
         # run with no conversation of its own, a
@@ -741,7 +764,9 @@ class ClaudeAdapter:
         # a session another worker's live session still holds (a background subagent of the
         # run at work there) is forked: the turn goes on here, in a process of its own
         held = session is not None and await shared.held_elsewhere(runtime, self.live)
+        # (not a run whose shell works in its workspace: that, and what runs in it, end with it)
         kept = key is not None and not written and not _own_process(target) and not held
+        kept = kept and box is None
         context = _dated(native_input.context, run, kept=kept)
         options = _options(target, context, run, session, steps, kept=kept)
         options = dataclasses.replace(options, fork_session=options.fork_session or held)
@@ -755,6 +780,7 @@ class ClaudeAdapter:
         turn = _turn(run, options)
         await self._gone(runtime, native_input)
         try:
+            steps.relay = None if box is None else await Relay(box).start()
             if kept:
                 assert key is not None
                 live = await self._live(key, options, run, session, spending, unsent=first)
@@ -763,7 +789,10 @@ class ClaudeAdapter:
                 shared.said(self.live, runtime, CODE)
             # closed as it is left (``aclosing``): a process of its own ends here, in this
             # loop; a live session's turn is interrupted when left before its result
-            source = _queried(prompt, options) if live is None else live.served(turn, prompt)
+            source = _relaying(
+                _queried(prompt, options) if live is None else live.served(turn, prompt),
+                steps.relay,
+            )
             async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     runtime.raise_stopped()  # a call the process's end stopped ends it here
@@ -784,8 +813,7 @@ class ClaudeAdapter:
                             await _settled(messages, steps, spending)
                         return
         finally:
-            steps.closed = True
-            runtime.model_ended(STEP)
+            await steps.finished()
             skills.removed(written)
             await spending.closed(live, turn)
 
@@ -874,12 +902,15 @@ async def _settled(messages: AsyncIterator[Any], steps: Steps, spending: Spendin
 
 
 def _dated(context: str | None, run: Invocation, *, kept: bool) -> str | None:
-    """The context a turn's prompt is given: memory's — and, a turn a live session may serve
-    that is offered ``schedule_task``, the day and hour it is (``schedules.now_said``): the
-    process keeps the tool's wording from its first turn (the hour then), and Claude Code
-    says the date once a session, again only when the day changes."""
+    """The context a turn's prompt is given: memory's, with what came back of the
+    conversation's working files into the run's workspace (``carry.told``) — and, a turn a
+    live session may serve that is offered ``schedule_task``, the day and hour it is
+    (``schedules.now_said``): the process keeps the tool's wording from its first turn (the
+    hour then), and Claude Code says the date once a session, again only when the day
+    changes."""
     from trellis.harness.schedules import SCHEDULE_TOOLS, now_said
 
+    context = "\n\n".join(p for p in (context, carry.told(run.runtime)) if p) or None
     if not kept or not any(t.name == SCHEDULE_TOOLS[0] for t in run.tools):
         return context
     now = now_said(run.runtime)
@@ -941,6 +972,25 @@ def _shape(options: Any) -> tuple[Any, ...]:
     )
     own = servers.get(convert.SERVER) if isinstance(servers, dict) else None
     return (fixed, hooks, None if own is None else convert.listing(own), journaled)
+
+
+async def _relaying(
+    messages: AsyncGenerator[Any, None], relay: Relay | None
+) -> AsyncGenerator[Any, None]:
+    """The query's ``messages``; at its turn's result, or left before, its shell's relay
+    closed — the commands still running in the workspace (a background one) killed: the run's
+    workspace ends with it — so the CLI, which waits for its background commands, ends."""
+    from claude_agent_sdk import ResultMessage
+
+    try:
+        async for message in messages:
+            yield message
+            if relay is not None and isinstance(message, ResultMessage) and _own(message):
+                await relay.aclose()
+    finally:
+        if relay is not None:
+            await relay.aclose()
+        await messages.aclose()
 
 
 def _queried(prompt: Any, options: Any) -> AsyncGenerator[Any, None]:
@@ -1323,6 +1373,7 @@ class Steps:
         "calls",
         "closed",
         "helped",
+        "relay",
         "runtime",
         "served",
         "settling",
@@ -1349,6 +1400,9 @@ class Steps:
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
         self.calls: dict[str, tuple[str, dict[str, Any], float]] = {}
+        #: where its shell's commands run, in the run's workspace (``sandbox.relay``), when
+        #: Claude Code's shell runs through the isolation layer
+        self.relay: Relay | None = None
         #: the calls a subagent makes, by Claude's id: the helper whose work each is — the
         #: CLI names the subagent in the ``PreToolUse`` hook by its task's id (``agent_id``),
         #: and its permission request (``can_use_tool``) for the same call is the same helper's
@@ -1366,6 +1420,14 @@ class Steps:
         if working is not None:
             self.helped[call_id] = working
         return working
+
+    async def finished(self) -> None:
+        """The query ended: its steps watched no more, its shell's relay closed (the commands
+        still running in it killed)."""
+        self.closed = True
+        self.runtime.model_ended(STEP)
+        if self.relay is not None:
+            await self.relay.aclose()
 
     def waiting(self) -> None:
         """Claude is to answer now (unless a call runs): watched for a stall."""
@@ -1667,8 +1729,11 @@ async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHook
         task = str(flow or decided.args.get("scriptPath") or "")
         await runtime.helpers.start(call_id, kind=Kind.WORKFLOW, name=WORKFLOW, task=task)
     steps.started(call_id, name, decided.args)
-    if decided.args != args:
-        return _decided("ask", updated=decided.args)
+    # a command run in the workspace: Claude Code's own rules see it as the model made it, then
+    # its permission check (``can_use_tool``, asked whatever its mode) runs it there
+    relayed = steps.relay is not None and name in RELAYED
+    if decided.args != args or relayed:
+        return _decided("ask", updated=decided.args if decided.args != args else None)
     return {}  # Claude Code's own permission check decides
 
 
@@ -1713,7 +1778,13 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         spec = _spec(runtime, name)
-        if own is not None:
+        if steps.relay is not None and name in RELAYED:
+            # a command: the deployment's, run in the run's workspace (the team's own check
+            # first, when it has one)
+            verdict = PermissionResultAllow() if own is None else await own(name, args, context)
+            if isinstance(verdict, PermissionResultAllow):
+                verdict = _relayed(steps.relay, name, verdict.updated_input or args)
+        elif own is not None:
             verdict = await own(name, args, context)
         elif name == QUESTION_TOOL:
             try:
@@ -1750,6 +1821,79 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         return verdict
 
     return can_use_tool
+
+
+def _relayed(relay: Relay, name: str, given: dict[str, Any]) -> Any:
+    """A shell call let through with its command run in the run's workspace (``Relay.command``:
+    what the CLI runs in its place); refused when it gives no command."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    command = given.get("command")
+    if not isinstance(command, str):
+        return PermissionResultDeny(message=NO_COMMAND.format(tool=name))
+    background = bool(given.get("run_in_background"))
+    return PermissionResultAllow(
+        updated_input={**given, "command": relay.command(name, command, background=background)}
+    )
+
+
+def _shells(options: Any) -> set[str]:
+    """Claude Code's shell tools the options leave it (``tools``, less ``disallowed_tools``)."""
+    tools = options.tools
+    offered = set(tools) if isinstance(tools, list) else set(CLAUDE_SHELLS)
+    return (offered & CLAUDE_SHELLS) - set(options.disallowed_tools or ())
+
+
+def _unisolated() -> str | None:
+    """Why Claude Code's shell cannot run through this machine's isolation layer (it cannot
+    isolate here; it works through a helper, and the CLI could not enter the workspace), else
+    ``None``."""
+    from trellis.harness.sandbox.isolation import host_layer
+
+    why = cannot_isolate()
+    return why if why is not None or not host_layer().helper else HELPER_ONLY
+
+
+async def _prepared(runtime: Runtime, options: Any) -> tuple[Any, list[Any], Any]:
+    """The options a query runs with — a skill source's plugin written for the run (its
+    pinned skills, removed after it: the plugins written) and its place (:func:`_placed`) —
+    and the workspace it works in, if any."""
+    plugins, written = await skills.for_run(options.plugins)
+    options = dataclasses.replace(options, plugins=plugins) if written else options
+    placed, box = await _placed(runtime, options)
+    return placed, written, box
+
+
+async def _placed(runtime: Runtime, options: Any) -> tuple[Any, Any]:
+    """The options a query runs with, and the workspace it works in when Claude Code's shell
+    runs through the isolation layer: the run's own (``HostSandbox.workspace``: its uid, 0700,
+    removed at the run's end), its ``cwd`` — the folder the options name stays one its file
+    tools reach (``add_dirs``) — with no settings of the folder's own (:data:`FOLDER_SOURCES`)
+    and no tool that runs code in the CLI (:data:`IN_PROCESS`). Its shell where the layer
+    cannot isolate: off, its tools left out, said on the run's stream. No shell: as given."""
+    from trellis.harness.sandbox.isolation import host_layer
+
+    shells = _shells(options)
+    if not shells:
+        return options, None
+    denied = list(options.disallowed_tools or ())
+    why = _unisolated()
+    if why is not None:
+        runtime.events.warning("claude_shell", SHELL_OFF.format(why=why))
+        off = [*denied, *(t for t in sorted(CLAUDE_SHELLS) if t not in denied)]
+        return dataclasses.replace(options, disallowed_tools=off), None
+    box = await host_layer().workspace(runtime.tenant, runtime.user, runtime.run_id)
+    sources = options.setting_sources
+    kept = ["user"] if sources is None else [s for s in sources if s not in FOLDER_SOURCES]
+    added = [*(options.add_dirs or ()), *([options.cwd] if options.cwd else [])]
+    placed = dataclasses.replace(
+        options,
+        cwd=box.home,
+        add_dirs=added,
+        setting_sources=kept,
+        disallowed_tools=[*denied, *(t for t in IN_PROCESS if t not in denied)],
+    )
+    return placed, box
 
 
 async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
@@ -1810,6 +1954,10 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         _, args, started = found or (name, dict(given.get("tool_input") or {}), time.time())
         if name in SHELLS and "agent_id" not in given:
             shell.ran(args)
+        if name in FILE_TOOLS and steps.relay is not None:
+            written = args.get("file_path") or args.get("notebook_path")
+            if isinstance(written, str):
+                steps.relay.adopt(written)
         failed = given.get("hook_event_name") == FAILED_EVENT
         # a workflow agent's call says who made it (several workflows at once: the run's own)
         agent = (

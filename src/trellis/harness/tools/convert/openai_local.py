@@ -27,6 +27,7 @@ import dataclasses
 import functools
 import inspect
 import json
+import shlex
 from collections import deque
 from collections.abc import Callable, Collection, Hashable, Sequence
 from typing import Any, Final, cast
@@ -157,13 +158,15 @@ async def through(
     call_id: str | None = None,
     decision: Hashable | None = None,
     on_refusal: Callable[[str], Any] = str,
+    confined: bool = False,
 ) -> Any:
     """``run(args)`` — the code that carries out a call of the SDK's tool ``name`` — as the run's
     call: what ``run`` returned (live, as the SDK takes it), the journal's record of it on a
     resume, ``on_refusal`` of what the model reads when the call does not run; what ``run``
     raised is raised again, for the SDK to deal with as it does. Outside a run, ``run(args)``.
     ``decision``: the model decision the call is part of (``bridge.call``: a computer call, for
-    each of its actions).
+    each of its actions); ``confined``: the call keeps to what the run owns (``Tool.confined``:
+    an isolated shell's).
 
     A call whose outcome the run's ``after_tool`` hooks changed (``bridge.hooked``) is theirs:
     a result is returned as the journal keeps it (what a resume returns), and a failure is
@@ -180,7 +183,8 @@ async def through(
 
     spec = spec_of(runtime, name)
     try:
-        outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id, decision=decision)
+        tool = Tool(spec, ran, confined=confined)
+        outcome = await bridge.call(tool, args, call_id=call_id, decision=decision)
     except Exception as error:
         if is_pause_signal(error):  # the SDK may swallow it: its hooks stop the run
             _local(runtime).paused = error
@@ -229,8 +233,10 @@ def _recorded(answer: Any) -> Any:
 
 def _executor(tool: Any) -> Any:
     """A shell's executor (``LocalShellTool``, ``ShellTool``): the request's call as its
-    arguments, the request made again from edited ones."""
-    executor = tool.executor
+    arguments, the request made again from edited ones — carried out in the run's workspace
+    of this machine's isolation layer (:func:`isolated`), never by the tool's own executor:
+    every shell command runs isolated."""
+    executor = isolated
 
     async def execute(request: Any) -> Any:
         data = request.data
@@ -244,9 +250,64 @@ def _executor(tool: Any) -> Any:
         def run(given: dict[str, Any]) -> Any:
             return executor(request if given == args else _remade(request, given))
 
-        return await through(tool.name, args, run, call_id=getattr(data, "call_id", None))
+        # isolated, the command keeps to what the run owns (``Tool.confined``): announced, as
+        # a sandbox's, unless the tool catalog says more
+        call_id = getattr(data, "call_id", None)
+        return await through(tool.name, args, run, call_id=call_id, confined=True)
 
     return execute
+
+
+async def isolated(request: Any) -> Any:
+    """A shell request carried out as the SDK's own executors answer one, in the run's
+    workspace (``sandbox.isolation.isolated_run``: the run's uid, its namespaces, its limits,
+    an environment of its own, audited; refused, raising, where commands cannot be isolated):
+    a ``ShellTool``'s each command, its ``ShellResult`` (stdout, stderr, its exit or its
+    timeout); a ``LocalShellTool``'s command (its words, its ``env``), its stdout and stderr
+    as one text. The first result says what came back of the conversation's working files
+    (``sandbox.carry``)."""
+    from agents import ShellCallOutcome, ShellCommandOutput, ShellResult
+
+    from trellis.harness.sandbox import carry
+    from trellis.harness.sandbox.isolation import isolated_run
+
+    runtime = current()
+    if runtime is None:
+        raise ToolError("a shell command runs in a harness run, isolated", source="tools")
+
+    async def ran(command: str, timeout_ms: Any, env: Any = None) -> Any:
+        seconds = float(timeout_ms) / 1000 if timeout_ms else None
+        try:
+            said = await isolated_run(
+                runtime.tenant, runtime.user, runtime.run_id, command, timeout=seconds, env=env
+            )
+        except TimeoutError:  # killed past its time: no exit of its own
+            return None
+        told = carry.told(runtime)
+        if told:
+            said = said.model_copy(update={"stdout": f"{told}\n{said.stdout}"})
+        return said
+
+    data = request.data
+    action = data.action
+    if hasattr(action, "commands"):  # a ShellTool's
+        outputs = []
+        for command in action.commands:
+            said = await ran(command, action.timeout_ms)
+            outcome = ShellCallOutcome(type="timeout")
+            if said is not None:
+                outcome = ShellCallOutcome(type="exit", exit_code=said.exit_code)
+            outputs.append(
+                ShellCommandOutput(
+                    stdout="" if said is None else said.stdout,
+                    stderr="" if said is None else said.stderr,
+                    outcome=outcome,
+                    command=command,
+                )
+            )
+        return ShellResult(output=outputs, max_output_length=action.max_output_length)
+    said = await ran(shlex.join(action.command), action.timeout_ms, action.env)
+    return "the command timed out" if said is None else said.stdout + said.stderr
 
 
 def _remade(request: Any, args: dict[str, Any]) -> Any:

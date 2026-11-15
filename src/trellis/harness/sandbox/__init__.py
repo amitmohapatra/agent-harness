@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, Final
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.bounded import LRU
 from trellis.harness.runtime import Runtime, current
+from trellis.harness.sandbox import carry
 from trellis.harness.sandbox.base import (
     AGENT,
     RUN,
@@ -177,7 +178,7 @@ OUTPUTS_BESIDE: Final = "Not in {folder}/, so not given to the user: {files}."
 #: The most new files beside the folder named at once; the rest are counted.
 BESIDE_NAMED: Final = 20
 #: The largest output file kept; a larger one is left, said in a warning.
-OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
+OUTPUT_MAX_BYTES: Final = carry.FILE_BYTES
 #: What the command tool's description says about outputs.
 DELIVERS: Final = (
     f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
@@ -338,6 +339,7 @@ class SandboxSource:
             journal.sandbox = _recorded(box.ref)
             await runtime.progress(now=True)  # named before any call uses it
             runtime.events.custom(EVENT, action="created", sandbox=box.ref.id)
+            await carry.restored(runtime, box)
             return box
         ref = SandboxRef.model_validate(journal.sandbox)
         if ref.provider != provider.name:
@@ -392,7 +394,7 @@ class SandboxSource:
         result = await box.exec(command, timeout=runtime.remaining())
         why = hint(result.exit_code, result.stderr, self.spec, result.limit)
         kept = await self.outputs_said(runtime, box, command)
-        told = {"hint": why, OUTPUTS: kept}
+        told = {"hint": why, OUTPUTS: kept, "restored": carry.told(runtime)}
         return result.model_dump() | {k: v for k, v in told.items() if v is not None}
 
     async def seen(self, runtime: Runtime, box: Sandbox) -> None:
@@ -462,7 +464,9 @@ class SandboxSource:
                 f"a part of it with {EXEC} (head -c, tail -c, sed -n)",
                 source="tools",
             )
-        return data.decode("utf-8", errors="replace")
+        text = data.decode("utf-8", errors="replace")
+        said = carry.told(runtime)
+        return f"{said}\n{text}" if said else text
 
     async def _write(self, args: dict[str, Any]) -> str:
         runtime = _running()
@@ -471,8 +475,8 @@ class SandboxSource:
         await self.seen(runtime, box)
         await box.write(path, data)
         wrote = f"wrote {len(data)} bytes to {path}"
-        said = await self.written_said(runtime, box, path)
-        return f"{wrote}\n{said}" if said else wrote
+        said = [s for s in (carry.told(runtime), await self.written_said(runtime, box, path)) if s]
+        return "\n".join([wrote, *said])
 
 
 class SandboxTools:
@@ -598,17 +602,25 @@ def _said_once(said: str) -> None:
 async def delivered(runtime: Runtime) -> None:
     """The run succeeded: each file written directly in :data:`OUTPUTS` kept in the file store
     for its user (``Runtime.save_file``: named in its journal, announced, served over AG-UI) —
-    its sandbox's, before the sandbox is deleted, and that of the folder its framework works in
-    on this machine (``Adapter.workdir``: Claude Code's, Kimi Code's), moved out of it so a
-    later run does not give it again. A file that cannot be kept (its name, its size past
+    its sandbox's or its workspace's on this machine (``isolation.HostSandbox.workspace``:
+    Claude Code's, an OpenAI shell's), before it is deleted, and that of the folder its
+    framework works in on this machine (``Adapter.workdir``), moved out of it so a later run
+    does not give it again — and the rest of its working files kept for the conversation's
+    next run (``carry.kept``). A file that cannot be kept (its name, its size past
     :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
     box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
-    if box is not None and source is not None:
-        tool = EXEC if EXEC in runtime.toolbox else "execute"
-        listed = await box.exec(LIST_OUTPUTS, timeout=source.call_timeout)
+    if box is not None:
+        # what made them: the sandbox's tool; a workspace of this machine's isolation layer
+        # (``HostSandbox.workspace``), the framework working in it
+        tool = runtime.agent.adapter.name
+        if source is not None:
+            tool = EXEC if EXEC in runtime.toolbox else "execute"
+        timeout = source.call_timeout if source is not None else REMOTE_TIMEOUT_SECONDS
+        listed = await box.exec(LIST_OUTPUTS, timeout=timeout)
         found = [line.strip().partition(" ") for line in listed.stdout.splitlines()]
         sized = [(int(size), name) for size, _, name in found]
         await _kept(runtime, sized, lambda name: box.read(f"{OUTPUTS}/{name}"), tool)
+        await carry.kept(runtime, box)
     agent = runtime.agent
     folder = agent.adapter.workdir(agent.target, runtime.framework_options)
     outputs = folder / OUTPUTS if folder is not None else None
@@ -674,7 +686,10 @@ def ref_of(runtime: Runtime, provider: str) -> SandboxRef:
 async def paused(runtime: Runtime) -> None:
     """The run pauses for a person: the sandbox this attempt worked in snapshotted (the
     snapshot named in its reference, which the pause saves) and paused, as far as its provider
-    can. A failure is a warning: the run pauses all the same."""
+    can, its working files kept for the conversation first (``carry.kept``). A failure is a
+    warning: the run pauses all the same."""
+    if runtime.sandbox is not None:
+        await carry.kept(runtime, runtime.sandbox)
     source = _source(runtime.agent, runtime.added)
     if runtime.sandbox is None or source is None:
         return
