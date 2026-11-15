@@ -25,8 +25,10 @@ from trellis.harness import conversation
 from trellis.harness.governance.decision import ALWAYS, CONVERSATION, DENY, ONCE
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import ALLOW, ALLOWED, EACH_TIME, NEITHER
+from trellis.harness.settings import deployment_spool
 from trellis.harness.tools import bridge
 from trellis.harness.tools.convert import text_of
+from trellis.harness.writes import SPOOL_FILE
 
 done: list[str] = []
 THREAD = "chat-1"
@@ -402,7 +404,7 @@ async def test_a_grant_whose_write_fails_is_kept_in_the_spool(
         )
         await h.writes.drain()
         assert h.writes.spooled == 1 and h.writes.failed == 0
-    spooled = (tmp_path / "trellis-writes.jsonl").read_text()
+    spooled = (Path(str(deployment_spool(settings))) / SPOOL_FILE).read_text()
     assert '"op": "allow_always"' in spooled and '"tool": "pay"' in spooled
 
 

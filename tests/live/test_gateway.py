@@ -1,5 +1,8 @@
-"""Opt-in: real models through a running Bifrost gateway (``GATEWAY_URL``, e.g.
-``http://localhost:8091/v1``). Skipped when it is unset. ``make test-live`` runs them."""
+"""Opt-in: real models, through a running Bifrost gateway (``LLM_GATEWAY=bifrost``,
+``LLM_BASE_URL`` e.g. ``http://localhost:8091/v1``) or — with no gateway — directly at the model's
+own OpenAI-compatible endpoint (``LLM_BASE_URL``, ``LLM_API_KEY``). Skipped when neither is set;
+the listing of the key's MCP tools is Bifrost's own and needs the gateway. ``make test-live``
+runs them."""
 
 from __future__ import annotations
 
@@ -13,23 +16,24 @@ from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from tests.live.conftest import MODEL
+from tests.live.conftest import GATEWAY_URL, MODEL, needs_gateway, needs_model
 from tests.live.proof import RUN_SECONDS, TEST_SECONDS, Proof, ended, governed, recorded, streamed
 from tests.support.arm import arm, native_tools
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Settings, tool
-from trellis.contracts import RunStatus
+from trellis.contracts import ModelError, RunStatus
 from trellis.harness.prompts import GatewayHeaders
 
-URL = os.environ.get("LLM_BASE_URL") if os.environ.get("LLM_GATEWAY") == "bifrost" else None
+#: The endpoint every model call goes to: the gateway's, or the model's own.
+URL = os.environ.get("LLM_BASE_URL")
 KEY = os.environ.get("LLM_API_KEY") or "unused"
+#: The route: ``bifrost`` through the gateway, else the endpoint's (``openai-compatible``).
+GATEWAY = "bifrost" if GATEWAY_URL else None
+#: What a framework's own model client sends: the gateway's per-request headers through
+#: Bifrost; nothing of the gateway's to an endpoint that is not one.
+HEADERS = GatewayHeaders() if GATEWAY else None
 
-pytestmark = [
-    pytest.mark.live,
-    pytest.mark.skipif(
-        not URL, reason="needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)"
-    ),
-]
+pytestmark = [pytest.mark.live]
 
 
 @tool(side_effects="read")
@@ -43,16 +47,18 @@ class Stock(BaseModel):
     units: int
 
 
-#: How a ``ReAct`` run ends on its model's account: an answer not in the schema, no answer
-#: within its steps, a stall.
-REACT_MODEL_ERRORS = frozenset({"ValidationError", "ModelError"})
+#: How a ``ReAct`` run ends on its model's account: an answer not in the schema (pydantic's
+#: ``ValidationError``), no answer within its steps or a stall (``ModelError``, by its code).
+REACT_MODEL_ERRORS = frozenset({"ValidationError", ModelError.code})
 
 
 def harness() -> Harness:
-    """The gateway alone: no memory, runs in process."""
-    return Harness(config=Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key=KEY))
+    """The model's route alone — the gateway, or the endpoint directly: no memory, runs in
+    process."""
+    return Harness(config=Settings(llm_gateway=GATEWAY, llm_base_url=URL, llm_api_key=KEY))
 
 
+@needs_model
 @pytest.mark.timeout(TEST_SECONDS)
 async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
     """``ReAct`` through the gateway: the run ends, with its events, as the harness ends it; a
@@ -90,14 +96,15 @@ async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
         assert '"stock"' in json.dumps(twin.requests[0]["tools"])  # offered
 
 
-async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
+@needs_model
+async def test_langgraph_with_a_model_pointed_at_the_endpoint() -> None:
     async with harness() as h:
         model = ChatOpenAI(
             base_url=URL,
             api_key=KEY,  # type: ignore[arg-type]
             model=MODEL,
             max_tokens=2048,  # type: ignore[call-arg]
-            default_headers=GatewayHeaders(),
+            default_headers=HEADERS,
         )
         graph = create_agent(model, tools=await native_tools(h, stock, framework="langgraph"))
         result = await h.wrap(graph, id="live-graph").run(
@@ -107,11 +114,12 @@ async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
     assert "42" in str(result.answer)
 
 
-async def test_openai_agents_with_a_model_pointed_at_bifrost() -> None:
+@needs_model
+async def test_openai_agents_with_a_model_pointed_at_the_endpoint() -> None:
     async with harness() as h:
         model = OpenAIChatCompletionsModel(
             model=MODEL,
-            openai_client=AsyncOpenAI(base_url=URL, api_key=KEY, default_headers=GatewayHeaders()),
+            openai_client=AsyncOpenAI(base_url=URL, api_key=KEY, default_headers=HEADERS),
         )
         target = Agent(name="stock", instructions="Use the stock tool.", model=model)
         result = await arm(h.wrap(target, id="live-openai"), [stock]).run(
@@ -121,6 +129,7 @@ async def test_openai_agents_with_a_model_pointed_at_bifrost() -> None:
     assert "42" in str(result.answer)
 
 
+@needs_gateway
 async def test_the_gateway_lists_the_mcp_tools_the_key_allows() -> None:
     async with harness() as h:
         assert h.gateway is not None

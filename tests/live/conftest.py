@@ -2,8 +2,16 @@
 a deployment uses (``.env.example``). ``make test-live`` runs it; a test whose service is
 unset or unreachable is skipped, never failed.
 
-Two variables of its own pick what it runs against: ``TRELLIS_LIVE_MODEL``, the gateway model
-its agents use (default :data:`DEFAULT_MODEL`), and ``TRELLIS_LIVE_MCP_URL``, the wiki MCP
+The model is reached the way a deployment reaches it: through Bifrost (``LLM_GATEWAY=bifrost``),
+or — Bifrost being optional — directly, at the endpoint ``LLM_BASE_URL`` names with ``LLM_API_KEY``
+(the ``openai-compatible`` route; the Claude Code CLI on the provider's own ``ANTHROPIC_API_KEY``
+and ``ANTHROPIC_BASE_URL``). A test that needs only a real model runs either way
+(:data:`needs_model`); only a test of Bifrost's own features — its MCP clients and virtual keys,
+Code Mode, stored prompts, its MCP endpoint — needs the gateway (:data:`needs_gateway`).
+
+Two variables of its own pick what it runs against: ``TRELLIS_LIVE_MODEL``, the model its
+agents use (default :data:`DEFAULT_MODEL`; Bifrost's ``provider/model`` through the gateway, the
+endpoint's own name directly), and ``TRELLIS_LIVE_MCP_URL``, the wiki MCP
 server (default the public DeepWiki, :data:`DEEPWIKI_URL`); ``TRELLIS_LIVE_TIMEOUT`` and
 ``TRELLIS_LIVE_MAX_TOKENS`` size the model-driven tests' runs to the model
 (``tests/live/proof.py``). The sandbox tests need only the Docker daemon (its socket); the
@@ -127,8 +135,36 @@ GATEWAY_UP = _reachable(GATEWAY_URL.removesuffix("/v1") if GATEWAY_URL else None
 MEMORY_UP = _reachable(MEMORY_URL, "/health/live")
 RUNS_UP = _reachable(RUNS_URL, "/health/live")
 
-needs_gateway = pytest.mark.skipif(
-    not GATEWAY_UP, reason="needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)"
+#: The endpoint a model is reached at with no gateway (``LLM_BASE_URL``, the ``openai-compatible``
+#: route), and whether it answers.
+DIRECT_URL = _env("LLM_BASE_URL") if GATEWAY_URL is None else None
+DIRECT_UP = _reachable(DIRECT_URL, "/models")
+#: The provider's own Anthropic variables, as this process was started with them: what the
+#: Claude Code CLI reads to reach the model with no gateway (``cli_home`` clears them from the
+#: process; :func:`claude_cli_env` hands them to the CLI).
+ANTHROPIC_ENV: Final = {
+    name: value
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+    if (value := _env(name)) is not None
+}
+
+#: What a test of Bifrost's own features says when there is no gateway.
+GATEWAY_REASON: Final = (
+    "tests a Bifrost feature: needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)"
+)
+needs_gateway = pytest.mark.skipif(not GATEWAY_UP, reason=GATEWAY_REASON)
+#: A real model, through the gateway or directly at ``LLM_BASE_URL``.
+needs_model = pytest.mark.skipif(
+    not (GATEWAY_UP or DIRECT_UP),
+    reason="needs a model: a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost) or the model's "
+    "own OpenAI-compatible endpoint (LLM_BASE_URL, LLM_API_KEY)",
+)
+#: The live model for the Claude Code CLI, which speaks Anthropic's API: the gateway's
+#: Anthropic route, or Anthropic's own API with the provider's key.
+needs_claude_model = pytest.mark.skipif(
+    not (GATEWAY_UP or "ANTHROPIC_API_KEY" in ANTHROPIC_ENV),
+    reason="needs the live model on Anthropic's API: a Bifrost gateway (LLM_BASE_URL, "
+    "LLM_GATEWAY=bifrost) or ANTHROPIC_API_KEY",
 )
 needs_memory = pytest.mark.skipif(not MEMORY_UP, reason="needs the memory service (MEMORY_URL)")
 needs_runs = pytest.mark.skipif(not RUNS_UP, reason="needs agent-runs (RUNS_URL)")
@@ -229,14 +265,22 @@ def cli_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def claude_cli_env() -> dict[str, str]:
-    """The CLI's environment for the live model: the gateway's Anthropic route, the key, and
-    replies capped at 512 tokens as the local server caps every other client's (its ``-n``).
-    The CLI asks for tens of thousands, which the server honours: a reply the small model
-    fell into repeating ran 2,100 tokens at ~4 token/s, past the test's ten minutes."""
-    assert GATEWAY_URL is not None
+    """The CLI's environment for the live model: the gateway's Anthropic route and the key —
+    with no gateway, Anthropic's API as the provider's own variables name it
+    (:data:`ANTHROPIC_ENV`) — and replies capped at 512 tokens as the local server caps every
+    other client's (its ``-n``). The CLI asks for tens of thousands, which the server honours:
+    a reply the small model fell into repeating ran 2,100 tokens at ~4 token/s, past the
+    test's ten minutes."""
+    route = (
+        {
+            "ANTHROPIC_BASE_URL": f"{GATEWAY_URL.removesuffix('/v1')}/anthropic",
+            "ANTHROPIC_API_KEY": settings().llm_api_key or "unused",
+        }
+        if GATEWAY_URL is not None
+        else dict(ANTHROPIC_ENV)
+    )
     return {
-        "ANTHROPIC_BASE_URL": f"{GATEWAY_URL.removesuffix('/v1')}/anthropic",
-        "ANTHROPIC_API_KEY": settings().llm_api_key or "unused",
+        **route,
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "512",
     }
@@ -249,7 +293,7 @@ def mcp_fixture() -> Iterator[str]:
     server's URL. Skips when the URL is not this machine's, or the gateway declares none of
     the clients."""
     if not GATEWAY_UP or GATEWAY_URL is None:
-        pytest.skip("needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)")
+        pytest.skip(f"{GATEWAY_REASON} (its MCP clients)")
     if not LOCAL_MCP:
         pytest.skip("needs the local MCP servers: TRELLIS_LIVE_MCP_URL=http://127.0.0.1:<port>/mcp")
     started = None
@@ -308,7 +352,7 @@ def wikis(request: pytest.FixtureRequest) -> Iterator[list[str]]:
     the local server's, declared in the gateway (``mcp_fixture``), or the public one's, added
     for the session and removed after it."""
     if not GATEWAY_UP or GATEWAY_URL is None:
-        pytest.skip("needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)")
+        pytest.skip(f"{GATEWAY_REASON} (its MCP clients)")
     url = GATEWAY_URL
     if LOCAL_MCP:
         request.getfixturevalue("mcp_fixture")

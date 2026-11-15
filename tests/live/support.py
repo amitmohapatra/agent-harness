@@ -200,13 +200,30 @@ def gateway_model(h: Harness, sent: Sent, *, wait: float = 600.0, **kwargs: Any)
 class Forcing(AgentMiddleware):
     """The model's tool choice forced at each step (``None``: answer, no tool): a small local
     model is slow and unreliable at choosing tools, so a test that needs a particular call
-    picks it — the model still writes the call, the harness still runs it."""
+    picks it — the model still writes the call, the harness still runs it. A forced step is
+    offered the forced tool alone, beside the forced ``tool_choice``: ``claude-haiku-5-5``
+    ignores a forced named tool and calls another of those offered (seen live, and in a
+    direct API call). ``offered`` keeps each step's tools as the harness built the request,
+    before the narrowing: what a test asserts the harness offers."""
 
     def __init__(self, choices: list[str | None]) -> None:
         super().__init__()
         self.choices = list(choices)
+        #: each step's tool names, as the harness offered them
+        self.offered: list[set[str]] = []
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        self.offered.append({_tool_name(t) for t in request.tools})
         choice = self.choices.pop(0) if self.choices else None
-        forced = {"type": "function", "function": {"name": choice}} if choice else "none"
-        return await handler(request.override(tool_choice=forced))
+        if choice is None:
+            return await handler(request.override(tool_choice="none"))
+        forced = {"type": "function", "function": {"name": choice}}
+        only = [t for t in request.tools if _tool_name(t) == choice]
+        return await handler(request.override(tool_choice=forced, tools=only))
+
+
+def _tool_name(tool: Any) -> str:
+    """A request's tool's name: a LangChain tool's, or a tool definition's (a dict)."""
+    if isinstance(tool, dict):
+        return str(tool.get("name") or (tool.get("function") or {}).get("name"))
+    return str(tool.name)

@@ -94,6 +94,33 @@ async def test_a_run_streams_numbered_events_ending_in_its_result(
     assert last["result"] == "echo hello"
 
 
+async def test_a_runs_stream_ends_with_its_finish_though_an_event_comes_after_it() -> None:
+    """The run's stream ends with its finish, as the protocol says (no event of a run after its
+    ``RUN_FINISHED``), and as a client reads it (``events[-1]`` is the outcome): an event the
+    run emits after its end — a warning from its end hooks, or from a write that failed after
+    the answer (``write_failed``) — is not put after it, on the stream or on a reconnect.
+    Under load (100 chats on 3 servers) a turn's stream ended with such a ``CUSTOM`` event,
+    its outcome nowhere at its end (``test_s14::test_stress_many_chats_on_three_servers``)."""
+    from trellis import Hooks
+    from trellis.harness.result import Result
+
+    class Late(Hooks):
+        async def on_run_end(self, run: Runtime, result: Result) -> None:
+            run.events.warning("write_failed", "memory.verify failed and is lost")
+
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    harness.wrap(agent_fn, id="chat", hooks=[Late()]).serve_chat(app, identity=user_of)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://agui", headers={"x-user": "u1"}
+    ) as http:
+        events = await post(http, body("hello", runId="run-late"))
+        assert finished(events)["type"] == "RUN_FINISHED", events[-2:]
+        again = decode((await http.get(f"{PATH}/runs/run-late/events")).text)
+        assert again and finished(again)["type"] == "RUN_FINISHED", again[-2:]
+    await harness.aclose()
+
+
 async def test_a_question_pauses_and_a_resume_entry_answers_it(client: httpx.AsyncClient) -> None:
     paused = finished(await post(client, body("ask")))
     assert paused["outcome"]["type"] == "interrupt"

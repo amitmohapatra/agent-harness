@@ -354,7 +354,7 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
         claimed = await store.claim(worker.worker_id, [dying.id])
         assert claimed is not None
         job = Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
-        with pytest.RaisesGroup(Crash, flatten_subgroups=True):
+        with pytest.raises(Crash):  # the attempt ends with the crash itself (``stopped_by``)
             await dying.execute(job)
         held, _ = store._leases[handle.id]
         store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))

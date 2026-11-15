@@ -1552,6 +1552,7 @@ class Attempt:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cached=usage.cached_read_tokens or 0,
+            written=usage.cached_write_tokens or 0,
         )
 
     def _accounted(self) -> int:

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
 import logging
 import os
 import tempfile
@@ -62,6 +63,8 @@ OTEL_EXPORTER_ENV: Final = (
 #: The variables that mark a container or a serverless runtime, where a folder on local disk
 #: does not outlive the process: the spool's default is not taken there.
 EPHEMERAL_MARKERS: Final = ("K_SERVICE", "KUBERNETES_SERVICE_HOST", "AWS_LAMBDA_FUNCTION_NAME")
+#: How much of the digest of a deployment's memory service and key names its spool folder.
+SPOOL_DIGEST_CHARS: Final = 16
 #: Each setting, by the variable it is read from.
 VARIABLES: Final = {
     "llm_base_url": "LLM_BASE_URL",
@@ -112,8 +115,9 @@ class Settings(BaseModel):
     #: agent-runs: durable runs, the worker queue, the inbox and schedules (else in process).
     runs_url: str | None = None
     #: A directory memory writes this process could not deliver are kept in, replayed at
-    #: the next start (``writes.py``): ``TRELLIS_SPOOL_DIR``, else the XDG state folder where
-    #: it lasts (:func:`default_spool`); unset: they are logged and counted, then lost.
+    #: the next start (``writes.py``), in a folder of the deployment's own
+    #: (:func:`deployment_spool`): ``TRELLIS_SPOOL_DIR``, else the XDG state folder where it
+    #: lasts (:func:`default_spool`); unset: they are logged and counted, then lost.
     spool_dir: str | None = None
     #: The virtual key the judge's calls go through — its own budget, rate limits and models
     #: in Bifrost, so evaluation spend never exhausts the agents'; unset: ``LLM_API_KEY``.
@@ -204,6 +208,19 @@ def default_spool(environ: Mapping[str, str]) -> str | None:
         _no_spool(f"{folder} cannot be written")
         return None
     return str(folder)
+
+
+def deployment_spool(settings: Settings) -> str | None:
+    """Where this deployment's undelivered memory writes are kept: a folder of its own in
+    ``spool_dir``, named by the memory service and the key its writes are made with (a digest
+    of them, never the key). A process replays only its deployment's writes: another's sharing
+    the directory — another key, another service — are not its to send (the service refuses
+    a write made with a key it does not belong to), and the next process of the same
+    deployment replays them. ``None`` without a spool directory."""
+    if not settings.spool_dir:
+        return None
+    who = f"{settings.memory_url or ''}\n{settings.api_key or ''}".encode()
+    return str(Path(settings.spool_dir) / hashlib.sha256(who).hexdigest()[:SPOOL_DIGEST_CHARS])
 
 
 def _container() -> bool:

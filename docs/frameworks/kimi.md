@@ -249,8 +249,8 @@ that ends with nothing at work ends it, as ever.
   on): a background run that ends first — cancelled (with the turn that started it, or on its
   own), out of time, its budget spent — leaves its task at work, refused whatever it asks, until
   it ends or the process does.
-* **Its life**, as Claude's: one process per conversation, in one server process, at most 16 per
-  agent; it closes 5 minutes after its last activity when nothing works in it, 6 hours after its
+* **Its life**, as Claude's: one process per conversation, in one server process, at most 8 over
+  all its agents; it closes 5 minutes after its last activity when nothing works in it, 6 hours after its
   last turn whatever does, when a turn brings other settings (`framework_options`, other harness
   tools) or does not continue its session, and with the harness (`Harness.aclose`). Work that
   ends with it is said in the conversation's next run (`acp_session`); a restart loses it.

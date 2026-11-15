@@ -57,7 +57,7 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.schedules import LimitsHook, schedule_tools
-from trellis.harness.settings import Settings, default_files_url
+from trellis.harness.settings import Settings, default_files_url, deployment_spool
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.mcp import MCPSource
@@ -186,7 +186,8 @@ class Harness:
         self.holds = Holds(lambda: self.runs, renewed=self._renewed, lost=self._lost)
         #: the background tasks at work in this process (``background``): cut off on close
         self.background = Tasks()
-        self.writes = Writes(spool=s.spool_dir, replay=self._replay)
+        #: memory writes it cannot deliver are kept in its deployment's own spool folder
+        self.writes = Writes(spool=deployment_spool(s), replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
         self.files = FileStore(s.files_url or default_files_url())

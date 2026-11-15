@@ -625,6 +625,30 @@ async def test_one_user_holds_at_most_their_share_of_the_places(
     assert sorted(s.key for s in sessions) == sorted([mine[1].key, mine[2].key, "a9", "b1"])
 
 
+async def test_a_server_keeps_eight_processes_and_the_oldest_idle_one_gives_its_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PERF-3, memory: a kept Claude Code CLI holds about 200 MB (the comparison of
+    2026-11-15 measured 16 of them at 3.3 GB). By default a server process keeps 8 (about
+    1.6 GB) over all its agents: a ninth conversation's turn takes the place of the idle
+    session asked for longest ago, which is closed; the others stay."""
+    _rooms(monkeypatch, live.KEPT)  # the default, as it is
+    one, two = LiveSessions(), LiveSessions()
+    among = [one, two]
+    for n in range(8):
+        found = await claude_live.opened(
+            one if n % 2 else two, f"c{n}", (), None, {}, owner=f"u{n}", among=among
+        )
+        assert found is not None
+    kept = {s.key: s for sessions in among for s in sessions}
+    assert len(kept) == 8
+    assert one.get("c1") is not None  # asked for again: c0 is now the one asked for longest ago
+    late = await claude_live.opened(one, "c8", (), None, {}, owner="u8", among=among)
+    assert late is not None
+    assert sorted(s.key for sessions in among for s in sessions) == [f"c{n}" for n in range(1, 9)]
+    assert kept["c0"].closed and not any(kept[f"c{n}"].closed for n in range(1, 8))
+
+
 async def test_a_session_that_fails_to_start_gives_its_place_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

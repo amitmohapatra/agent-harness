@@ -6,7 +6,10 @@ failure may pass (the service unavailable, a timeout; not a refusal the same req
 again). While the memory client's circuit is open (``CircuitOpenError``: the service down, the
 call refused at once, nothing sent) a write spends no attempt: it waits the circuit's cool-down,
 queued, and is tried again with its attempts whole — however long the outage lasts, bounded by
-the queue (:data:`MAX_PENDING`; past it, a write is given up as a full queue's always is). A
+the queue (:data:`MAX_PENDING`; past it, a write is given up as a full queue's always is). Its
+calls the service answered past their time (its own ``TIMEOUT``, a 504: the service is up, the
+call is what takes too long — they open the circuit too) are counted across the cool-downs: a
+write whose every call times out is given up after its attempts, not tried forever. A
 write that still fails is never raised into the run, and never only a warning:
 
 * counted (``trellis.writes.failed``, and ``trellis.writes.undelivered`` by outcome: kept in the
@@ -14,7 +17,8 @@ write that still fails is never raised into the run, and never only a warning:
 * traced: a ``write_failed`` span in the run's trace, its status an error;
 * reported to the run's event listeners as a ``write_failed`` warning event;
 * logged: an error, the first time a kind of write fails in this process (each later one a
-  warning, so a long outage does not flood the log);
+  warning, so a long outage does not flood the log), with what the service said of it (a
+  refused request's field errors);
 * listed by ``trellis doctor`` while it waits in the spool (its "records failing" check).
 
 A full queue holds the run instead of dropping the write: ``await submit(...)`` waits up to
@@ -25,7 +29,9 @@ spool directory (``TRELLIS_SPOOL_DIR``), after the next start. A write given up 
 spent on failures that may pass, a queue that stayed full, the process stopping with it still
 queued) is appended to ``<spool>/trellis-writes.jsonl`` when it can be described as data (a
 transcript, a tool record, an outcome, a decision, catalog entries: ``record=``), and the next
-harness that starts writing with the same directory replays the file and removes it. Writes
+harness that starts writing with the same directory replays the file and removes it — a
+harness's directory is its deployment's own (``settings.deployment_spool``), so it replays
+only the writes its own deployment left. Writes
 are idempotent, so a replayed write that had in fact landed is stored once. Without a spool
 directory — or for a write that is not data (a grounding check, the model key) — it is lost:
 logged, counted (``trellis.writes.undelivered``, ``outcome=lost``) and reported. The queue is in
@@ -59,6 +65,8 @@ from trellis.harness.events import RunEvents
 from trellis.harness.telemetry import metrics
 from trellis.memory.breaker import FAILURE_THRESHOLD
 from trellis.memory.errors import CircuitOpenError
+from trellis.memory.errors import MemoryError as MemoryServiceError
+from trellis.memory.errors import TimeoutError as MemoryTimeout
 
 log = logging.getLogger("trellis.writes")
 
@@ -82,6 +90,8 @@ SPOOL_FILE: Final = "trellis-writes.jsonl"
 #: The most the spool file may hold, in bytes: past it a write given up is lost, not kept (a
 #: long outage must not fill the disk), said once until the spool is replayed.
 MAX_SPOOL_BYTES: Final = 64 * 1024 * 1024
+#: The most of a refusal's details a failed write says (the memory service's field errors).
+DETAILS_MAX_CHARS: Final = 2000
 
 Work = Callable[[], Awaitable[object]]
 #: Turns a spooled record back into its write (``None``: nothing replays it here).
@@ -224,11 +234,21 @@ class Writes:
         def wait(state: RetryCallState) -> float:  # full jitter, not a secret
             return random.uniform(0, WRITE_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
 
+        # its calls the service answered past their time: counted across the circuit's
+        # cool-downs (the service is up, and the call is what takes too long), where a call
+        # that never reached it is not
+        late = 0
+
+        def tried(exc: BaseException) -> bool:
+            nonlocal late
+            late += isinstance(exc, MemoryTimeout)
+            return _passing_now(exc) and late < WRITE_ATTEMPTS
+
         while True:
             try:
                 async for attempt in AsyncRetrying(
                     stop=stop_after_attempt(WRITE_ATTEMPTS),
-                    retry=retry_if_exception(_passing_now),
+                    retry=retry_if_exception(tried),
                     wait=wait,
                     sleep=asyncio.sleep,
                     reraise=True,
@@ -245,7 +265,7 @@ class Writes:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._give_up(item, f"{type(exc).__name__}: {exc}", keep=_passing(exc))
+                self._give_up(item, _why(exc), keep=_passing(exc))
                 return
 
     def _give_up(self, item: _Item, reason: str, *, keep: bool = True) -> None:
@@ -346,6 +366,17 @@ def _logged(label: str, message: str) -> None:
         return
     _ERRORS_SAID.add(label)
     log.error("%s (said once as an error; later failures of %s are warnings)", message, label)
+
+
+def _why(exc: Exception) -> str:
+    """What a write's failure says: its type and message, and the details the memory service
+    gave with it — a refused request's field errors, each field and why (never the values
+    sent), at most :data:`DETAILS_MAX_CHARS` of them."""
+    said = f"{type(exc).__name__}: {exc}"
+    details = exc.details if isinstance(exc, MemoryServiceError) else None
+    if not details:
+        return said
+    return f"{said} {json.dumps(details, default=str)[:DETAILS_MAX_CHARS]}"
 
 
 def _passing(exc: BaseException) -> bool:

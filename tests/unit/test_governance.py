@@ -59,6 +59,7 @@ from trellis.harness.governance.decision import (
     decide,
 )
 from trellis.harness.hooks import Deny, Hooks
+from trellis.harness.settings import deployment_spool
 from trellis.harness.writes import SPOOL_FILE, Writes
 from trellis.memory.errors import NotFoundError
 
@@ -795,7 +796,8 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
         assert governance.catalog.ctx.scope.tenant_id == "acme"
         await governance.publish(SPECS)
     # its circuit open, the write waited it out, queued; the harness's close spooled it
-    [kept] = [json.loads(line) for line in (tmp_path / SPOOL_FILE).read_text().splitlines()]
+    spool = Path(str(deployment_spool(settings))) / SPOOL_FILE  # the deployment's own folder
+    [kept] = [json.loads(line) for line in spool.read_text().splitlines()]
     assert (kept["label"], kept["op"], kept["scope"]) == (
         "memory.tool_catalog",
         "publish_catalog",
@@ -803,7 +805,7 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     )
     service.fail.clear()
     replay = Memory(service.client()).replay
-    writes = Writes(spool=tmp_path, replay=replay)
+    writes = Writes(spool=spool.parent, replay=replay)
     writes.start()  # the next start replays the spooled publish
     await writes.drain()
     [put] = service.named("put_catalog")

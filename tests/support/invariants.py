@@ -32,7 +32,8 @@ fixture reads it back. At teardown:
 * **INV-9** no process the test started outlives it, and nothing new is left in the temporary
   directory outside the test's own folder.
 * **INV-10** each run's events are well formed: per attempt, ``RUN_STARTED`` first, numbered in
-  order, one end; one ``TOOL_CALL_START`` per tool call across the run, each with its end.
+  order, one end; one ``TOOL_CALL_START`` per tool call across the run, each with its end (a
+  call its graph's ``RetryPolicy`` tries again after its error is the same call).
 
 A check that cannot apply (no memory, a run of another tenant's key) is left out, not failed.
 ``inv.allow("INV-n", why)`` waives one invariant for a test that breaks it on purpose (a fault
@@ -638,11 +639,21 @@ class Invariants:
 
     def _inv5(self) -> list[str]:
         out = []
+        # each key's own tenant, as memory answered whose key it is (``GET /v1/keys/self``):
+        # that answer names the caller's tenant, so it crosses nothing — a test that uses a
+        # second tenant's key on purpose has two
+        owned = {
+            _credential(e): value
+            for e in self.traffic.exchanges
+            if e.service == "memory" and _route(e.path) == KEY_SELF and (e.status or 500) < 300
+            for _, value in _fields(e.response, ("tenant_id",))
+        }
         tenants = {
             (e.request.get("scope") or {}).get("tenant_id")
             for e in self.traffic.exchanges
             if e.service == "memory" and isinstance(e.request, dict)
         } - {None}
+        tenants |= set(owned.values())
         for e in self.traffic.exchanges:
             if (e.status or 500) >= 300 or e.response is None:
                 continue
@@ -658,14 +669,15 @@ class Invariants:
                     out.append(
                         f"INV-5 {e.service} {e.method} {e.path} for tenant {tenant} answered tenant {value}"
                     )
-                if (
-                    key == "tenant_id"
-                    and value
-                    and not tenant
-                    and len(tenants) == 1
-                    and value not in tenants
-                    and e.service == "memory"
-                ):
+                if key != "tenant_id" or not value or tenant or e.service != "memory":
+                    continue
+                own = owned.get(_credential(e))
+                if own is not None and value != own:
+                    out.append(
+                        f"INV-5 memory {e.method} {e.path} answered tenant {value} to a key of "
+                        f"tenant {own}"
+                    )
+                elif own is None and len(tenants) == 1 and value not in tenants:
                     out.append(f"INV-5 memory {e.method} {e.path} answered tenant {value}")
         return list(dict.fromkeys(out))
 
@@ -746,12 +758,7 @@ class Invariants:
                 # a call counts where its attempt ended (a pause, an ending): one an attempt cut
                 # short began (a crash, a worker that handed the run back) is begun again by the
                 # next, the same logical call — unless it began twice in that one attempt
-                here = Counter(
-                    str(ev.get("tool_call_id"))
-                    for ev in evs_a
-                    if ev.get("type") == "TOOL_CALL_START"
-                    and str(ev.get("tool_call_id")) not in paused
-                )
+                here = _begun(evs_a, paused)
                 starts.update({call: begun - 1 for call, begun in here.items()})
                 finished = any(ev.get("type") == "RUN_FINISHED" for ev in evs_a)
                 if finished or attempt == max(by_attempt):
@@ -760,6 +767,28 @@ class Invariants:
             if twice:
                 out.append(f"INV-10 run {run_id}: tool calls started more than once: {twice[:3]}")
         return out
+
+
+def _begun(evs: list[dict[str, Any]], paused: set[str]) -> Counter[str]:
+    """How many times each call began in one attempt (not one that paused it): a call begun
+    again after its result was an error is the same call tried again — a node's
+    ``RetryPolicy`` runs a failed read again by the same id (``tools/convert/langchain``) —
+    not a second start; begun again with no error before it, it is."""
+    begun: Counter[str] = Counter()
+    failed: set[str] = set()
+    for ev in evs:
+        call = str(ev.get("tool_call_id"))
+        if call in paused:
+            continue
+        if ev.get("type") == "TOOL_CALL_RESULT":
+            if (ev.get("data") or {}).get("status") == "error":
+                failed.add(call)
+        elif ev.get("type") == "TOOL_CALL_START":
+            if call in failed:
+                failed.discard(call)  # tried again: the same call
+            else:
+                begun[call] += 1
+    return begun
 
 
 def _root(run_id: str, records: dict[str, dict[str, Any]]) -> str:
@@ -843,6 +872,15 @@ def _starts(evs: list[dict[str, Any]], tool: Any, call_id: Any, wanted: Any = No
     if call_id is None and wanted is not None:  # by its tool: only the calls with its arguments
         started = [a for a in started if a is None or a == wanted]
     return started
+
+
+#: The memory service's answer to whose key the caller's is (its tenant among it).
+KEY_SELF: Final = "/v1/keys/self"
+
+
+def _credential(e: Exchange) -> tuple[tuple[str, str], ...]:
+    """The credential an exchange was made with, as a key to look it up by."""
+    return tuple(sorted(e.auth.items()))
 
 
 def _fields(value: Any, names: tuple[str, ...]) -> Iterator[tuple[str, Any]]:

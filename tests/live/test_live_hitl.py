@@ -1,10 +1,10 @@
-"""W5 against agent-runs (and, for one model-driven run, the gateway): an approval rule in code
+"""W5 against agent-runs (and, for one model-driven run, the live model): an approval rule in code
 (a ``before_tool`` hook asking by the call's arguments, on its own screen), labelled options with
 several picks checked by agent-runs itself, a comment kept in agent-runs' resolution history, an
 approval remembered for the run, a result from outside the run (an ``ask`` in the tool), Way 2's
 ``Question`` paused in agent-runs, a pause told through agent-runs' ``run.paused`` webhook, and a
-``ReAct`` agent through the gateway pausing inside a tool that waits for a result from outside.
-What is asserted is the harness's behaviour, not the model's words."""
+``ReAct`` agent on the live model (through the gateway, or directly at its endpoint) pausing
+inside a tool that waits for a result from outside. What is asserted is the harness's behaviour, not the model's words."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 import pytest
 
 import trellis
-from tests.live.conftest import MODEL, live_harness, needs_gateway, needs_memory, needs_runs
+from tests.live.conftest import MODEL, live_harness, needs_memory, needs_model, needs_runs
 from tests.live.support import Forcing
 from tests.support.arm import arm
 from trellis import Ask, Hooks, ReAct, Runtime, tool
@@ -198,9 +198,9 @@ async def test_way_2_pauses_with_the_same_question_in_agent_runs() -> None:
         await h.runs.finish(run.run_id, RunStatus.SUCCESS, tenant=tenant)
 
 
-@needs_gateway
+@needs_model
 @pytest.mark.timeout(300)
-async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -> None:
+async def test_a_react_agent_reads_a_result_from_outside() -> None:
     async with live_harness() as h:
         target = ReAct(
             system_prompt="You get contracts signed. Always call the sign tool with the contract id "
@@ -215,6 +215,12 @@ async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -
         paused = await agent.run("Get contract c-42 signed.", user="live-user")
         if paused.status is not RunStatus.PAUSED:
             pytest.skip(f"the model did not call the tool ({paused.status.value}: {paused.error})")
+        # sign is a write: it asks before it waits on the signature
+        signing = paused.interrupt
+        assert signing is not None and signing.tool_call is not None
+        assert signing.tool_call.tool == "sign" and signing.component is None
+        paused = await agent.resume(signing.interrupt_id, "approve", reviewer="live-user")
+        assert paused.status is RunStatus.PAUSED, paused.error
         asked = paused.interrupt
         assert asked is not None and asked.component == "e-signature"
         assert asked.expects == {"type": "string"}  # what sign returns
@@ -223,7 +229,7 @@ async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -
         )
         assert done.status is RunStatus.SUCCESS, done.error
         record = await h.runs.get(done.run_id)
-        assert record is not None and record.attempt == 2
+        assert record is not None and record.attempt == 3  # the approval, then the answer
     assert trellis.current() is None
 
 
