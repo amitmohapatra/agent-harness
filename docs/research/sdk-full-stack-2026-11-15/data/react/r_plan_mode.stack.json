@@ -1,0 +1,182 @@
+{
+ "sdk": "react",
+ "feature": "r_plan_mode",
+ "arm": "stack",
+ "error": null,
+ "seconds": 7.6,
+ "spend": {
+  "requests": 5,
+  "in": 28640,
+  "out": 513,
+  "usd": 0.001334,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "O-1"
+ ],
+ "plan_asked": true,
+ "answers": [
+  "Order O-1 has been refunded. It had 2 items and a total of 80 EUR, and it was in \"paid\" status before the refund."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve write_todos?",
+   "tool_call": {
+    "tool": "write_todos",
+    "args": {
+     "todos": [
+      {
+       "content": "Refund order O-1 (2 items, 80 EUR, status: paid) using the refund tool",
+       "status": "pending"
+      },
+      {
+       "content": "Confirm the refund result to the user",
+       "status": "pending"
+      }
+     ]
+    },
+    "task": "",
+    "step": null,
+    "idempotency_key": "d1d07d023389fd6d03dfeaf364b76ac5"
+   },
+   "options": []
+  },
+  {
+   "reason": "APPROVAL",
+   "question": "Approve refund? refund is write. Allow once, allow for this conversation, always allow, or deny.",
+   "tool_call": {
+    "tool": "refund",
+    "args": {
+     "order_id": "O-1"
+    },
+    "task": "Refund order O-1.",
+    "step": 1,
+    "idempotency_key": "toolu_01BrGG6yWRfQm3YEwWdguWBK"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='always' label='Always allow' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_cd32f39108844e0393ffd339629269b1"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "re-plan-b6b1813d",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_cd32f39108844e0393ffd339629269b1",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "f1e895cf",
+    "user_id": "re-plan-b6b1813d",
+    "agent_id": "re-plan",
+    "attempt": 3,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_cd32f39108844e0393ffd339629269b1": {
+     "RUN_STARTED": 3,
+     "CONTEXT_LOADED": 3,
+     "TOOL_CALL_START": 2,
+     "TOOL_CALL_ARGS": 2,
+     "TOOL_CALL_END": 2,
+     "TOOL_CALL_RESULT": 2,
+     "INTERRUPT": 2,
+     "RUN_FINISHED": 3,
+     "CUSTOM": 2
+    }
+   },
+   "messages": {
+    "run_cd32f39108844e0393ffd339629269b1": [
+     {
+      "role": "USER",
+      "content": "Refund order O-1."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "O-1: 2 items, 80 EUR, paid"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated todo list to [{'content': 'Refund order O-1 (2 items, 80 EUR, status: paid) using the refund tool', 'status': 'pending'}, {'content': 'Confirm the refund result to the user', 'status': 'pending'}]"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "refunded O-1"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated todo list to [{'content': 'Refund order O-1 (2 items, 80 EUR, status: paid) using the refund tool', 'status': 'completed'}, {'content': 'Confirm the refund result to the user', 'status': 'completed'}]"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Order O-1 has been refunded. It had 2 items and a total of 80 EUR, and it was in \"paid\" status before the refund."
+     }
+    ]
+   },
+   "tools": {
+    "run_cd32f39108844e0393ffd339629269b1": [
+     {
+      "tool_name": "order",
+      "status": "ok",
+      "output": "O-1: 2 items, 80 EUR, paid"
+     },
+     {
+      "tool_name": "refund",
+      "status": "ok",
+      "output": "refunded O-1"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

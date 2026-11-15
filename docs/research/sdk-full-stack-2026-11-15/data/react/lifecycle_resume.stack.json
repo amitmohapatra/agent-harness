@@ -1,0 +1,88 @@
+{
+ "sdk": "react",
+ "feature": "lifecycle_resume",
+ "arm": "stack",
+ "error": null,
+ "seconds": 3.7,
+ "spend": {
+  "requests": 1,
+  "in": 4050,
+  "out": 35,
+  "usd": 6.9e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "SUCCESS",
+ "answer": "I sent a wire of 300 to account ACME-1. The wire tool reported it done, with no further details.",
+ "calls_made": 1,
+ "records": {
+  "run": {
+   "run_id": "run_c127b08bc63c4b32a662e40c6175b050",
+   "status": "SUCCESS",
+   "parent_run_id": null,
+   "thread_id": "0feccc81",
+   "user_id": "life-bd6bcfb3",
+   "agent_id": "lc-react-restart",
+   "attempt": 2,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_c127b08bc63c4b32a662e40c6175b050": {
+    "RUN_STARTED": 2,
+    "CONTEXT_LOADED": 2,
+    "INTERRUPT": 1,
+    "RUN_FINISHED": 2,
+    "CUSTOM": 1,
+    "TOOL_CALL_START": 1,
+    "TOOL_CALL_ARGS": 1,
+    "TOOL_CALL_END": 1,
+    "TOOL_CALL_RESULT": 1
+   }
+  },
+  "messages": {
+   "run_c127b08bc63c4b32a662e40c6175b050": [
+    {
+     "role": "USER",
+     "content": "Wire 300 to account ACME-1 now: call the wire tool, do not ask me first."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": ""
+    },
+    {
+     "role": "TOOL",
+     "content": "wire-react done for ACME-1"
+    },
+    {
+     "role": "ASSISTANT",
+     "content": "I sent a wire of 300 to account ACME-1. The wire tool reported it done, with no further details."
+    }
+   ]
+  },
+  "tools": {
+   "run_c127b08bc63c4b32a662e40c6175b050": [
+    {
+     "tool_name": "wire",
+     "status": "ok",
+     "output": "wire-react done for ACME-1"
+    }
+   ]
+  },
+  "feedback": [
+   {
+    "target_kind": "tool_call",
+    "verdict": "approve",
+    "source": "interrupt"
+   },
+   {
+    "target_kind": "run",
+    "verdict": "confirm",
+    "source": "system"
+   }
+  ]
+ }
+}

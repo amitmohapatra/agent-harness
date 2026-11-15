@@ -1,0 +1,143 @@
+{
+ "sdk": "deepagents",
+ "feature": "todos",
+ "arm": "stack",
+ "error": null,
+ "seconds": 9.5,
+ "spend": {
+  "requests": 6,
+  "in": 43570,
+  "out": 1008,
+  "usd": 0.001847,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Fruit: apple. Vegetable: carrot. Grain: rice."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_f46a2490a8304e398ae63b6a2bbcadec"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "da-todos-dc8e8233",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_f46a2490a8304e398ae63b6a2bbcadec",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "26a82ad2",
+    "user_id": "da-todos-dc8e8233",
+    "agent_id": "da-todos",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_f46a2490a8304e398ae63b6a2bbcadec": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_f46a2490a8304e398ae63b6a2bbcadec": [
+     {
+      "role": "USER",
+      "content": "Use write_todos to plan these three steps, then do them: 1) name a fruit, 2) name a vegetable, 3) name a grain. Mark each todo completed as you go."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list."
+     },
+     {
+      "role": "TOOL",
+      "content": "Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list."
+     },
+     {
+      "role": "TOOL",
+      "content": "Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list."
+     },
+     {
+      "role": "TOOL",
+      "content": "Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "My parallel todo updates were rejected, so I'll update the list one call at a time."
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated todo list to [{'content': 'Name a fruit', 'status': 'in_progress'}, {'content': 'Name a vegetable', 'status': 'pending'}, {'content': 'Name a grain', 'status': 'pending'}]"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Fruit: apple."
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated todo list to [{'content': 'Name a fruit', 'status': 'completed'}, {'content': 'Name a vegetable', 'status': 'in_progress'}, {'content': 'Name a grain', 'status': 'pending'}]"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Vegetable: carrot."
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated todo list to [{'content': 'Name a fruit', 'status': 'completed'}, {'content': 'Name a vegetable', 'status': 'completed'}, {'content': 'Name a grain', 'status': 'in_progress'}]"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated todo list to [{'content': 'Name a fruit', 'status': 'completed'}, {'content': 'Name a vegetable', 'status': 'completed'}, {'content': 'Name a grain', 'status': 'completed'}]"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Fruit: apple. Vegetable: carrot. Grain: rice."
+     }
+    ]
+   },
+   "tools": {
+    "run_f46a2490a8304e398ae63b6a2bbcadec": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ],
+ "todos": [
+  {
+   "content": "Name a fruit",
+   "status": "completed"
+  },
+  {
+   "content": "Name a vegetable",
+   "status": "completed"
+  },
+  {
+   "content": "Name a grain",
+   "status": "completed"
+  }
+ ],
+ "files": []
+}

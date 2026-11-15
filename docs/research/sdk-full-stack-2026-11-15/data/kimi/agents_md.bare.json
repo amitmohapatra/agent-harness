@@ -1,0 +1,21 @@
+{
+ "sdk": "kimi",
+ "feature": "agents_md",
+ "arm": "bare",
+ "error": null,
+ "seconds": 2.6,
+ "spend": {
+  "requests": 1,
+  "in": 20467,
+  "out": 21,
+  "usd": 0.000614,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "3 + 4 = 7\n\n-- KIMI-OK"
+ ],
+ "tools_used": []
+}

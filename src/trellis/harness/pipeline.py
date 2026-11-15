@@ -1275,7 +1275,9 @@ def _pause(
             return runtime.pending.model_copy(
                 update={"native_id": native_id, "native_state": native.state}
             )
-        return runtime.pending
+        # the framework gave no handle of this pause: one a tool noted (an agent tool's own
+        # SDK gate, its child run's) is not this run's to resume, which the journal answers
+        return runtime.pending.model_copy(update={"native_id": None})
     if native is None:
         return None
     return _foreign(runtime, native)

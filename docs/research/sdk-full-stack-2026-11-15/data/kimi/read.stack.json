@@ -1,0 +1,94 @@
+{
+ "sdk": "kimi",
+ "feature": "read",
+ "arm": "stack",
+ "error": null,
+ "seconds": 11.4,
+ "spend": {
+  "requests": 2,
+  "in": 48759,
+  "out": 61,
+  "usd": 0.003326,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "High water is at 06:42."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_b66047b9502e473d962de192a70b4be6"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "ki-read-0128401b",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_b66047b9502e473d962de192a70b4be6",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "999a224e",
+    "user_id": "ki-read-0128401b",
+    "agent_id": "ki-read",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_b66047b9502e473d962de192a70b4be6": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_b66047b9502e473d962de192a70b4be6": [
+     {
+      "role": "USER",
+      "content": "Read tide.txt and tell me when high water is."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "1\tHigh water at 06:42."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "High water is at 06:42."
+     }
+    ]
+   },
+   "tools": {
+    "run_b66047b9502e473d962de192a70b4be6": [
+     {
+      "tool_name": "Read",
+      "status": "ok",
+      "output": "1\tHigh water at 06:42."
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

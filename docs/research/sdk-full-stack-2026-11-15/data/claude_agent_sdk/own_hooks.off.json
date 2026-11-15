@@ -1,0 +1,36 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "own_hooks",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.8,
+ "spend": {
+  "requests": 2,
+  "in": 32064,
+  "out": 107,
+  "usd": 0.000808,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "hooks_seen": [
+  "pre:Read",
+  "post:Read"
+ ],
+ "answers": [
+  "The word in `a.txt` is **alpha**."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_6dca206711024956a7cb6cda0a8cdb6a"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "cl-hooks-2327c946",
+ "records": null
+}

@@ -1,0 +1,21 @@
+{
+ "sdk": "langgraph",
+ "feature": "tools",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.4,
+ "spend": {
+  "requests": 2,
+  "in": 849,
+  "out": 68,
+  "usd": 0.000119,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "SKU-1 has 7 units in stock.",
+ "calls": [
+  "SKU-1"
+ ]
+}

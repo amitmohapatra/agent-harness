@@ -1,0 +1,94 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "builtin_read",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.9,
+ "spend": {
+  "requests": 2,
+  "in": 36316,
+  "out": 213,
+  "usd": 0.000976,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "The vault combination in notes.txt is **31-14-59**."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_e3031df1e40b47f8a475a5f6e08013df"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "cl-read-1a4596ab",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_e3031df1e40b47f8a475a5f6e08013df",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "8cd86d8c",
+    "user_id": "cl-read-1a4596ab",
+    "agent_id": "cl-read",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_e3031df1e40b47f8a475a5f6e08013df": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_e3031df1e40b47f8a475a5f6e08013df": [
+     {
+      "role": "USER",
+      "content": "Read notes.txt and tell me the vault combination."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "1\tThe vault combination is 31-14-59.\n2\t"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "The vault combination in notes.txt is **31-14-59**."
+     }
+    ]
+   },
+   "tools": {
+    "run_e3031df1e40b47f8a475a5f6e08013df": [
+     {
+      "tool_name": "Read",
+      "status": "ok",
+      "output": "{\"type\": \"text\", \"file\": {\"filePath\": \"/var/tmp/cons/sdkfull-tmp/tmp/cl-read-u0ghth9b/notes.txt\", \"content\": \"The vault combination is 31-14-59.\\n\", \"numLines\": 2, \"startLine\": 1, \"totalLines\": 2}}"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

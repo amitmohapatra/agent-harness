@@ -1,0 +1,1670 @@
+{
+ "claude_agent_sdk": {
+  "background_bash": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002105,
+    "file": "claude_agent_sdk/background_bash.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002623,
+    "file": "claude_agent_sdk/background_bash.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002255,
+    "file": "claude_agent_sdk/background_bash.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "builtin_read": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000796,
+    "file": "claude_agent_sdk/builtin_read.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000834,
+    "file": "claude_agent_sdk/builtin_read.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000976,
+    "file": "claude_agent_sdk/builtin_read.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "builtin_write": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000815,
+    "file": "claude_agent_sdk/builtin_write.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000844,
+    "file": "claude_agent_sdk/builtin_write.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001085,
+    "file": "claude_agent_sdk/builtin_write.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "can_use_tool": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002405,
+    "file": "claude_agent_sdk/can_use_tool.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00101,
+    "file": "claude_agent_sdk/can_use_tool.off.json"
+   }
+  },
+  "lifecycle_cancel": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001217,
+    "file": "claude_agent_sdk/lifecycle_cancel.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run_525421ea6f834c9da107237588d7e092: events lack RUN_STARTED/RUN_FINISHED: {'RUN_STARTED': 1, 'CONTEXT_LOADED': 1, 'TOOL_CALL_START': 1, 'TOOL_CALL_ARGS': 1, 'TOOL_CALL_END': 1, 'TOOL_CALL_RESULT': 1}"
+    ]
+   }
+  },
+  "lifecycle_pause": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000994,
+    "file": "claude_agent_sdk/lifecycle_pause.stack.json",
+    "records_ok": null,
+    "record_problems": null
+   }
+  },
+  "lifecycle_queued": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000682,
+    "file": "claude_agent_sdk/lifecycle_queued.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_resume": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000616,
+    "file": "claude_agent_sdk/lifecycle_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "live_session": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001089,
+    "file": "claude_agent_sdk/live_session.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001141,
+    "file": "claude_agent_sdk/live_session.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001076,
+    "file": "claude_agent_sdk/live_session.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "max_turns": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000598,
+    "file": "claude_agent_sdk/max_turns.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000653,
+    "file": "claude_agent_sdk/max_turns.off.json"
+   }
+  },
+  "own_hooks": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000772,
+    "file": "claude_agent_sdk/own_hooks.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000808,
+    "file": "claude_agent_sdk/own_hooks.off.json"
+   }
+  },
+  "partial_stream": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000591,
+    "file": "claude_agent_sdk/partial_stream.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000592,
+    "file": "claude_agent_sdk/partial_stream.off.json"
+   }
+  },
+  "plan_mode": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001614,
+    "file": "claude_agent_sdk/plan_mode.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00197,
+    "file": "claude_agent_sdk/plan_mode.off.json"
+   }
+  },
+  "sdk_tool": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002253,
+    "file": "claude_agent_sdk/sdk_tool.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002462,
+    "file": "claude_agent_sdk/sdk_tool.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002749,
+    "file": "claude_agent_sdk/sdk_tool.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "session_resume": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000752,
+    "file": "claude_agent_sdk/session_resume.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000803,
+    "file": "claude_agent_sdk/session_resume.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001313,
+    "file": "claude_agent_sdk/session_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "stdio_mcp": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001085,
+    "file": "claude_agent_sdk/stdio_mcp.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001361,
+    "file": "claude_agent_sdk/stdio_mcp.off.json"
+   }
+  },
+  "structured": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002156,
+    "file": "claude_agent_sdk/structured.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00237,
+    "file": "claude_agent_sdk/structured.off.json"
+   }
+  },
+  "subagent": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001149,
+    "file": "claude_agent_sdk/subagent.bare.json"
+   },
+   "off": {
+    "ok": false,
+    "error": null,
+    "usd": 0.001422,
+    "file": "claude_agent_sdk/subagent.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001293,
+    "file": "claude_agent_sdk/subagent.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  }
+ },
+ "deepagents": {
+  "files": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00028,
+    "file": "deepagents/files.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000418,
+    "file": "deepagents/files.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.0005,
+    "file": "deepagents/files.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001269,
+    "file": "deepagents/files.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "interrupt_on": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000597,
+    "file": "deepagents/interrupt_on.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000156,
+    "file": "deepagents/interrupt_on.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000793,
+    "file": "deepagents/interrupt_on.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000662,
+    "file": "deepagents/interrupt_on.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_cancel": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000135,
+    "file": "deepagents/lifecycle_cancel.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run_ea190527ef5a476c862e2f892f02063a: events lack RUN_STARTED/RUN_FINISHED: {'RUN_STARTED': 1, 'CONTEXT_LOADED': 1, 'TOOL_CALL_START': 1, 'TOOL_CALL_ARGS': 1}"
+    ]
+   }
+  },
+  "lifecycle_pause": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000602,
+    "file": "deepagents/lifecycle_pause.stack.json",
+    "records_ok": null,
+    "record_problems": null
+   }
+  },
+  "lifecycle_queued": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 4.7e-05,
+    "file": "deepagents/lifecycle_queued.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_resume": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000212,
+    "file": "deepagents/lifecycle_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "memory_files": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000347,
+    "file": "deepagents/memory_files.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00016,
+    "file": "deepagents/memory_files.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000462,
+    "file": "deepagents/memory_files.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "permissions": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000181,
+    "file": "deepagents/permissions.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000252,
+    "file": "deepagents/permissions.off.json"
+   }
+  },
+  "skills": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000667,
+    "file": "deepagents/skills.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000891,
+    "file": "deepagents/skills.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000565,
+    "file": "deepagents/skills.on.json"
+   }
+  },
+  "store_backend": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000293,
+    "file": "deepagents/store_backend.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000301,
+    "file": "deepagents/store_backend.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000701,
+    "file": "deepagents/store_backend.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "structured": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000542,
+    "file": "deepagents/structured.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000111,
+    "file": "deepagents/structured.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000724,
+    "file": "deepagents/structured.on.json"
+   }
+  },
+  "subagent": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00124,
+    "file": "deepagents/subagent.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000405,
+    "file": "deepagents/subagent.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001057,
+    "file": "deepagents/subagent.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00134,
+    "file": "deepagents/subagent.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "todos": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001592,
+    "file": "deepagents/todos.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000967,
+    "file": "deepagents/todos.off.json"
+   },
+   "on": {
+    "ok": false,
+    "error": null,
+    "usd": 0.000751,
+    "file": "deepagents/todos.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001847,
+    "file": "deepagents/todos.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  }
+ },
+ "kimi": {
+  "agents_md": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000614,
+    "file": "kimi/agents_md.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000697,
+    "file": "kimi/agents_md.off.json"
+   }
+  },
+  "background": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002201,
+    "file": "kimi/background.bare.json"
+   },
+   "off": {
+    "ok": false,
+    "error": null,
+    "usd": 0.006673,
+    "file": "kimi/background.off.json"
+   },
+   "stack": {
+    "ok": false,
+    "error": null,
+    "usd": 0.003369,
+    "file": "kimi/background.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run run_396d502f021a400684a70ca00021ecba: 1 questions asked, 0 tool_call feedback rows"
+    ]
+   }
+  },
+  "bash_write": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000895,
+    "file": "kimi/bash_write.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.003846,
+    "file": "kimi/bash_write.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.004237,
+    "file": "kimi/bash_write.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_cancel": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000431,
+    "file": "kimi/lifecycle_cancel.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_pause": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000814,
+    "file": "kimi/lifecycle_pause.stack.json",
+    "records_ok": null,
+    "record_problems": null
+   }
+  },
+  "lifecycle_queued": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000695,
+    "file": "kimi/lifecycle_queued.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_resume": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001162,
+    "file": "kimi/lifecycle_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "mcp": {
+   "bare": {
+    "ok": false,
+    "error": null,
+    "usd": 0.003061,
+    "file": "kimi/mcp.bare.json"
+   },
+   "off": {
+    "ok": false,
+    "error": null,
+    "usd": 0.000824,
+    "file": "kimi/mcp.off.json"
+   },
+   "stack": {
+    "ok": false,
+    "error": null,
+    "usd": 0.001599,
+    "file": "kimi/mcp.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "plan_mode": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002472,
+    "file": "kimi/plan_mode.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00364,
+    "file": "kimi/plan_mode.off.json"
+   }
+  },
+  "read": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000887,
+    "file": "kimi/read.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.003107,
+    "file": "kimi/read.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.003326,
+    "file": "kimi/read.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "session": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000825,
+    "file": "kimi/session.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001229,
+    "file": "kimi/session.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001932,
+    "file": "kimi/session.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "skills": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001008,
+    "file": "kimi/skills.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001022,
+    "file": "kimi/skills.off.json"
+   }
+  },
+  "subagent": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002788,
+    "file": "kimi/subagent.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001576,
+    "file": "kimi/subagent.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002349,
+    "file": "kimi/subagent.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "todo": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001768,
+    "file": "kimi/todo.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001913,
+    "file": "kimi/todo.off.json"
+   }
+  }
+ },
+ "langgraph": {
+  "checkpointer": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 1.6e-05,
+    "file": "langgraph/checkpointer.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 1.8e-05,
+    "file": "langgraph/checkpointer.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 5.4e-05,
+    "file": "langgraph/checkpointer.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000136,
+    "file": "langgraph/checkpointer.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "context_schema": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 9.8e-05,
+    "file": "langgraph/context_schema.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000104,
+    "file": "langgraph/context_schema.off.json"
+   }
+  },
+  "custom_stream": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000117,
+    "file": "langgraph/custom_stream.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000123,
+    "file": "langgraph/custom_stream.off.json"
+   }
+  },
+  "fallback": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 4e-06,
+    "file": "langgraph/fallback.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 7e-06,
+    "file": "langgraph/fallback.off.json"
+   }
+  },
+  "hitl": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000111,
+    "file": "langgraph/hitl.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000117,
+    "file": "langgraph/hitl.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000285,
+    "file": "langgraph/hitl.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000207,
+    "file": "langgraph/hitl.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_cancel": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000119,
+    "file": "langgraph/lifecycle_cancel.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run_ce9d2c4ea2b6477e8c38dc22c0d9196e: events lack RUN_STARTED/RUN_FINISHED: {'RUN_STARTED': 1, 'CONTEXT_LOADED': 1, 'TOOL_CALL_START': 1, 'TOOL_CALL_ARGS': 1}"
+    ]
+   }
+  },
+  "lifecycle_pause": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000132,
+    "file": "langgraph/lifecycle_pause.stack.json",
+    "records_ok": null,
+    "record_problems": null
+   }
+  },
+  "lifecycle_queued": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 9.6e-05,
+    "file": "langgraph/lifecycle_queued.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_resume": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000241,
+    "file": "langgraph/lifecycle_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "own_interrupt": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000126,
+    "file": "langgraph/own_interrupt.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000132,
+    "file": "langgraph/own_interrupt.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000299,
+    "file": "langgraph/own_interrupt.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000222,
+    "file": "langgraph/own_interrupt.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "pii": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 9.3e-05,
+    "file": "langgraph/pii.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 8.2e-05,
+    "file": "langgraph/pii.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000148,
+    "file": "langgraph/pii.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "store": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000249,
+    "file": "langgraph/store.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000352,
+    "file": "langgraph/store.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00067,
+    "file": "langgraph/store.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "stream": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 3.6e-05,
+    "file": "langgraph/stream.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 6e-05,
+    "file": "langgraph/stream.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000262,
+    "file": "langgraph/stream.on.json"
+   }
+  },
+  "structured": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000174,
+    "file": "langgraph/structured.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00018,
+    "file": "langgraph/structured.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000335,
+    "file": "langgraph/structured.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00027,
+    "file": "langgraph/structured.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run run_d14a770f3a5048a08c04d2e82416dc58: a success with no ASSISTANT text in memory"
+    ]
+   }
+  },
+  "tool_retry": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000131,
+    "file": "langgraph/tool_retry.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000137,
+    "file": "langgraph/tool_retry.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000228,
+    "file": "langgraph/tool_retry.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "tools": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000119,
+    "file": "langgraph/tools.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000125,
+    "file": "langgraph/tools.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000292,
+    "file": "langgraph/tools.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000215,
+    "file": "langgraph/tools.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  }
+ },
+ "openai_agents": {
+  "agent_tool": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000256,
+    "file": "openai_agents/agent_tool.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00084,
+    "file": "openai_agents/agent_tool.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001258,
+    "file": "openai_agents/agent_tool.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "context": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000104,
+    "file": "openai_agents/context.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000395,
+    "file": "openai_agents/context.off.json"
+   }
+  },
+  "context_per_run": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000104,
+    "file": "openai_agents/context_per_run.bare.json"
+   },
+   "off": {
+    "ok": false,
+    "error": null,
+    "usd": 0.000613,
+    "file": "openai_agents/context_per_run.off.json"
+   }
+  },
+  "handoff": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000229,
+    "file": "openai_agents/handoff.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000395,
+    "file": "openai_agents/handoff.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001012,
+    "file": "openai_agents/handoff.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "hooks": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000124,
+    "file": "openai_agents/hooks.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000415,
+    "file": "openai_agents/hooks.off.json"
+   }
+  },
+  "hooks_per_run": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000124,
+    "file": "openai_agents/hooks_per_run.bare.json"
+   },
+   "off": {
+    "ok": false,
+    "error": null,
+    "usd": 0.000415,
+    "file": "openai_agents/hooks_per_run.off.json"
+   }
+  },
+  "input_guard": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 4.3e-05,
+    "file": "openai_agents/input_guard.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000182,
+    "file": "openai_agents/input_guard.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000382,
+    "file": "openai_agents/input_guard.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_cancel": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.0,
+    "file": "openai_agents/lifecycle_cancel.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run_c81a0f0a10f948a28fdf0ca436ccccf1: events lack RUN_STARTED/RUN_FINISHED: {'RUN_STARTED': 1, 'CONTEXT_LOADED': 1, 'TOOL_CALL_START': 1, 'TOOL_CALL_ARGS': 1}"
+    ]
+   }
+  },
+  "lifecycle_pause": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000436,
+    "file": "openai_agents/lifecycle_pause.stack.json",
+    "records_ok": null,
+    "record_problems": null
+   }
+  },
+  "lifecycle_queued": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.0004,
+    "file": "openai_agents/lifecycle_queued.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_resume": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000436,
+    "file": "openai_agents/lifecycle_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "max_turns": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000119,
+    "file": "openai_agents/max_turns.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000215,
+    "file": "openai_agents/max_turns.off.json"
+   }
+  },
+  "mcp": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000136,
+    "file": "openai_agents/mcp.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000427,
+    "file": "openai_agents/mcp.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001241,
+    "file": "openai_agents/mcp.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "model_settings": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 1.1e-05,
+    "file": "openai_agents/model_settings.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000185,
+    "file": "openai_agents/model_settings.off.json"
+   }
+  },
+  "needs_approval": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000123,
+    "file": "openai_agents/needs_approval.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000414,
+    "file": "openai_agents/needs_approval.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00081,
+    "file": "openai_agents/needs_approval.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "output_guard": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 5e-06,
+    "file": "openai_agents/output_guard.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000183,
+    "file": "openai_agents/output_guard.off.json"
+   }
+  },
+  "sandbox_docker": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001416,
+    "file": "openai_agents/sandbox_docker.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001707,
+    "file": "openai_agents/sandbox_docker.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002102,
+    "file": "openai_agents/sandbox_docker.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "sandbox_local": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001399,
+    "file": "openai_agents/sandbox_local.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00169,
+    "file": "openai_agents/sandbox_local.off.json"
+   }
+  },
+  "session": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 1.4e-05,
+    "file": "openai_agents/session.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000362,
+    "file": "openai_agents/session.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001331,
+    "file": "openai_agents/session.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "stream": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.0,
+    "file": "openai_agents/stream.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.0,
+    "file": "openai_agents/stream.off.json"
+   }
+  },
+  "structured": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000208,
+    "file": "openai_agents/structured.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000464,
+    "file": "openai_agents/structured.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000863,
+    "file": "openai_agents/structured.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "tool_use_behavior": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 6.7e-05,
+    "file": "openai_agents/tool_use_behavior.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000212,
+    "file": "openai_agents/tool_use_behavior.off.json"
+   }
+  },
+  "tools": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000126,
+    "file": "openai_agents/tools.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000417,
+    "file": "openai_agents/tools.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000816,
+    "file": "openai_agents/tools.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  }
+ },
+ "react": {
+  "lifecycle_cancel": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000131,
+    "file": "react/lifecycle_cancel.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run_0e00420b2eaa451da89243dbe6dca415: events lack RUN_STARTED/RUN_FINISHED: {'RUN_STARTED': 1, 'CONTEXT_LOADED': 1, 'TOOL_CALL_START': 1, 'TOOL_CALL_ARGS': 1}"
+    ]
+   }
+  },
+  "lifecycle_pause": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000531,
+    "file": "react/lifecycle_pause.stack.json",
+    "records_ok": null,
+    "record_problems": null
+   }
+  },
+  "lifecycle_queued": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 4.1e-05,
+    "file": "react/lifecycle_queued.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "lifecycle_resume": {
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 6.9e-05,
+    "file": "react/lifecycle_resume.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "r_approval": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000571,
+    "file": "react/r_approval.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000586,
+    "file": "react/r_approval.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "r_files": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000814,
+    "file": "react/r_files.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001934,
+    "file": "react/r_files.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "r_plan_mode": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001082,
+    "file": "react/r_plan_mode.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001334,
+    "file": "react/r_plan_mode.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "r_reject": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000365,
+    "file": "react/r_reject.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.00019,
+    "file": "react/r_reject.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "r_structured": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000337,
+    "file": "react/r_structured.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000607,
+    "file": "react/r_structured.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run run_8d3103cdd50b4403a088b3a1d696915e: a success with no ASSISTANT text in memory"
+    ]
+   }
+  },
+  "r_subagent": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.001699,
+    "file": "react/r_subagent.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.002011,
+    "file": "react/r_subagent.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  },
+  "r_tools": {
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000294,
+    "file": "react/r_tools.off.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000563,
+    "file": "react/r_tools.stack.json",
+    "records_ok": true,
+    "record_problems": []
+   }
+  }
+ },
+ "swarm": {
+  "s_handoff": {
+   "bare": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000443,
+    "file": "swarm/s_handoff.bare.json"
+   },
+   "off": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000419,
+    "file": "swarm/s_handoff.off.json"
+   },
+   "on": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000381,
+    "file": "swarm/s_handoff.on.json"
+   },
+   "stack": {
+    "ok": true,
+    "error": null,
+    "usd": 0.000651,
+    "file": "swarm/s_handoff.stack.json",
+    "records_ok": false,
+    "record_problems": [
+     "run run_7e39e48de5754310b25e7b1bdccb2506: 1 questions asked, 0 tool_call feedback rows"
+    ]
+   }
+  }
+ }
+}

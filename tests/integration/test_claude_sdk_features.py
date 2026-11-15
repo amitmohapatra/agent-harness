@@ -30,8 +30,11 @@ from claude_agent_sdk import (
     ProcessError,
     ResultMessage,
     StreamEvent,
+    create_sdk_mcp_server,
 )
+from claude_agent_sdk import tool as sdk_tool
 from claude_agent_sdk.types import PermissionRuleValue
+from mcp.types import ToolAnnotations
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
@@ -944,6 +947,58 @@ async def test_partial_messages_and_other_kinds_of_message_leave_the_answer_as_i
     assert "".join(deltas) == "the tide is out"
     [result] = [m for m in seen if isinstance(m, ResultMessage)]
     assert result.usage == {"input_tokens": 10, "output_tokens": 5}
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_partial_messages_stream_the_runs_text_as_the_model_writes_it(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """With ``include_partial_messages`` the SDK's own stream gives the model's text delta by
+    delta (``StreamEvent``); the run's stream does the same — each delta a text event as it
+    comes, the message's whole text not sent again — on the query and the live way (seen on
+    Haiku: one event a message, docs/research/sdk-full-stack-2026-11-15)."""
+    target = options(tmp_path, [{"text": "the tide is out"}], include_partial_messages=True)
+    agent = harness.wrap(target, id="partial-deltas")
+    events = [e async for e in agent.stream("tide?", user="u1", thread=conversation(path))]
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert said == ["the", " tide", " is", " out"]
+    assert events[-1].data["result"] == "the tide is out"
+
+
+async def test_without_partial_messages_the_runs_text_is_each_message_once(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Without ``include_partial_messages`` the CLI sends no deltas: each assistant message's
+    text is one text event."""
+    agent = harness.wrap(options(tmp_path, [{"text": "the tide is out"}]), id="whole")
+    events = [e async for e in agent.stream("tide?", user="u1")]
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert said == ["the tide is out"]
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["allowed", "unnamed"])
+async def test_an_in_process_tools_annotations_decide_it_when_allowed_tools_names_it(
+    harness: Harness, tmp_path: Path, named: bool
+) -> None:
+    """An in-process server's tool is governed by its annotations (``readOnlyHint``: a read,
+    which runs unasked) — also when ``allowed_tools`` names it, as the SDK's docs pre-approve
+    an MCP tool: naming it there said nothing of its risk, and each call asked a person (seen
+    on Haiku, docs/research/sdk-full-stack-2026-11-15). APR-01"""
+    ran: list[str] = []
+
+    @sdk_tool("stock", "Units of a SKU.", {"sku": str},
+              annotations=ToolAnnotations(read_only_hint=True))  # fmt: skip
+    async def stock(args: dict[str, Any]) -> dict[str, Any]:
+        ran.append(args["sku"])
+        return {"content": [{"type": "text", "text": "7 units"}]}
+
+    shop = create_sdk_mcp_server("shop", tools=[stock])
+    script = [{"tool": "stock", "server": "shop", "args": {"sku": "S1"}}, {"text": "{last}"}]
+    allowed = {"allowed_tools": ["mcp__shop__stock"]} if named else {}
+    target = options(tmp_path, script, mcp_servers={"shop": shop}, **allowed)
+    result = await harness.wrap(target, id="annotated").run("stock of S1?", user="u1")
+    assert result.interrupt is None and result.status is RunStatus.SUCCESS, result.error
+    assert ran == ["S1"] and result.answer == "7 units"
 
 
 # --------------------------------------------------------------------------- sessions

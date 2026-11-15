@@ -1,0 +1,88 @@
+{
+ "sdk": "openai_agents",
+ "feature": "lifecycle_resume",
+ "arm": "stack",
+ "error": null,
+ "seconds": 9.0,
+ "spend": {
+  "requests": 1,
+  "in": 4060,
+  "out": 59,
+  "usd": 0.000436,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "SUCCESS",
+ "answer": "I sent a wire of 300 to account ACME-1. The tool confirmed it completed. It didn't return a transaction ID or currency, so I can't confirm those details from my side.",
+ "calls_made": 1,
+ "records": {
+  "run": {
+   "run_id": "run_bbf6773a0d8f4fed9e80dcc1b4477995",
+   "status": "SUCCESS",
+   "parent_run_id": null,
+   "thread_id": "7f53f4df",
+   "user_id": "life-c46e7d39",
+   "agent_id": "lc-openai_agents-restart",
+   "attempt": 2,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_bbf6773a0d8f4fed9e80dcc1b4477995": {
+    "RUN_STARTED": 2,
+    "CONTEXT_LOADED": 2,
+    "INTERRUPT": 1,
+    "RUN_FINISHED": 2,
+    "CUSTOM": 3,
+    "TOOL_CALL_START": 1,
+    "TOOL_CALL_ARGS": 1,
+    "TOOL_CALL_END": 1,
+    "TOOL_CALL_RESULT": 1
+   }
+  },
+  "messages": {
+   "run_bbf6773a0d8f4fed9e80dcc1b4477995": [
+    {
+     "role": "USER",
+     "content": "Wire 300 to account ACME-1 now: call the wire tool, do not ask me first."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": ""
+    },
+    {
+     "role": "TOOL",
+     "content": "wire-openai_agents done for ACME-1"
+    },
+    {
+     "role": "ASSISTANT",
+     "content": "I sent a wire of 300 to account ACME-1. The tool confirmed it completed. It didn't return a transaction ID or currency, so I can't confirm those details from my side."
+    }
+   ]
+  },
+  "tools": {
+   "run_bbf6773a0d8f4fed9e80dcc1b4477995": [
+    {
+     "tool_name": "wire",
+     "status": "ok",
+     "output": "wire-openai_agents done for ACME-1"
+    }
+   ]
+  },
+  "feedback": [
+   {
+    "target_kind": "tool_call",
+    "verdict": "approve",
+    "source": "interrupt"
+   },
+   {
+    "target_kind": "run",
+    "verdict": "confirm",
+    "source": "system"
+   }
+  ]
+ }
+}

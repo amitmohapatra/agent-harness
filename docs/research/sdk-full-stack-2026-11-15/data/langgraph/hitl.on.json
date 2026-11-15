@@ -1,0 +1,74 @@
+{
+ "sdk": "langgraph",
+ "feature": "hitl",
+ "arm": "on",
+ "error": null,
+ "seconds": 1.7,
+ "spend": {
+  "requests": 2,
+  "in": 3709,
+  "out": 62,
+  "usd": 0.000285,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "paused": true,
+ "made": [
+  "O-77"
+ ],
+ "answer": "Order O-77 has been refunded.",
+ "interrupt": {
+  "interrupt_id": "run_741aa892ab81429789155500f88913ce.1.1",
+  "tenant_id": "default",
+  "run_id": "run_741aa892ab81429789155500f88913ce",
+  "reason": "APPROVAL",
+  "question": "Approve refund?",
+  "ui": "approve",
+  "expects": null,
+  "options": [],
+  "multiple": false,
+  "ui_schema": null,
+  "component": null,
+  "props": null,
+  "payload": {
+   "action_requests": [
+    {
+     "name": "refund",
+     "args": {
+      "order": "O-77"
+     },
+     "description": "Tool execution requires approval\n\nTool: refund\nArgs: {'order': 'O-77'}"
+    }
+   ],
+   "review_configs": [
+    {
+     "action_name": "refund",
+     "allowed_decisions": [
+      "approve",
+      "edit",
+      "reject",
+      "respond"
+     ]
+    }
+   ]
+  },
+  "payload_ref": null,
+  "tool_call": {
+   "tool": "refund",
+   "args": {
+    "order": "O-77"
+   },
+   "task": "",
+   "step": null,
+   "idempotency_key": "6b812e65c47f094a4e18b39e09f9ec2f"
+  },
+  "assignee": null,
+  "deadline": null,
+  "escalate_to": null,
+  "created_at": "2026-11-15T09:18:27.155152Z"
+ },
+ "status": "SUCCESS",
+ "run_id": "run_741aa892ab81429789155500f88913ce"
+}
