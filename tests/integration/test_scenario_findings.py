@@ -158,11 +158,12 @@ async def test_claude_a_burst_to_one_chat_each_turn_continues_the_turn_before(
     listed = h.runs.iterate
 
     async def newest_created_first(**query: Any) -> Any:
-        runs = [
-            (await h.runs.get(r.run_id, tenant=query.get("tenant")), r)
-            async for r in listed(**query)
-        ]
-        for _, found in sorted(runs, key=lambda r: (r[0].created_at, r[1].run_id), reverse=True):
+        runs = []
+        async for summary in listed(**query):
+            record = await h.runs.get(summary.run_id, tenant=query.get("tenant"))
+            assert record is not None
+            runs.append((record.created_at, summary.run_id, summary))
+        for *_, found in sorted(runs, key=lambda r: (r[0], r[1]), reverse=True):
             yield found
 
     h.runs.iterate = newest_created_first  # type: ignore[method-assign]

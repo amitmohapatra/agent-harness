@@ -3374,7 +3374,7 @@ def _steps_said(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
     messages = list(request.messages)
     groups: list[list[int]] = []
     n = asked + 1
-    while n < len(messages) and isinstance(messages[n], AIMessage) and messages[n].tool_calls:
+    while n < len(messages) and _calls_tools(messages[n]):
         group = [n]
         n += 1
         while n < len(messages) and isinstance(messages[n], ToolMessage):
@@ -3409,6 +3409,10 @@ def _steps_said(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
     )
     kept = [m for i, m in enumerate(messages) if i not in gone]
     return request.override(messages=[*kept[: asked + 1], note, *kept[asked + 1 :]])
+
+
+def _calls_tools(message: AnyMessage) -> bool:
+    return isinstance(message, AIMessage) and bool(message.tool_calls)
 
 
 def _step_lines(messages: Sequence[AnyMessage], group: Sequence[int]) -> list[str]:
