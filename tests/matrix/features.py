@@ -134,9 +134,16 @@ async def events(w: World) -> None:
     if w.mode == "stream":
         assert [e.type for e in o.surface][-1] is RunEventType.RUN_FINISHED
     if w.mode == "agui":
-        # numbered one by one; an activity line shares the number of the result it follows
+        # each event's id is where its harness event is in the run's log — its attempt, then
+        # its sequence in it — the same on every replica, so a reconnect anywhere resumes with
+        # no gap or repeat (H-AGUI, d21c1ca; docs/surfaces.md "Several replicas"): increasing,
+        # unused only for the harness events RUN_FINISHED carries (the approval's INTERRUPT)
+        logged = {(e.attempt - 1) * 2**32 + e.sequence: e.type for e in o.events}
         numbers = [n for n, e in o.surface if e["type"] != "ACTIVITY_SNAPSHOT"]
-        assert numbers == list(range(len(numbers))), numbers
+        assert numbers == sorted(set(numbers)) and set(numbers) <= logged.keys(), numbers
+        unsent = {kind for n, kind in logged.items() if n not in numbers}
+        assert unsent == {RunEventType.INTERRUPT}, (unsent, numbers)
+        # an activity line shares the number of the result it follows
         lines = [i for i, (_, e) in enumerate(o.surface) if e["type"] == "ACTIVITY_SNAPSHOT"]
         assert lines and all(o.surface[i][0] == o.surface[i - 1][0] for i in lines), lines
         assert o.surface[-1][1]["type"] == "RUN_FINISHED" and o.surface[-1][1]["result"] == o.answer
@@ -1111,10 +1118,15 @@ async def agui_surface(w: World) -> None:
     run_id = w.outcomes[-1].run_id
     handle = w._current
     assert handle is not None and handle.http is not None
-    replay = await handle.http.get(f"/agui/runs/{run_id}/events", params={"after": 0})
     from trellis.harness.agui.sse import decode
 
-    assert decode(replay.text) == w.outcomes[-1].surface[1:]
+    surface = w.outcomes[-1].surface
+    # from the start, and from the first attempt's end (past the id the INTERRUPT leaves
+    # unused, into the next attempt's): what came after, no gap or repeat
+    ended = next(n for n, e in surface if e["type"] == "RUN_FINISHED")
+    for after in (0, ended):
+        replay = await handle.http.get(f"/agui/runs/{run_id}/events", params={"after": after})
+        assert decode(replay.text) == [(n, e) for n, e in surface if n > after], after
 
 
 #: A tool the AG-UI client declares (a CopilotKit frontend action): the app runs it.
