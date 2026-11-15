@@ -50,7 +50,7 @@ command="kimi", reads=())`:
 | `model` | the model's name on the gateway: with Bifrost serving the harness, Kimi's model calls go through Bifrost's OpenAI route with the virtual key (below). Without Bifrost, Kimi calls the model it is configured with: its login (`kimi login`) or `KIMI_MODEL_*` in `env` |
 | `cwd` | where Kimi works (this process's working directory by default) |
 | `env` | over this process's environment, for the `kimi` process (`KIMI_MODEL_BASE_URL`, `KIMI_MODEL_API_KEY`, `KIMI_LOOP_MAX_STEPS_PER_TURN`...) |
-| `mcp_servers` | Kimi's own MCP servers, as ACP takes them: `{"name", "command", "args", "env"}` (stdio) or `{"type": "http", "name", "url", "headers"}`, beside the harness's |
+| `mcp_servers` | Kimi's own MCP servers, as ACP takes them: `{"name", "command", "args", "env"}` (stdio) or `{"type": "http", "name", "url", "headers"}`, beside the harness's — over HTTP for Kimi to offer their tools to its model ([below](#models-swarms-and-limits)) |
 | `mode` | Kimi's session mode for a session the run starts: `"default"` or `"plan"`. `"auto"` and `"yolo"` are refused: they approve on their own, and governance would see no call. Whatever is given, every session is set to ask ([below](#the-session-mode)) |
 | `sandbox` | `sandbox()`: Kimi's `Bash` and file writes go to the run's sandbox (below) |
 | `skills` | a skill set, `**src.kimi()`: the run's skills in Kimi's own skills folder (below) |
@@ -206,6 +206,15 @@ that ends with nothing at work ends it, as ever.
   agent's turns (`turn.prompt`, one whose `origin` is not the `user` being Kimi's own,
   `turn.ended`), whose a permission request is (`interaction.request`: ACP's names no agent),
   and each sub-agent's usage.
+* **A task that ends while a turn waits for it answers that turn.** When a background task
+  ends while the user's turn runs (the model waiting for it with `WaitFor`, say), Kimi steers
+  the task's notification into that turn (`prompt.steered`), ends the turn right after its
+  step with no answer, and answers in a turn of its own — which ACP does not forward. The
+  harness waits for that turn (as long as a prompt waits for Kimi's own turns, 30 seconds at
+  most) and takes its answer, read from Kimi's log, as the user's turn's answer, as `kimi -p`
+  prints it; what it spends is that run's, counted once (the next turn counts only its own).
+  Kimi asks about a call it makes in that turn in the user's run, which is still under way;
+  the calls themselves are not on the run's stream (ACP shows none of them).
 * **A background sub-agent keeps its child run.** The child run its `Agent` call started stays
   `RUNNING` from there — never `SUCCESS` with the launch's words — until Kimi's log says its task
   ended: `SUCCESS` with what the sub-agent said last, `ERROR` when it failed, `CANCELLED` when it
@@ -273,6 +282,19 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 * **Swarms.** Not over ACP ([above](#what-is-automatic)). `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` is still
   set to the harness's adaptive limit of child runs unless your `env` names it, for a Kimi
   whose swarm mode is on.
+* **Your MCP servers: give them over HTTP.** Kimi 2.6.2 offers its model the tools of an MCP
+  server over HTTP (`{"type": "http", "name", "url", "headers"}`) in its first request, but not
+  those of a stdio server it starts itself: it starts the server, lists its tools
+  (`tool_select.initialized`, as `initial`, `inline` tools) and leaves them out of every model
+  request (`llm.tools_snapshot`), offering them only through its `select_tools`, which a model
+  without Kimi's `dynamically_loaded_tools` capability is not given. Measured with a plain ACP
+  client and under the harness alike (Haiku and a scripted model), for a Python MCP SDK server
+  given in `session/new` (started at once, and a second late), in the Kimi home's `mcp.json`
+  (the team's, linked into each user's home: started with the process) and in a project's
+  `.kimi-code/mcp.json` (not read at all: Kimi's workspace trust gates it). The harness has no
+  other way to hand Kimi a server, so run a stdio server behind HTTP (most MCP SDKs serve
+  streamable HTTP) and give its URL; the harness's own tools reach Kimi that way
+  (pinned by `test_kimi.py::test_kimi_offers_its_model_an_mcp_server_over_http_in_its_first_request`).
 * **Framework options.** `framework_options=` takes `ACPAgent` fields: `env` and `mcp_servers`
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
   `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer

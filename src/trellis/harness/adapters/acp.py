@@ -1344,9 +1344,31 @@ class Attempt:
             prompt, self.followup = self.followup, None
             if self.runtime.pending is not None or self.runtime.budget_spent is not None:
                 return
+            if not answered and (carried := await self._carried()) is not None:
+                answered = True
+                yield carried
             told = None if prompt is not None or asked_once else self._unanswered(answered)
             if told is not None:  # the turn ended with no answer: asked once more
                 asked_once, prompt = True, told
+
+    async def _carried(self) -> Any:
+        """The turn's answer when Kimi gave it in a turn of its own (``ACPSession.carried_on``:
+        a background task's notification steered into the turn, which Kimi ended with no
+        answer), as the text update ACP would have sent; what that turn spent is the run's,
+        counted once. ``None`` when the turn has no such answer."""
+        from acp import text_block
+        from acp.schema import AgentMessageChunk
+
+        assert self.session is not None  # bound before its turns
+        self.runtime.model_started(STEP)
+        try:
+            said = await self.session.carried_on()
+        finally:
+            self.runtime.model_ended(STEP)
+        if said is None:
+            return None
+        await self._spent()
+        return AgentMessageChunk(session_update="agent_message_chunk", content=text_block(said))
 
     def _unanswered(self, answered: bool) -> str | None:
         """What the agent is told when its turn ended with no answer where the run asks once

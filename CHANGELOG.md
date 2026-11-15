@@ -14,6 +14,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   adapter, and a run cancelled while it waited its turn). The attempt now stops first, its
   log takes its last events, and agent-runs' own cancel ends it, keeping the reason and who
   asked. A run a worker holds is asked to stop through agent-runs first, as before.
+* **Kimi: a background command's result read in a later turn answers that turn.** A turn
+  that waited for a task it had started (`WaitFor`) while the task ended failed `NO_ANSWER`:
+  Kimi steers the task's notification into the turn, ends it after the wait, and answers in
+  a turn of its own that ACP does not forward. The harness now waits for that turn and takes
+  its answer from Kimi's log, as `kimi -p` does; its tokens are that run's, counted once
+  ([kimi.md](docs/frameworks/kimi.md#background-work)).
+* **Docs: Kimi offers its model an MCP server over HTTP, not a stdio one.** Kimi 2.6.2 starts
+  a stdio MCP server and lists its tools but leaves them out of its model's requests, given in
+  ACP's `session/new` or in its own `mcp.json` alike; one over HTTP is offered at once
+  ([kimi.md](docs/frameworks/kimi.md#models-swarms-and-limits)).
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 

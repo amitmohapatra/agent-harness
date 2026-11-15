@@ -22,7 +22,10 @@ session (``bridges.claude_live``) is ``bridges.live``'s: its relays, its backgro
   a task's start and end (``task.started``, ``task.terminated``; a sub-agent's last word,
   ``subagent.completed``), the main agent's turns (``turn.prompt`` — one whose ``origin`` is
   not the ``user`` is Kimi's own — and ``turn.ended``), whose a permission request is
-  (``interaction.request``: ACP's names no agent) and what each sub-agent spends.
+  (``interaction.request``: ACP's names no agent) and what each sub-agent spends. A task's
+  notification Kimi steered into the user's turn (``prompt.steered``) ends that turn with no
+  answer: what Kimi's own turn for it says is that turn's answer
+  (:meth:`ACPSession.carried_on`).
 * **One prompt at a time.** A prompt sent while Kimi runs a turn of its own is queued behind
   it: Kimi answers ``end_turn`` at once and runs it later, unseen. So a prompt waits until the
   log shows Kimi idle (``Keeper.settled``); a prompt Kimi queued anyway fails the turn saying
@@ -299,6 +302,18 @@ class ACPSession(Keeper[Background]):
         self.drain: asyncio.Task[None] | None = None
         #: how many turns of its own Kimi began (for a task's end), as the log says
         self.own_turns = 0
+        #: the prompt of the user's latest turn, as the log names it (``turn.prompt``)
+        self._prompt: str | None = None
+        #: the notifications Kimi steered into that prompt's turn (``prompt.steered``: a task
+        #: that ended while it ran): Kimi ends that turn after its step and answers them in a
+        #: turn of its own (:meth:`carried_on`)
+        self._steered: set[str] = set()
+        #: that turn of Kimi's own while it is under way: its id, and what it said after its
+        #: last call (its text parts, as the log has them)
+        self._carrying: str | None = None
+        self._carried: list[str] = []
+        #: what that turn answered, once it ended, until the turn it carries on takes it
+        self._answered: str | None = None
         #: each permission request as Kimi logs it (``interaction.request``), by call id:
         #: whose it is, and what Kimi shows its own user of the call (:func:`_shown`) — the
         #: most recent (``bounded.MAXSIZE``): a request is read here as it is asked
@@ -586,14 +601,60 @@ class ACPSession(Keeper[Background]):
         """A turn of the main agent began or ended: one of Kimi's own (its ``turn.prompt``
         comes from a task's notification, not from the ``user``) is under way until it ends;
         once one ended the session takes a prompt (a task that ended meanwhile was told in it:
-        a turn takes what came while it ran)."""
-        if kind == "turn.prompt" and (entry.get("origin") or {}).get("kind") != "user":
+        a turn takes what came while it ran). A notification steered into the user's turn
+        (``prompt.steered``) is answered in a turn of Kimi's own: what it says is read
+        (:meth:`_carried_on`)."""
+        if kind == "turn.prompt" and (entry.get("origin") or {}).get("kind") == "user":
+            self._prompt = str(entry.get("promptId"))
+            self._steered.clear()
+        elif kind == "turn.prompt":
             self.injected, self.due = True, False
             self.own_turns += 1
             self._settled.clear()
+            if str(entry.get("promptId")) in self._steered:
+                self._carrying, self._carried = str(entry.get("turnId")), []
+        elif kind == "prompt.steered" and str(entry.get("activePromptId")) == self._prompt:
+            self._steered.update(str(p) for p in entry.get("promptIds") or ())
+        elif kind == "context.append_loop_event":
+            self._carried_on(entry.get("event") or {})
         elif kind == "turn.ended":
             self.injected = self.due = False
             self._settled.set()
+            if self._carrying is not None and str(entry.get("turnId")) == self._carrying:
+                self._answered, self._carrying = "".join(self._carried), None
+
+    def _carried_on(self, event: Mapping[str, Any]) -> None:
+        """A step of a turn of the main agent's, as its log has it: of the turn of Kimi's own
+        that answers a notification steered into the user's turn, its text after its last
+        call is kept (what Kimi's ``-p`` prints of it)."""
+        if self._carrying is None or str(event.get("turnId")) != self._carrying:
+            return
+        part = event.get("part") or {}
+        if event.get("type") == "tool.call":
+            self._carried.clear()
+        elif event.get("type") == "content.part" and part.get("type") == "text":
+            self._carried.append(str(part.get("text") or ""))
+
+    async def carried_on(self) -> str | None:
+        """What Kimi answered the user's turn being served with, in a turn of its own: a
+        background task that ended while that turn ran has its notification steered into it
+        (``prompt.steered``); Kimi then ends the turn after its step, with no answer, and
+        answers the notification in a turn of its own right after — which ACP does not
+        forward. Its answer, read from the log once it ended (waited for as long as a prompt
+        waits for Kimi's own turns, ``live.SETTLE_SECONDS``); ``None`` when nothing was
+        steered into the turn, or that turn did not end in time."""
+
+        async def ended() -> bool:
+            await self.read()
+            return self._answered is not None
+
+        await self.read()
+        if not self._steered:
+            return None
+        await _logged_in_time(ended, live.SETTLE_SECONDS)
+        answered, self._answered = self._answered, None
+        self._steered.clear()
+        return answered
 
     def _task_ended(self, task_id: str, status: str, summary: str) -> None:
         super()._task_ended(task_id, status, summary)

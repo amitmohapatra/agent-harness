@@ -151,7 +151,7 @@ class PlannedEndpoint:
                     results.append(found)
             elif role == "user":
                 users += 1
-                said = _system_reminders(text)
+                said = unreminded(text)
                 matched = _EDITED.search(said)
                 if matched:
                     edited = (matched["tool"], json.loads(matched["args"]))
@@ -310,7 +310,7 @@ def attached_endpoints() -> list[PlannedEndpoint]:
     return list(shared.endpoints.values()) if shared is not None else []
 
 
-def _system_reminders(text: str) -> str:
+def unreminded(text: str) -> str:
     """A user message less the reminders Kimi puts before it."""
     return re.sub(r"<system-reminder>.*?</system-reminder>\s*", "", text, flags=re.DOTALL).strip()
 
@@ -418,9 +418,7 @@ def _ran(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _told_to_answer(body: dict[str, Any]) -> bool:
     """Whether a later user message tells the model to answer now (its step limit, a loop)."""
     users = [m for m in body["messages"] if m.get("role") == "user"]
-    return any(
-        _system_reminders(text_of(m.get("content"))).startswith(_TOLD_TO_ANSWER) for m in users[1:]
-    )
+    return any(unreminded(text_of(m.get("content"))).startswith(_TOLD_TO_ANSWER) for m in users[1:])
 
 
 def kimi_home_of(user: str, tenant: str = "default") -> Path:
