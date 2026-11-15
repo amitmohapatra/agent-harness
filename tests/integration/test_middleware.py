@@ -780,11 +780,15 @@ def test_the_helpers_read_what_they_are_given() -> None:
 
     # no user message to keep: nothing is put back; a summary in the state ends the head
     bare = request([summary], [SystemMessage("context", id="c")])
-    assert _with_task(bare) is bare
+    assert _with_task(bare, None) is bare
     earlier = request([summary], [summary, HumanMessage("task", id="t")])
-    assert _with_task(earlier) is earlier
+    assert _with_task(earlier, None) is earlier
     kept = request([summary], [SystemMessage("context", id="c"), HumanMessage("task", id="t")])
-    assert [m.content for m in _with_task(kept).messages] == ["context", "task", "the summary"]
+    assert [m.content for m in _with_task(kept, None).messages] == [
+        "context",
+        "task",
+        "the summary",
+    ]
     _replied(None, ModelResponse(result=[]))  # nothing the model said: nothing on the span
 
 
@@ -810,5 +814,5 @@ def test_the_task_kept_ahead_of_a_summary_is_the_runs_own_question() -> None:
     given = ModelRequest(
         model=ScriptedChatModel(turns=[]), messages=[summary], state={"messages": state}
     )
-    said = [m.content for m in _with_task(given).messages]
+    said = [m.content for m in _with_task(given, None).messages]
     assert said == ["context", "the run's question", "the summary"]

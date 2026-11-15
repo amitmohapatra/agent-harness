@@ -220,7 +220,8 @@ async def test_a_reconnect_to_another_replica_reads_the_run_from_the_log() -> No
         run_id = served[0][1]["runId"]
         elsewhere = decode((await b.get(f"/agui/runs/{run_id}/events")).text)
         assert [e for _, e in elsewhere] == [e for _, e in served]  # the same events
-        assert [n for n, _ in elsewhere][:2] == [1, 2]  # numbered by their position in the log
+        # numbered as the serving replica numbered them: the attempt, then the sequence
+        assert [n for n, _ in elsewhere][:2] == [0, 1] == [n for n, _ in served][:2]
         last = {"Last-Event-ID": str(elsewhere[-2][0])}
         assert (
             decode((await b.get(f"/agui/runs/{run_id}/events", headers=last)).text)

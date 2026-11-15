@@ -144,6 +144,7 @@ from trellis.harness.adapters.langgraph import (
     TASK_TOOL,
     carried_plain,
     notified,
+    screened,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
@@ -1387,13 +1388,13 @@ async def _again(calling: _Calling, error: Exception | None, config: RunnableCon
     (``_Calling.owed``), it has tries again left, and the graph did not — and will not — try it
     again itself: a wrapper of the graph's ran it again within the try (``ToolRetryMiddleware``
     calling its handler again), or the error leaves the node for the node's own
-    ``RetryPolicy`` to run it again (:func:`_node_retries`). A wrapper that only handles the
+    ``RetryPolicy`` to run it again (:func:`graph_retries`). A wrapper that only handles the
     error (``ToolErrorMiddleware``, Deep Agents' file middleware, ``GovernTools``) leaves the
     harness's tries standing: each try runs through it, as the graph runs a call."""
     owed = calling.owed
     if owed is None or calling.tried >= owed[1] or calling.entries > 1:
         return False
-    if error is not None and _node_retries(config, error):
+    if error is not None and graph_retries(config, error):
         return False
     await asyncio.sleep(backoff(calling.tried + 1, owed[0]))
     return True
@@ -1403,7 +1404,7 @@ async def _again(calling: _Calling, error: Exception | None, config: RunnableCon
 PREGEL_KEYS: Final = "__pregel"
 
 
-def _node_retries(config: RunnableConfig, error: Exception) -> bool:
+def graph_retries(config: RunnableConfig, error: Exception) -> bool:
     """Whether the graph runs the node again on ``error``: a retry policy of its task's (else
     the graph's) that retries it, as LangGraph reads them (its task, from the call it hands the
     node's config: ``CONFIG_KEY_CALL``). These are LangGraph's internals: where they are not
@@ -1894,7 +1895,7 @@ class ModelHooks(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         runtime = current()
-        request = _with_task(_unbroken(_offered(request, runtime)))
+        request = _with_task(_unbroken(_offered(request, runtime)), runtime)
         request = self._in_order(with_question(request), runtime)
         prompt = await self._pinned(runtime)
         if prompt is not None:
@@ -2000,12 +2001,13 @@ def _dated(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[
     return request.override(system_message=SystemMessage(content=content))
 
 
-def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
+def _with_task(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
     """The request with the task kept ahead of a summary: a summarization middleware (Deep
     Agents', LangChain's) replaces the older turns by a summary, the run's task and its pushed
     memory context among them — the conversation's leading system messages and the run's
     question (its last user message not steered into it: earlier turns replayed before it are
-    the summary's) are put back before it."""
+    the summary's) are put back before it; where the summary took them out of the graph's
+    state too (LangChain's removes what it summarized), the run's own (:func:`_asked_again`)."""
     messages = request.messages
     if not messages or not _summary(messages[0]):
         return request
@@ -2016,11 +2018,29 @@ def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
         None,
     )
     if asked is None:
-        return request
+        again = _asked_again(messages, runtime)
+        return request if again is None else request.override(messages=[again, *messages])
     lead = itertools.takewhile(lambda m: isinstance(m, SystemMessage), state)
     sent = {m.id for m in messages if m.id is not None}
     kept = [m for m in [*lead, asked] if m.id is None or m.id not in sent]
     return request.override(messages=[*kept, *messages]) if kept else request
+
+
+def _asked_again(messages: Sequence[BaseMessage], runtime: Runtime | None) -> HumanMessage | None:
+    """The run's question as its turn asked it — the memory context pushed with it marked off
+    ahead of it (``history.ASKED_WITH``), screened as the graph screens the user's message —
+    for a request whose summary left neither in the graph's state; ``None`` with no run, no
+    question, or one the request still sends."""
+    if runtime is None or not runtime.task:
+        return None
+    if any(isinstance(m, HumanMessage) and runtime.task in m.text for m in messages):
+        return None
+    said: list[str | dict[str, Any]] = [{"type": "text", "text": runtime.task}]
+    context = runtime.pushed_context
+    if context:
+        told = ASKED_WITH.format(context=screened(runtime.agent.target, context))
+        said.insert(0, {"type": "text", "text": told})
+    return HumanMessage(content=said)
 
 
 def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:

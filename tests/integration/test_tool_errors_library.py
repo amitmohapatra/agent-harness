@@ -22,17 +22,18 @@ from langchain.agents.middleware import (
     ToolRetryMiddleware,
     wrap_tool_call,
 )
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import RetryPolicy
 
+from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.journals import journal_of
 from tests.support.memory import FakeMemoryService
-from trellis import Budget, Harness, ReAct
+from trellis import Budget, Harness, ReAct, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolOutcome, ToolStatus
 from trellis.harness.hooks import Ask, Hooks
 from trellis.harness.tools import base
@@ -707,19 +708,101 @@ def test_a_langgraph_whose_internals_moved_is_refused_not_read_as_no_retry_polic
     from langchain_core.runnables import RunnableConfig
 
     from trellis.harness import compat
-    from trellis.harness.middleware import _node_retries
+    from trellis.harness.middleware import graph_retries
 
     low, high = compat.TESTED["langgraph"]
     error = TimeoutError("slow")
     # no graph runs the node (a tool node used on its own): no node, so no policy of a node's
-    assert _node_retries({"configurable": {"thread_id": "t"}}, error) is False
+    assert graph_retries({"configurable": {"thread_id": "t"}}, error) is False
     moved: RunnableConfig = {"configurable": {"__pregel_call": object(), "__pregel_task_id": "1"}}
     with pytest.raises(ConfigurationError, match=f"langgraph.*{low}.*{high}"):
-        _node_retries(moved, error)
+        graph_retries(moved, error)
     # a graph's task, its call kept elsewhere
     renamed: RunnableConfig = {"configurable": {"__pregel_task_id": "1"}}
     with pytest.raises(ConfigurationError, match="langgraph"):
-        _node_retries(renamed, error)
+        graph_retries(renamed, error)
     monkeypatch.setitem(sys.modules, "langgraph.pregel._retry", types.ModuleType("gone"))
     with pytest.raises(ConfigurationError, match="langgraph"):
-        _node_retries(moved, error)
+        graph_retries(moved, error)
+
+
+shelf: list[str] = []
+
+
+@tool(side_effects="read")
+def shelf_count(sku: str) -> str:
+    """Units of a SKU on the shelf (a harness tool)."""
+    shelf.append(sku)
+    if fails:
+        raise fails.pop(0)
+    return f"{sku}: 7"
+
+
+def _fetching(tools: dict[str, Any], policy: RetryPolicy | None) -> Any:
+    """A graph whose own node calls the harness tool ``shelf_count`` (``policy``: the node's)."""
+
+    async def fetch(state: MessagesState) -> dict[str, Any]:
+        got = await tools["shelf_count"].ainvoke({"sku": "a"})
+        return {"messages": [AIMessage(got)]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("fetch", fetch, retry_policy=policy)
+    graph.add_edge(START, "fetch")
+    graph.add_edge("fetch", END)
+    return graph.compile()
+
+
+@pytest.mark.usefixtures("_quick_retries")
+async def test_a_nodes_retry_policy_runs_a_failed_harness_read_again(harness: Harness) -> None:
+    """SCN-11: a harness read that fails inside a node whose ``RetryPolicy`` retries the error
+    raises it once the call is recorded, so the node runs again — and the read is tried once
+    more by that one layer, not by the harness on top."""
+    shelf.clear()
+    fails.append(ConnectionError("the service hung up"))
+    tools = {t.name: t for t in await native_tools(harness, shelf_count, framework="langgraph")}
+    policy = RetryPolicy(max_attempts=3, initial_interval=0.0, jitter=False, retry_on=Exception)
+    agent = arm(harness.wrap(_fetching(tools, policy), id="node-policy"), [shelf_count])
+    result = await agent.run("count a", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "a: 7", result.error
+    assert shelf == ["a", "a"]
+
+
+@pytest.mark.usefixtures("_quick_retries")
+async def test_a_nodes_retry_policy_alone_retries_an_error_the_harness_would_retry(
+    harness: Harness,
+) -> None:
+    """An error the harness itself would try again (a refused connection) inside a node whose
+    policy retries it: the node's ``max_attempts`` are all the tries there are."""
+    shelf.clear()
+    refused(10)
+    tools = {t.name: t for t in await native_tools(harness, shelf_count, framework="langgraph")}
+    policy = RetryPolicy(max_attempts=3, initial_interval=0.0, jitter=False, retry_on=Exception)
+    agent = arm(harness.wrap(_fetching(tools, policy), id="node-policy-only"), [shelf_count])
+    result = await agent.run("count a", user="u")
+    assert result.status is RunStatus.ERROR and shelf == ["a"] * 3
+
+
+@pytest.mark.usefixtures("_quick_retries")
+async def test_without_a_node_policy_a_failed_harness_read_is_the_nodes_text(
+    harness: Harness,
+) -> None:
+    """No node policy (or one that does not retry the error): the failure is what the call
+    answers, as before, after the harness's own tries of an error that may pass."""
+    shelf.clear()
+    fails.append(ConnectionError("the service hung up"))
+    tools = {t.name: t for t in await native_tools(harness, shelf_count, framework="langgraph")}
+    narrow = RetryPolicy(max_attempts=3, initial_interval=0.0, retry_on=ValueError)
+    for policy in (None, narrow):
+        fails[:] = [ConnectionError("the service hung up")]
+        shelf.clear()
+        agent = arm(
+            harness.wrap(_fetching(tools, policy), id=f"no-policy-{policy is None}"), [shelf_count]
+        )
+        result = await agent.run("count a", user="u")
+        assert result.status is RunStatus.SUCCESS and "the service hung up" in result.answer
+        assert shelf == ["a"]
+    refused(10)
+    shelf.clear()
+    agent = arm(harness.wrap(_fetching(tools, None), id="no-policy-harness"), [shelf_count])
+    result = await agent.run("count a", user="u")
+    assert result.status is RunStatus.SUCCESS and len(shelf) == base.READ_RETRIES + 1

@@ -20,11 +20,13 @@ citations in its ``metadata`` (:data:`SOURCES`), which the run's trajectory keep
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import inspect
 import json
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
@@ -310,6 +312,34 @@ def failed_output(tool: str, exc: BaseException) -> str:
     return f"{tool} failed: {exc}"
 
 
+@dataclass(slots=True)
+class NodeRetries:
+    """A call made inside a LangGraph node whose own ``RetryPolicy`` runs it again
+    (``retries``: whether it does on an error): the harness does not try such an error again
+    itself — one layer retries — and keeps it (``error``) for the tool to raise once the call
+    has ended and been recorded (``tools.convert.langchain``)."""
+
+    retries: Callable[[Exception], bool]
+    error: Exception | None = None
+
+
+_NODE: contextvars.ContextVar[NodeRetries | None] = contextvars.ContextVar(
+    "trellis_node_retries", default=None
+)
+
+
+@contextlib.contextmanager
+def node_retries(retries: Callable[[Exception], bool]) -> Iterator[NodeRetries]:
+    """The calls made in the block are inside a node whose ``RetryPolicy`` ``retries`` some
+    errors (:class:`NodeRetries`)."""
+    node = NodeRetries(retries)
+    token = _NODE.set(node)
+    try:
+        yield node
+    finally:
+        _NODE.reset(token)
+
+
 async def execute(
     tool: Tool,
     args: dict[str, Any],
@@ -333,12 +363,20 @@ async def execute(
 
     began = time.monotonic()
     retries = retries_of(tool.spec, reads=reads)
+    # a read inside a node whose own policy runs it again on the error: that one layer retries
+    node = _NODE.get() if retries else None
     try:
         async with within or asyncio.timeout(tool.timeout):
-            output = await retried(once, retries=0 if tool.deferring or tool.retried else retries)
+            output = await retried(
+                once,
+                retries=0 if tool.deferring or tool.retried else retries,
+                unless=None if node is None else node.retries,
+            )
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
+        if node is not None and node.retries(exc):
+            node.error = exc
         if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
             failed = ToolOutcome(
                 tool=tool.name,
@@ -378,13 +416,17 @@ async def retried(
     *,
     retries: int,
     left: Callable[[], float | None] | None = None,
+    unless: Callable[[Exception], bool] | None = None,
 ) -> Any:
     """``call()``, tried again up to ``retries`` times after an error that may pass, with a
     jittered backoff — or, when the error says when to come back (``Retry-After``), then: a
     wait longer than the time ``left`` (the run's, the call's) is not waited, the error is
-    raised. The caller's timeout bounds the whole of it."""
+    raised; an error ``unless`` says another layer tries again is raised at once. The caller's
+    timeout bounds the whole of it."""
 
     def passes(exc: BaseException) -> bool:
+        if unless is not None and isinstance(exc, Exception) and unless(exc):
+            return False  # tried again by whoever ``unless`` says does (a node's policy)
         return may_pass(exc, left)
 
     def wait(state: RetryCallState) -> float:

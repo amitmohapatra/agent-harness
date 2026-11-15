@@ -817,7 +817,7 @@ async def opened(
     """A session started for ``key``, ``owner``'s conversation, and kept by ``sessions`` in a
     place taken before its process starts (``LiveSessions.place``, counted over ``among``).
     ``None``: there is no place — the turn runs without one, as it always did."""
-    async with sessions.place(among) as room:
+    async with sessions.place(among, owner=owner) as room:
         if not room:
             return None
         session = LiveSession(key, shape, sessions, owner=owner)

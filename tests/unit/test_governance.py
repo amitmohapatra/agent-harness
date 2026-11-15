@@ -785,6 +785,7 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(writes_module, "DRAIN_SECONDS", 0.5)
     service = FakeMemoryService()
     service.fail.add("put_catalog")  # unavailable: the write is kept in the spool
     settings = Settings(spool_dir=str(tmp_path))
@@ -793,7 +794,7 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
         assert isinstance(governance.catalog, MemoryCatalog)
         assert governance.catalog.ctx.scope.tenant_id == "acme"
         await governance.publish(SPECS)
-        await h.writes.drain()
+    # its circuit open, the write waited it out, queued; the harness's close spooled it
     [kept] = [json.loads(line) for line in (tmp_path / SPOOL_FILE).read_text().splitlines()]
     assert (kept["label"], kept["op"], kept["scope"]) == (
         "memory.tool_catalog",

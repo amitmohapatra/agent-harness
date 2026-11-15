@@ -1087,7 +1087,7 @@ class ACPAdapter:
         if busy and self.live.get(session.key) is session:
             return
         if busy:
-            async with self.live.place(shared.among(runtime, self)) as room:
+            async with self.live.place(shared.among(runtime, self), owner=session.owner) as room:
                 if room:
                     self.live.keep(session)
                     return

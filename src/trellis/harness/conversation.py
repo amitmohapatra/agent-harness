@@ -471,6 +471,7 @@ class Turns:
             if line is not None and not await line.turn(self._here, mine):
                 yield None
                 return
+            mine.holding = True
             live = self._live[key] = Live(run_id, steers, line=line)
             try:
                 yield live
@@ -484,11 +485,16 @@ class Turns:
 
     def cancel(self, run_id: str, reason: str) -> asyncio.Future[None] | None:
         """Run ``run_id``, waiting its turn here, is cancelled for ``reason``: it takes no
-        turn. What is done once it left the line; ``None`` when it does not wait here."""
+        turn. What is done once it left the line; ``None`` when it does not wait here. One
+        that holds its turn and whose attempt has not begun yet (``Agent.running`` names it
+        not) is marked: that attempt ends it ``CANCELLED`` as it begins (:meth:`cancelled`),
+        and nothing waits for it — it may wait on the very caller (a slow memory read)."""
         mine = self._here.get(run_id)
         if mine is None:
             return None
         mine.cancelled = reason
+        if mine.holding:
+            return None
         mine.again.set()
         return mine.left
 
@@ -502,8 +508,10 @@ class Turns:
         return False
 
     def cancelled(self, run_id: str) -> str | None:
-        """Why run ``run_id``, in line here, was cancelled while it waited, if it was."""
-        return self._here[run_id].cancelled
+        """Why run ``run_id``, in line here, was cancelled while it waited or before its
+        attempt began, if it was (``None`` too for a run not in a line here)."""
+        mine = self._here.get(run_id)
+        return None if mine is None else mine.cancelled
 
     def live(self, key: str) -> Live | None:
         """The run holding ``key``'s turn in this process, if one does."""

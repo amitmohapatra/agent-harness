@@ -75,6 +75,10 @@ WORKING_SECONDS: Final = 6 * 3600.0
 #: The most sessions of a framework kept in this server process, over all its agents (each is
 #: an agent process, some 70 MB of its own).
 KEPT: Final = 16
+#: The most of them one user (an owner: a tenant's user) holds at once: one user's many
+#: working conversations — each kept up to :data:`WORKING_SECONDS` — leave the rest of the
+#: server's places to the others.
+KEPT_PER_OWNER: Final = 4
 #: How long a turn waits for the session to be free (an earlier turn's end, a turn of the
 #: session's own) before its own prompt is sent; past it the session is closed and the turn
 #: runs without.
@@ -728,8 +732,8 @@ class LiveSessions:
 
     def __init__(self) -> None:
         self._open: dict[str, Keeper[Any]] = {}
-        #: the places taken by sessions whose process is starting (:meth:`place`)
-        self.starting = 0
+        #: the places taken by sessions whose process is starting (:meth:`place`), by owner
+        self.starting: Counter[Hashable] = Counter()
         #: the background subagents' runs under way in them, by run (:class:`Kept`)
         self.attended: dict[str, Kept] = {}
         #: what each conversation's next run is told of work that ended with its session
@@ -750,27 +754,34 @@ class LiveSessions:
         return found
 
     @contextlib.asynccontextmanager
-    async def place(self, among: Sequence[LiveSessions]) -> AsyncIterator[bool]:
-        """Whether a session can be kept here, its place taken while the code inside starts
-        and keeps it (:meth:`keep`). :data:`KEPT` processes are kept by the server process,
-        over every agent's sessions (``among``, these included): the place is taken before
-        the process starts, so turns that start together start no more; with every place
-        taken an idle session gives its own (:func:`_yielding`), and with none idle there is
-        no place (``False``: the turn runs without one, as it always did)."""
+    async def place(self, among: Sequence[LiveSessions], *, owner: Hashable) -> AsyncIterator[bool]:
+        """Whether a session of ``owner``'s can be kept here, its place taken while the code
+        inside starts and keeps it (:meth:`keep`). :data:`KEPT` processes are kept by the
+        server process, over every agent's sessions (``among``, these included), at most
+        :data:`KEPT_PER_OWNER` of them one owner's: the place is taken before the process
+        starts, so turns that start together start no more; with every place taken — or every
+        one the owner may hold — an idle session gives its own (:func:`_yielding`: of the
+        owner's own, at its share), and with none idle there is no place (``False``: the turn
+        runs without one, as it always did)."""
+        held = sum(s.owner == owner for sessions in among for s in sessions)
+        held += sum(sessions.starting[owner] for sessions in among)
+        taken = sum(len(sessions) + sessions.starting.total() for sessions in among)
         yielding = None
-        if sum(len(sessions) + sessions.starting for sessions in among) >= KEPT:
-            yielding = _yielding(among)
+        if held >= KEPT_PER_OWNER or taken >= KEPT:
+            yielding = _yielding(among, owner=owner if held >= KEPT_PER_OWNER else None)
             if yielding is None:
                 yield False
                 return
-        self.starting += 1
+        self.starting[owner] += 1
         try:
             if yielding is not None:
                 why = "another conversation needed its place"
                 await yielding.sessions.close(yielding.key, why)
             yield True
         finally:
-            self.starting -= 1
+            self.starting[owner] -= 1
+            if not self.starting[owner]:
+                del self.starting[owner]
 
     def keep(self, session: Keeper[Any]) -> None:
         """``session`` is its conversation's (:meth:`place` took a place for it)."""
@@ -818,12 +829,17 @@ def among(runtime: Runtime, adapter: Any) -> list[LiveSessions]:
     return list(found.values())
 
 
-def _yielding(among: Sequence[LiveSessions]) -> Keeper[Any] | None:
+def _yielding(
+    among: Sequence[LiveSessions], *, owner: Hashable | None = None
+) -> Keeper[Any] | None:
     """The idle session (no turn, no work under way) that gives its place to another
     conversation: of the user who holds the most sessions — one user's many conversations
-    cost that user a place, not another user's only one — the one asked for longest ago.
-    ``None``: none is idle."""
+    cost that user a place, not another user's only one — the one asked for longest ago;
+    ``owner``'s own only, for an owner at its share (:data:`KEPT_PER_OWNER`). ``None``: none
+    is idle."""
     kept = [session for sessions in among for session in sessions]
+    if owner is not None:
+        kept = [session for session in kept if session.owner == owner]
     held = Counter(session.owner for session in kept)
     idle = [session for session in kept if session.turn is None and not session.working]
     return min(idle, key=lambda session: (-held[session.owner], session.used), default=None)
@@ -850,6 +866,7 @@ async def apart[T](work: Awaitable[T]) -> T:
 __all__ = [
     "IDLE_SECONDS",
     "KEPT",
+    "KEPT_PER_OWNER",
     "UNATTENDED",
     "Keeper",
     "Kept",

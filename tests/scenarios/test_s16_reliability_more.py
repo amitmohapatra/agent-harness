@@ -138,11 +138,6 @@ def flaky(key: str) -> str:
 
 
 @pytest.mark.plan("WF-07")
-@pytest.mark.xfail(
-    strict=True,
-    reason="SCN-11 (langchain-fixes): a failed harness tool answers its error as the result, so a "
-    "node's RetryPolicy never sees a failure and the read is not tried again by either layer",
-)
 async def test_a_nodes_retry_policy_runs_a_failed_read_exactly_twice(h: Harness, uid: str) -> None:
     tools = {t.name: t for t in await native_tools(h, flaky, framework="langgraph")}
 

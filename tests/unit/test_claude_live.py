@@ -597,6 +597,34 @@ async def test_a_place_goes_from_who_holds_most_the_one_used_longest_ago(
     assert sorted(s.key for s in among[0]) == ["a1", "b1", "c1", "c2"]  # a3 went, not a1
 
 
+async def test_one_user_holds_at_most_their_share_of_the_places(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One user's conversations, each at work in the background (none idle), take at most
+    ``KEPT_PER_OWNER`` places, however many places are free: the next of theirs runs without
+    a session, or takes their own idle one, and another user still finds a place."""
+    _rooms(monkeypatch, 16)
+    monkeypatch.setattr(live, "KEPT_PER_OWNER", 3)
+    sessions = LiveSessions()
+    among = [sessions]
+    opened = await asyncio.gather(
+        *(
+            claude_live.opened(sessions, f"a{n}", (), None, {}, owner="ada", among=among)
+            for n in range(5)
+        )
+    )
+    mine = [found for found in opened if found is not None]
+    assert len(mine) == 3 and len(sessions) == 3  # starting at once, still three
+    for found in mine:
+        found.working["t1"] = "research"  # at work: none of them gives its place
+    assert await claude_live.opened(sessions, "a9", (), None, {}, owner="ada", among=among) is None
+    bob = await claude_live.opened(sessions, "b1", (), None, {}, owner="bob", among=among)
+    assert bob is not None  # another user's conversation finds a place
+    mine[0].working.clear()  # idle now: ada's next takes ada's own place, not bob's
+    assert await claude_live.opened(sessions, "a9", (), None, {}, owner="ada", among=among)
+    assert sorted(s.key for s in sessions) == sorted([mine[1].key, mine[2].key, "a9", "b1"])
+
+
 async def test_a_session_that_fails_to_start_gives_its_place_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -609,7 +637,7 @@ async def test_a_session_that_fails_to_start_gives_its_place_back(
     monkeypatch.setattr(LiveSession, "start", broken)
     with pytest.raises(RuntimeError, match="no CLI"):
         await claude_live.opened(sessions, "c1", (), None, {}, owner="u", among=[sessions])
-    assert len(sessions) == 0 and sessions.starting == 0
+    assert len(sessions) == 0 and not sessions.starting
 
 
 async def test_closing_a_session_cancels_what_it_left_running_aside() -> None:

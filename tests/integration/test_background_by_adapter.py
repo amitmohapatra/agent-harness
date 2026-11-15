@@ -51,7 +51,7 @@ import pytest
 from agents import Agent as OpenAIAgent
 from agents import ModelSettings, RunConfig
 from agents.models.openai_responses import OpenAIResponsesModel
-from agents.sandbox import SandboxAgent, SandboxRunConfig
+from agents.sandbox import Manifest, SandboxAgent, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from deepagents import create_deep_agent
@@ -387,11 +387,17 @@ def shell_turns(gate: Path) -> list[Any]:
     return [("exec_command", command), reports_the_process, "4"]
 
 
+def granted(folder: Path) -> Manifest:
+    """A sandbox's manifest letting its commands write ``folder`` (the test's gates): on macOS
+    the SDK confines them to the workspace (``sandbox-exec``); elsewhere nothing changes."""
+    return Manifest(extra_path_grants=(SandboxPathGrant(path=str(folder), read_only=False),))
+
+
 @pytest.fixture
-async def session() -> AsyncIterator[Any]:
+async def session(tmp_path: Path) -> AsyncIterator[Any]:
     """A sandbox session the app keeps: made before the chat, closed after it."""
     client = UnixLocalSandboxClient()
-    found = await client.create()
+    found = await client.create(manifest=granted(tmp_path))
     await found.start()
     yield found
     await found.shutdown()
@@ -480,7 +486,7 @@ async def test_b_a_kept_sandbox_session_is_each_conversations_and_its_shell_is_g
     process = process_in(model.inputs[1])
     await opened(gate)
     client = UnixLocalSandboxClient()
-    bobs = await client.create()
+    bobs = await client.create(manifest=granted(tmp_path))
     await bobs.start()
     try:
         model.turns += [

@@ -471,7 +471,9 @@ async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
     last = saved[-1]
     outputs = [outcome["output"] for _, outcome in last["trajectory"]]
     assert len(outputs) == steps + 1 and all(len(o) <= PREVIEW_CHARS + 1 for o in outputs)
-    added = {k: v for k, v in last.items() if k not in ("graph", "trajectory")}
+    # what a rewind asks about again: one entry a write, each sent once (a save appends)
+    assert len(last["effects"]) == steps + 1  # every log_line, and the lc_boom
+    added = {k: v for k, v in last.items() if k not in ("graph", "trajectory", "effects")}
     assert len(json.dumps(added)) < 2_000  # the same at step 1 and at step 80
 
 

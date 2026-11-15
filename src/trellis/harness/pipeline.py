@@ -1224,7 +1224,8 @@ async def _invoked(
         run_tools = [t for t in run_tools if runtime.offers(t.name)]
     invocation = Invocation(runtime, run_tools, convert(adapter.tool_format, run_tools))
     produced = await _execute(agent, native_input, invocation, streaming=streaming)
-    if runtime.pushed_context and prepared is input:  # the input had no place for it
+    # the input had no place for it: handed on as it was (an adapter may hand on a copy)
+    if runtime.pushed_context and (prepared is input or prepared == input):
         agent.unreached(runtime)
     return adapter.extract(target, produced)
 

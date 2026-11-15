@@ -93,8 +93,11 @@ class Here:
     left: asyncio.Future[None] = field(default_factory=_leaving)
     #: set to have it look at the line again now
     again: asyncio.Event = field(default_factory=asyncio.Event)
-    #: why it was cancelled while it waited its turn (it takes none)
+    #: why it was cancelled while it waited its turn (it takes none), or while it held its
+    #: turn before its attempt began (that attempt ends it ``CANCELLED`` as it begins)
     cancelled: str | None = None
+    #: it holds its conversation's turn here
+    holding: bool = False
 
 
 class Followers:
