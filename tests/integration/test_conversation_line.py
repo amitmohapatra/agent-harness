@@ -706,11 +706,25 @@ async def test_a_run_cancelled_while_it_waits_its_turn_never_runs(
     assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
 
 
-async def test_a_run_cancelled_here_while_it_waits_its_turn_has_its_end_in_its_log() -> None:
+class EndedFirst(LoggedRuns):
+    """A store that ends a run ``TIMEOUT`` (its deadline) just before a cancel of it arrives:
+    the cancel is refused, as agent-runs refuses one of an ended run."""
+
+    async def cancel(self, run_id: str, **kwargs: Any) -> Any:
+        await self.finish(run_id, RunStatus.TIMEOUT, tenant=kwargs.get("tenant"))
+        raise ConflictError(f"run {run_id} already ended TIMEOUT", code="CONFLICT", status=409)
+
+
+@pytest.mark.parametrize("store", ["takes the cancel", "ended it first"])
+async def test_a_run_cancelled_here_while_it_waits_its_turn_has_its_end_in_its_log(
+    store: str,
+) -> None:
     """RUN-CANCEL-LOG: a run waiting its turn here, cancelled here, against a store that keeps
-    runs' events as agent-runs does: its log is its start and its end (``RUN_FINISHED``
-    ``CANCELLED``, the reason), and the store's cancel ended it, keeping that reason."""
-    runs = LoggedRuns()
+    runs' events as agent-runs does: it takes no turn, and its log is its start and its end
+    (``RUN_FINISHED`` ``CANCELLED``, the reason, appended while it still ran) — then the
+    store's cancel ends it, keeping that reason; a store that ended it first (its deadline)
+    refuses the cancel, and its ending stands, nothing written over it."""
+    runs = LoggedRuns() if store == "takes the cancel" else EndedFirst()
     log: Log = []
     gates = {"one": asyncio.Event()}
     async with Harness(config=Settings(), runs=runs) as h:
@@ -719,15 +733,19 @@ async def test_a_run_cancelled_here_while_it_waits_its_turn_has_its_end_in_its_l
         await started(log, "one")
         second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
         waiting = await thread_run(runs, "two")
-        await a.cancel(waiting, reason="not needed")
+        record = await a.cancel(waiting, reason="not needed")
         assert (await asyncio.wait_for(second, 5)).status is RunStatus.CANCELLED
         gates["one"].set()
         await first
+    assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
     logged = runs.logged(waiting)
     assert [e.type for e in logged] == [RunEventType.RUN_STARTED, RunEventType.RUN_FINISHED]
     assert logged[-1].outcome is RunOutcome.CANCELLED
     assert logged[-1].data["reason"] == "not needed"
-    assert runs.cancelled == {waiting: "not needed"}
+    if store == "takes the cancel":
+        assert record.status is RunStatus.CANCELLED and runs.cancelled == {waiting: "not needed"}
+    else:
+        assert record.status is RunStatus.TIMEOUT and runs.cancelled == {}
 
 
 @pytest.mark.parametrize("how", ["run", "stream"])
