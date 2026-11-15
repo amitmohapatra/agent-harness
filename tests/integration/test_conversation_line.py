@@ -596,6 +596,34 @@ async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
         assert result.answer == f"re: {mode}"
 
 
+async def test_a_line_that_cannot_be_read_at_a_renewal_leaves_the_turn_working(
+    servers: tuple[Harness, Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each renewal of a turn's hold reads its line for an interrupt sent to another server;
+    a run store that cannot be listed then is said, and the turn works on — it is not
+    stopped for a message nobody could read."""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a = chat(servers[0], log, gates)
+    runs = servers[0].runs
+    working = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    listed = runs.iterate
+
+    def down(**kwargs: Any) -> Any:
+        raise RunsError("the run store is down", code="UNAVAILABLE", status=503)
+
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        runs.iterate = down  # type: ignore[method-assign]
+        async with asyncio.timeout(10):
+            while "its conversation's line was not read" not in caplog.text:  # noqa: ASYNC110
+                await asyncio.sleep(0.05)
+        runs.iterate = listed  # type: ignore[method-assign]
+    assert not working.done()
+    gates["one"].set()
+    assert (await working).status is RunStatus.SUCCESS
+
+
 async def test_a_log_whose_run_ended_takes_nothing_more_whoever_listens() -> None:
     """A run's log refused (the run no longer runs) closes; with nobody to tell, that is all."""
 
