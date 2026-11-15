@@ -234,6 +234,48 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
     assert [m["role"] for m in other["messages"]] == ["system", "user"]
 
 
+async def test_runs_puts_the_environments_run_store_under_the_run(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--runs``: the harness the run makes keeps the environment's agent-runs (``RUNS_URL``);
+    without it the run store is the in-process one, as before."""
+    asked: list[dict[str, Any]] = []
+    made = run.harness
+
+    def harness(**kw: Any) -> Any:
+        asked.append(kw)
+        return made(**kw)
+
+    monkeypatch.setattr(cx.runner, "harness", harness)
+    assert cx.arguments(["--scripted"]).runs is False
+    await cx.bench(_args(tmp_path / "off", cases="multihop-01"), progress=lambda _: None)
+    await cx.bench(_args(tmp_path / "on", cases="multihop-01", runs=True), progress=lambda _: None)
+    assert asked == [{"memory": False, "runs": False}, {"memory": False, "runs": True}]
+    assert cx.arguments(["--scripted", "--runs"]).runs is True
+
+
+async def test_each_variant_wraps_its_own_agent_so_runs_on_one_store_stay_apart(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two variants of one adapter run side by side on one run store (agent-runs, ``--runs``)
+    claim queued runs by agent id: each variant's agent has an id of its own, so a worker of
+    one never takes the other's run (``main`` keeps the id it always had)."""
+    ids: list[str] = []
+    async with run.harness() as h:
+        wrap = h.wrap
+
+        def spy(target: Any, **kw: Any) -> Any:
+            ids.append(kw["id"])
+            return wrap(target, **kw)
+
+        monkeypatch.setattr(h, "wrap", spy)
+        for variant in ("main", "deep"):
+            out = tmp_path / variant
+            args = _args(out, cases="multihop-01", adapter="react", variant=variant)
+            await cx.bench(args, harness=h, progress=lambda _: None)
+    assert ids == ["complex-react-multihop-01", "complex-react-deep-multihop-01"]
+
+
 async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> None:
     out = tmp_path / "cap"
     # the scripted model reports each request's own size in and 50 out: the run stops at the

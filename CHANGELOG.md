@@ -49,6 +49,35 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
   a worker process does) until the run pauses or ends.
 
+### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
+
+An MCP tool whose server sent **no annotations at all** is now *undeclared*, as a function
+without `side_effects` is, on every way a tool arrives: it asks, and the person may allow it
+once, for this conversation, always (with a memory service) or deny. Before, on the harness's
+own `mcp(...)`, the gateway's MCP listing, an OpenAI agent's `MCPServer*` and Claude's
+in-process servers it was `irreversible` — asked at every call, never "for this conversation"
+or "always" — while the same tool through `langchain.mcp` / langchain-mcp-adapters was
+undeclared. Annotations that leave a tool destructive by the MCP defaults (`destructiveHint:
+true`, or `readOnlyHint: false` with no `destructiveHint`) still make it `irreversible`. The
+harness publishes nothing of such a tool's risk to the tool catalog (it published
+`destructiveHint: true`), so the catalog's risk for it is null and an administrator's still
+wins.
+
+A call a framework runs and asks its own user about — Claude Code's permission check (its
+built-ins, its own MCP servers' tools, in a query and in a live session) and Kimi's permission
+request — now offers the person the same choices as a harness tool's: always allow too, with a
+memory service (Claude Code's question offered no choice at all, and asked again at every
+call). What is allowed for the conversation or always holds as Claude Code's own "don't ask
+again" would. The tool catalog's word on such a tool (a risk, an `approve_when`) decides before
+the framework's own question, as for every tool.
+Deep Agents' own `write_file`, `edit_file` and `delete` on a disk, a store or a sandbox (a
+backend, or a route of a `CompositeBackend`) now **ask** as any write — allow once, for this
+conversation, always — where they were only announced (a framework's own tool), while a tool
+of yours that writes in the same graph asked; `ls`, `read_file`, `glob`, `grep` still run, and
+the file tools on the graph's own state stay its scratch. `ReAct(backend=)` alike.
+`tests/matrix/test_approval_rule.py` walks every adapter × way × risk × answer
+([governance.md](docs/governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)).
+
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 
 * **OpenAI Agents: a governed call inside an agent tool resumes.** An `Agent.as_tool` agent
@@ -167,6 +196,15 @@ chat's own on its thread stream when it is idle; its questions asked through the
   rule in its user's config), so the catalog can have a person approve it. A team config whose
   `[permission]` rules are written inline is asked over (a `[[permission.ask]]` rule after it)
   instead of refusing the run; only a `permission = { ... }` inline table is still refused.
+
+### Fixed: what the framework comparison on Haiku found
+
+- `middleware(context_window=)` below the model's own window (a team's `create_agent` or
+  `create_deep_agent` given 16,000 tokens for a model of 200,000 that replies up to 64,000)
+  reserves the reply out of the model's own window, as `ReAct(context_window=)` does. Before,
+  it was taken out of the window given, which left 0 tokens for the input: every request of
+  such a run was refused (`ContextTooLarge`), 10 scored turns of the comparison's small-window
+  cases on LangGraph ([compare-2026-11-15](docs/research/compare-2026-11-15/README.md)).
 
 ### Fixed: what the real-model (Haiku) acceptance found
 

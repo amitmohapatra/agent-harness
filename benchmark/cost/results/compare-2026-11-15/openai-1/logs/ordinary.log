@@ -1,0 +1,61 @@
+the memory service refused http://127.0.0.1:18106/v1/ (GET http://127.0.0.1:18106/v1/models answered 400: check the endpoint's key and auth, and that base_url is the API root (it usually ends in /v1).): its LLM work for these agents runs on its own settings
+multihop-01      tier 1 [True] $0.0022
+multihop-02      tier 2 [True] $0.0051
+multihop-03      tier 1 [True] $0.0073
+multihop-06      tier 2 [True] $0.0097
+multihop-07      tier 2 [True] $0.0159
+multihop-09      tier 2 [True] $0.0181
+aggregate-01     tier 1 [True] $0.0195
+aggregate-02     tier 2 [True] $0.0212
+aggregate-05     tier 2 [True] $0.0237
+aggregate-06     tier 2 [True] $0.0289
+aggregate-08     tier 2 [True] $0.0439
+formula-01       tier 1 [True] $0.0454
+formula-02       tier 2 [True] $0.0471
+the turn could not be written before the run returned; it is queued
+formula-03       tier 2 [True] $0.0487
+formula-05       tier 2 [True] $0.0502
+stats-01         tier 2 [True] $0.0531
+stats-02         tier 2 [True] $0.0556
+stats-05         tier 2 [True] $0.0584
+stats-06         tier 1 [True] $0.0610
+stats-08         tier 2 [True] $0.0636
+conversation-02  tier 1 [True, True] $0.0669
+the turn could not be written before the run returned; it is queued
+the turn could not be written before the run returned; it is queued
+conversation-06  tier 1 [True, True] $0.0730
+explain-01       tier 1 [True, None] $0.0762
+freshness-01     tier 1 [True, True] $0.0801
+ambiguity-04     tier 1 [True] $0.0830
+nodata-01        tier 1 [True] $0.0838
+nodata-02        tier 1 [True] $0.0863
+conflict-03      tier 1 [True] $0.0879
+edge-01          tier 1 [True] $0.0893
+edge-03          tier 1 [True] $0.0916
+run run_d303fdb0454345379dcfe8f68b0529b8 stopped warehouse_scan: the same call 3 times in a row (a stall)
+edge-04          tier 1 [True] $0.0939
+cantdo-01        tier 1 [True] $0.0958
+cantdo-02        tier 1 [True] $0.1054
+cantdo-03        tier 1 [True] $0.1082
+cantdo-04        tier 1 [False] $0.1275
+# complex: claude-haiku-5-5 (openai, memory history)
+
+Spend: $0.1275 (cap $0.25)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 35 | 39 | 0.97 ± 0.05 | 1 | 0 | 0 | 0 of 39 |
+| multihop | 6 | 6 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 6 |
+| aggregate | 5 | 5 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 5 |
+| formula | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| stats | 5 | 5 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 5 |
+| conversation | 2 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| explain | 1 | 2 | 1.00 | 1 | 0 | 0 | 0 of 2 |
+| freshness | 1 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| ambiguity | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| nodata | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| conflict | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| edge | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| cantdo | 4 | 4 | 0.75 ± 0.80 | 0 | 0 | 0 | 0 of 4 |
+| tier 1 | 20 | 24 | 0.96 ± 0.09 | 1 | 0 | 0 | 0 of 24 |
+| tier 2 | 15 | 15 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 15 |

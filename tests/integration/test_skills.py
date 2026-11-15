@@ -230,6 +230,9 @@ async def test_a_deep_agent_of_your_own_takes_a_sandbox_and_skills_in_one_backen
     assert "Check every JOIN." in tool_said(model) and provider.commands == ["echo ran"]
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_a_sandboxs_files_are_governed_beside_the_skills_route(harness: Harness) -> None:
     """SEC: the documented recipe, a sandbox and the run's skills in one backend. A read of
     the skills route is a call of the run — recorded, a read, never asked; a file written to

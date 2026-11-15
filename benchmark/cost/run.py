@@ -173,12 +173,17 @@ class Called(Hooks):
         return outcome
 
 
-def harness(*, memory: bool = False) -> Harness:
+def harness(*, memory: bool = False, runs: bool = False) -> Harness:
     """The environment's harness with nothing but the model: memory, the run store, tracing
     and the gateway's MCP tools off, so no service's data is read or written — ``memory``:
-    the environment's memory service on (its context and tool hints)."""
+    the environment's memory service on (its context and tool hints); ``runs``: the
+    environment's agent-runs (``RUNS_URL``) the run store."""
     config = Settings.from_env()
-    off = {"runs_url": None, "otlp_endpoint": None} | ({} if memory else {"memory_url": None})
+    off = (
+        {"otlp_endpoint": None}
+        | ({} if runs else {"runs_url": None})
+        | ({} if memory else {"memory_url": None})
+    )
     config = config.model_copy(update=off)
     if memory:
         return Harness(config=config, gateway=False)

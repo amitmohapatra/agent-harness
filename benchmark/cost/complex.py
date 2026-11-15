@@ -3925,8 +3925,11 @@ async def run_case(
         tools=(*r.TOOLS, *case.tools),
         bound=await h.memory_tools() if kind == "graph" else (), variant=variant,
     )  # fmt: skip
+    # each variant its own agent: a worker claims queued runs by agent id, so two variants on
+    # one run store (agent-runs) would take each other's runs
+    named = kind if variant == "main" else f"{kind}-{variant}"
     agent = h.wrap(
-        target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
+        target, id=agent_id or f"complex-{named}-{case.id}", hooks=[trace],
         run_timeout=run_seconds,
         **options,
     )  # fmt: skip
@@ -4325,7 +4328,7 @@ async def bench(
             f"--max-usd needs a price: {model_name} is not in benchmark.cost.prices (use --price)"
         )
     spend = Spend(price, args.max_usd, usd=sum(x.get("usd", 0.0) for x in rows))
-    h = harness or runner.harness(memory=args.history == "memory")
+    h = harness or runner.harness(memory=args.history == "memory", runs=args.runs)
     tag = uuid.uuid4().hex[:6]
     stopped = None
     try:
@@ -4397,6 +4400,11 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="the scripted model replaying the gold calls (no endpoint)",
     )
     p.add_argument("--history", choices=("thread", "memory"), default="thread")
+    p.add_argument(
+        "--runs",
+        action="store_true",
+        help="the environment's agent-runs (RUNS_URL) the run store, not the in-process one",
+    )
     p.add_argument(
         "--adapter",
         choices=ADAPTERS,

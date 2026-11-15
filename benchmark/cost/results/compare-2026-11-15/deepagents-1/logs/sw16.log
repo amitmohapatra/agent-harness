@@ -1,0 +1,21 @@
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+the turn could not be written before the run returned; it is queued
+advdata-02       tier 3 [True] $0.0025
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-04    tier 3 [True] $0.0046
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-01     tier 3 [True] $0.0056
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-02     tier 3 [True] $0.0118
+# complex: claude-haiku-5-5 (deepagents, memory history)
+
+Spend: $0.0118 (cap $0.15)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 7 |
+| adv_data | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 4 |
+| long_chain | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| long_data | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| tier 3 | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 7 |
