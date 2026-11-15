@@ -933,7 +933,7 @@ async def test_an_in_process_tools_annotations_decide_it_when_allowed_tools_name
     ran: list[str] = []
 
     @sdk_tool("stock", "Units of a SKU.", {"sku": str},
-              annotations=ToolAnnotations(readOnlyHint=True))  # fmt: skip
+              annotations=ToolAnnotations(read_only_hint=True))  # fmt: skip
     async def stock(args: dict[str, Any]) -> dict[str, Any]:
         ran.append(args["sku"])
         return {"content": [{"type": "text", "text": "7 units"}]}
