@@ -56,9 +56,29 @@ so its tests use `needs_claude_model`: the gateway's Anthropic route, or `ANTHRO
 | the (b) tests directly, with no gateway | 12 | 12 | 0 | — |
 
 The one failure left is `test_every_code_mode_call_of_a_react_run_goes_through_the_bridge`. It
-failed twice in a row and passed in run 1. On its last step the test forces a reply with no
-tool. Haiku's reply was 89 thinking tokens of 91, with no text, so the harness ended the run
-`ERROR` (no answer). The root cause is not established.
+passed in run 1, and then failed in four runs out of four.
+
+**Root cause:** `claude-haiku-5-5` does not honour a forced named `tool_choice`, and the test
+relies on one. The test steers the model with `support.Forcing`: `list_tool_files`, then
+`execute_tool_code`, then no tool.
+
+- **On the wire.** The meter saw the requests go to Anthropic with
+  `tool_choice: {"type": "tool", "name": "list_tool_files"}`, so Bifrost mapped them
+  correctly. Haiku called `execute_tool_code` anyway.
+- **A minimal direct call reproduces it,** with no harness and no gateway. Forced to
+  `list_files`, the model called `run_code`, the tool the prompt asked for.
+- **What happens next.** Haiku never lists the files the prompt asked it to list. On the last
+  step, with `tool_choice: none`, it replies with one thinking block and no text
+  (`stop_reason: end_turn`; 98, 90 and 155 thinking tokens across the runs). The harness then
+  ends the run `ERROR` (no answer), as designed.
+- **Not the reply's size.** The suspected cause, a `max_tokens` too small for the model's
+  thinking, is ruled out. `stop_reason` is `end_turn`, not `max_tokens`. The harness does
+  not lower the limit: `_answer_now` keeps the model's own, and the 160 here is
+  `tests/live/support.gateway_model`'s. With 1,024 the test failed the same way, twice.
+
+**Open:** the fix is a decision about the test. Forcing could also narrow the offered tools
+to the forced one, which works on any model. But the test asserts that every request offers
+all the Code Mode meta-tools, and that assertion would have to change.
 
 ### What the live runs found
 
