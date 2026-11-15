@@ -123,6 +123,7 @@ class Turned:
     """What the brain decided for one request: a call, or the answer."""
 
     call: Any = None  # (tool, args), or a list of them made in one message
+    #: the answer — with a call to make, the one it gives when it is offered no tool
     answer: str = ""
     slow: float = 0.0
     #: the kind of provider failure the message asks for (a key of :data:`PROVIDER_ERRORS`)
@@ -164,21 +165,23 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
             return Turned(call=(redo[1].removeprefix("mcp__trellis__"), json.loads(redo[2])))
         except ValueError:
             pass
+    everything = " ".join(t for _, t in messages)
+    recalled = " ".join(MEMORIES.findall(everything))
+    conversation = MEMORIES.sub("", everything)
+    last = results[-1] if results else ""
+    # what it answers now: with every call made, or — calls still to make — when it is offered
+    # no tool (a step limit's or a budget's last call: ``tool_choice="none"``), as a model then
+    # answers with what it has
+    answer = f"ANS {mine.upper()} SEEN {_seen(conversation, mine)} MEM {_seen(recalled, mine)} LAST {last}"
     done = 0
     for step in _steps(commands):  # a step: one call, or several in one message (``batch``)
         size = len(step) if isinstance(step, list) else 1
         if len(results) < done + size:
             pending = step[len(results) - done :] if isinstance(step, list) else step
-            return Turned(call=pending, slow=float(slow[1]) if slow and not results else 0)
+            slowed = float(slow[1]) if slow and not results else 0
+            return Turned(call=pending, answer=answer, slow=slowed)
         done += size
-    everything = " ".join(t for _, t in messages)
-    recalled = " ".join(MEMORIES.findall(everything))
-    conversation = MEMORIES.sub("", everything)
-    last = results[-1] if results else ""
-    return Turned(
-        answer=f"ANS {mine.upper()} SEEN {_seen(conversation, mine)} MEM {_seen(recalled, mine)} LAST {last}",
-        slow=float(slow[1]) if slow and not commands else 0.0,
-    )
+    return Turned(answer=answer, slow=float(slow[1]) if slow and not commands else 0.0)
 
 
 def _commands(asked: str) -> list[tuple[str, dict[str, Any]]]:
@@ -385,6 +388,24 @@ def _item_text(item: Any) -> tuple[str, str]:
     return str(role), text(get("content"))
 
 
+def _provider_error(kind: str) -> Exception:
+    """What the OpenAI client raises for a ``fail:`` the OpenAI Agents SDK's model meets: the
+    status error of its API's answer (:data:`PROVIDER_ERRORS`), as its Responses model raises
+    one it gets (``OpenAIResponsesModel``: ``openai.InternalServerError`` for a 500)."""
+    import openai
+
+    status, kind_of, message = PROVIDER_ERRORS[kind]
+    code = "context_length_exceeded" if kind == "overflow" else None
+    body = {"error": {"message": message, "type": kind_of, "code": code}}
+    response = httpx.Response(
+        status, json=body, request=httpx.Request("POST", f"{BASE_URL}/responses")
+    )
+    error = {500: openai.InternalServerError, 429: openai.RateLimitError}.get(
+        status, openai.BadRequestError
+    )
+    return error(f"Error code: {status} - {body}", response=response, body=body["error"])
+
+
 class BrainModel(ScriptedModel):
     """An OpenAI Agents SDK model answered by the brain."""
 
@@ -410,6 +431,8 @@ class BrainModel(ScriptedModel):
         turned = decide(self._request(input, system_instructions))
         if turned.slow:
             await asyncio.sleep(turned.slow)
+        if turned.fail:
+            raise _provider_error(turned.fail)
         return await super().get_response(system_instructions, input, *args, **kwargs)
 
     async def stream_response(  # type: ignore[override]
@@ -418,6 +441,8 @@ class BrainModel(ScriptedModel):
         turned = decide(self._request(input, system_instructions))
         if turned.slow:
             await asyncio.sleep(turned.slow)
+        if turned.fail:
+            raise _provider_error(turned.fail)
         async for event in super().stream_response(system_instructions, input, *args, **kwargs):
             yield event
 

@@ -182,7 +182,9 @@ async def test_a_two_hundred_step_task(h: Harness, adapter: str, uid: str, tmp_p
 async def test_a_budget_stops_a_long_task_where_it_says(
     h: Harness, uid: str, tmp_path: Path
 ) -> None:
-    agent, _ = await wrapped(h, "react", TOOLS, tmp_path, id=f"s13b-{uid}")
+    # a step limit past the budget: ReAct's own (12 steps) stopped the task first, a
+    # SUCCESS that never reached the budget
+    agent = arm(h.wrap(ReAct(SYSTEM, BrainChat(), max_steps=100), id=f"s13b-{uid}"), TOOLS)
     done = await agent.run(
         f"{token(uid, 1)} loop:60:lookup",
         user=f"ada-{uid}",
@@ -190,6 +192,7 @@ async def test_a_budget_stops_a_long_task_where_it_says(
         budget=Budget(max_tool_calls=25),
     )
     assert done.status is RunStatus.PARTIAL, (done.status, done.error)
+    assert parse(done.answer).mine == token(uid, 1), done.answer  # told to answer, it answered
     events = [e async for e in agent.events(done.run_id)]
     assert len([e for e in events if e.type is RunEventType.TOOL_CALL_START]) <= 25
 
