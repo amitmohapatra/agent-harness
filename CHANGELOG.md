@@ -48,6 +48,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   the dead worker's run, before agent-runs' ticker had queued it again, and nothing asked
   again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
   a worker process does) until the run pauses or ends.
+* **A remote task that ends while its turn is finishing is told.** A Deep Agents async task
+  (`AsyncSubAgent`) that ended after its turn's graph last read it, but before the turn let go
+  of the chat, was read by the process holding its run, which ended the run and found the chat
+  busy: the outcome was told to nobody until the user's next message (a loaded machine lost the
+  chain of outcomes this way). That read now waits for the turn at work in its process to end,
+  then tells the chat by a turn of its own; one that finds the outcome told already stays quiet.
 
 ### Fixed: gaps the SDK full-stack pass found
 

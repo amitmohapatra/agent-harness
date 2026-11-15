@@ -66,7 +66,7 @@ from tests.support.journals import journal_of
 from tests.support.openapi import runs_contract
 from trellis import Harness, ReAct, Runtime, Settings, middleware, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunRecord, RunStatus
-from trellis.harness import pipeline
+from trellis.harness import background, conversation, pipeline
 from trellis.harness.adapters.langgraph import LangGraphAdapter, bound_tools, notified
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
@@ -1272,14 +1272,16 @@ async def test_c_with_agent_runs_as_the_run_store_another_server_has_the_task_li
     is the document's, and nothing of the list is in a run's record. The task's run, started
     and held by the first, is ended by the second when its check reads the result."""
     service = RunsService(runs_contract())
-    server.seconds = 0.2
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    # the task ends once the first server's turn has: one that ended first (a loaded machine)
+    # is read by that turn itself, after its answer, which the script does not plan
+    server.hold()
     async with (
         Harness(config=Settings(), runs=service.client()) as first,
         Harness(config=Settings(), runs=service.client()) as second,
     ):
         await say(chat(first, server, model), "run the optimization")
-        await server.finished()
+        server.release()
         done = await say(chat(second, server, model), "is the optimization done?")
     assert done.status is RunStatus.SUCCESS and RESULT in done.answer, done.answer
     assert service.violations == [], "\n".join(service.violations)
@@ -1944,6 +1946,50 @@ async def test_i_an_idle_chat_is_told_how_its_task_ended(
     later = await say(agent, "anything else?")
     assert later.answer == "Nothing else."  # told once: Deep Agents recorded it
     assert len(server.calls) == asked
+
+
+async def test_i_a_task_that_ends_while_its_turn_is_finishing_is_told_once_the_turn_ends(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task ends after its turn last read it (its graph is done) and before the turn has
+    let go of the chat — too late for the turn, too early for an idle chat: the process that
+    holds its run reads it then and ends its run, and tells the chat by a turn of its own once
+    that turn has ended. Forced by the order of events: the server ends the task as the turn
+    finishes, and the turn goes on only once the reader has looked for a turn at work."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    model = Model(turns=[START, reports_the_id, says_the_update])
+    agent = chat(harness, server, model)
+    server.hold()
+    looked = asyncio.Event()
+    live, left = conversation.Turns.live, background.left
+
+    def looking(turns: conversation.Turns, key: str) -> conversation.Live | None:
+        looked.set()  # the reader's look at the chat: nothing else looks while a turn ends
+        return live(turns, key)
+
+    async def finishing(*args: Any) -> None:
+        if server.held:  # the turn that started the task, its graph done: the task ends now
+            monkeypatch.setattr(conversation.Turns, "live", looking)
+            server.release()
+            await looked.wait()
+        await left(*args)
+
+    monkeypatch.setattr(background, "left", finishing)
+    first = await say(agent, "run the optimization")
+    assert first.status is RunStatus.SUCCESS and len(model.seen) == 2, first.error
+
+    async def told() -> list[RunRecord]:
+        found = [r async for r in harness.runs.iterate(agent_id="bg", thread_id=THREAD)]
+        records = [await harness.runs.get(r.run_id) for r in found]
+        return [r for r in records if r and background.NOTIFIED in r.metadata and r.final]
+
+    async with asyncio.timeout(10):
+        while not await told():  # noqa: ASYNC110 - the keeper's progress
+            await asyncio.sleep(0.05)
+    [turn] = await told()
+    assert turn.output == f"Done: {RESULT}"
+    [task] = await task_runs(harness)
+    assert (task.status, task.output) == (RunStatus.SUCCESS, RESULT)
 
 
 async def test_i_remote_task_outcomes_start_three_tasks_in_a_row_and_the_fourth_is_refused(
