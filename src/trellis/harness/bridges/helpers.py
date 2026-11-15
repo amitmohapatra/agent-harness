@@ -18,7 +18,9 @@ hooks (the spawning stays the framework's):
   helper's); and how it ended, as its run's ``system`` outcome;
 * **the task tree** — on the run's stream as every child run is (``admission.py``):
   ``helper_started`` when the framework starts it, ``helper_finished`` (its status and
-  seconds) when it ends; its parallelism stays the framework's own;
+  seconds) when it ends; its parallelism stays the framework's own. Its tool calls are on the
+  run's stream between the two, as the framework's own stream shows a helper's work in the
+  run that spawned it; its run's log has no events of its own (they would be logged twice);
 * **governance and budget** — its tool calls and its model replies are the run's: they go
   through the same governance (the catalog's rules) and count toward the run's budget, by the
   adapter's hooks that reach the helper (:mod:`trellis.harness.adapters`).

@@ -32,6 +32,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   Haiku). It now says a file the user names (a bare name: the working folder) or places goes where
   they said, and `outputs/` is for a file made to give the user with no place named
   ([sandbox.md](docs/sandbox.md)).
+* **Docs: a framework's own helper's events are on its parent's stream.** subagents.md said
+  every child run's events are on its own stream; a Deep Agents `task`, an `Agent.as_tool`, a
+  Claude `agents=` subagent and a Kimi `Agent` are steps of the parent's framework run, their
+  tool calls on the parent's stream as the library streams them, their child run without
+  events of its own ([subagents.md](docs/subagents.md#limits)).
 * **Docs: Kimi offers its model an MCP server over HTTP, not a stdio one.** Kimi 2.6.2 starts
   a stdio MCP server and lists its tools but leaves them out of its model's requests, given in
   ACP's `session/new` or in its own `mcp.json` alike; one over HTTP is offered at once
