@@ -33,7 +33,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -325,22 +325,29 @@ class Way:
 
     kinds: tuple[str, ...] = ALL_KINDS
     named: Callable[[str], str] = lambda kind: TOOLS[kind]
-    args: Callable[[int], dict[str, Any]] = lambda n: {"n": n}
+    args: Callable[[str, int], dict[str, Any]] = lambda kind, n: {"n": n}
     #: what ran, as ``"<tool> <n>"`` lines, where it is not the ``ran`` file
-    ran: Callable[[Path], list[str]] | None = None
+    ran: Callable[[Deployment], list[str]] | None = None
     #: the framework that runs the tools under its own permission flow: where it asks its
     #: user about a call, its question is the person's (its reason, the rule's choices)
     asker: str | None = None
+    #: what a kind is held to be on this way, where it is not its own (a write that only
+    #: changes the graph's own state: the graph's scratch, run unasked as a read is)
+    risks: Mapping[str, str] = field(default_factory=dict)
+    #: whether a read leaves a line in :attr:`ran` (a file read does not)
+    reads_ran: bool = True
+    #: whether the catalog reaches its calls (the graph's scratch is no call of the run)
+    catalogued: bool = True
 
 
-def _claude_builtins_ran(tmp: Path) -> list[str]:
-    path = tmp / "builtins.jsonl"
+def _claude_builtins_ran(d: Deployment) -> list[str]:
+    path = d.tmp / "builtins.jsonl"
     found = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
     return [f"{f['tool']} {f['args']['n']}" for f in found]
 
 
-def _kimi_builtins_ran(tmp: Path) -> list[str]:
-    work = tmp / "kimi-work"
+def _kimi_builtins_ran(d: Deployment) -> list[str]:
+    work = d.tmp / "kimi-work"
     written = sorted(work.glob("w*.txt"), key=lambda p: p.stat().st_mtime_ns)
     return [f"Write {p.stem.removeprefix('w')}" for p in written]
 
@@ -372,16 +379,59 @@ WAYS: Final[dict[str, Way]] = {
     "kimi_builtin": Way(
         kinds=("write",),
         named=lambda kind: "Write",
-        args=lambda n: {"path": f"w{n}.txt", "content": f"entry {n}"},
+        args=lambda kind, n: {"path": f"w{n}.txt", "content": f"entry {n}"},
         ran=_kimi_builtins_ran,
         asker=KIMI_CODE,
     ),
 }
+
+
+def _files(prefix: str, ran: Callable[[Deployment], list[str]] | None = None, **more: Any) -> Way:
+    """Deep Agents' own file tools on a backend: ``ls`` the read, ``write_file`` the write,
+    each path under ``prefix`` (where the backend's route lands)."""
+    return Way(
+        kinds=("read", "write"),
+        named=lambda kind: {"read": "ls", "write": "write_file"}[kind],
+        args=lambda kind, n: (
+            {"path": prefix}
+            if kind == "read"
+            else {"file_path": f"{prefix}w{n}.txt", "content": f"entry {n}"}
+        ),
+        ran=ran or _disk_ran,
+        reads_ran=False,
+        **more,
+    )
+
+
+def _disk_ran(d: Deployment) -> list[str]:
+    written = sorted(d.disk.rglob("w*.txt"), key=lambda p: p.stat().st_mtime_ns)
+    return [f"write_file {p.stem.removeprefix('w')}" for p in written]
+
+
+def _store_ran(d: Deployment) -> list[str]:
+    found = sorted(d.store.search(("ledger",), limit=100), key=lambda item: item.created_at)
+    return [f"write_file {item.key.removeprefix('/w').removesuffix('.txt')}" for item in found]
+
+
+WAYS.update(
+    {
+        # Deep Agents' own file tools (``create_deep_agent(backend=)``, ``ReAct(backend=)``):
+        # on a disk, a store or a disk route they change real files — a write asks, a read
+        # runs; on the graph's own state they are its scratch, run unasked
+        "files_disk": _files("/"),
+        "files_store": _files("/", _store_ran),
+        "files_routed": _files("/kept/"),
+        "files_state": _files("/", lambda d: [], risks={"write": "read"}, catalogued=False),
+    }
+)
+FILES: Final = ("files_disk", "files_store", "files_routed", "files_state")
 HARNESS_WAYS: Final = ("harness_mcp", "tool_function", "gateway_mcp")
 LANGCHAIN: Final = ("react", "langgraph", "middleware", "graph", "deepagents", "swarm")
 ADAPTERS: Final[dict[str, tuple[str, ...]]] = {
     "function": HARNESS_WAYS,
     **dict.fromkeys(LANGCHAIN, (*HARNESS_WAYS, "langchain_tool", "langchain_mcp")),
+    "react": (*HARNESS_WAYS, "langchain_tool", "langchain_mcp", "files_disk", "files_routed"),
+    "deepagents": (*HARNESS_WAYS, "langchain_tool", "langchain_mcp", *FILES),
     "openai_agents": (*HARNESS_WAYS, "openai_mcp_server", "openai_function_tool"),
     "claude_query": (*HARNESS_WAYS, "claude_mcp_server", "claude_builtin"),
     "claude_live": (*HARNESS_WAYS, "claude_mcp_server", "claude_builtin"),
@@ -413,9 +463,17 @@ class Row:
 
 
 ROWS: Final = [Row(a, w) for a, ways in ADAPTERS.items() for w in ways]
+#: The rows whose calls the catalog reaches (the graph's scratch is no call of the run).
+CATALOGUED: Final = [row for row in ROWS if WAYS[row.way].catalogued]
 
 
 # --------------------------------------------------------------------------- one row's runs
+
+
+def _store() -> Any:
+    from langgraph.store.memory import InMemoryStore
+
+    return InMemoryStore()
 
 
 @dataclass
@@ -427,10 +485,19 @@ class Deployment:
     memory: FakeMemoryService
     tmp: Path
     servers: contextlib.AsyncExitStack
+    #: the store a Deep Agents ``StoreBackend`` keeps its files in
+    store: Any = field(default_factory=_store)
 
     @property
     def ran(self) -> Path:
         return self.tmp / "ran"
+
+    @property
+    def disk(self) -> Path:
+        """Where a Deep Agents ``FilesystemBackend`` keeps its files."""
+        found = self.tmp / "disk"
+        found.mkdir(exist_ok=True)
+        return found
 
 
 @contextlib.asynccontextmanager
@@ -466,11 +533,12 @@ async def built(d: Deployment, row: Row, plan: list[Call]) -> tuple[Any, list[An
     if row.way in ("langchain_tool", "langchain_mcp"):
         says = LANGCHAIN_SAYS if row.way == "langchain_tool" else LANGCHAIN_MCP_SAYS
         return _langchain(row.adapter, plan, langchain_tools(d.ran, says)), []
-    if row.way.startswith("openai_"):
-        return await _openai(d, row, plan), []
+    if row.way in FILES:
+        return _deep_files(d, row, plan), []
     if row.way.startswith("claude_"):
         return _claude(d, plan), []
-    return await _kimi(d, row, plan), []
+    own = _openai if row.way.startswith("openai_") else _kimi
+    return await own(d, row, plan), []
 
 
 async def _openai(d: Deployment, row: Row, plan: list[Call]) -> Any:
@@ -489,6 +557,24 @@ async def _openai(d: Deployment, row: Row, plan: list[Call]) -> Any:
     )
     await d.servers.enter_async_context(server)
     return Agent(name="w", instructions=SYSTEM, model=PlannedModel(plan), mcp_servers=[server])
+
+
+def _deep_files(d: Deployment, row: Row, plan: list[Call]) -> Any:
+    """Deep Agents (or ``ReAct``) with its file tools on the row's backend."""
+    from deepagents import create_deep_agent
+    from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend, StoreBackend
+
+    disk = FilesystemBackend(root_dir=str(d.disk), virtual_mode=True)
+    backend = {
+        "files_disk": disk,
+        "files_store": StoreBackend(namespace=lambda runtime: ("ledger",), store=d.store),
+        "files_routed": CompositeBackend(default=StateBackend(), routes={"/kept/": disk}),
+        "files_state": None,
+    }[row.way]
+    if row.adapter == "react":
+        return ReAct(system_prompt=SYSTEM, model=PlannedChat(plan), backend=backend)
+    model = PlannedChatModel(plan=plan)
+    return create_deep_agent(model=model, backend=backend, system_prompt=SYSTEM, store=d.store)
 
 
 def _swarm(plan: list[Call], tools: list[Any]) -> Any:
@@ -611,7 +697,7 @@ async def walked(
     call asked (with what it is offered) or not, and its body run or not, as :class:`Rule`
     says; ``overrides``: the risks an administrator set in the catalog."""
     way = WAYS[row.way]
-    rule = Rule({kind: kind for kind in ALL_KINDS} | (overrides or {}))
+    rule = Rule({kind: kind for kind in ALL_KINDS} | dict(way.risks) | (overrides or {}))
     async with deployed(row, tmp) as d:
         for kind, risk in (overrides or {}).items():
             if kind in way.kinds:
@@ -624,7 +710,7 @@ async def walked(
                 continue
             conversation = "c1" if label == LATER else label
             thread = conversation if row.conversations else None
-            calls = [(way.named(kind), way.args(n)) for kind, n, _ in steps]
+            calls = [(way.named(kind), way.args(kind, n)) for kind, n, _ in steps]
             earlier = [] if row.turn_by_turn or thread is None else said.get(thread, [])
             if thread is not None:
                 said[thread] = [*earlier, *calls]
@@ -652,7 +738,7 @@ async def _ran(
 
     def ran() -> list[str]:
         if way.ran is not None:
-            return way.ran(d.tmp)
+            return way.ran(d)
         return d.ran.read_text().splitlines() if d.ran.exists() else []
 
     target, tools = await built(d, row, plan)
@@ -664,12 +750,12 @@ async def _ran(
         offered, runs = rule.call(kind, scope, answer)
         name = way.named(kind)
         if offered:
-            _asked(result, name, rule.risks[kind], way.args(n), offered, asker=way.asker)
+            _asked(result, name, rule.risks[kind], way.args(kind, n), offered, asker=way.asker)
             assert result.interrupt is not None
             result = await agent.resume(
                 result.interrupt.interrupt_id, "answer", answer=answer, reviewer="ada"
             )
-        if runs:
+        if runs and (rule.risks[kind] != "read" or way.reads_ran):
             expected.append(f"{name.removeprefix('mcp__ledger__').removeprefix('ledger-')} {n}")
     unasked = result.interrupt and (result.interrupt.tool_call, result.interrupt.question)
     assert result.status is RunStatus.SUCCESS, f"{scope}: {unasked!r} {result.error}"
@@ -712,6 +798,6 @@ async def test_one_rule(row: Row, tmp_path: Path) -> None:
     await walked(row, tmp_path, SCRIPT)
 
 
-@pytest.mark.parametrize("row", ROWS, ids=lambda r: r.id)
+@pytest.mark.parametrize("row", CATALOGUED, ids=lambda r: r.id)
 async def test_the_catalogs_risk_wins(row: Row, tmp_path: Path) -> None:
     await walked(row, tmp_path, OVERRIDDEN, OVERRIDES)

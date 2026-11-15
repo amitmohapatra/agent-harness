@@ -1623,7 +1623,7 @@ async def test_an_acp_agent_the_harness_has_no_profile_of_has_its_own_calls_aske
     assert "has not declared" in first.interrupt.question
     assert second.interrupt.question == (
         "Approve Notify? The agent asks before it runs this call. "
-        "Allow once, allow for this conversation, or deny."
+        "Allow once, allow for this conversation, always allow, or deny."
     )
     done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: told ops"

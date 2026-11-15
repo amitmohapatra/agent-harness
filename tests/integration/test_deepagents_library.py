@@ -176,6 +176,9 @@ async def test_a_sub_agent_that_forks_the_conversation_reads_it_and_answers_thro
 
 
 # -------------------------------------------------------------------------------- backends
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_files_on_a_store_of_the_graphs_own_are_kept_past_the_thread(
     harness: Harness,
 ) -> None:
@@ -204,6 +207,9 @@ async def test_files_on_a_store_of_the_graphs_own_are_kept_past_the_thread(
     assert "ship friday" in str(model.seen[-1][-1].content)
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_files_on_a_store_go_to_the_memory_service_when_the_graph_has_no_store(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -238,6 +244,9 @@ def routed(tmp_path: Path) -> CompositeBackend:
     )
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_a_composite_backend_routes_each_path_to_its_backend(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -270,6 +279,9 @@ async def test_a_composite_backend_routes_each_path_to_its_backend(
     assert set(files) == {"/scratch.md"}
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 @pytest.mark.parametrize(
     ("call", "governed"),
     [
