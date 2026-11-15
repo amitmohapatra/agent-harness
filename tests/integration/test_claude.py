@@ -156,6 +156,27 @@ async def test_the_turns_tool_calls_and_results_are_in_its_transcript(
     assert sent[2]["custom_metadata"]["run_record"]["status"] == "ok"
 
 
+async def test_a_turn_of_fifty_seven_calls_keeps_its_whole_transcript(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """MEM-: Claude makes one call a reply, so a long task's turn is two messages a call — the
+    comparison of 2026-11-15's ``long-flow-01`` made 57 calls on Haiku, a transcript of 116
+    messages, and memory refused it whole (422: one ``POST /v1/messages`` takes at most 100),
+    losing the turn. It is kept whole, in writes the service takes, in order."""
+    refunds.clear()
+    calls = [{"tool": "refund", "args": {"order": f"o{n}"}} for n in range(57)]
+    target = options(tmp_path, [*calls, {"text": "all refunded"}])
+    agent = arm(memory_harness.wrap(target, id="refunds"), [tool(refund.fn, side_effects="write")])
+    assert (await agent.run("refund them all", user="u1")).answer == "all refunded"
+    await memory_harness.writes.drain()
+    writes = memory_service.named("messages")
+    assert [len(w.body["messages"]) for w in writes] == [100, 16]
+    sent = [m for w in writes for m in w.body["messages"]]
+    assert [m["role"] for m in sent] == ["USER", *["ASSISTANT", "TOOL"] * 57, "ASSISTANT"]
+    results = [m["content"] for m in sent if m["role"] == "TOOL"]
+    assert results == [f"refunded o{n}" for n in range(57)]
+
+
 async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
     harness: Harness, tmp_path: Path
 ) -> None:
