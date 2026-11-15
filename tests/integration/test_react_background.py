@@ -1086,6 +1086,49 @@ async def _told(harness: Harness, count: int) -> bool:
     return await _own_turns(harness) >= count
 
 
+async def test_a_server_with_no_room_refuses_a_start_and_a_follow_up_with_the_reason(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background attempts a server keeps at work are bounded (``background.AT_WORK``):
+    at the bound, a task is not started and a follow-up to one at work is not sent — each
+    refused with the reason the model reads, nothing left half begun."""
+    monkeypatch.setattr(background, "AT_WORK", 1)
+    release = asyncio.Event()
+    heard: list[str] = []
+
+    async def writer(input: str, agent: Runtime) -> str:
+        """Write on a topic."""
+        heard.append(input)
+        await release.wait()
+        return f"WROTE: {input}"
+
+    model = Model(
+        turns=[
+            ("start_async_task", {"description": "lighthouses", "subagent_type": "writer"}),
+            reports_the_task,
+            ("start_async_task", {"description": "tides", "subagent_type": "writer"}),
+            says_what_the_tool_said,
+            with_task("update_async_task", message="shorter, please"),
+            says_what_the_tool_said,
+        ]
+    )
+    wrapped = harness.wrap(writer, id="writer")
+    agent = harness.wrap(ReAct("You help.", model, subagents=[wrapped]), id="chat")
+    first = await chatted(agent, "write about lighthouses")
+    assert first.status is RunStatus.SUCCESS, first.error
+    assert results(model.seen[1])[0].startswith("Launched async subagent.")
+    await until(lambda: heard == ["lighthouses"])
+    second = await chatted(agent, "and about tides")
+    assert second.status is RunStatus.SUCCESS, second.error
+    assert results(model.seen[3]) == [background.NO_ROOM]
+    assert [r async for r in harness.runs.iterate(parent_run_id=second.run_id)] == []
+    updated = await chatted(agent, "make it shorter")
+    assert updated.status is RunStatus.SUCCESS, updated.error
+    assert results(model.seen[5]) == [background.NO_ROOM]
+    assert heard == ["lighthouses"]  # the task at work goes on, not interrupted
+    release.set()
+
+
 async def test_sec_r_2_fifty_starts_in_one_turn_start_at_most_the_admission_limit(
     harness: Harness, gate: Gate
 ) -> None:
