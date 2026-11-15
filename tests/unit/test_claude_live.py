@@ -640,6 +640,22 @@ async def test_a_session_that_fails_to_start_gives_its_place_back(
     assert len(sessions) == 0 and not sessions.starting
 
 
+async def test_a_lapse_lets_go_only_of_the_session_its_conversation_has() -> None:
+    """A session's time up (``LiveSessions.lapse``) closes it while it is its conversation's;
+    one the conversation no longer has — forgotten, a newer one in its place — is left to
+    whoever forgot it, and the newer one stays."""
+    sessions = LiveSessions()
+    old = LiveSession("c1", (), sessions, owner="u")
+    sessions.keep(old)
+    sessions.forget(old, "its process ended")
+    newer = LiveSession("c1", (), sessions, owner="u")
+    sessions.keep(newer)
+    await sessions.lapse(old, "it was idle")
+    assert not old.closed and sessions.get("c1") is newer and not newer.closed
+    await sessions.lapse(newer, "it was idle")
+    assert newer.closed and sessions.get("c1") is None
+
+
 async def test_closing_a_session_cancels_what_it_left_running_aside() -> None:
     """What a session started aside (a stop, an interrupt) ends with it."""
     session = LiveSession("conversation", (), LiveSessions(), owner="u")

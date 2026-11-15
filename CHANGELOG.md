@@ -76,6 +76,29 @@ shape) given to the conversation's model at its next model call or turn, or by a
 chat's own on its thread stream when it is idle; its questions asked through the chat
 (`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
 
+### Fixed: the last open harness bugs
+
+- Kimi: a conversation's kept process whose time is up (kept as long as a session is, idle, its
+  place given to another conversation) or that the harness closes (`Harness.aclose`) leaves
+  nothing behind: the process and what it started end, its background runs end, and the
+  session's own folder leaves its user's Kimi home (its login and config stay). The
+  conversation's next turn starts a new session, given its earlier turns by the harness, where
+  it resumed a session whose files stayed on disk for good.
+- `ReAct(skills=)` and Deep Agents with the run's skills: reading a skill (`read_file`, `ls`,
+  `glob`, `grep` under `/skills/`) is a call of the run — on its stream, traced, in memory's
+  record of its calls — governed as a read, never asked. It was taken for the graph's own
+  scratch and left no record.
+- Claude: a subagent's reasoning is a `reasoning` event naming its child run, and a tool the
+  API ran in a subagent's step (web search, the advisor) is recorded under that child run.
+  Before, only the main agent's were.
+- Deep Agents' tasks on a server of yours: the outcomes of such tasks, told by turns of the
+  chat's own, may start or update a task three times in a row, as a harness task's may; the
+  fourth fails saying so. Each outcome counted as the first, so a chain never ended.
+- Kimi: a skill Kimi loads (`Skill`) is decided by governance — Kimi asks about it (an `ask`
+  rule in its user's config), so the catalog can have a person approve it. A team config whose
+  `[permission]` rules are written inline is asked over (a `[[permission.ask]]` rule after it)
+  instead of refusing the run; only a `permission = { ... }` inline table is still refused.
+
 ### Fixed: what the real-model (Haiku) acceptance found
 
 - Claude: the turn a live session runs by itself once a background task ended is charged in

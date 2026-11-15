@@ -44,7 +44,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import AgentError, RunRecord, RunStatus, stable_id
+from trellis.contracts import AgentError, RunRecord, RunStatus, ToolError, stable_id
 from trellis.harness.bounded import MAXSIZE
 from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
@@ -117,12 +117,21 @@ class AsyncTasks:
     def __init__(self) -> None:
         self._kept: OrderedDict[str, Kept] = OrderedDict()
 
-    async def starting(self, tool: Any, args: Mapping[str, Any]) -> None:
-        """Before a call of Deep Agents' task tool ``tool`` reaches the sub-agent's server: a
-        start names the ``webhook`` the server is told to call, which is checked where it
-        leads now (``outbound.checked``: every address its host resolves to is public), as
-        its spec was checked when the agent was built. ``TargetRefused``: the call fails, and
-        the server is sent nothing."""
+    async def starting(self, runtime: Runtime, tool: Any, args: Mapping[str, Any]) -> None:
+        """Before a call of Deep Agents' task tool ``tool`` reaches the sub-agent's server in
+        ``runtime``'s turn: a start or an update is admitted as a task's of the harness is,
+        within the chain of outcomes (``background.depth_of``: past it the call fails saying
+        so, a ``ToolError``); a start names the ``webhook`` the server is told to call, which
+        is checked where it leads now (``outbound.checked``: every address its host resolves
+        to is public), as its spec was checked when the agent was built (``TargetRefused``).
+        Either way the server is sent nothing."""
+        from trellis.harness import background
+
+        if tool.name in (START, UPDATE):
+            try:
+                await background.depth_of(runtime)
+            except background.Refused as exc:
+                raise ToolError(str(exc), source="tools") from exc
         spec = _specs(tool).get(str(args.get("subagent_type"))) or {}
         if tool.name == START and spec.get("webhook"):
             await checked(str(spec["webhook"]))
@@ -175,11 +184,16 @@ class AsyncTasks:
     async def _started(
         self, runtime: Runtime, tool: Any, run_id: str, task: dict[str, Any], text: str
     ) -> None:
-        """The task's run, started as a helper of the run and handed on to this process."""
+        """The task's run, started as a helper of the run and handed on to this process: its
+        metadata says the chat's thread and how many outcomes in a row led to the turn that
+        started it (``background.depth_of``), which its outcome's turn is one further from."""
+        from trellis.harness import background
+
         helpers = runtime.helpers
         assert helpers is not None  # a graph's attempt has its helpers (``adapters.langgraph``)
         spec = _specs(tool).get(task["agent_name"]) or {}
-        about = {"task_id": task["task_id"], "thread": runtime.thread}
+        depth = await background.depth_of(runtime)  # admitted already (:meth:`starting`)
+        about = {"task_id": task["task_id"], "thread": runtime.thread, "depth": str(depth)}
         about.update({k: str(spec[k]) for k in ("url", "graph_id") if spec.get(k)})
         key, name = task["task_id"], task["agent_name"]
         helper = await helpers.start(

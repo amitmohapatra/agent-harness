@@ -425,6 +425,16 @@ class UsageLog:
         found = self.home.glob(f"sessions/*/{self.session_id}/agents/{agent}/wire.jsonl")
         return sorted(path for path in found if path.parent.name not in self.skip)
 
+    def removed(self) -> None:
+        """The session's own files removed from Kimi's home: its folder
+        (``sessions/<workspace>/<session>``), its log in it. What Kimi keeps for every session
+        — its login, its config, its skills — stays. Only a folder of that name directly in a
+        workspace's is removed, whatever the agent named its session."""
+        for workspace in self.home.glob("sessions/*"):
+            folder = workspace / self.session_id
+            if folder.resolve().parent == workspace.resolve() and folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+
     def profile(self, agent: str) -> str | None:
         """The profile Kimi started the sub-agent ``agent`` (its id) with: its type, which a
         resumed agent keeps (its log's ``profile.bind``); ``None`` when no log of it says."""
@@ -566,6 +576,18 @@ def kimi_allows(env: Mapping[str, str], cwd: str) -> list[str]:
 #: What of the team's Kimi home a user's own links to: its login, and what it set Kimi up
 #: with. Its sessions, its logs and what Kimi caches are the user's own.
 KIMI_SHARED: Final = ("credentials", "skills", "agents", "plugins", "AGENTS.md", "mcp.json")
+#: Kimi's own tools its default policy runs unasked (its ``default-tool-approve``) that a run's
+#: Kimi asks about all the same, so governance decides each call (a read, unless the catalog
+#: says more): a skill loaded (``Skill``) is a call of the run, as Claude's is. An ``ask`` rule
+#: of Kimi's config comes before that policy (its ``user-configured-ask``).
+KIMI_ASKED: Final = ("Skill",)
+#: The forms an ``ask`` rule of Kimi's config takes after the team's config (``pattern``: its
+#: pattern, as TOML): a ``[[permission.rules]]`` entry, else — the team's ``rules`` written
+#: inline, which no table extends — a ``[[permission.ask]]`` one; Kimi reads both.
+KIMI_ASK_FORMS: Final = (
+    '\n[[permission.rules]]\ndecision = "ask"\npattern = {pattern}\n',
+    "\n[[permission.ask]]\npattern = {pattern}\n",
+)
 
 
 def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
@@ -576,9 +598,10 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
     ``~/.kimi-code``): the team's login and setup are linked (:data:`KIMI_SHARED`), and its
     ``config.toml`` is the team's, as it is, with an ``ask`` rule after it for each ``allow``
     rule that would let a call run unasked (:func:`kimi_allows`, the project's too: Kimi reads
-    ``ask`` rules first) — so Kimi asks, and governance decides. A config those rules cannot be
-    added to (its ``[permission]`` rules written inline) is copied as it is: the run is then
-    not started (:data:`UNASKED`)."""
+    ``ask`` rules first) and for each tool of :data:`KIMI_ASKED` — so Kimi asks, and governance
+    decides. The rules take the first of :data:`KIMI_ASK_FORMS` the team's config takes after
+    it; a config that takes none (its whole ``permission`` an inline table) is copied as it is:
+    a run whose config would then let a call run unasked is not started (:data:`UNASKED`)."""
     team = Path(env.get("KIMI_CODE_HOME") or KIMI_HOME).expanduser()
     base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     home = Path(base) / "trellis" / "kimi" / stable_id(*owner, prefix="u_")
@@ -588,14 +611,14 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
             (home / name).symlink_to(team / name)
     config = team / "config.toml"
     given = config.read_text() if config.exists() else ""
-    asks = "".join(
-        f'\n[[permission.rules]]\ndecision = "ask"\npattern = {json.dumps(pattern)}\n'
-        for pattern in kimi_allows(env, cwd)
-    )
-    try:
-        tomllib.loads(given + asks)
-    except tomllib.TOMLDecodeError:
-        asks = ""
+    patterns = [*kimi_allows(env, cwd), *KIMI_ASKED]
+    asks = ""
+    for form in KIMI_ASK_FORMS:
+        added = "".join(form.format(pattern=json.dumps(p)) for p in patterns)
+        with contextlib.suppress(tomllib.TOMLDecodeError):
+            tomllib.loads(given + added)
+            asks = added
+            break
     part = home / "config.toml.part"
     part.write_text(given + asks)
     part.replace(home / "config.toml")

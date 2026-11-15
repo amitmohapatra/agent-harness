@@ -131,7 +131,7 @@ from trellis.harness.bridges.claude_live import (
     LiveSession,
     opened,
 )
-from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
+from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, naming
 from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
@@ -982,12 +982,15 @@ async def _tasks(helpers: Helpers, message: Any) -> None:
 
 
 async def _provided(steps: Steps, message: Any) -> None:
-    """What the provider did inside the main agent's model step, in ``message``. Its reasoning
-    (a ``thinking`` block) is on the run's stream as a ``reasoning`` event — the text only:
-    the block's signature goes nowhere, and none of it to memory or a log. A tool the API
-    ran itself (``server_tool_use``: web search, code execution, the advisor) is a call of
-    the run (:func:`_served`): recorded with its result where the stream carries one (the
-    SDK parses the advisor's), and with none at the turn's result."""
+    """What the provider did inside a model step, in ``message`` — the main agent's, or a
+    subagent's (its messages name the ``Agent`` call that runs it: its helper's run is whose
+    record it is, ``Helpers.working``). Its reasoning (a ``thinking`` block) is on the run's
+    stream as a ``reasoning`` event — the text only, a subagent's naming its run
+    (``helpers.naming``): the block's signature goes nowhere, and none of it to memory or a
+    log. A tool the API ran itself (``server_tool_use``: web search, code execution, the
+    advisor) is a call of the run, or of the subagent's (:func:`_served`): recorded with its
+    result where the stream carries one (the SDK parses the advisor's), and with none at the
+    turn's result."""
     from claude_agent_sdk import (
         AssistantMessage,
         ResultMessage,
@@ -999,21 +1002,27 @@ async def _provided(steps: Steps, message: Any) -> None:
     if isinstance(message, ResultMessage):
         for ref in list(steps.served):
             await _served(steps, ref, None)
-    elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+    elif isinstance(message, AssistantMessage):
+        helpers = steps.runtime.helpers
+        assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
+        parent = message.parent_tool_use_id
+        helper = None if parent is None else helpers.of_key(parent)
         for block in message.content:
             if isinstance(block, ThinkingBlock) and block.thinking:
-                steps.runtime.events.custom("reasoning", text=block.thinking)
+                whose = naming(helper) or {}
+                steps.runtime.events.custom("reasoning", text=block.thinking, **whose)
             elif isinstance(block, ServerToolUseBlock):
-                steps.served[block.id] = (block.name, dict(block.input), time.time())
+                steps.served[block.id] = (block.name, dict(block.input), time.time(), helper)
             elif isinstance(block, ServerToolResultBlock) and block.tool_use_id in steps.served:
                 await _served(steps, block.tool_use_id, block.content)
 
 
 async def _served(steps: Steps, ref: str, content: Mapping[str, Any] | None) -> None:
-    """A tool the API ran itself for the model (its use ``ref``), recorded as the run's call
-    (``bridge.observed``) with what it returned (``content``; ``None``: not on the SDK's
-    stream): a read, and nobody's to approve — the provider already ran it."""
-    name, args, started = steps.served.pop(ref)
+    """A tool the API ran itself for the model (its use ``ref``), recorded as the call of the
+    run — or of the subagent whose step it was — (``bridge.observed``) with what it returned
+    (``content``; ``None``: not on the SDK's stream): a read, and nobody's to approve — the
+    provider already ran it."""
+    name, args, started, helper = steps.served.pop(ref)
     failed = content is not None and "error_code" in content
     outcome = ToolOutcome(
         tool=name,
@@ -1022,7 +1031,10 @@ async def _served(steps: Steps, ref: str, content: Mapping[str, Any] | None) -> 
         error_class="ServerToolError" if failed else None,
     )
     spec = ToolSpec(name=name, side_effects="read")
-    await bridge.observed(steps.runtime, spec, args, outcome, ref=ref, started=started)
+    helpers = steps.runtime.helpers
+    assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
+    with helpers.working(helper):
+        await bridge.observed(steps.runtime, spec, args, outcome, ref=ref, started=started)
 
 
 def _noticed(runtime: Runtime, message: Any) -> None:
@@ -1257,8 +1269,9 @@ class Steps:
         #: watches nothing
         self.closed = False
         #: the tools the API ran itself whose result has not come, by Claude's id of the use:
-        #: their name, arguments and when they were seen (:func:`_provided`)
-        self.served: dict[str, tuple[str, dict[str, Any], float]] = {}
+        #: their name, arguments, when they were seen and the subagent whose step it was
+        #: (``None``: the main agent's) (:func:`_provided`)
+        self.served: dict[str, tuple[str, dict[str, Any], float, Helper | None]] = {}
         #: whose query it is: the MCP tools it is seen calling join its tool set
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
