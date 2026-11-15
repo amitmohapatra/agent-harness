@@ -1212,19 +1212,20 @@ async def test_a_background_commands_end_read_in_a_later_turn_is_that_turns_answ
     gate = tmp_path / "kimi-work" / "go"
     async with PlannedEndpoint(turns=_waits_for_its_command(gate)).serving() as endpoint:
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-waits")
-        said = {"user": "u1", "thread": "t1"}
-        paused = await agent.run("start the command", **said)
+        paused = await agent.run("start the command", user="u1", thread="t1")
         assert paused.interrupt is not None  # Kimi asks before a command
         started = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
         assert started.status is RunStatus.SUCCESS, started.error
         before = len(endpoint.requests)
-        waited = await agent.run("wait for the command and say what it printed", **said)
+        waited = await agent.run(
+            "wait for the command and say what it printed", user="u1", thread="t1"
+        )
         assert waited.status is RunStatus.SUCCESS, waited.error
         assert waited.answer == NOTIFIED
         # the wait, then the notification's turn: its read, its answer
         assert len(endpoint.requests) - before == 3
         after = len(endpoint.requests)
-        thanked = await agent.run("thanks", **said)
+        thanked = await agent.run("thanks", user="u1", thread="t1")
         assert thanked.status is RunStatus.SUCCESS and thanked.answer == "noted"
     assert counted[waited.run_id] == 15 * 3
     assert counted[thanked.run_id] == 15 * (len(endpoint.requests) - after)
