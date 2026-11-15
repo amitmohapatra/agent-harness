@@ -54,7 +54,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, middleware
 from trellis.harness.agent import Agent
 from trellis.harness.automatic import JournalBackend
-from trellis.harness.middleware import RunCheckpointer
+from trellis.harness.middleware import STEPS_LEFT_COUNT, RunCheckpointer
 from trellis.harness.tools.convert import text_of
 
 CLI: Final = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -134,7 +134,7 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
     result's role is ``tool``."""
     latest = -1
     for n, (role, text) in enumerate(messages):
-        if role == "user" and TOKEN.search(text):
+        if role == "user" and TOKEN.search(text) and not STEPS_LEFT_COUNT.search(text):
             latest = n
     if latest < 0:
         everything = " ".join(t for _, t in messages)
@@ -143,7 +143,9 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
     asked = messages[latest][1].split("</memory_context>")[-1]
     mine = (TOKEN.findall(asked) or TOKEN.findall(messages[latest][1]))[0]
     asked = asked[asked.find(mine) :]
-    results = [t for role, t in messages[latest + 1 :] if role == "tool"]
+    # the steps the harness left out to fit the window, said in a note: made, as it says
+    left = [int(m[1]) for _, t in messages[latest + 1 :] if (m := STEPS_LEFT_COUNT.search(t))]
+    results = [""] * sum(left) + [t for role, t in messages[latest + 1 :] if role == "tool"]
     commands = _commands(asked)
     for n, tool in LOOP.findall(asked):
         commands += [(tool, {"key": f"k{i}"}) for i in range(int(n))]
@@ -273,6 +275,17 @@ class _BrainScript(Script):
         answered = super().reply(body)
         for call in answered["choices"][0]["message"].get("tool_calls") or []:
             call["id"] = f"call_{self.prefix}_{call['id'].removeprefix('call_')}"
+        # the request's size, as a model's usage says it (a token per 4 characters of what it
+        # was sent): the harness fits its later requests by what replies say theirs were, and
+        # a fixed 10 taught it each was a fifth of its count (``middleware._calibrated``)
+        sent = len(json.dumps(body.get("messages") or [])) + len(
+            json.dumps(body.get("tools") or [])
+        )
+        answered["usage"] = {
+            "prompt_tokens": sent // 4,
+            "completion_tokens": 5,
+            "total_tokens": sent // 4 + 5,
+        }
         return answered
 
     def next(self, body: dict[str, Any]) -> Any:
