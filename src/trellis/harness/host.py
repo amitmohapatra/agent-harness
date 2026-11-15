@@ -9,14 +9,18 @@ here, not in an isolated sandbox, is refused where it is wrapped (``h.wrap``) an
 run's own ``framework_options`` would make it one (:func:`refuse`): a ``ConfigurationError``
 naming the setting and the sandbox to give it instead, before anything runs, unless the
 deployment allows it (``TRELLIS_HOST_EXECUTION=allow``). Allowed, governance decides each call
-as before — and the user's and tenant's boundaries still hold on the host: commands run through
-the isolation layer installed for this machine (:func:`install`: a workspace of the run's own,
-an unprivileged uid of its own inside the tenant's boundary, limits, an environment with no
-secret, a network policy, clean-up, a reaper, audit), not as the service's own user (with none
-installed they would run as that user). A layer
-that says it cannot isolate here (it cannot switch uid, say) refuses host execution, naming
-why (:data:`UNISOLATED`). The layer is built apart (``trellis.harness.sandbox``'s isolation);
-this module is where it is called.
+as before — and the user's and tenant's boundaries still hold on the host: the deployment
+installs the isolation layer (:func:`install`: a ``sandbox.isolation.HostSandbox``, its one
+entry point ``isolated_run`` — a per-tenant base, a per-run uid and 0700 workspace, limits, an
+environment with no secret, a network policy, clean-up, a reaper, audit), which refuses at
+start when it cannot isolate here (it cannot switch uid, say: :data:`UNISOLATED`). Under it,
+Deep Agents' ``execute`` on a ``LocalShellBackend`` runs through ``isolated_run``
+(:func:`_through`), never as the service's own user, and a shell the harness cannot route
+there — a framework's own process (Claude Code, Kimi Code without a sandbox, an OpenAI local
+shell or Unix-local sandbox, LangChain's ``ShellToolMiddleware``) — is refused, naming the
+layer's way in (``kimi(sandbox=sandbox(HostSandbox()))``, ``ReAct(backend=sandbox(
+HostSandbox()))``). With no layer installed, an allowed command runs as the service's user:
+a deployment that allows host execution installs one.
 
 What runs a command here (:func:`found`), by each framework's own word for it:
 
@@ -44,12 +48,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
+    from trellis.harness.sandbox.isolation import HostSandbox
 
 #: The variable an administrator allows commands on this machine with.
 HOST_EXECUTION_ENV: Final = "TRELLIS_HOST_EXECUTION"
@@ -60,13 +65,22 @@ REFUSED: Final = (
     "{fix} — or, where the deployment's administrator decides that commands may run here, "
     f"set {HOST_EXECUTION_ENV}=allow (Settings(host_execution='allow'))"
 )
-#: What an agent allowed to run commands here is refused with when the isolation layer cannot
-#: isolate them.
+#: What installing an isolation layer that cannot isolate here is refused with.
 UNISOLATED: Final = (
-    "agent {agent!r} would run commands on this machine ({found}), which this deployment "
-    "allows ({env}=allow), but they cannot be isolated here: {why}. Commands on the host run "
-    "only through the isolation layer, never as the service's own user"
-).replace("{env}", HOST_EXECUTION_ENV)
+    "commands on this machine cannot be isolated here: {why}. Host execution "
+    f"({HOST_EXECUTION_ENV}=allow) runs commands only through the isolation layer, never as "
+    "the service's own user"
+)
+#: What a host shell the isolation layer cannot carry is refused with, once a layer is
+#: installed.
+UNROUTED: Final = (
+    "agent {agent!r} would run commands on this machine outside the isolation layer: {found}. "
+    "This deployment runs host commands only through it (its workspace, uid and limits per "
+    "run): give the agent the layer as its sandbox — kimi(sandbox=sandbox(HostSandbox())), "
+    "ReAct(backend=sandbox(HostSandbox())), sandbox(HostSandbox()).tools() — or {fix}"
+)
+#: Marks a ``LocalShellBackend`` whose ``execute`` runs through the isolation layer.
+ROUTED: Final = "_trellis_isolated"
 #: Claude Code's built-in tools that run a command or code on the machine its CLI runs on.
 CLAUDE_SHELLS: Final = frozenset({"Bash", "PowerShell", "REPL", "Monitor"})
 #: How the Deep Agents fix reads, for a graph of your own and for ``ReAct``.
@@ -83,43 +97,91 @@ class HostShell:
 
     what: str
     fix: str
-
-
-class HostIsolation(Protocol):
-    """The isolation layer commands on this machine run through (:func:`install`)."""
-
-    def cannot_isolate(self) -> str | None:
-        """Why commands cannot be isolated on this machine now (no unprivileged uid to switch
-        to, say), else ``None``."""
-        ...
+    #: the ``LocalShellBackend`` whose ``execute`` the isolation layer can carry (:func:`_through`)
+    backend: Any = None
 
 
 #: The isolation layer installed for this machine's commands (:func:`install`), if any.
-_isolation: HostIsolation | None = None
+_isolation: HostSandbox | None = None
 
 
-def install(layer: HostIsolation | None) -> HostIsolation | None:
-    """Make ``layer`` the isolation layer every allowed command on this machine runs through
-    (``None``: none); the one it replaces is returned."""
+def install(layer: HostSandbox | None) -> HostSandbox | None:
+    """Make ``layer`` the isolation layer every allowed command on this machine runs through,
+    and the host's for ``isolated_run`` (``sandbox.isolation.use_host``; ``None``: none) —
+    refused at start (:data:`UNISOLATED`) when it says it cannot isolate here. The layer it
+    replaces is returned."""
+    from trellis.harness.sandbox.isolation import use_host
+
+    why = None if layer is None else layer.cannot_isolate()
+    if why is not None:
+        raise ConfigurationError(UNISOLATED.format(why=why))
     global _isolation
+    use_host(layer)
     replaced, _isolation = _isolation, layer
     return replaced
 
 
 def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
     """Refuse ``agent`` run with framework ``options`` (its own, or a run's over them) when it
-    would run commands on this machine (:func:`found`) and the deployment does not allow it,
-    or allows it but the isolation layer cannot isolate them (:data:`UNISOLATED`)."""
+    would run commands on this machine (:func:`found`) and the deployment does not allow it;
+    allowed, with an isolation layer installed, route what it can carry through it
+    (:func:`_through`) and refuse what it cannot (:data:`UNROUTED`)."""
     shells = found(agent.adapter.name, agent.target, options)
     if not shells:
         return
-    what = "; ".join(dict.fromkeys(s.what for s in shells))
     if agent.harness.settings.host_execution != "allow":
+        what = "; ".join(dict.fromkeys(s.what for s in shells))
         fix = "; ".join(dict.fromkeys(s.fix for s in shells))
         raise ConfigurationError(REFUSED.format(agent=agent.id, found=what, fix=fix))
-    why = None if _isolation is None else _isolation.cannot_isolate()
-    if why is not None:
-        raise ConfigurationError(UNISOLATED.format(agent=agent.id, found=what, why=why))
+    layer = _isolation
+    if layer is None:
+        return
+    unrouted = [s for s in shells if s.backend is None]
+    if unrouted:
+        what = "; ".join(dict.fromkeys(s.what for s in unrouted))
+        fix = "; ".join(dict.fromkeys(s.fix for s in unrouted))
+        raise ConfigurationError(UNROUTED.format(agent=agent.id, found=what, fix=fix))
+    for shell in shells:
+        _through(shell.backend, layer)
+
+
+def _through(backend: Any, layer: HostSandbox) -> None:
+    """``backend`` (a ``LocalShellBackend``) with its ``execute`` run through the isolation
+    layer's one entry point (``isolated_run``): in the run's workspace, as its uid, within the
+    layer's limits — never in its own folder as the service's user. Once per backend."""
+    from deepagents.backends.protocol import ExecuteResponse
+
+    from trellis.harness.runtime import current
+    from trellis.harness.sandbox.isolation import isolated_run
+    from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
+
+    if getattr(backend, ROUTED, None) is layer:
+        return
+
+    async def aexecute(command: str, *, timeout: int | None = None) -> ExecuteResponse:  # noqa: ASYNC109 - the command's
+        runtime = current()
+        if runtime is None:
+            raise ConfigurationError(
+                "a command on this machine runs in a harness run, through its isolation layer"
+            )
+        ran = await isolated_run(
+            runtime.tenant,
+            runtime.user,
+            runtime.run_id,
+            command,
+            timeout=REMOTE_TIMEOUT_SECONDS if timeout is None else float(timeout),
+            layer=layer,
+        )
+        return ExecuteResponse(output=ran.stdout + ran.stderr, exit_code=ran.exit_code)
+
+    def execute(command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        raise ConfigurationError(
+            "a command on this machine runs through its isolation layer, asynchronously "
+            "(the harness runs the graph so)"
+        )
+
+    backend.aexecute, backend.execute = aexecute, execute
+    setattr(backend, ROUTED, layer)
 
 
 def found(adapter: str, target: Any, options: Mapping[str, Any]) -> list[HostShell]:
@@ -137,8 +199,10 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
 
     shells: list[HostShell] = []
     for tool in graph_tools(target):
-        if tool.name == "execute" and _local_shell(files_backend(tool)):
-            shells.append(HostShell("Deep Agents' execute on a LocalShellBackend", DEEP_AGENTS_FIX))
+        backend = _local_shell(files_backend(tool)) if tool.name == "execute" else None
+        if backend is not None:
+            what = "Deep Agents' execute on a LocalShellBackend"
+            shells.append(HostShell(what, DEEP_AGENTS_FIX, backend=backend))
         middleware = _shell_middleware(tool)
         if middleware is not None and not _isolated(middleware):
             shells.append(
@@ -150,14 +214,15 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
     return shells
 
 
-def _local_shell(backend: Any) -> bool:
-    """Whether Deep Agents' ``execute`` on ``backend`` runs on this machine: a
-    ``LocalShellBackend``, or a ``CompositeBackend`` whose default is one."""
+def _local_shell(backend: Any) -> Any | None:
+    """The ``LocalShellBackend`` Deep Agents' ``execute`` on ``backend`` runs on this machine
+    with: the backend, or a ``CompositeBackend``'s default (where ``execute`` goes); else
+    ``None``."""
     from deepagents.backends import CompositeBackend, LocalShellBackend
 
     if isinstance(backend, CompositeBackend):
         return _local_shell(backend.default)
-    return isinstance(backend, LocalShellBackend)
+    return backend if isinstance(backend, LocalShellBackend) else None
 
 
 def _shell_middleware(tool: Any) -> Any | None:

@@ -189,8 +189,10 @@ container is `SandboxLost`), and a background process across commands.
 
 ### Commands on the host: the same boundaries
 
-When an administrator allows commands on the server itself (the `-hostshell` setting), they go
-through the same layer: `HostSandbox` and its one entry point —
+When an administrator allows commands on the server itself (`TRELLIS_HOST_EXECUTION=allow`,
+[governance.md](governance.md#commands-on-the-host-the-deployments-to-allow)), they go through
+the same layer, installed at start with `trellis.harness.host.install(HostSandbox(...))` (which
+refuses when `cannot_isolate()` says why): `HostSandbox` and its one entry point —
 
 ```python
 from trellis.harness.sandbox import HostSandbox, Limits, isolated_end, isolated_run
@@ -219,7 +221,8 @@ Kept results are bound at `/large_tool_results` (an empty mount point the layer 
 | Kimi Code, `kimi(sandbox=sandbox())` | its `Bash` and file writes: yes (its working folder is the workspace); its own reads are not isolated (they read the host) |
 | Claude Agent SDK's own `Bash` (its `SandboxSettings`) | no: the CLI's own sandbox on the machine it runs on; give it `sandbox().tools()` for commands the layer runs |
 | OpenAI Agents SDK's `SandboxAgent` and its clients | no: the SDK's own sandbox (Docker, Unix-local, hosted); give it a hosted or Docker client, or `sandbox().tools()` |
-| Deep Agents with a backend of its own (`LocalShellBackend`) | no: refused unless the administrator allows host commands |
+| Deep Agents with a backend of its own (`LocalShellBackend`) | refused unless the administrator allows host commands; allowed, with the layer installed, its `execute` runs through `isolated_run` (its file tools still read and write its folder) |
+| any other shell on the host (Claude Code's, an unsandboxed Kimi's, an OpenAI local shell, LangChain's `ShellToolMiddleware`) | no: refused unless the administrator allows host commands, and refused under an installed layer, which it cannot go through — give the agent `sandbox(HostSandbox())` |
 
 ## The image: build in the libraries the agent needs
 

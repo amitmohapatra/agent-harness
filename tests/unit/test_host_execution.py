@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import tempfile
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
@@ -34,6 +34,7 @@ from trellis.harness import host
 from trellis.harness.adapters.acp import ACPAgent, kimi
 from trellis.harness.events import NOTICE
 from trellis.harness.host import _shell_middleware
+from trellis.harness.sandbox import ExecResult
 from trellis.harness.settings import Settings
 
 #: What every refusal names: the one setting an administrator turns.
@@ -319,31 +320,86 @@ def test_a_tool_whose_code_holds_an_empty_cell_is_no_shell() -> None:
 
 
 class Layer:
-    """An isolation layer for commands on this machine, as the harness calls it."""
+    """The isolation layer as the harness calls it (``sandbox.isolation.HostSandbox``): whether
+    it can isolate here, and each run's workspace, whose commands it records."""
 
-    def __init__(self, why: str | None) -> None:
+    def __init__(self, why: str | None = None) -> None:
         self.why = why
+        self.ran: list[tuple[str, str | None, str, str, float | None]] = []
 
     def cannot_isolate(self) -> str | None:
         return self.why
 
+    async def workspace(self, tenant: str, user: str | None, run: str) -> Any:
+        layer = self
 
-def test_allowed_host_execution_runs_only_through_an_isolation_layer_that_can_isolate() -> None:
-    """Allowed, a host shell still needs the installed isolation layer to isolate it: one that
-    cannot (no uid to switch to) refuses it, naming why; an agent with no host shell is not
-    asked about."""
-    before = host.install(Layer("cannot switch to an unprivileged uid"))
-    try:
-        h = allowing()
-        with pytest.raises(ConfigurationError, match="cannot switch to an unprivileged uid"):
-            h.wrap(deep_local(), id="unisolated")
-        h.wrap(plain, id="no-shell")
-        replaced = host.install(Layer(None))
-        assert isinstance(replaced, Layer) and replaced.why is not None
-        h.wrap(deep_local(), id="isolated")
-        assert set(h.agents) == {"no-shell", "isolated"}
-    finally:
-        host.install(before)
+        class Box:
+            async def exec(self, command: str, *, timeout: float | None, **_: Any) -> ExecResult:  # noqa: ASYNC109 - the command's
+                layer.ran.append((tenant, user, run, command, timeout))
+                return ExecResult(exit_code=0, stdout="isolated-ok\n")
+
+        return Box()
+
+
+@pytest.fixture
+def layer() -> Iterator[Layer]:
+    """A layer installed for the test, the one before put back after it."""
+    made = Layer()
+    before = host.install(cast(Any, made))
+    yield made
+    host.install(before)
+
+
+def test_a_layer_that_cannot_isolate_refuses_host_execution_at_start() -> None:
+    """Installing the isolation layer refuses at once when it says it cannot isolate here (no
+    uid to switch to): never a command as the service's own user."""
+    with pytest.raises(ConfigurationError, match="cannot switch to an unprivileged uid"):
+        host.install(cast(Any, Layer("cannot switch to an unprivileged uid")))
+
+
+async def test_allowed_a_local_shell_runs_through_the_isolation_layer(
+    layer: Layer, tmp_path: Path
+) -> None:
+    """Under the installed layer, Deep Agents' ``execute`` on a ``LocalShellBackend`` runs
+    through its one entry point (``isolated_run``): the run's tenant, user and id, the command,
+    its timeout — not in the backend's folder; wrapped again, the backend is routed once."""
+    root = folder()
+    turns = [
+        ("execute", {"command": "touch here.txt"}),
+        ("execute", {"command": "ls", "timeout": 5}),
+        "done",
+    ]
+    scripted = ScriptedChatModel(turns=turns)
+    backend = LocalShellBackend(root_dir=root, virtual_mode=True)
+    graph = ReAct("s", scripted, backend=backend)
+    h = allowing()
+    agent = h.wrap(graph, id="isolated")
+    h.wrap(graph, id="isolated-again")
+    result = await agent.run("run it", user="ada")
+    assert result.answer == "done", result.error
+    assert [(t, u, c, s) for t, u, _, c, s in layer.ran] == [
+        ("default", "ada", "touch here.txt", 120.0),
+        ("default", "ada", "ls", 5.0),
+    ]
+    assert {r for _, _, r, _, _ in layer.ran} == {result.run_id}
+    assert "isolated-ok" in str(scripted.seen[-1][-1].content)
+    assert not (Path(root) / "here.txt").exists()
+    with pytest.raises(ConfigurationError, match="asynchronously"):
+        backend.execute("ls")
+    with pytest.raises(ConfigurationError, match="in a harness run"):
+        await backend.aexecute("ls")
+
+
+@pytest.mark.parametrize(
+    "way",
+    ["claude-unsandboxed", "kimi-unsandboxed", "openai-shell-tool", "langchain-shell-middleware"],
+)
+def test_allowed_a_shell_the_layer_cannot_carry_is_refused(layer: Layer, way: str) -> None:
+    """A framework's own shell process cannot go through the layer: under it, refused, naming
+    the layer's way in."""
+    target, options, _ = HOST_PATHS[way]
+    with pytest.raises(ConfigurationError, match=r"sandbox\(HostSandbox\(\)\)"):
+        allowing().wrap(target(), id=way, framework_options=options())
 
 
 def test_a_run_config_given_as_dicts_is_read_as_the_sdk_takes_it() -> None:

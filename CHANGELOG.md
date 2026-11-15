@@ -38,9 +38,11 @@ harness publishes them with no risk of its own, and a run's Kimi is configured t
 them so the catalog decides. **MCP servers, Claude's `allowed_tools` and a permission mode
 that lets calls through** (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) are the
 deployment's: a run's own `framework_options` that change them are refused, naming
-`h.wrap(framework_options=)`. **Host execution goes through an isolation layer**: where one is
-installed (`trellis.harness.host.install`), an allowed host shell is refused when the layer
-cannot isolate it (no unprivileged uid to switch to, say)
+`h.wrap(framework_options=)`. **Host execution goes through the isolation layer**:
+`trellis.harness.host.install(HostSandbox(...))` refuses at start when the layer cannot isolate
+(no unprivileged uid to switch to, say); under it, Deep Agents' `execute` on a
+`LocalShellBackend` runs through `isolated_run`, and a framework's own shell process, which it
+cannot carry, is refused at `h.wrap`, naming `sandbox(HostSandbox())`
 ([governance.md](docs/governance.md#who-decides-what)).
 
 **Who decides what** is now said in one place: the end user only the actions taken in their

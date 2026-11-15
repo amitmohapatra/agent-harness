@@ -72,12 +72,19 @@ made: a `ConfigurationError` naming `TRELLIS_HOST_EXECUTION` and the sandbox to 
 An administrator who decides that commands may run on this machine sets
 `TRELLIS_HOST_EXECUTION=allow` (`Settings(host_execution="allow")`); each call is then
 governed, journaled and recorded as before, and the tenant's and user's boundaries still hold
-on the host: commands run through the isolation layer installed for the machine
-(`trellis.harness.host.install`: a workspace of the run's own, an unprivileged uid of its own
-inside the tenant's boundary, limits, an environment with no secret, a network policy,
-clean-up, a reaper, audit), not as the service's own user — with no layer installed they would
-run as that user, so a deployment that allows host execution installs one — and a layer that
-cannot isolate them here (it cannot switch uid, say) refuses host execution, naming why.
+on the host. The deployment installs the isolation layer at start —
+`trellis.harness.host.install(HostSandbox(...))`, the same layer as the shared sandbox's
+([sandbox.md](sandbox.md#commands-on-the-host-the-same-boundaries): a per-tenant base, a
+per-run uid and 0700 workspace, limits, an environment with no secret, a network policy,
+clean-up, a reaper, audit) — and that refuses at once when the layer cannot isolate here (it
+cannot switch uid, say), naming why. Under it, Deep Agents' `execute` on a `LocalShellBackend`
+runs through the layer's one entry point, `isolated_run`, never as the service's own user, and
+a shell the harness cannot route there — a framework's own process: Claude Code's, an
+unsandboxed Kimi's, an OpenAI local shell or Unix-local sandbox, LangChain's
+`ShellToolMiddleware` — is refused at `h.wrap`, naming the layer's way in
+(`kimi(sandbox=sandbox(HostSandbox()))`, `ReAct(backend=sandbox(HostSandbox()))`,
+`sandbox(HostSandbox()).tools()`). With no layer installed an allowed command runs as the
+service's own user, so a deployment that allows host execution installs one.
 `trellis.harness.host` is the one place this is decided.
 
 | The way to a shell | On the host (refused unless allowed) | In a sandbox (never refused) |
