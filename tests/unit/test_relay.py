@@ -155,7 +155,7 @@ async def test_a_client_that_goes_has_its_command_killed(tmp_path: Path) -> None
     relay = await Relay(box).start()
     try:
         token = relay.command("Bash", "sleep 300").split()[-1]
-        reader, writer = await asyncio.open_unix_connection(relay.path)
+        _, writer = await asyncio.open_unix_connection(relay.path)
         writer.write(f"{token}\n".encode())
         await writer.drain()
         while not box.ran:  # noqa: ASYNC110 - the command started
