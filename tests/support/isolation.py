@@ -13,7 +13,7 @@ import sys
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -54,6 +54,22 @@ def processes_of(uid: int) -> list[str]:
         ["ps", "-o", "pid=,args=", "-u", str(uid)], check=False, capture_output=True, text=True
     )
     return [line.strip() for line in found.stdout.splitlines() if line.strip()]
+
+
+#: The layer every test has unless it gives one of its own: it cannot isolate (its helper is
+#: ``false``) — wherever the tests run, root or not, a framework's own shell is off the same
+#: way (Claude Code's left out, Kimi Code's and an OpenAI shell's refused, saying why), and no
+#: workspace is made on this machine. The test processes a test starts set it too.
+NOT_ISOLATING: Final = ("/var/lib/trellis-test-none", ("false",))
+
+
+def not_isolating() -> Any:
+    """Make this machine's layer one that cannot isolate (:data:`NOT_ISOLATING`); the one it
+    replaces is returned."""
+    from trellis.harness.sandbox.isolation import HostSandbox, use_host
+
+    root, helper = NOT_ISOLATING
+    return use_host(HostSandbox(root, helper=helper))
 
 
 @contextmanager

@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.invariants import record_in_process
+from tests.support.isolation import not_isolating
 from trellis import Harness, Runtime, Settings, current, tool
 from trellis.contracts import InterruptDecision
 from trellis.harness import holding
@@ -160,6 +161,7 @@ def serving(runs_url: str, api_key: str, folder: Path) -> FastAPI:
 
 def main(runs_url: str, api_key: str, port: str, folder: str) -> None:
     record_in_process()  # its exchanges with agent-runs, for the test's invariants
+    not_isolating()  # as in every test: no workspace made on this machine
     if seconds := os.environ.get("HOLD_SECONDS"):
         holding.HOLD_SECONDS = int(seconds)
     app = serving(runs_url, api_key, Path(folder))

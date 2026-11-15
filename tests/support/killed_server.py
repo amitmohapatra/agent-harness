@@ -34,12 +34,12 @@ from claude_agent_sdk import ClaudeAgentOptions
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.isolation import not_isolating
 from tests.support.shared_runs import FileRuns
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import holding, pipeline
 from trellis.harness.frontend import Frontend
-from trellis.harness.sandbox.isolation import HostSandbox, use_host
 
 CLI: Final = str(Path(__file__).resolve().parent / "fake_claude_cli.py")
 AGENT_ID: Final = "chat"
@@ -138,7 +138,7 @@ async def main(store_path: Path, folder: Path, scenario: str) -> None:
     # as in every test (``tests/conftest.py``): this machine's layer cannot isolate a command,
     # so Claude Code's shell is off and its conversation's process is kept between turns —
     # and a killed server leaves no workspace behind
-    use_host(HostSandbox("/var/lib/trellis-test-none", helper=("false",)))
+    not_isolating()
     async with Harness(config=Settings(host_execution="allow"), runs=store) as harness:
         if scenario == "asked":
             await asked(harness, store, folder)

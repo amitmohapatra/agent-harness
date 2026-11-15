@@ -59,9 +59,10 @@ def commands_refused_unless_a_test_isolates_them() -> Iterator[None]:
     (its helper is ``false``), wherever the tests run — root or not — so a framework's own
     shell is off the same way on every machine (Claude Code's left out, Kimi Code's and an
     OpenAI shell's refused, saying why). The isolation tests make one that can."""
-    from trellis.harness.sandbox.isolation import HostSandbox, use_host
+    from tests.support.isolation import not_isolating
+    from trellis.harness.sandbox.isolation import use_host
 
-    replaced = use_host(HostSandbox("/var/lib/trellis-test-none", helper=("false",)))
+    replaced = not_isolating()
     yield
     use_host(replaced)
 

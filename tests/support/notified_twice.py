@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.isolation import not_isolating
 from tests.support.shared_runs import FileRuns
 from trellis import Harness, ReAct, Settings
 from trellis.harness import background
@@ -34,6 +35,7 @@ async def found(input: str, agent: object) -> str:
 
 async def main(store_path: Path, folder: Path, name: str) -> None:
     store = FarRuns(store_path)
+    not_isolating()  # as in every test: no workspace made on this machine
     async with Harness(config=Settings(), runs=store) as harness:
         research = harness.wrap(found, id="research")
         model = ScriptedChatModel(turns=["Your research is back."])

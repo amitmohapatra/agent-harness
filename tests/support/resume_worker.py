@@ -24,6 +24,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.isolation import not_isolating
 from tests.support.shared_runs import FileRuns
 from trellis import Harness, Settings, middleware
 from trellis.harness.governance import decision
@@ -77,6 +78,7 @@ async def main(store: Path, ledger: Path, calls: Path) -> bool:
     # the write runs unasked, as the ``writes_unasked`` fixture has it: a crash around a write
     # is the subject here, not its approval
     decision.ACTIONS["write"] = decision.Action.ANNOUNCE
+    not_isolating()  # as in every test: no workspace made on this machine
     async with Harness(config=Settings(), runs=FileRuns(store)) as h:
         agent = h.wrap(agent_graph(ledger, calls), id=AGENT_ID)
         return await h.worker([agent]).run_once()
