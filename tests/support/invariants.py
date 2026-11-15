@@ -387,9 +387,8 @@ class Invariants:
             if e.service != "runs" or not isinstance(e.response, dict) or (e.status or 500) >= 300:
                 continue
             if (e.method, e.path) in (("POST", "/v1/runs"), ("POST", "/v1/runs/claim")):
-                record = (
-                    e.response.get("record", e.response) if isinstance(e.response, dict) else {}
-                )
+                # a create answers the run's record; a claim ``{"run": <record>, "lease": ...}``
+                record = e.response.get("run") if e.path.endswith("/claim") else e.response
                 run_id = record.get("run_id") if isinstance(record, dict) else None
                 if run_id:
                     found.setdefault(run_id, e)
