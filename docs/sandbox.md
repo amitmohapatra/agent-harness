@@ -338,9 +338,10 @@ Kimi run writes in its sandbox instead.
 
 A run's workspace goes with the run. What it wrote there besides `outputs/` (delivered as
 above) is kept for the conversation's next run (`sandbox.carry`): when the run succeeds or
-pauses, one archive in the file store, beside what the conversation's graph state keeps
-(`.carried/<tenant>/<user>/<conversation>/<agent>/workspace.tar`, with its record: the files
-in it, those left out). The workspace on this machine is still deleted at the run's end. The
+pauses, one archive in the file store, in a folder of its own in the one the conversation's
+graph state is kept in (`.carried/<tenant>/<user>/<conversation>/<agent>/workspace/workspace.tar`,
+with its record: the files in it, those left out). The workspace on this machine is still
+deleted at the run's end. The
 conversation's next run — the same tenant, user, conversation and agent, on any worker, never
 another's — gets them back in its fresh workspace before its first command, and is told in
 one line what came back (with its first command's result; Claude Code, with its context).

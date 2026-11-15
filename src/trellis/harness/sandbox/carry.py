@@ -4,10 +4,11 @@ them), which goes with the run, kept in the file store under the conversation an
 to the conversation's next run, in its fresh workspace, before its first command.
 
 * **kept** (:func:`kept`) when a run ends in a way that keeps state — it succeeded, or it
-  paused — as one archive (:data:`ARCHIVE`) in the conversation's folder of what it carries
-  (``.carried/<tenant>/<user>/<conversation>/<agent>``, the one the graph state is kept in),
-  with its record (the files in it, those left out): every file under the working directory
-  but the user's :data:`~trellis.harness.sandbox.OUTPUTS` (delivered as ever) and the caches
+  paused — as one archive (:data:`ARCHIVE`) in a folder of its own (:data:`KEPT_IN`) in the
+  conversation's folder of what it carries, the graph state's
+  (``.carried/<tenant>/<user>/<conversation>/<agent>/workspace``), with its record (the
+  files in it, those left out): every file under the working directory but the user's
+  :data:`~trellis.harness.sandbox.OUTPUTS` (delivered as ever) and the caches
   (:data:`SKIPPED`). A file past :data:`FILE_BYTES` is left out, and past
   :data:`TOTAL_BYTES` all told the oldest go first; the run is told which (a warning). A run
   that failed keeps nothing new: the next run gets what the last kept.
@@ -34,6 +35,9 @@ log = logging.getLogger("trellis.sandbox")
 #: The archive a conversation's working files are kept in, and what made it (its source).
 ARCHIVE: Final = "workspace.tar"
 SOURCE: Final = "workspace"
+#: The folder the archive is kept in, in the conversation's folder of what it carries: not
+#: beside the graph state's files there, each of which a turn reads as one (``pipeline``).
+KEPT_IN: Final = "workspace"
 #: The largest file carried (the largest output kept), and the most carried all told: what one
 #: read of a workspace's file takes (``isolation.READ_MAX_BYTES``), less the archive's own room.
 FILE_BYTES: Final = 50 * 1024 * 1024
@@ -65,11 +69,12 @@ LEFT_OUT: Final = "Left out, past what a conversation carries: {files}."
 
 
 def folder(runtime: Runtime) -> str:
-    """Where the conversation's working files are kept: its folder of what it carries."""
+    """Where the conversation's working files are kept: in its folder of what it carries
+    (:data:`KEPT_IN`)."""
     from trellis.harness.pipeline import CARRIED_FOLDER  # noqa: PLC0415 - imports this
 
     scope = (runtime.tenant, runtime.user, runtime.conversation, runtime.agent_id)
-    return "/".join([CARRIED_FOLDER, *map(part, scope)])
+    return "/".join([CARRIED_FOLDER, *map(part, scope), KEPT_IN])
 
 
 def _carries(runtime: Runtime) -> bool:

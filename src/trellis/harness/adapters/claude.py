@@ -1769,6 +1769,28 @@ def _shell(options: Any, env: Mapping[str, str]) -> Shell:
     return Shell(options.cwd or os.getcwd(), reads, {**os.environ, **env})
 
 
+async def _checked_by(
+    own: Any, name: str, args: dict[str, Any], context: Any, *, relay: Relay | None, shell: Shell
+) -> Any:
+    """The verdict on a call before the harness's own answer (``None``: none yet): a command,
+    the deployment's, run in the run's workspace by ``relay`` (the team's own check first, when
+    it has one); else the team's own ``can_use_tool``'s, when it has one; else a file tool's
+    call outside the run's folders refused (:data:`FILE_PATHS`: Claude Code asks about one)."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    if relay is not None and name in RELAYED:
+        verdict = PermissionResultAllow() if own is None else await own(name, args, context)
+        if isinstance(verdict, PermissionResultAllow):
+            verdict = _relayed(relay, name, verdict.updated_input or args)
+        return verdict
+    if own is not None:
+        return await own(name, args, context)
+    path = args.get(FILE_PATHS.get(name, ""))
+    if isinstance(path, str) and path and not shell.reaches(path):
+        return PermissionResultDeny(message=OUTSIDE.format(tool=name, path=path))
+    return None
+
+
 def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
     """The ``can_use_tool`` the CLI calls when Claude Code would ask its user about a call (its
     permission mode and rules let it through without asking otherwise): the team's own
@@ -1795,17 +1817,9 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         spec = _spec(runtime, name)
-        if steps.relay is not None and name in RELAYED:
-            # a command: the deployment's, run in the run's workspace (the team's own check
-            # first, when it has one)
-            verdict = PermissionResultAllow() if own is None else await own(name, args, context)
-            if isinstance(verdict, PermissionResultAllow):
-                verdict = _relayed(steps.relay, name, verdict.updated_input or args)
-        elif own is not None:
-            verdict = await own(name, args, context)
-        elif (path := args.get(FILE_PATHS.get(name, ""))) and not shell.reaches(str(path)):
-            # a file tool's call outside the run's folders (:data:`FILE_PATHS`): the service's
-            verdict = PermissionResultDeny(message=OUTSIDE.format(tool=name, path=path))
+        verdict = await _checked_by(own, name, args, context, relay=steps.relay, shell=shell)
+        if verdict is not None:
+            pass
         elif name == QUESTION_TOOL:
             try:
                 verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))

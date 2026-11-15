@@ -19,7 +19,8 @@ runs under the harness's isolation. No setting more than `TRELLIS_HOST_EXECUTION
   Claude reads is what Claude Code makes of a command run itself; a `cd` holds for the next.
   Claude Code works in that workspace (its `cwd`; the options' own `cwd` joins `add_dirs`),
   with no settings of the folder's own and no `REPL`; a file it writes there is the run's.
-  Its file tools stay the CLI's, as the service's user. With its shell, a conversation's turn
+  Its file tools stay the CLI's, as the service's user: a path outside the run's folders is
+  refused. With its shell, a conversation's turn
   runs in a process of its own (the workspace, and what runs in it, end with the run). Where
   the service is not root, or the layer cannot isolate, its shell is left out, saying why.
 * **Kimi Code with no `sandbox=`**: its terminal and file capabilities are served by a
@@ -29,8 +30,9 @@ runs under the harness's isolation. No setting more than `TRELLIS_HOST_EXECUTION
 * **OpenAI Agents' `LocalShellTool` and local `ShellTool`** (breaking): each command runs in
   the run's workspace, the result the SDK's own (`ShellResult`, the text); the tool's own
   executor is no longer called. Declared `write`, isolated: announced, not asked.
-* **The isolation layer keeps secrets out**: the cloud metadata server is out of every
-  command's reach, the network open or not (an iptables owner rule on the host — an open
+* **The isolation layer keeps secrets out**: the cloud metadata server and the platform's
+  other credential endpoints (the link-local 169.254.0.0/16: ECS task and EKS Pod Identity
+  credentials too; `fd00:ec2::254`) are out of every command's reach, the network open or not (an iptables owner rule on the host — an open
   network needs iptables — a blackhole route in the shared container); a pod's secret folders
   (`/var/run/secrets`, `/run/secrets`) are hidden; the folders above the workspaces' root are
   made for any uid to go through (a command reached its workspace by its whole path only from
@@ -46,7 +48,7 @@ runs under the harness's isolation. No setting more than `TRELLIS_HOST_EXECUTION
 
 When a run succeeds or pauses, what it wrote in its workspace besides `outputs/` is kept in the
 file store under the conversation (`.carried/<tenant>/<user>/<conversation>/<agent>/
-workspace.tar`), and the conversation's next run — on any worker, never another user's,
+workspace/workspace.tar`), and the conversation's next run — on any worker, never another user's,
 tenant's or conversation's — gets it back in its fresh workspace before its first command, told
 in one line. Caches are skipped; past 50 MiB a file, 60 MiB all told, the oldest go first and
 the run is told which; a failed run keeps nothing new. The workspace on this machine is still
