@@ -5,6 +5,49 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed (breaking): a command on the host is the deployment's to allow — `TRELLIS_HOST_EXECUTION`
+
+An agent that would run commands on the machine the harness runs on, not in an isolated
+sandbox, is now **refused by default**: at `h.wrap`, and for a run whose own
+`framework_options` would make it one, with a `ConfigurationError` that names
+`TRELLIS_HOST_EXECUTION=allow` and the sandbox to give it instead. Before, each of these ran
+on the host, left at most to the chat user's approval — Deep Agents' `execute` on a
+`LocalShellBackend` (`ReAct(backend=)` too) and LangChain's `ShellToolMiddleware` ran their
+commands only announced, an OpenAI agent's `LocalShellTool` or local `ShellTool` and Claude
+Code's and Kimi Code's shells asked the run's user, and the SDK's `UnixLocalSandboxClient`
+ran with no isolation. The end user decides the actions taken in their name; the deployment's
+machine is the administrator's, who allows commands there with `TRELLIS_HOST_EXECUTION=allow`
+(`Settings(host_execution="allow")`). Isolated sandboxes are unaffected: `sandbox()`, a Deep
+Agents sandbox backend, LangChain's Docker or Codex policy, an OpenAI `SandboxAgent` on Docker
+or a hosted client, Claude Code's `sandbox={"enabled": True, "allowUnsandboxedCommands":
+False}`, `kimi(sandbox=sandbox())`; so is an agent with no shell (a Claude Code whose `tools`
+leave out `Bash`, `PowerShell`, `REPL` and `Monitor`). `TRELLIS_REQUIRE_SANDBOX` is gone (what
+it asked for is the default; `Settings(require_sandbox=)` is refused, naming the new setting),
+and it no longer passes a Claude Code sandbox that leaves `allowUnsandboxedCommands` unset —
+Claude Code's own default for it is true, which lets a command out of the sandbox
+([governance.md](docs/governance.md#commands-on-the-host-the-deployments-to-allow)).
+
+**Claude Code and Kimi Code, tool by tool** (breaking where noted). Reads in the workspace run
+unasked and writes stay the user's under the one rule, as before. **The shell in the sandbox
+runs unasked**, announced and recorded: Claude Code's and Kimi's own permission question about
+a command is no longer the user's (on the host, where the administrator allows it, the same).
+**The network out is closed by default** — Claude's `WebFetch`, `WebSearch`, Kimi's
+`FetchURL`, `WebSearch`: refused, and the model told why, until the tool catalog gives the tool
+a risk or an `approve_when` (before, Claude's asked the user and Kimi's ran unasked); the
+harness publishes them with no risk of its own, and a run's Kimi is configured to ask about
+them so the catalog decides. **MCP servers, Claude's `allowed_tools` and a permission mode
+that lets calls through** (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) are the
+deployment's: a run's own `framework_options` that change them are refused, naming
+`h.wrap(framework_options=)`. **Host execution goes through an isolation layer**: where one is
+installed (`trellis.harness.host.install`), an allowed host shell is refused when the layer
+cannot isolate it (no unprivileged uid to switch to, say)
+([governance.md](docs/governance.md#who-decides-what)).
+
+**Who decides what** is now said in one place: the end user only the actions taken in their
+name; infrastructure — the host, a tool's risk, who answers an infrastructure tool's approval
+(`before_tool`'s `Ask(assignee="role:…")`, the catalog's `risk` and `approve_when`) — the
+administrator's, always audited ([governance.md](docs/governance.md#who-decides-what)).
+
 ### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
 
 An MCP tool whose server sent **no annotations at all** is now *undeclared*, as a function

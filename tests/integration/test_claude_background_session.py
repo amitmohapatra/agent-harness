@@ -65,6 +65,12 @@ from trellis.harness.identity import conversation_key
 from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT
 
+#: Claude Code and Kimi Code run their shells in a folder of this machine: the tests' deployment
+#: allows it (TRELLIS_HOST_EXECUTION=allow, the harness fixtures).
+pytestmark = pytest.mark.host_execution
+#: the deployment of the tests that make their own harness
+HOST_ALLOWED = Settings(host_execution="allow")
+
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 #: A subagent started in the background: its ``Agent`` call returns at once, task ``t1`` runs.
 BACKGROUND = {"background": {"id": "t1", "agent": "researcher", "prompt": "research the market"}}
@@ -565,7 +571,7 @@ async def _charged_for_a_paused_turn(
     scripts = [[{"text": "hi"}], [{"tool": "refund", "args": {"order": "o1"}}, {"text": "done"}]]
     target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
     store = LocalRuns()
-    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    one, two = Harness(config=HOST_ALLOWED, runs=store), Harness(config=HOST_ALLOWED, runs=store)
     try:
         first = arm(one.wrap(target, id="chat"), [refund])
         second = arm(two.wrap(target, id="chat"), [refund])
@@ -1088,7 +1094,7 @@ async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_sta
     given as context (the run store's)."""
     scripts = [[{"text": "turn {heard}"}]]
     store = LocalRuns()
-    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    one, two = Harness(config=HOST_ALLOWED, runs=store), Harness(config=HOST_ALLOWED, runs=store)
     try:
         first = one.wrap(options(tmp_path, scripts), id="chat")
         second = two.wrap(options(tmp_path, scripts), id="chat")
@@ -1428,7 +1434,7 @@ async def test_a_background_subagents_write_asks_a_person_in_the_next_turn_and_t
     it, and its answer lets the call through."""
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
     catalog = FakeCatalog({"Write": Rule(risk="write", approve_when="true")})
-    async with with_governance(Harness(config=Settings()), Governance(catalog)) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(catalog)) as h:
         agent = h.wrap(options(tmp_path, scripts, allowed_tools=["Write"]), id="asks")
         first = await agent.run("research the market", user="u1", thread="t1")
         child = await child_of(h, first.run_id)
@@ -1475,7 +1481,7 @@ async def test_a_rejected_call_of_a_background_subagent_is_told_to_it(
     agent = harness.wrap(options(tmp_path, scripts), id="rejects")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     turn = await agent.run("how is it going?", user="u1", thread="t1")
@@ -1487,7 +1493,7 @@ async def test_a_rejected_call_of_a_background_subagent_is_told_to_it(
     await until((tmp_path / "tasks" / "t1.called").exists)
     called = json.loads((tmp_path / "tasks" / "t1.called").read_text())
     assert called == {
-        "result": "Bash was not run: the approver rejected it (not there)",
+        "result": "Edit was not run: the approver rejected it (not there)",
         "ok": False,
     }
     assert built_ins(tmp_path) == []
@@ -1607,7 +1613,7 @@ async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_t
     agent = harness.wrap(options(tmp_path, scripts), id="unanswered")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     await when(harness, child.run_id, RunStatus.CANCELLED)
@@ -1694,7 +1700,7 @@ async def test_cancelling_a_background_run_that_waits_for_a_person_stops_its_tas
     agent = harness.wrap(options(tmp_path, scripts), id="cancel-paused")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     assert (await agent.cancel(child.run_id)).status is RunStatus.CANCELLED
@@ -1913,7 +1919,7 @@ async def test_a_turn_resumed_on_another_worker_leaves_the_first_its_background_
     script = [BACKGROUND, {"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
     target = options(tmp_path, [script])
     store = LocalRuns()
-    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    one, two = Harness(config=HOST_ALLOWED, runs=store), Harness(config=HOST_ALLOWED, runs=store)
     try:
         first = arm(one.wrap(target, id="bg"), [refund])
         second = arm(two.wrap(target, id="bg"), [refund])
@@ -1973,7 +1979,7 @@ async def test_another_users_thread_of_the_same_name_sees_nothing_of_a_backgroun
     agent = harness.wrap(options(tmp_path, scripts), id="two-users-bg")
     hers = await agent.run("research the market", user="ada", thread="t1")
     child = await child_of(harness, hers.run_id)
-    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     his = await agent.run("research the market", user="bob", thread="t1")
@@ -2050,7 +2056,7 @@ async def test_a_session_with_work_is_kept_past_the_idle_bound_but_not_for_ever(
 
 async def test_closing_the_harness_closes_every_session_and_its_process(tmp_path: Path) -> None:
     scripts = [[BACKGROUND, {"text": "started it"}]]
-    async with Harness(config=Settings()) as harness:
+    async with Harness(config=HOST_ALLOWED) as harness:
         agent = harness.wrap(options(tmp_path, scripts), id="closing")
         await agent.run("research the market", user="u1", thread="t1")
         await agent.run("research the market", user="u2", thread="t1")
@@ -2073,12 +2079,12 @@ async def test_closing_the_harness_ends_every_process_and_part_even_when_the_run
     from trellis.harness import telemetry
 
     store = LocalRuns()
-    harness = Harness(config=Settings(), runs=store)
+    harness = Harness(config=HOST_ALLOWED, runs=store)
     scripts = [[BACKGROUND, {"text": "started it"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="closing")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)  # its call waits for a person
     [one] = served(tmp_path)
@@ -2649,7 +2655,7 @@ async def test_a_shared_runs_call_asks_a_person_once_and_runs_as_they_decided(
         [{"text": "ok"}],
     ]
     catalog = FakeCatalog({"Write": Rule(risk="write", approve_when="true")})
-    async with with_governance(Harness(config=Settings()), Governance(catalog)) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(catalog)) as h:
         agent = h.wrap(options(tmp_path, scripts, allowed_tools=["Write"]), id="shared-asks")
         await agent.run("fan out twice", user="u1", thread="t1")
         await until(lambda: SHARED in runs_of(agent))

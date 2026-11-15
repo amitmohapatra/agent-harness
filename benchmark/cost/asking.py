@@ -932,7 +932,10 @@ async def run_case(
 
     service = FakeMemoryService(context_text=case.memory, shown=[])
     service.catalog.update(RULES)
-    config = Settings.from_env().model_copy(update={"runs_url": None, "otlp_endpoint": None})
+    # Claude Code and Kimi Code run in work folders of this machine: allowed for the suite
+    config = Settings.from_env().model_copy(
+        update={"runs_url": None, "otlp_endpoint": None, "host_execution": "allow"}
+    )
     declared = [ask_user()] if ask == "declared" and not case.plain else []
     without = ["tool_search", *(["ask"] if ask == "none" else [])]
     RAN.clear()

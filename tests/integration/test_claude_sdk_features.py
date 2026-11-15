@@ -52,6 +52,12 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import DELIVERS_HERE
 
+#: Claude Code and Kimi Code run their shells in a folder of this machine: the tests' deployment
+#: allows it (TRELLIS_HOST_EXECUTION=allow, the harness fixtures).
+pytestmark = pytest.mark.host_execution
+#: the deployment of the tests that make their own harness
+HOST_ALLOWED = Settings(host_execution="allow")
+
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 #: The adapter's two paths: a query in a process of its own, and a conversation's live session.
 PATHS = ("query", "live")
@@ -672,7 +678,7 @@ async def test_a_call_the_teams_hook_refuses_is_not_a_persons_to_approve(
     script = [{"builtin": "Bash", "args": {"command": "make deploy"}}, {"text": "{last}"}]
     own = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[refusing])]}
     rules = {"Bash": Rule(risk="irreversible")}  # governance would ask a person
-    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog(rules))) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog(rules))) as h:
         agent = h.wrap(options(tmp_path, script, hooks=own), id="refused")
         result = await agent.run("deploy", user="u1", thread=conversation(path))
     assert result.status is RunStatus.SUCCESS and result.answer == "not on Fridays", result
@@ -747,16 +753,16 @@ async def test_loading_a_deferred_tool_asks_nobody(
     ]
 
 
-@pytest.mark.parametrize("name", ["ExitPlanMode", "WebFetch", "WebSearch", "Skill"])
+@pytest.mark.parametrize("name", ["ExitPlanMode", "Skill"])
 async def test_what_claude_code_asks_about_a_person_answers_unless_the_catalog_allows_it(
     tmp_path: Path, name: str
 ) -> None:
-    """Claude Code asks its user before it leaves plan mode with a plan (``ExitPlanMode``),
-    reaches the network (``WebFetch``, ``WebSearch``) or runs a skill (``Skill``): a person
-    answers as it would have, once — unless the tool catalog allows the tool, which then
-    runs without a question."""
+    """Claude Code asks its user before it leaves plan mode with a plan (``ExitPlanMode``) or
+    runs a skill (``Skill``): a person answers as it would have, once — unless the tool
+    catalog allows the tool, which then runs without a question. (The network, ``WebFetch``
+    and ``WebSearch``, is the catalog's alone: ``test_who_decides``.)"""
     script = [{"builtin": name, "args": {"url": "https://example.com"}}, {"text": "{last}"}]
-    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog({}))) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog({}))) as h:
         agent = h.wrap(options(tmp_path, script), id="asks")
         paused = await agent.run("go on", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -766,7 +772,7 @@ async def test_what_claude_code_asks_about_a_person_answers_unless_the_catalog_a
         assert [c["tool"] for c in lines(tmp_path / "builtins.jsonl")] == [name]  # once
     (tmp_path / "builtins.jsonl").unlink()
     allows = FakeCatalog({name: Rule(risk="read")})
-    async with with_governance(Harness(config=Settings()), Governance(allows)) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(allows)) as h:
         done = await h.wrap(options(tmp_path, script), id="allowed").run("go on", user="u1")
         assert done.status is RunStatus.SUCCESS and done.answer == f"{name} ran", done.error
 
@@ -777,14 +783,14 @@ async def test_a_write_claude_code_asks_about_is_one_question_and_the_same_call_
 ) -> None:
     """A write governance lets run is asked about when Claude Code asks (its question): once
     a call. The same command made again is another call, asked about again."""
-    again = {"builtin": "Bash", "args": {"command": "make deploy"}}
+    again = {"builtin": "Edit", "args": {"file_path": "deploy.txt"}}
     agent = harness.wrap(options(tmp_path, [again, again, {"text": "{last}"}]), id="twice")
     paused = await agent.run("deploy twice", user="u1", thread=conversation(path))
     for _ in range(2):
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert "Claude Code asks" in paused.interrupt.question
         paused = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert paused.status is RunStatus.SUCCESS and paused.answer == "Bash ran"
+    assert paused.status is RunStatus.SUCCESS and paused.answer == "Edit ran"
     assert len(lines(tmp_path / "builtins.jsonl")) == 2
 
 
@@ -816,7 +822,7 @@ async def test_a_built_in_governance_asked_about_is_one_question_whatever_made_i
 
     rules = {} if why == "hook" else {"Bash": Rule(risk="irreversible")}
     agents = {"deployer": AgentDefinition(description="Deploys.", prompt="Deploy it.")}
-    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog(rules))) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog(rules))) as h:
         target = options(tmp_path, script, agents=agents)
         agent = h.wrap(target, id="deploys", hooks=[Asking()])
         paused = await agent.run("deploy", user="u1", thread=conversation(path))
@@ -835,10 +841,10 @@ async def test_an_approval_is_carried_for_the_call_it_answered_and_no_other(
 ) -> None:
     """SEC-R-7: a person's answer spares the call it answered Claude Code's own question, by
     the call's id. From a CLI (or a relay) that names no id, nothing is carried: an approved
-    ``make deploy`` is no approval of the ``rm -rf build`` that follows, which a person is
+    edit of ``deploy.txt`` is no approval of the edit of ``build.txt`` that follows, which a person is
     asked about before it runs (the call it could not name is asked about again)."""
-    deploy, wipe = {"command": "make deploy"}, {"command": "rm -rf build"}
-    script = [{"builtin": "Bash", "args": deploy}, {"builtin": "Bash", "args": wipe}]
+    deploy, wipe = {"file_path": "deploy.txt"}, {"file_path": "build.txt"}
+    script = [{"builtin": "Edit", "args": deploy}, {"builtin": "Edit", "args": wipe}]
 
     class Asking(Hooks):
         async def before_tool(self, call: ToolCall) -> Ask | None:
@@ -857,7 +863,7 @@ async def test_an_approval_is_carried_for_the_call_it_answered_and_no_other(
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.answer
     assert asked.interrupt.tool_call is not None and asked.interrupt.tool_call.args == wipe
     ran = [(c["tool"], c["args"]) for c in lines(tmp_path / "builtins.jsonl")]
-    assert ran == [("Bash", deploy)]
+    assert ran == [("Edit", deploy)]
 
 
 @pytest.mark.parametrize("path", PATHS)
@@ -872,10 +878,10 @@ async def test_a_question_a_hook_asks_while_a_call_is_decided_is_no_approval_of_
     class Ticket(Hooks):
         async def before_tool(self, call: ToolCall) -> None:
             runtime = current()
-            if call.tool == "Bash" and runtime is not None:
+            if call.tool == "Edit" and runtime is not None:
                 await runtime.ask("Which ticket is this change for?")
 
-    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
     agent = harness.wrap(options(tmp_path, [touch, {"text": "{last}"}]), id="ticketed",
                          hooks=[Ticket()])  # fmt: skip
     asked = await agent.run("touch it", user="u1", thread=conversation(path))
@@ -883,11 +889,11 @@ async def test_a_question_a_hook_asks_while_a_call_is_decided_is_no_approval_of_
     assert asked.interrupt.tool_call is None  # the hook's question
     approval = await agent.resume(asked.interrupt.interrupt_id, "approve", answer="T-1",
                                   reviewer="u1")  # fmt: skip
-    assert lines(tmp_path / "builtins.jsonl") == [], "Bash ran without anyone approving it"
+    assert lines(tmp_path / "builtins.jsonl") == [], "Edit ran without anyone approving it"
     assert approval.status is RunStatus.PAUSED and approval.interrupt is not None
     assert "Claude Code asks" in approval.interrupt.question  # its own question, asked
     done = await agent.resume(approval.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS and done.answer == "Bash ran"
+    assert done.status is RunStatus.SUCCESS and done.answer == "Edit ran"
     assert [c["args"] for c in lines(tmp_path / "builtins.jsonl")] == [touch["args"]]
 
 

@@ -454,6 +454,7 @@ async def test_a_model_known_to_answer_on_responses_never_falls_back(
     ("capability", "dropped"),
     [("Compaction", "its request parameters (context_management)"), ("Filesystem", "its tool")],
 )
+@pytest.mark.host_execution
 async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
     monkeypatch: pytest.MonkeyPatch, capability: str, dropped: str
 ) -> None:
@@ -481,6 +482,7 @@ async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
     assert dropped in result.error.message
 
 
+@pytest.mark.host_execution
 async def test_a_sandbox_capability_goes_whole_to_a_model_bifrost_serves_on_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -742,6 +744,7 @@ def test_claude_is_routed_through_bifrosts_anthropic_route() -> None:
     assert routed_env({}, _claude_runtime(ProviderSDK()), {}) is None  # the CLI's own key
 
 
+@pytest.mark.host_execution
 async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> None:
     from claude_agent_sdk import ClaudeAgentOptions
 
@@ -758,6 +761,7 @@ async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> N
     assert "x-bf-mcp-include-tools: " in sent and "x-bf-dim-agent: claude" in sent
 
 
+@pytest.mark.host_execution
 async def test_a_kept_claude_process_names_no_one_turns_run_to_the_gateway(tmp_path: Any) -> None:
     """SEC: Claude Code reads its gateway headers once, as it starts. A conversation's process
     serves many turns, so the headers it starts with name what holds for all of them — the

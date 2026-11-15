@@ -19,7 +19,7 @@ from tests.support.arm import with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.invariants import descendants
 from tests.support.kimi import kimi_home_of
-from trellis import Harness
+from trellis import Harness, Settings
 from trellis.contracts import RunStatus
 from trellis.harness import budget
 from trellis.harness.adapters.acp import ACPAdapter
@@ -31,6 +31,12 @@ from trellis.harness.budget import Budget
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.identity import conversation_key
+
+#: Claude Code and Kimi Code run their shells in a folder of this machine: the tests' deployment
+#: allows it (TRELLIS_HOST_EXECUTION=allow, the harness fixtures).
+pytestmark = pytest.mark.host_execution
+#: the deployment of the tests that make their own harness
+KIMI_HERE = Settings(host_execution="allow")
 
 USER, THREAD = "u1", "chat"
 #: The end of a turn of the scripted agent's (what follows is its next turn's).
@@ -194,7 +200,7 @@ async def test_a_background_sub_agents_call_is_governed_in_its_own_run(
     sub-agent's question is asked through its parent), and the answer lets the call run; the
     task ends, its run with it; then the turn's own prompt is sent."""
     catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
-    async with with_governance(Harness(), Governance(catalog)) as harness:
+    async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as harness:
         ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
             {"agent": LOOK, "background": {"after": after, "asks": ask, "result": "cleaned"}},
@@ -402,7 +408,7 @@ async def test_a_session_kept_when_the_harness_closes_leaves_no_process_and_no_f
     team = _team_home(tmp_path)
     script = [{"agent": LOOK, "background": {"after": 30, "result": "never"}}, {"text": "go"}]
     before = set(descendants(os.getpid()))
-    async with Harness() as harness:
+    async with Harness(config=KIMI_HERE) as harness:
         agent = harness.wrap(fake(tmp_path, script), id="bg-aclose")
         first = await say(agent, "look")
         [child] = await children(harness, first.run_id)
@@ -475,7 +481,7 @@ async def test_a_session_kept_for_the_next_turn_leaves_its_files_when_the_harnes
     """KIMI-LIVE-4. ``Harness.aclose`` with a session kept for a conversation's next turn (its
     process ended with its turn): its files leave its user's Kimi home; its login and config
     stay."""
-    async with Harness() as harness:
+    async with Harness(config=KIMI_HERE) as harness:
         agent = harness.wrap(fake(tmp_path, [{"text": "one"}]), id="idle-aclose")
         await say(agent, "first")
         first = _kept_for(agent)
@@ -490,7 +496,7 @@ async def test_a_paused_turns_session_keeps_its_files_when_the_harness_closes(
     """A turn paused on a question keeps its session in its run's journal, which a resume
     continues on whichever server takes it: closing the harness leaves its files."""
     script = [{"question": "Which tea?", "options": ["green", "black"]}, {"text": "{last}"}]
-    async with Harness() as harness:
+    async with Harness(config=KIMI_HERE) as harness:
         agent = harness.wrap(fake(tmp_path, script), id="paused-aclose")
         paused = await say(agent, "pick a tea")
         assert paused.status is RunStatus.PAUSED, paused.error
@@ -524,7 +530,7 @@ async def test_closing_the_harness_ends_the_kept_process_and_its_background_runs
         {"agent": LOOK, "background": {"after": 30, "result": "never"}},
         {"text": "started"},
     ]
-    async with Harness() as harness:
+    async with Harness(config=KIMI_HERE) as harness:
         agent = harness.wrap(fake(tmp_path, script), id="bg-closed")
         first = await say(agent, "look")
         [child] = await children(harness, first.run_id)
@@ -574,7 +580,7 @@ async def test_a_session_another_worker_still_holds_is_forked_not_resumed_twice(
     worker (here, another agent on the same run store: its process keeps nothing of the
     first's). The sub-agent's run, handed on to the first worker's session, has not ended:
     two processes do not hold one session, so the resumed turn forks it, and goes on there."""
-    ask = {"builtin": "Bash", "args": {"command": "touch made.txt"}, "ask": True}
+    ask = {"builtin": "Edit", "args": {"path": "made.txt"}, "ask": True}  # the user's
     script = [
         {"agent": LOOK, "background": {"after": 30, "result": "never"}},
         ask,
@@ -584,7 +590,8 @@ async def test_a_session_another_worker_still_holds_is_forked_not_resumed_twice(
     first = harness.wrap(target, id="bg-worker")
     paused = await say(first, "look, then make it")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    worker = Harness()  # another worker, on the same run store: its process kept nothing
+    # another worker, on the same run store: its process kept nothing
+    worker = Harness(config=KIMI_HERE)
     worker.runs = harness.runs
     other = worker.wrap(target, id="bg-worker")
     done = await other.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
@@ -666,7 +673,7 @@ async def test_an_answer_that_reaches_a_worker_without_the_session_ends_its_run(
     its session — and its task — are not there to go on, so its run records the answer and
     ends, and the turn says so; the turn's own prompt goes on."""
     catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
-    async with with_governance(Harness(), Governance(catalog)) as harness:
+    async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as harness:
         ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
             {"agent": LOOK, "background": {"after": 0.2, "asks": ask, "result": "cleaned"}},
@@ -686,7 +693,7 @@ async def test_an_answer_that_reaches_a_worker_without_the_session_ends_its_run(
         await until(paused)
         second = await say(agent, "how is it going?")
         assert second.interrupt is not None
-        async with with_governance(Harness(), Governance(catalog)) as worker:
+        async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as worker:
             worker.runs = harness.runs  # another worker, on the same run store
             other = worker.wrap(target, id="bg-gone")
             events: list[Any] = []
@@ -733,7 +740,7 @@ async def test_a_background_sub_agents_harness_tool_call_is_made_in_its_own_run(
 
 async def test_a_background_sub_agents_call_a_person_rejects_is_refused(tmp_path: Path) -> None:
     catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
-    async with with_governance(Harness(), Governance(catalog)) as harness:
+    async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as harness:
         ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
             {"agent": LOOK, "background": {"after": 0.2, "asks": ask, "result": "left it"}},

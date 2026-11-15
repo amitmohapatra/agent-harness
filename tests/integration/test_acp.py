@@ -47,6 +47,10 @@ from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import DELIVERS_HERE, sandbox
 from trellis.harness.tools import bridge
 
+#: Claude Code and Kimi Code run their shells in a folder of this machine: the tests' deployment
+#: allows it (TRELLIS_HOST_EXECUTION=allow, the harness fixtures).
+pytestmark = pytest.mark.host_execution
+
 #: What Kimi reads its swarm's concurrency from.
 SWARM_LIMIT = "KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"
 
@@ -248,36 +252,28 @@ async def test_a_harness_tool_error_reaches_the_agent(harness: Harness, tmp_path
 
 
 # --------------------------------------------------------------------------- its own tools
-async def test_a_read_outside_the_working_folder_asks_a_person(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """A command that only reads runs unasked inside the folder the agent works in; a file
-    anywhere else on the machine (``/etc/passwd``) changes nothing, but asks a person."""
-    script = [
-        {"builtin": "Bash", "args": {"command": "ls"}, "ask": True, "output": "a.txt"},
-        {"builtin": "Bash", "args": {"command": "cat /etc/passwd"}, "ask": True, "output": ""},
-        {"text": "done"},
-    ]
-    agent = harness.wrap(fake(tmp_path, script), id="ops")
-    asked = await agent.run("look around", user="u1")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"command": "cat /etc/passwd"}
-
-
 @pytest.mark.parametrize(
     ("args", "fields"),
     [
+        ({"command": "ls"}, {}),
+        ({"command": "cat /etc/passwd"}, {}),  # outside the folder it works in
         ({"command": "cat passwd", "cwd": "/etc"}, {}),  # Bash runs it in the folder it names
+        ({"command": "rm a.txt"}, {}),
         ({"command": "python3 -c 'print(1)'"}, {"env": {"PYTHONPATH": "src"}}),  # Kimi's env
     ],
 )
-async def test_where_and_with_what_kimi_runs_a_command_is_read(
+async def test_a_command_runs_unasked_and_announced_whatever_it_does(
     harness: Harness, tmp_path: Path, args: dict[str, Any], fields: dict[str, Any]
 ) -> None:
+    """The shell is the deployment's (its sandbox, or a host its administrator allows): Kimi's
+    question about a command is not the user's, whatever the command reads or writes — it runs,
+    announced, with the arguments it was made with."""
     script = [{"builtin": "Bash", "args": args, "ask": True, "output": ""}, {"text": "done"}]
-    asked = await harness.wrap(fake(tmp_path, script, **fields), id="ops").run("x", user="u1")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == args
+    agent = harness.wrap(fake(tmp_path, script, **fields), id="ops")
+    events = [e async for e in agent.stream("x", user="u1")]
+    assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
+    assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["Bash"]
+    assert [p["answer"] for p in recorded(tmp_path)["permissions"]] == ["approve_once"]
 
 
 async def test_a_folder_the_target_names_is_read_unasked(harness: Harness, tmp_path: Path) -> None:
@@ -295,33 +291,33 @@ async def test_a_folder_the_target_names_is_read_unasked(harness: Harness, tmp_p
 async def test_its_own_tools_are_governed_and_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
-    """A ``Bash`` command the agent asks about asks a person; approved, it runs once, after a
-    pause. A command that only reads runs without asking, as the reads do; each call it ran is
-    recorded with its result."""
+    """A write the agent asks about (``Edit``) asks a person; approved, it runs once, after a
+    pause. A ``Bash`` command runs without asking (the shell is the deployment's, as the reads
+    run); each call it ran is recorded with its result."""
     script = [
         {"builtin": "Read", "args": {"path": "orders.csv"}, "output": "o1,o2"},
         {"builtin": "Bash", "args": {"command": "ls"}, "ask": True, "output": "a.txt"},
-        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""},
+        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": ""},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {"text": "done: {last}"},
     ]
     agent = memory_harness.wrap(fake(tmp_path, script), id="ops")
     asked = await agent.run("tidy up", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "Bash"
-    assert asked.interrupt.tool_call.args == {"command": "rm a.txt"}
+    assert asked.interrupt.tool_call.tool == "Edit"
+    assert asked.interrupt.tool_call.args == {"path": "a.txt"}
     assert asked.interrupt.question == (
-        "Approve Bash? Kimi Code asks before it runs this call. "
+        "Approve Edit? Kimi Code asks before it runs this call. "
         "Allow once, allow for this conversation, always allow, or deny."
     )
     done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: bad pattern"
-    assert recorded(tmp_path)["prompts"][-1] == RESUMED_CALL.format(tool="Bash")
+    assert recorded(tmp_path)["prompts"][-1] == RESUMED_CALL.format(tool="Edit")
     await memory_harness.writes.drain()
     records = [
         (c.body["tool"], c.body["status"]) for c in memory_service.calls if c.name == "record_tool"
     ]
-    assert records == [("Read", "ok"), ("Bash", "ok"), ("Bash", "ok"), ("Grep", "error")]
+    assert records == [("Read", "ok"), ("Bash", "ok"), ("Edit", "ok"), ("Grep", "error")]
 
 
 async def test_a_call_allowed_for_the_conversation_is_kimis_approval_for_its_session(
@@ -334,12 +330,12 @@ async def test_a_call_allowed_for_the_conversation_is_kimis_approval_for_its_ses
     in Kimi's session (its own rule for the same command) and in the conversation's next
     run. One question for the chat."""
     script = [
-        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "a gone"},
-        {"builtin": "Bash", "args": {"command": "rm b.txt"}, "ask": True, "output": "b gone"},
+        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "a gone"},
+        {"builtin": "Edit", "args": {"path": "b.txt"}, "ask": True, "output": "b gone"},
         {"text": "done: {last}"},
         {"stop": "end_turn"},
-        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "a gone again"},
-        {"builtin": "Bash", "args": {"command": "rm c.txt"}, "ask": True, "output": "c gone"},
+        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "a gone again"},
+        {"builtin": "Edit", "args": {"path": "c.txt"}, "ask": True, "output": "c gone"},
         {"text": "then: {last}"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="keeps")
@@ -369,8 +365,8 @@ async def test_a_call_allowed_once_is_kimis_approval_once(harness: Harness, tmp_
     """APR-01 (DECISIONS B4). Allowed once, the call is approved once in Kimi: the tool's
     next call asks again."""
     script = [
-        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "a gone"},
-        {"builtin": "Bash", "args": {"command": "rm b.txt"}, "ask": True, "output": "b gone"},
+        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "a gone"},
+        {"builtin": "Edit", "args": {"path": "b.txt"}, "ask": True, "output": "b gone"},
         {"text": "done: {last}"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="once")
@@ -379,7 +375,7 @@ async def test_a_call_allowed_once_is_kimis_approval_once(harness: Harness, tmp_
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert again.status is RunStatus.PAUSED and again.interrupt is not None
     assert again.interrupt.tool_call is not None
-    assert again.interrupt.tool_call.args == {"command": "rm b.txt"}
+    assert again.interrupt.tool_call.args == {"path": "b.txt"}
     assert [p["answer"] for p in recorded(tmp_path)["permissions"]][:2] == [
         "cancelled",
         "approve_once",
@@ -553,8 +549,8 @@ async def test_a_sub_agent_is_a_child_run_and_its_calls_are_governed_with_their_
 ) -> None:
     """APR-01, L47. ACP shows no update of a sub-agent's own call, and Kimi's request for it
     names the tool and a line that cuts a command at 50 characters. The call is governed with
-    what Kimi shows its own user of it (its log's ``interaction.request``): the person reads
-    the whole command, in the folder Kimi runs it in."""
+    what Kimi shows its own user of it (its log's ``interaction.request``); a command is the
+    deployment's, so it runs unasked, and the sub-agent's run is a child run."""
     script = [
         {
             "agent": {"description": "look", "prompt": "find tea", "subagent_type": "explore"},
@@ -564,16 +560,8 @@ async def test_a_sub_agent_is_a_child_run_and_its_calls_are_governed_with_their_
         {"text": "done"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="lead")
-    asked = await agent.run("find tea", user="u1")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "Bash"
-    assert asked.interrupt.tool_call.args == {
-        "command": LONG,
-        "cwd": str(tmp_path),
-        "language": "bash",
-    }
-    done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS
+    done = await agent.run("find tea", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None  # the shell: unasked
     kids = await children(harness, done.run_id)
     assert [c.metadata["native_helper"]["name"] for c in kids] == ["explore"]
     assert {c.status for c in kids} == {RunStatus.SUCCESS}
@@ -607,7 +595,7 @@ async def test_with_no_log_of_the_agent_a_sub_agents_call_is_asked_about_as_its_
     script = [
         {
             "agent": {"prompt": "tidy"},
-            "asks": {"builtin": "Bash", "args": {"command": "rm a"}},
+            "asks": {"builtin": "Edit", "args": {"path": "a"}},
             "result": "x",
         },
         {"text": "done"},
@@ -617,7 +605,7 @@ async def test_with_no_log_of_the_agent_a_sub_agents_call_is_asked_about_as_its_
         "x", user="u1"
     )
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"request": "Requesting approval to Running: rm a"}
+    assert asked.interrupt.tool_call.args == {"request": "Requesting approval to Calling Edit"}
 
 
 async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
@@ -625,7 +613,8 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
 ) -> None:
     """SEC (DECISIONS A2, for Kimi). Kimi is started in its user's own home: the team's login
     and setup linked, its config the team's with an ``ask`` rule after it for each ``allow``
-    rule that would let a call run unasked and for Kimi's ``Skill`` (KIMI-SKILL-1), its
+    rule that would let a call run unasked and for Kimi's ``Skill`` (KIMI-SKILL-1) and its
+    network tools (the catalog's to decide), its
     sessions its user's alone."""
     team = tmp_path / "home"
     team.mkdir()
@@ -642,7 +631,7 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
         asked = (home / "config.toml").read_text().removeprefix(rules)
         assert asked == "".join(
             f'\n[[permission.rules]]\ndecision = "ask"\npattern = "{pattern}"\n'
-            for pattern in ("Bash(rm *)", "Skill")
+            for pattern in ("Bash(rm *)", "Skill", "FetchURL", "WebSearch")
         )
         assert len(list(home.glob("sessions/*/session_*"))) == 1
     assert (team / "config.toml").read_text() == rules and not (team / "sessions").exists()
@@ -653,7 +642,8 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
     [
         (
             '[permission]\nrules = [{ decision = "allow", pattern = "Bash(rm *)" }]\n',
-            '\n[[permission.ask]]\npattern = "Bash(rm *)"\n\n[[permission.ask]]\npattern = "Skill"\n',
+            '\n[[permission.ask]]\npattern = "Bash(rm *)"\n\n[[permission.ask]]\npattern = "Skill"\n'
+            '\n[[permission.ask]]\npattern = "FetchURL"\n\n[[permission.ask]]\npattern = "WebSearch"\n',
         ),
         ('permission = { rules = [{ decision = "allow", pattern = "Bash(rm *)" }] }\n', None),
     ],
@@ -915,8 +905,8 @@ async def test_a_session_asks_whatever_the_agents_config_starts_it_in(
     that asks on every session it opens — a new one, and the one a resume continues — so the
     call still asks a person and runs once, approved."""
     script = [
-        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "gone"},
-        {"builtin": "Bash", "args": {"command": "rm b.txt"}, "ask": True, "output": "gone too"},
+        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "gone"},
+        {"builtin": "Edit", "args": {"path": "b.txt"}, "ask": True, "output": "gone too"},
         {"text": "done: {last}"},
     ]
     config = {"FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": starts_in})}
@@ -924,11 +914,11 @@ async def test_a_session_asks_whatever_the_agents_config_starts_it_in(
     asked = await agent.run("tidy up", user="u1")
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
     assert asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"command": "rm a.txt"}
+    assert asked.interrupt.tool_call.args == {"path": "a.txt"}
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert again.status is RunStatus.PAUSED and again.interrupt is not None
     assert again.interrupt.tool_call is not None
-    assert again.interrupt.tool_call.args == {"command": "rm b.txt"}
+    assert again.interrupt.tool_call.args == {"path": "b.txt"}
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: gone too"
     record = recorded(tmp_path)
@@ -941,7 +931,7 @@ async def test_a_session_the_agent_leaves_in_a_mode_that_asks_nothing_fails_the_
 ) -> None:
     """APR-01, L46. Fails closed: the agent answered ``session/set_mode`` but its log says the
     session still approves on its own, so no prompt is sent and the run fails saying so."""
-    script = [{"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True}, {"text": "done"}]
+    script = [{"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True}, {"text": "done"}]
     env = {
         "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
         "FAKE_ACP_MODE_STUCK": "1",
@@ -962,7 +952,7 @@ async def test_a_mode_kimis_log_confirms_late_still_runs_and_no_prompt_goes_befo
     seconds a request's line is waited for), sends no prompt meanwhile, and goes on once the
     log confirms the mode."""
     gate = tmp_path / "the-log-is-written"
-    script = [{"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True}, {"text": "done"}]
+    script = [{"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True}, {"text": "done"}]
     env = {
         "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
         "FAKE_ACP_LOG_GATE": str(gate),
@@ -987,7 +977,7 @@ async def test_a_session_keeps_the_plan_mode_it_is_in(harness: Harness, tmp_path
     own leaves plan mode to be made to ask, and enters it again; one that plans and asks
     already — its config's, or the session a resume continues (``mode="plan"`` began it) — is
     set nothing, its plan as it was."""
-    asks = {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "gone"}
+    asks = {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "gone"}
     for name in "abc":
         (tmp_path / name).mkdir()
     config = {"default_plan_mode": True, "default_permission_mode": "auto"}
@@ -1398,11 +1388,10 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     target = fake(tmp_path, script, sandbox=sandbox(sandboxes), env={"FAKE_ACP_RAW": "1"})
     agent = harness.wrap(target, id="boxed")
     events = [e async for e in agent.stream("work", user="u1")]
-    [paused] = [e for e in events if e.type is RunEventType.INTERRUPT]
+    assert not [e for e in events if e.type is RunEventType.INTERRUPT]  # the sandbox's: unasked
     warned = [e for e in events if e.data.get("code") == "acp_sandbox"]
     assert warned and "reads are not isolated" in warned[0].data["message"]
-    done = await agent.resume(paused.data["interrupt_id"], "approve", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS
+    assert events[-1].error is None, events[-1].error
     [made] = sandboxes.made()
     assert made not in sandboxes.boxes  # deleted with its run
     assert any(c.startswith("mkdir -p ") for c in sandboxes.commands)
@@ -1586,7 +1575,7 @@ async def test_kimis_skills_folder_holds_each_tenants_and_users_own_skills(
     from trellis.skills import combine
 
     memory_service.tenant = None  # a platform key: each run names its tenant
-    harness = Harness(config=Settings(), memory=memory_service.client())
+    harness = Harness(config=Settings(host_execution="allow"), memory=memory_service.client())
 
     async def seen(store: SkillStore, tenant: str, user: str) -> str:
         folder = tmp_path / f"{tenant}-{user}"

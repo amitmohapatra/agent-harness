@@ -27,7 +27,7 @@ from trellis.contracts import (
     ToolCall,
     ToolSpec,
 )
-from trellis.harness import telemetry
+from trellis.harness import host, telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
@@ -279,8 +279,7 @@ class Harness:
         )
         if wrapped.id in self.agents:
             raise ConfigurationError(f"an agent {wrapped.id!r} is already wrapped by this harness")
-        if self.settings.require_sandbox:
-            _sandboxed(wrapped)
+        host.refuse(wrapped, wrapped.framework_options)
         self.agents[wrapped.id] = wrapped
         return wrapped
 
@@ -780,29 +779,3 @@ async def _forgotten(runtime: Runtime, args: dict[str, Any]) -> Any:
     assert runtime.user is not None  # the user's own statement is only ever a user's
     await memory.memory.for_user(runtime.tenant, runtime.user).ctx.forget(memory_id)
     return {"id": memory_id, "forgotten": True}
-
-
-#: What ``require_sandbox`` refuses to wrap.
-UNSANDBOXED: Final = (
-    "agent {agent!r} runs a shell of its own without a sandbox, and this deployment requires "
-    "one (TRELLIS_REQUIRE_SANDBOX): {fix}"
-)
-
-
-def _sandboxed(agent: Agent) -> None:
-    """``agent`` — one that runs a shell of its own — has a sandbox (``Settings.
-    require_sandbox``): Claude Code's ``sandbox`` enabled with no command let out of it, an
-    ACP agent's ``sandbox``; any other framework runs no shell of its own and is not checked."""
-    target = agent.target
-    if agent.adapter.name == "claude_agent_sdk":
-        given = getattr(target, "sandbox", None) or {}
-        if given.get("enabled") and not given.get("allowUnsandboxedCommands"):
-            return
-        fix = "set ClaudeAgentOptions(sandbox={'enabled': True}), no unsandboxed commands"
-    elif agent.adapter.name == "acp":
-        if getattr(target, "sandbox", None) is not None:
-            return
-        fix = "give it ACPAgent(sandbox=sandbox())"
-    else:
-        return
-    raise ConfigurationError(UNSANDBOXED.format(agent=agent.id, fix=fix))

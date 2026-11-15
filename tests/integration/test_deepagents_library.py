@@ -473,6 +473,7 @@ async def test_the_todo_list_stays_in_view_when_the_turns_that_wrote_it_do_not(
     assert "Your todo list" not in model.seen[1][-3].text  # the call shows it: said once
 
 
+@pytest.mark.host_execution
 async def test_a_local_shell_backends_execute_runs_the_command_as_a_write_of_the_run(
     harness: Harness, tmp_path: Path
 ) -> None:

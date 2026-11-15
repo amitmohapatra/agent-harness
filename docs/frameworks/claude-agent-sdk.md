@@ -94,20 +94,15 @@ the user Claude Code would ask:
   files: your allowlist, passed through as it is) and its own read-only checks. What it lets
   run, runs; nothing more is asked.
 * **When Claude Code would ask** its user, it asks the harness (its `can_use_tool`): a call
-  that only reads runs — a read tool, or a `Bash` command the harness reads as read-only (`ls`,
-  `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`, read with
-  `shlex` and `ast`); any other asks a person, who picks as for a harness tool: allow once,
-  for this conversation, always (with a memory service), deny — allow once or deny for an
-  irreversible tool. What Claude Code would keep for its session ("don't ask again"), the run
-  keeps: a tool allowed for the conversation or always is not asked about again there, in a
-  query or a live session. Approved once (or edited), it runs once; rejected or denied,
-  Claude reads why. A read-only command reads only what the run may read: the CLI's
-  `cwd`, the folders `add_dirs` adds (Claude Code reads and works there itself: name a folder
-  of yours there, such as the tool results the CLI saves), the run's skills, and where a kept
-  result is read. Claude Code's shell keeps the folder a `cd` left it in, so after a `cd` a
-  relative read is placed from every folder the shell may be in; where that cannot be followed
-  (`cd $DIR`, `pushd`, `eval`), every read of a file asks until the next query. The
-  environment the CLI is given (`env`: its `PATH`, `PYTHONPATH`) is the one read.
+  that only reads runs. Its shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs too,
+  announced and recorded: it is in Claude Code's sandbox, or on a machine whose administrator
+  allows commands there (`TRELLIS_HOST_EXECUTION=allow`) — the deployment's decision, never
+  the user's ([below](#who-decides-what)). `WebFetch` and `WebSearch` are the tool catalog's
+  (below). Any other asks a person, who picks as for a harness tool: allow once, for this
+  conversation, always (with a memory service), deny — allow once or deny for an irreversible
+  tool. What Claude Code would keep for its session ("don't ask again"), the run keeps: a tool
+  allowed for the conversation or always is not asked about again there, in a query or a live
+  session. Approved once (or edited), it runs once; rejected or denied, Claude reads why.
 * **Claude's questions** (`AskUserQuestion`) are the run's questions, asked as `ask_user` asks
   them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
   recommended with its description as why, another answer in words); Claude reads the answers
@@ -122,17 +117,21 @@ the user Claude Code would ask:
   `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`, `REPL`, `Monitor`, `EnterWorktree`,
   `ExitWorktree`, `TaskStop`, and what reaches outside the session (`Artifact`,
   `PushNotification`, `SendUserFile`, `SendFeedback`, `ShareOnboardingGuide`,
-  `EndConversation`). Claude Code asks its user before `ExitPlanMode` (the plan's approval),
-  `WebFetch` and `WebSearch` (the network) and `Skill`: a person answers there too, as Claude
-  Code would have asked, unless the tool catalog has a rule for the tool that lets it run.
+  `EndConversation`). Claude Code asks its user before `ExitPlanMode` (the plan's approval)
+  and `Skill`: a person answers there too, as Claude Code would have asked, unless the tool
+  catalog has a rule for the tool that lets it run. `WebFetch` and `WebSearch` reach the
+  network outside the deployment: the tool catalog alone decides them — refused (Claude reads
+  why) until an administrator gives them a risk (`read`: they run unasked) or an
+  `approve_when` there; with memory off there is no catalog, and they are refused. The harness
+  publishes them with no risk of its own, so the catalog's is the administrator's.
   Your in-process server's tool is what its annotations say; any other tool (an MCP server's
   of yours the CLI reaches itself, a tool of a newer CLI's the harness has no word on) says
   nothing of what it does: a person approves its calls (and may allow it for the
-  conversation or always), until its risk is in the tool catalog. `PowerShell` gets no read-only analysis (`Bash` does).
+  conversation or always), until its risk is in the tool catalog.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
-  ([governance.md](../governance.md)): a team that wants every shell command approved, even
-  one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
-  `true`) there.
+  ([governance.md](../governance.md)): a team that wants every shell command approved gives
+  `Bash` the risk `irreversible` (or an `approve_when` such as `true`) there — the
+  administrator's rule, whose question a `before_tool` hook may route to a role.
 * **Not offered: schedules.** A scheduled prompt (`CronCreate`), a wake-up
   (`ScheduleWakeup`) or a claude.ai scheduled task (`RemoteTrigger`) fires with no run to
   check its calls: the first two only in a CLI that is running then. A query's own process ends
@@ -215,11 +214,25 @@ the user Claude Code would ask:
   records, with its result or its error; it is not in the journal (the CLI keeps its result
   in its session, below).
 
+## Who decides what
+
+The run's user decides only the actions taken in their name; the rest is the deployment's
+([governance.md](../governance.md#who-decides-what)):
+
+| Claude Code's | Decided by | What happens |
+|---|---|---|
+| `Read`, `Grep`, `Glob` in the workspace | nobody | they run, recorded |
+| `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny |
+| its shell in its sandbox | the deployment | runs unasked, announced (`tool_notice`) and recorded |
+| its shell on the host (no sandbox, or one that lets a command out) | the administrator | `h.wrap` refuses it unless `TRELLIS_HOST_EXECUTION=allow`; allowed, it runs as in a sandbox, never asked of the user |
+| `WebFetch`, `WebSearch` | the administrator, in the tool catalog | refused until the catalog gives the tool a risk or an `approve_when` |
+| MCP servers, `allowed_tools`, a `permission_mode` that lets calls through (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) | the deployment | on the options you wrap or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused (`default` and `plan` it may choose) |
+
 ## Where sandbox, skills and hooks go
 
 | | Where |
 |---|---|
-| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)) |
+| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). Without it — or with a command let out of it (`allowUnsandboxedCommands`, which Claude Code takes as true unless set false; `excludedCommands`) — Claude Code's shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs on this machine, so `h.wrap` refuses the options unless the deployment allows that (`TRELLIS_HOST_EXECUTION=allow`), and so is a run whose `framework_options` turn the sandbox off; options whose `tools` leave the shell out (or `disallowed_tools` name it) need neither ([governance.md](../governance.md#commands-on-the-host-the-deployments-to-allow)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far, no query more (a `step_limit` warning) |
@@ -231,9 +244,10 @@ the user Claude Code would ask:
   `setting_sources` unset, loads the user's and the project's settings)
   ([skills.md](../skills.md#native-or-ours)).
 * **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
-  `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))`; the harness answers each
-  call the CLI asks about (above), and a sandboxed `Bash` call is asked about only with
-  `autoAllowBashIfSandboxed` false ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+  `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`
+  — unconfined, they need the deployment's `TRELLIS_HOST_EXECUTION=allow`; the harness answers each
+  call the CLI asks about (above); a `Bash` call in the sandbox runs unasked, announced,
+  whatever `autoAllowBashIfSandboxed` says ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 * **Prompts:** the options take text: `system_prompt=(await h.prompt("triage")).text` for a
   stored prompt of the gateway ([prompts.md](../prompts.md#native-or-ours)).
 

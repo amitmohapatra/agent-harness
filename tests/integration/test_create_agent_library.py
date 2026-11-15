@@ -799,6 +799,7 @@ async def test_file_search_middlewares_tool_asks_then_searches_the_folder(
     assert "notes.md" in str(model.seen[-1][-1].content)
 
 
+@pytest.mark.host_execution
 async def test_shell_tool_middlewares_shell_asks_then_runs_in_the_librarys_session(
     harness: Harness, tmp_path: Path
 ) -> None:

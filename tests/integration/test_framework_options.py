@@ -66,6 +66,7 @@ async def confirm(step: str) -> str:
     return f"confirmed {step}"
 
 
+@pytest.mark.host_execution
 @pytest.mark.parametrize("streaming", [False, True], ids=["run", "stream"])
 @pytest.mark.parametrize("framework", list(TIGHT))
 async def test_the_options_reach_the_frameworks_run_call_a_runs_over_its_agents(
@@ -176,11 +177,13 @@ async def test_a_graphs_configurable_keys_merge_key_by_key_and_the_thread_is_the
         )
 
 
+@pytest.mark.host_execution
 async def test_claudes_options_merge_with_what_the_harness_sets(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The run's ``system_prompt`` and ``mcp_servers`` go to the CLI beside the harness's own
-    server; its ``can_use_tool`` is asked after governance, as the target's would be."""
+    """The run's ``system_prompt`` and the deployment's ``mcp_servers`` (``h.wrap``'s: a run's
+    own may not change them) go to the CLI beside the harness's own server; the run's
+    ``can_use_tool`` is asked after governance, as the target's would be."""
     asked: list[str] = []
 
     async def own(name: str, args: dict[str, Any], context: Any) -> Any:
@@ -198,9 +201,13 @@ async def test_claudes_options_merge_with_what_the_harness_sets(
         "FAKE_CLAUDE_RECORD": str(record),
         "FAKE_CLAUDE_SESSIONS": str(tmp_path),
     }
-    agent = arm(harness.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="cc"), [lookup])
     erp = {"type": "stdio", "command": "erp-mcp", "args": []}
-    given = {"system_prompt": "Be brief.", "can_use_tool": own, "mcp_servers": {"erp": erp}}
+    deployed = {"mcp_servers": {"erp": erp}}
+    target = ClaudeAgentOptions(cli_path=CLI, env=env)
+    agent = arm(harness.wrap(target, id="cc", framework_options=deployed), [lookup])
+    with pytest.raises(ConfigurationError, match="the deployment's"):
+        await agent.run("tides?", user="u", framework_options={"mcp_servers": {}})
+    given = {"system_prompt": "Be brief.", "can_use_tool": own}
     result = await agent.run("tides?", user="u", framework_options=given)
     assert result.answer == "read: facts about tides" and asked == ["Read"]
     cli = json.loads(record.read_text())
@@ -224,6 +231,7 @@ async def test_claudes_options_merge_with_what_the_harness_sets(
         ("claude_agent_sdk", {"mcp_servers": {"trellis": {}}}, "the harness's own server"),
     ],
 )
+@pytest.mark.host_execution
 async def test_options_a_framework_cannot_take_are_refused_before_any_run(
     harness: Harness, framework: str, options: dict[str, Any], said: str, tmp_path: Path
 ) -> None:
@@ -237,6 +245,7 @@ async def test_options_a_framework_cannot_take_are_refused_before_any_run(
         await agent.start("tides?", user="u", framework_options=options)
 
 
+@pytest.mark.host_execution
 async def test_an_openai_sandbox_agent_runs_wrapped_with_its_run_config_as_an_option(
     harness: Harness,
 ) -> None:

@@ -54,6 +54,7 @@ def recorded(memory_service: FakeMemoryService) -> list[tuple[str, str]]:
     return [(c.body["tool"], c.body["status"]) for c in memory_service.named("record_tool")]
 
 
+@pytest.mark.host_execution
 async def test_an_edited_local_shell_command_runs_as_edited(harness: Harness) -> None:
     def execute(request: Any) -> str:
         done.append(" ".join(request.data.action.command))
@@ -77,6 +78,7 @@ async def test_an_edited_local_shell_command_runs_as_edited(harness: Harness) ->
     assert result.status is RunStatus.SUCCESS and done == ["rm -rf build"]
 
 
+@pytest.mark.host_execution
 async def test_a_shells_structured_result_is_the_sdks_and_its_record_is_its_data(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:

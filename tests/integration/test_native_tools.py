@@ -350,6 +350,7 @@ async def test_a_governed_mcp_server_passes_through_outside_a_run_and_reports_er
 # --------------------------------------------------------------------------- Claude
 
 
+@pytest.mark.host_execution
 async def test_claudes_own_tools_the_hints_leave_out_are_disallowed_for_the_query(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
 ) -> None:

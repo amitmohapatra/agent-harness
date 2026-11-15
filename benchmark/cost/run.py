@@ -175,7 +175,10 @@ def harness(*, memory: bool = False) -> Harness:
     and the gateway's MCP tools off, so no service's data is read or written — ``memory``:
     the environment's memory service on (its context and tool hints)."""
     config = Settings.from_env()
-    off = {"runs_url": None, "otlp_endpoint": None} | ({} if memory else {"memory_url": None})
+    # the suite runs Claude Code and Kimi Code in work folders of this machine: its deployment
+    # allows commands here (TRELLIS_HOST_EXECUTION=allow)
+    off = {"runs_url": None, "otlp_endpoint": None, "host_execution": "allow"}
+    off |= {} if memory else {"memory_url": None}
     config = config.model_copy(update=off)
     if memory:
         return Harness(config=config, gateway=False)

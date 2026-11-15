@@ -36,6 +36,7 @@ from langchain_core.tools import tool as langchain_tool
 import trellis
 from trellis import Agent as Wrapped
 from trellis import Harness, ReAct, Runtime, tool
+from trellis.harness.host import CLAUDE_SHELLS
 
 set_tracing_disabled(True)  # the SDK's own tracing goes to OpenAI; the harness traces via OTel
 QUESTION = "How many units of SKU-1 are left?"
@@ -140,6 +141,7 @@ async def main() -> None:
         options = ClaudeAgentOptions(
             system_prompt="Hand stock questions to the counter.",
             agents={"counter": AgentDefinition(description="Counts units.", prompt="Count.")},
+            disallowed_tools=sorted(CLAUDE_SHELLS),  # no shell on this machine
             **claude_cli(script, "trellis"),
         )
         await lineage(h, h.wrap(options, id="claude"), QUESTION)

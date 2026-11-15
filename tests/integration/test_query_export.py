@@ -104,6 +104,7 @@ def test_each_frameworks_tool_that_runs_code_is_known() -> None:
     assert runs_code(SimpleNamespace(toolbox={}, native=set())) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.host_execution
 async def test_claude_without_bash_saves_and_with_bash_writes_with_its_code(
     harness: Harness, stored: Path, tmp_path: Path
 ) -> None:

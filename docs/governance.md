@@ -10,6 +10,92 @@ it: every harness tool call goes through governance with nothing to write. A tea
 its own framework checks its own tools with the same decisions, from the same catalog:
 [blocks/governance.md](blocks/governance.md) (Way 2).
 
+## Who decides what
+
+The person a run is for decides only the actions taken in their name. What the deployment's
+own machine, network and services do is infrastructure: the administrator's policy, set in
+configuration and in the tool catalog, never left to an end user's approval — and audited
+either way, every call journaled, recorded on the run's stream and in the memory service's
+tool records, and traced.
+
+| Decision | Whose | Where it is set |
+|---|---|---|
+| an action in the user's name: a refund, an email, a write to their records | the run's user — or the reviewer a rule names | governance asks them at the call ([below](#what-the-person-picks)): allow once, for this conversation, always, deny |
+| whether agents may run commands on the machine the harness runs on | the deployment's administrator | `TRELLIS_HOST_EXECUTION` (`Settings.host_execution`): `deny` by default ([below](#commands-on-the-host-the-deployments-to-allow)) |
+| a tool's risk, and when its calls need a person | an administrator (or an accepted approval suggestion) | the tool catalog: `risk`, `approve_when` ([below](#one-place-for-approval-rules)) |
+| who answers an infrastructure tool's approval | an administrator, in code | a `before_tool` hook's `Ask(assignee="role:…")`: the call waits in that role's inbox, not the user's ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook)) |
+| which MCP servers an agent reaches, what it runs without asking (Claude's `allowed_tools`, a permission mode such as `acceptEdits` or `bypassPermissions`) | the deployment | the agent's options or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused |
+
+**Claude Code and Kimi Code, tool by tool.** They run their own tools, in the user's workspace:
+
+| Tool | Decided by | What happens |
+|---|---|---|
+| `Read`, `Grep`, `Glob` (Kimi's reads) in the workspace | nobody | run unasked, recorded |
+| `Write`, `Edit` of the user's own files | the user | the one rule: allow once, for this conversation, always (with memory), deny |
+| the shell (`Bash`) in the sandbox | the deployment | runs unasked, announced and recorded: the framework's own permission question is not the user's |
+| the shell on the host | the administrator | refused unless `TRELLIS_HOST_EXECUTION=allow` ([below](#commands-on-the-host-the-deployments-to-allow)); allowed, as in a sandbox |
+| the network out: Claude's `WebFetch`, `WebSearch`; Kimi's `FetchURL`, `WebSearch` | the administrator, in the catalog | **refused by default**: until the catalog gives the tool a risk (`read`: runs unasked) or an `approve_when` (asks when it holds); with memory off there is no catalog, and they are refused |
+| an MCP server's tool | the administrator chooses the servers; the user the actions in their name | the one rule, by what the tool says ([below](#one-rule-every-adapter-and-every-way-a-tool-arrives)) |
+
+The network is closed by default because a fetch can carry what the run read to any host, and a
+search reveals what it looks for: no end user can approve that for the deployment.
+
+**An infrastructure approval routed to a role.** A tool that acts on the platform — a deploy, a
+restart, a change to shared configuration — still asks when the catalog says so, but its
+question need not be the run's user's. The catalog says *when* (`risk: irreversible`, or an
+`approve_when` on its arguments); a `before_tool` hook says *whose* it is: it waits in that
+role's inbox (`h.inbox("role:ops")`), agent-runs' webhooks tell whoever waits, and a person of
+that role answers (`agent.resume(..., reviewer=...)`). Nothing the run's user allowed — for
+this conversation, always, or by a schedule — covers it: a hook's `Ask` is asked at every call
+([below](#what-the-person-picks)).
+
+```python
+await scope.advanced.tools.put_catalog([{"name": "restart_service", "risk": "irreversible"}])
+
+
+class OpsReviews(Hooks):
+    """The platform's tools are the operators' to approve, never the chat user's."""
+
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        if call.tool == "restart_service":
+            return Ask(f"Restart {call.args.get('name')}?", assignee="role:ops")
+        return None  # the rest: governance decides, by the catalog
+```
+
+### Commands on the host: the deployment's to allow
+
+A shell command on the machine the harness runs on reaches the deployment's files,
+credentials, network and other users' runs: no end user can approve that. So an agent that
+would run commands there — not in an isolated sandbox — is refused where it is wrapped
+(`h.wrap`), and a run whose own `framework_options` would make it one is refused before it is
+made: a `ConfigurationError` naming `TRELLIS_HOST_EXECUTION` and the sandbox to give it instead.
+An administrator who decides that commands may run on this machine sets
+`TRELLIS_HOST_EXECUTION=allow` (`Settings(host_execution="allow")`); each call is then
+governed, journaled and recorded as before, and the tenant's and user's boundaries still hold
+on the host: commands run through the isolation layer installed for the machine
+(`trellis.harness.host.install`: a workspace of the run's own, an unprivileged uid of its own
+inside the tenant's boundary, limits, an environment with no secret, a network policy,
+clean-up, a reaper, audit), not as the service's own user — with no layer installed they would
+run as that user, so a deployment that allows host execution installs one — and a layer that
+cannot isolate them here (it cannot switch uid, say) refuses host execution, naming why.
+`trellis.harness.host` is the one place this is decided.
+
+| The way to a shell | On the host (refused unless allowed) | In a sandbox (never refused) |
+|---|---|---|
+| Deep Agents, `ReAct(backend=)` | `execute` on a `LocalShellBackend` (alone, the default of a `CompositeBackend`, a sub-agent's) | `sandbox()`, any other `SandboxBackendProtocol` backend (`BaseSandbox`, LangSmith's) |
+| LangChain `create_agent` | `ShellToolMiddleware` with `HostExecutionPolicy` (its default) or a policy of your own | `DockerExecutionPolicy`, `CodexSandboxExecutionPolicy` |
+| OpenAI Agents SDK | `LocalShellTool`, `ShellTool` in its local environment (on the agent, a handoff, an agent tool's agent), `UnixLocalSandboxClient` | a hosted `ShellTool` (`container_auto`), a `SandboxAgent` on Docker or a hosted client |
+| Claude Agent SDK | its shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) with no `sandbox`, or one that lets a command out (`allowUnsandboxedCommands`, true unless set false; `excludedCommands`) | `sandbox={"enabled": True, "allowUnsandboxedCommands": False}`, no `excludedCommands`; or no shell in its `tools` |
+| Kimi Code, an ACP agent | no `sandbox=` | `kimi(sandbox=sandbox())` |
+
+Claude Code and Kimi Code run their own shells in the run's working folder by design. That
+folder is on the host, and their own permission prompt would leave the command to the person
+in the chat, so they follow the same rule: sandboxed, or allowed by the deployment. A tool of
+your own that starts a process is code you wrote and wrapped, not an agent's shell: it is
+governed by what it declares. The harness's own tools run no command on the host. Way 2
+([blocks/governance.md](blocks/governance.md)) wraps nothing: there the agent's process is
+yours, and so is the policy.
+
 ## How a call is decided
 
 ```mermaid
@@ -151,7 +237,8 @@ store or a sandbox (a backend, or a route of a `CompositeBackend`) they change r
 always — and `ls`, `read_file`, `glob`, `grep` run as reads. A
 framework's own tools under its own permission flow — Claude Code's and Kimi's built-ins, an
 OpenAI agent's hosted tools — keep their own way: a `write` there is announced, and Claude
-Code or Kimi asks its own way, the person picking from the rule's choices. An MCP tool, an
+Code or Kimi asks its own way, the person picking from the rule's choices — their shell and
+the network aside, which are the deployment's ([who decides what](#who-decides-what)). An MCP tool, an
 OpenAPI `POST`/`PUT`/`PATCH`, an `a2a(url)` agent and your own functions ask.
 
 **A schedule set in chat.** `schedule_task` names the tools its runs will call that change
@@ -339,7 +426,9 @@ asks, a read runs.
 Claude Code's built-ins go through the CLI's `PreToolUse` hook, where the harness decides them
 by risk (`Read` runs; `Write` and `Bash` are announced), then Claude Code's own permission check;
 what it would ask its user, a person is asked — with the rule's choices — unless the call only
-reads (a `Bash` command the harness reads as read-only runs). In its default permission mode
+reads, or is its shell (in its sandbox, or on a host the administrator allows: announced, never
+the user's), or reaches the network as the catalog allows (`WebFetch`, `WebSearch`: refused
+until the catalog gives them a risk or an `approve_when`). In its default permission mode
 Claude Code asks before `Write` and `Edit`, so they ask as any write; a team that sets
 `acceptEdits` or `bypassPermissions` has chosen to let them through, as Kimi lets its own
 writes inside a git working tree through (ACP gives the harness no hook before them): those

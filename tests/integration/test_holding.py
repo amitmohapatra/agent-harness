@@ -127,6 +127,7 @@ def refund(order: str) -> str:
     return f"refunded {order}"
 
 
+@pytest.mark.host_execution
 async def test_a_helper_whose_run_waits_for_a_person_is_let_go_of_not_left_to_lapse(
     tmp_path: Path,
 ) -> None:

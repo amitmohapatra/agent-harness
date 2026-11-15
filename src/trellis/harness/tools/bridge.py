@@ -99,6 +99,12 @@ _UNREAD: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
 
 #: Why a person is asked about a call its framework asks about (:func:`asked`).
 FRAMEWORK_ASKS: Final = "{framework} asks before it runs this call."
+#: What the model reads of a call of a framework's own tool that reaches the network, which
+#: the tool catalog says nothing of (:func:`outbound`).
+OUTBOUND: Final = (
+    "{tool} was not run: it reaches the network outside this deployment, and the tool catalog "
+    "does not allow it (an administrator gives {tool} a risk, or an approve_when, there)."
+)
 #: Why a call that did more than read asks again in a run rewound past it (``Journal.repeats``).
 REWOUND_PAST: Final = (
     "{tool} already ran with these arguments before the rewind: running it again is a second "
@@ -293,6 +299,22 @@ async def asked(
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
         _, call, rejected = await _decided(runtime, spec, call, Ask(why), kept=kept)
     return call if rejected is None else rejected
+
+
+async def outbound(spec: ToolSpec) -> str | None:
+    """For a framework's own tool that reaches the network outside the deployment (Claude
+    Code's ``WebFetch``, ``WebSearch``; Kimi Code's ``FetchURL``, ``WebSearch``): the
+    administrator's policy, never a question to the run's user. With the tool catalog's word on
+    it — a risk or an ``approve_when`` — ``None``: governance decides the call by that word, as
+    for any tool. With none (memory off, the catalog unread, or nothing set for the tool), what
+    the model reads of the call it refuses (:data:`OUTBOUND`): the default is closed."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    rule = (await governance.rules([spec.name], agent_id=runtime.agent_id))[spec.name]
+    if rule is not None and (rule.risk is not None or rule.approve_when is not None):
+        return None
+    return OUTBOUND.format(tool=spec.name)
 
 
 async def _catalog_decides(runtime: Runtime, spec: ToolSpec, args: dict[str, Any]) -> bool:

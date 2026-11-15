@@ -15,7 +15,10 @@ isolated sandbox (Docker, the harness's ``sandbox()``, a hosted one) is never af
 from __future__ import annotations
 
 import tempfile
+import types
 from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,8 +29,11 @@ from deepagents.backends import CompositeBackend, FilesystemBackend, LocalShellB
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, ReAct, sandbox
-from trellis.contracts import ConfigurationError, InterruptDecision, RunStatus
+from trellis.contracts import ConfigurationError
+from trellis.harness import host
 from trellis.harness.adapters.acp import ACPAgent, kimi
+from trellis.harness.events import NOTICE
+from trellis.harness.host import _shell_middleware
 from trellis.harness.settings import Settings
 
 #: What every refusal names: the one setting an administrator turns.
@@ -36,6 +42,11 @@ NAMED = r"TRELLIS_HOST_EXECUTION=allow"
 
 def folder() -> str:
     return tempfile.mkdtemp(prefix="trellis-host-")
+
+
+def made(root: str) -> str:
+    """What the command wrote in ``root``: on this machine, not in a sandbox."""
+    return (Path(root) / "made.txt").read_text().strip()
 
 
 def model() -> ScriptedChatModel:
@@ -60,7 +71,7 @@ def react_local() -> Any:
 def react_subagent_local() -> Any:
     """A Deep Agent whose own backend is the graph's state, with a sub-agent of a host shell."""
     helper = create_deep_agent(model=model(), backend=LocalShellBackend(root_dir=folder()))
-    spec = {"name": "ops", "description": "runs commands", "runnable": helper}
+    spec: Any = {"name": "ops", "description": "runs commands", "runnable": helper}
     return create_deep_agent(model=model(), subagents=[spec])
 
 
@@ -68,7 +79,9 @@ def shell_middleware() -> Any:
     from langchain.agents import create_agent
     from langchain.agents.middleware import ShellToolMiddleware
 
-    return create_agent(model(), tools=[], middleware=[ShellToolMiddleware(workspace_root=folder())])
+    return create_agent(
+        model(), tools=[], middleware=[ShellToolMiddleware(workspace_root=folder())]
+    )
 
 
 async def executor(request: Any) -> str:
@@ -258,7 +271,7 @@ async def test_a_runs_own_options_that_let_a_shell_out_are_refused() -> None:
     off, an OpenAI run given a Unix-local sandbox, are refused before the run is made; allowed,
     the same run is made."""
     h = denying()
-    boxed = {"enabled": True, "allowUnsandboxedCommands": False}
+    boxed: Any = {"enabled": True, "allowUnsandboxedCommands": False}
     claude = h.wrap(ClaudeAgentOptions(sandbox=boxed), id="claude")
     with pytest.raises(ConfigurationError, match=NAMED):
         await claude.start("hi", user="u", framework_options={"sandbox": {"enabled": False}})
@@ -275,20 +288,59 @@ async def test_a_runs_own_options_that_let_a_shell_out_are_refused() -> None:
 
 async def test_allowed_a_host_shell_runs_its_command_here() -> None:
     """Where the deployment allows it, Deep Agents' ``execute`` on a ``LocalShellBackend``
-    runs on this machine — asked of a person first, as any write of a framework's own on a
-    real backend — and the model reads its output."""
+    runs on this machine — announced, as a command of the framework's own is, the
+    administrator having decided — and the model reads its output."""
     root = folder()
     turns = [("execute", {"command": "echo host-ok > made.txt && cat made.txt"}), "done"]
     scripted = ScriptedChatModel(turns=turns)
     graph = ReAct("s", scripted, backend=LocalShellBackend(root_dir=root, virtual_mode=True))
-    agent = allowing().wrap(graph, id="local")
-    paused = await agent.run("run it", user="u")
-    if paused.status is RunStatus.PAUSED:
-        assert paused.interrupt is not None
-        result = await agent.resume(paused.interrupt.id, InterruptDecision.APPROVE, reviewer="u")
-    else:
-        result = paused
-    assert result.answer == "done", result.error
+    events = [e async for e in allowing().wrap(graph, id="local").stream("run it", user="u")]
+    assert events[-1].error is None, events[-1].error
+    notices = [e.data["tool"] for e in events if e.data.get("name") == NOTICE]
+    assert notices == ["execute"]
     assert "host-ok" in str(scripted.seen[-1][-1].content)
-    with open(f"{root}/made.txt") as made:
-        assert made.read().strip() == "host-ok"
+    assert made(root) == "host-ok"
+
+
+def test_a_tool_whose_code_holds_an_empty_cell_is_no_shell() -> None:
+    """A graph's tool whose code closes over a name not yet bound (an empty cell) is read past,
+    as any tool that is not a ``ShellToolMiddleware``'s shell."""
+
+    def holding() -> Callable[[], int]:
+        held = 0
+
+        def code() -> int:
+            return held
+
+        return code
+
+    empty = types.FunctionType(holding().__code__, {}, "code", None, (types.CellType(),))
+    assert _shell_middleware(SimpleNamespace(func=empty)) is None
+
+
+class Layer:
+    """An isolation layer for commands on this machine, as the harness calls it."""
+
+    def __init__(self, why: str | None) -> None:
+        self.why = why
+
+    def cannot_isolate(self) -> str | None:
+        return self.why
+
+
+def test_allowed_host_execution_runs_only_through_an_isolation_layer_that_can_isolate() -> None:
+    """Allowed, a host shell still needs the installed isolation layer to isolate it: one that
+    cannot (no uid to switch to) refuses it, naming why; an agent with no host shell is not
+    asked about."""
+    before = host.install(Layer("cannot switch to an unprivileged uid"))
+    try:
+        h = allowing()
+        with pytest.raises(ConfigurationError, match="cannot switch to an unprivileged uid"):
+            h.wrap(deep_local(), id="unisolated")
+        h.wrap(plain, id="no-shell")
+        replaced = host.install(Layer(None))
+        assert isinstance(replaced, Layer) and replaced.why is not None
+        h.wrap(deep_local(), id="isolated")
+        assert set(h.agents) == {"no-shell", "isolated"}
+    finally:
+        host.install(before)

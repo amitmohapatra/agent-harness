@@ -45,7 +45,11 @@ from trellis.harness.sandbox import sandbox
 from trellis.harness.tools import bridge
 from trellis.harness.tools.bridge import TURN_STALLED
 
-pytestmark = needs_kimi
+#: Kimi Code runs its shell in a folder of this machine: the tests' deployment allows it
+#: (TRELLIS_HOST_EXECUTION=allow, the harness fixtures).
+pytestmark = [needs_kimi, pytest.mark.host_execution]
+#: the deployment of the tests that make their own harness
+HOST_ALLOWED = Settings(host_execution="allow")
 lookups: list[str] = []
 #: A command that writes (a file in Kimi's working directory): Kimi asks, and so a person.
 WRITES = "touch made.txt && echo resumed"
@@ -337,7 +341,7 @@ async def test_a_skill_kimi_loads_is_decided_by_governance(
     store.put("sql-review", "Check every JOIN.", description="Reviews SQL queries for joins.")
     endpoint.plan = [("Skill", {"skill": "sql-review"})]
     rules = {"Skill": Rule(risk="irreversible")} if asks else {}
-    async with with_governance(Harness(), Governance(FakeCatalog(rules))) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog(rules))) as h:
         target = kimi_target(endpoint, tmp_path, **combine(store).kimi())
         agent = h.wrap(target, id=f"kimi-skill-{asks}")
         events = [e async for e in agent.stream("review my SQL", user="u1")]
@@ -594,7 +598,9 @@ async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_cat
     endpoint: PlannedEndpoint, tmp_path: Path, rule: Rule
 ) -> None:
     endpoint.plan = [("Bash", {"command": "ls"})]
-    async with with_governance(Harness(), Governance(FakeCatalog({"Bash": rule}))) as h:
+    async with with_governance(
+        Harness(config=HOST_ALLOWED), Governance(FakeCatalog({"Bash": rule}))
+    ) as h:
         paused = await h.wrap(kimi_target(endpoint, tmp_path), id="kimi-strict").run(
             "look", user="u1"
         )

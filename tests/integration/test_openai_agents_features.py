@@ -1316,6 +1316,7 @@ def twice(*items: Any) -> list[Any]:
     return [Items(*items), Items(*items)]
 
 
+@pytest.mark.host_execution
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
 async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, streamed: bool
@@ -1346,6 +1347,7 @@ async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
     assert recorded(memory_service) == [("shell", "ok")]
 
 
+@pytest.mark.host_execution
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 async def test_a_decision_on_a_shell_command_reaches_memory_with_its_nested_arguments(
     memory_harness: Harness,
@@ -1373,6 +1375,7 @@ async def test_a_decision_on_a_shell_command_reaches_memory_with_its_nested_argu
     assert [r.getMessage() for r in caplog.records if r.name == "trellis.writes"] == []
 
 
+@pytest.mark.host_execution
 async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
     harness: Harness,
 ) -> None:
@@ -1401,6 +1404,7 @@ async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
     assert done.status is RunStatus.SUCCESS and ran == ["rm -rf build"]
 
 
+@pytest.mark.host_execution
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 async def test_a_shell_tools_own_approval_is_the_one_question_for_its_call(
     memory_harness: Harness, memory_service: FakeMemoryService, decision: str
@@ -1426,6 +1430,7 @@ async def test_a_shell_tools_own_approval_is_the_one_question_for_its_call(
         assert ran == [] and recorded(memory_service) == []
 
 
+@pytest.mark.host_execution
 async def test_a_command_the_catalog_says_reads_runs_unasked_and_a_failure_is_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -1450,6 +1455,7 @@ async def test_a_command_the_catalog_says_reads_runs_unasked_and_a_failure_is_re
     assert recorded(memory_service) == [("shell", "ok"), ("shell", "ok"), ("shell", "error")]
 
 
+@pytest.mark.host_execution
 async def test_a_local_shell_call_asks_and_runs_once_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -1663,6 +1669,7 @@ async def test_a_hosted_mcp_tools_approval_request_pauses_or_asks_its_own_callba
     assert result.status is RunStatus.SUCCESS and seen == ["list_issues"]
 
 
+@pytest.mark.host_execution
 async def test_a_sandbox_agents_own_memory_reaches_its_model_and_its_reads_are_the_runs(
     harness: Harness,
 ) -> None:
