@@ -6,8 +6,9 @@ user, one thread.
 The remote sub-agent is a stand-in Agent Protocol server (FastAPI on a local port, below): the
 five routes the ``langgraph_sdk`` client calls from ``deepagents.middleware.async_subagents``
 — a thread made, a run started on it, the run read, the thread read, the run cancelled — whose
-run takes :data:`TASK_SECONDS` and then answers :data:`RESULT`. No model is called: the chat
-model is scripted, and reads a task id as a model would, from what it is shown.
+run works until the test ends it (``StandIn.release``: the order of events, never the clock)
+and then answers :data:`RESULT`. No model is called: the chat model is scripted, and reads a
+task id as a model would, from what it is shown.
 
 Each test asserts what a user needs; a test whose docstring starts "Today:" pins an observation
 that is not what a user needs, as the evidence of a finding. What they show:
@@ -37,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import re
 import socket
 import threading
@@ -66,7 +66,7 @@ from tests.support.journals import journal_of
 from tests.support.openapi import runs_contract
 from trellis import Harness, ReAct, Runtime, Settings, middleware, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunRecord, RunStatus
-from trellis.harness import pipeline
+from trellis.harness import background, conversation, pipeline
 from trellis.harness.adapters.langgraph import LangGraphAdapter, bound_tools, notified
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
@@ -80,8 +80,7 @@ from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.base import max_age
 from trellis.runs import Job
 
-#: How long the background task takes on the server, and what it answers.
-TASK_SECONDS: Final = 1.5
+#: What the background task answers on the server.
 RESULT: Final = "OPTIMUM: x=42, cost=7"
 
 USER: Final = "ada"
@@ -136,16 +135,19 @@ def only_read(server: StandIn, since: int = 0) -> bool:
 class StandIn:
     """An Agent Protocol server standing for a remote sub-agent's: exactly the routes the
     ``langgraph_sdk`` client calls from Deep Agents' async sub-agent tools. A run is ``running``
-    for ``seconds`` and then ``success``, its thread's last message :data:`RESULT`."""
+    until the test ends it (:meth:`release`) and then ``success``, its thread's last message
+    :data:`RESULT` — whatever the clock says: a turn that ends while its task works did not
+    wait for it, and a task that ends within a turn does so at a step the test chose, proved
+    by the order things happen in, not by how long they took (a loaded machine's turn can
+    take seconds)."""
 
-    def __init__(self, seconds: float = TASK_SECONDS) -> None:
-        self.seconds = seconds
-        #: every task runs until :meth:`release`, whatever the clock says (:meth:`hold`)
-        self.held = False
-        #: a task's time over, it ends only once this says so too, and stays ended (``None``:
-        #: at once) — what a test's order of events, not the clock, says it waits for
+    def __init__(self) -> None:
+        #: every task runs until :meth:`release` (and again from :meth:`hold`)
+        self.held = True
+        #: released, a task ends only once this says so too, and stays ended (``None``: at
+        #: once) — what a test's order of events says it waits for
         self.ends_after: Callable[[], bool] | None = None
-        #: why every task fails once its time is over (``None``: it succeeds)
+        #: why every task fails once it ends (``None``: it succeeds)
         self.fails: str | None = None
         #: the server refuses to cancel a run
         self.refuses_cancel = False
@@ -173,7 +175,6 @@ class StandIn:
                 "assistant_id": body["assistant_id"],
                 "status": "running",
                 "input": body["input"],
-                "started": time.monotonic(),
             }
             return self._run(thread_id)
 
@@ -213,34 +214,27 @@ class StandIn:
 
     def status(self, task_id: str) -> str:
         run = self.runs[task_id]
-        over = not self.held and time.monotonic() - run["started"] >= self.seconds
-        ended = "success" if self.fails is None else "error"
-        if run["status"] == "running" and over and self.ends_after is not None:
-            if not self.ends_after():
-                return "running"
-            run["status"] = ended  # ended for good: whatever the test's condition says later
-        return ended if run["status"] == "running" and over else run["status"]
+        working = run["status"] == "running" and not self.held
+        if working and (self.ends_after is None or self.ends_after()):
+            # ended for good: whatever a later hold or the test's condition says
+            run["status"] = "success" if self.fails is None else "error"
+        return run["status"]
 
     def hold(self) -> None:
-        """Every task runs until :meth:`release`, whatever the clock says: a turn that ends
-        meanwhile did not wait for its task, which could not end before it — proved by the
-        order things happen in, not by how long they took."""
+        """Every task at work, and every one started from now, runs until :meth:`release` (one
+        that ended stays ended)."""
         self.held = True
 
     def release(self) -> None:
-        """Every task held ends now (``success``)."""
-        self.held, self.seconds = False, 0.0
+        """Every task ends now (``success``, or as :attr:`fails` says), and every task started
+        later ends at once — once :attr:`ends_after` agrees, when it is set."""
+        self.held = False
 
     @property
     def task_id(self) -> str:
         """The one task started here (a task's id is its thread's)."""
         [found] = self.runs
         return found
-
-    async def finished(self) -> None:
-        """Waits until every task started here has ended."""
-        while any(self.status(t) == "running" for t in self.runs):  # noqa: ASYNC110 - by the clock
-            await asyncio.sleep(0.05)
 
     def start(self) -> None:
         sock = socket.socket()
@@ -311,6 +305,17 @@ def calls(name: str, **args: Any) -> Callable[[list[BaseMessage]], Any]:
     return turn
 
 
+def ends_in(server: StandIn, turn: Any) -> Callable[[list[BaseMessage]], Any]:
+    """``turn``, during whose model call every task ends on its server (``StandIn.release``):
+    after the pull before that call, before the one after it."""
+
+    def ending(messages: list[BaseMessage]) -> Any:
+        server.release()
+        return turn(messages) if callable(turn) else turn
+
+    return ending
+
+
 def says_what_the_tool_said(messages: list[BaseMessage]) -> str:
     return str(messages[-1].content)
 
@@ -352,7 +357,6 @@ async def test_t1_the_task_starts_and_the_turn_ends_at_once_with_its_id(
 ) -> None:
     model = Model(turns=[START, reports_the_id])
     agent = chat(harness, server, model)
-    server.hold()
     first = await say(agent, "run the optimization")
     assert first.status is RunStatus.SUCCESS and first.interrupt is None, first.error
     assert set(TOOLS) <= set(model.requests[0]["tools"])  # the five tools, offered to the model
@@ -371,7 +375,6 @@ async def test_t2_the_next_message_is_answered_while_the_task_runs(
 ) -> None:
     model = Model(turns=[START, reports_the_id, "4"])
     agent = chat(harness, server, model)
-    server.hold()
     await say(agent, "run the optimization")
     second = await say(agent, "what is 2+2?")
     assert second.status is RunStatus.SUCCESS and second.answer == "4", second.error
@@ -388,7 +391,7 @@ async def later_turn(harness: Harness, server: StandIn, *turns: Any) -> tuple[Mo
     agent = chat(harness, server, model)
     await say(agent, "run the optimization")
     await say(agent, "what is 2+2?")
-    await server.finished()
+    server.release()
     model.turns += turns
     return model, await say(agent, "is the optimization done?")
 
@@ -409,7 +412,6 @@ async def test_t3_a_later_turn_lists_the_task(harness: Harness, server: StandIn)
 
 
 async def test_a_later_turn_cancels_the_task(harness: Harness, server: StandIn) -> None:
-    server.seconds = 60
     model = Model(turns=[START, reports_the_id, calls("cancel_async_task"), "cancelled"])
     agent = chat(harness, server, model)
     await say(agent, "run the optimization")
@@ -440,7 +442,6 @@ async def test_h_a_started_task_is_a_child_run_of_its_turn_held_while_it_runs(
     spec = subagent(server, headers={"authorization": "Bearer of-the-app"})
     model = Model(turns=[START, reports_the_id, "4"])
     agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
-    server.hold()
     first = await say(agent, "run the optimization")
     [task] = await task_runs(harness)
     assert task.parent_run_id == first.run_id and task.status is RunStatus.RUNNING
@@ -472,7 +473,7 @@ async def test_h_a_later_check_ends_the_tasks_run_with_its_result(
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
     agent = chat(harness, server, model)
     await say(agent, "run the optimization")
-    await server.finished()
+    server.release()
     events = [e async for e in agent.stream("is it done?", user=USER, thread=THREAD)]
     [task] = await task_runs(harness)
     assert task.status is RunStatus.SUCCESS and task.output == RESULT
@@ -506,7 +507,6 @@ async def test_h_the_model_cancelling_the_task_ends_its_run_cancelled(
 ) -> None:
     """A later turn's ``cancel_async_task`` stops the task on its server: its run ends
     ``CANCELLED`` (the turn that cancelled it goes on and answers)."""
-    server.seconds = 60
     model = Model(turns=[START, reports_the_id, calls("cancel_async_task"), "cancelled"])
     agent = chat(harness, server, model)
     await say(agent, "run the optimization")
@@ -521,7 +521,6 @@ async def test_h_new_instructions_keep_it_running_and_a_cancel_reaches_the_new_r
 ) -> None:
     """``update_async_task`` starts a new run of the task on its server: the task's run goes
     on, and the turn's cancel reaches the server's run of now."""
-    server.seconds = 60
     update = calls("update_async_task", message="Minimise cost.")
     model = Model(turns=[START, update, "never said"], hold_from=2)
     agent = chat(harness, server, model)
@@ -545,7 +544,7 @@ async def test_h_a_server_that_refuses_the_cancel_is_said_and_the_run_ends_all_t
 ) -> None:
     """The turn cancelled, the task's server refuses its cancel: that is said in the log (the
     task may run on there), and the task's run ends ``CANCELLED`` with its turn."""
-    server.seconds, server.refuses_cancel = 60, True
+    server.refuses_cancel = True
     model = Model(turns=[START, ("publish", {"text": "started"})])
     agent = arm(chat(harness, server, model), [publish])
     paused = await say(agent, "run the optimization and publish that it started")
@@ -566,7 +565,6 @@ async def test_h_past_the_bound_the_oldest_task_is_let_go(
     oldest is let go, and the run store ends its run once the hold lapses (cut off), as it
     does for a process that stopped."""
     monkeypatch.setattr(async_tasks, "KEPT", 1)
-    server.seconds = 60
     agent = chat(harness, server, Model(turns=[START, reports_the_id, START, reports_the_id]))
     await say(agent, "run the optimization")
     await say(agent, "and another one")
@@ -633,7 +631,6 @@ async def test_a_with_memory_the_start_in_the_history_is_not_marked_out_of_date(
     status check's earlier result is a value that changes, and is rightly marked."""
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), "It runs.", "Yes."])
     agent = chat(memory_harness, server, model)
-    server.hold()  # it runs throughout, however long the turns take
     await say(agent, "run the optimization")
     second = await say(agent, "is the optimization done?")
     assert second.status is RunStatus.SUCCESS, second.error
@@ -685,7 +682,6 @@ async def test_sec_r_1_an_input_names_no_task_list_for_its_run(
     nothing for him, and her task's run goes on as it was."""
     model = Model(turns=[START, reports_the_id])
     agent = chat(harness, server, model)
-    server.hold()
     await say(agent, "run the optimization")
     [task] = await task_runs(harness)
     asked = len(server.calls)
@@ -711,7 +707,6 @@ async def test_sec_r_1_a_task_tools_word_ends_only_a_run_of_its_conversation(
     ada's run goes on, held as it was."""
     model = Model(turns=[START, reports_the_id])
     agent = chat(harness, server, model)
-    server.hold()
     await say(agent, "run the optimization")
     [task] = await task_runs(harness)
     theirs = SimpleNamespace(
@@ -736,9 +731,8 @@ async def test_a_within_one_turn_the_task_is_started_and_checked(
 ) -> None:
     """The tools and the stand-in do work together while the graph's state is there: one turn
     starts the task and, the task over, reads its result."""
-    server.seconds = 0.2
-    turns = [START, calls("check_async_task"), says_what_the_tool_said]
-    model = Model(turns=turns, stall=0.3)
+    turns = [START, ends_in(server, calls("check_async_task")), says_what_the_tool_said]
+    model = Model(turns=turns)
     done = await say(chat(harness, server, model), "run the optimization and wait for it")
     assert done.status is RunStatus.SUCCESS, done.error
     assert RESULT in done.answer and '"status": "success"' in done.answer
@@ -756,13 +750,11 @@ async def test_a_a_graph_with_its_own_checkpointer_keeps_the_task_list_across_tu
         model, subagents=[subagent(server)], middleware=middleware(), checkpointer=InMemorySaver()
     )
     agent = harness.wrap(graph, id="own-thread")
-    server.hold()
     first = await say(agent, "run the optimization")
     assert server.task_id in first.answer
     assert (await say(agent, "what is 2+2?")).answer == "4"
     assert server.status(server.task_id) == "running"  # both turns ended while it could not
     server.release()
-    await server.finished()
     model.turns += [calls("check_async_task"), says_what_the_tool_said]
     third = await say(agent, "is the optimization done?")
     assert RESULT in third.answer, third.answer
@@ -942,7 +934,6 @@ async def test_c_today_a_crash_inside_the_start_leaves_a_task_nobody_holds_the_i
     kept. The retried turn does not start it blind — the model is told the effect is unknown
     — but the request carries no idempotency key and the task's id was never kept, so the
     task runs on with nothing able to check, cancel or find it."""
-    server.seconds = math.inf  # it runs on as long as nothing stops it: never by the clock
     crashes: list[BaseException] = [Crash()]
     create = RunsClient.create
 
@@ -978,7 +969,6 @@ async def test_d_the_stream_shows_the_call_and_nothing_tells_an_idle_chat_the_ta
     monkeypatch.setattr(threads_module, "POLL_SECONDS", 0.01)
     model = Model(turns=[START, reports_the_id])
     agent = chat(harness, server, model)
-    server.hold()  # it runs until the test ends it, below
     events = [e async for e in agent.stream("run the optimization", user=USER, thread=THREAD)]
     assert [e.type.value for e in events] == [
         "RUN_STARTED",
@@ -1018,7 +1008,6 @@ async def test_d_the_stream_shows_the_call_and_nothing_tells_an_idle_chat_the_ta
         replayed = len(chunks)
         assert replayed and server.status(server.task_id) == "running"
         server.release()
-        await server.finished()
         await asyncio.sleep(0.5)  # the task ended while no turn runs
         assert len(chunks) == replayed  # nothing reached the chat
     finally:
@@ -1038,12 +1027,11 @@ async def test_c_a_worker_of_the_process_runs_the_next_turn_with_the_task_list(
 ) -> None:
     """The next message queued, and run by a worker of the process that ran the turn before:
     the list that turn ended with is there."""
-    server.seconds = 0.2
     first, _ = workers
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
     agent = chat(first, server, model)
     await say(agent, "run the optimization")
-    await server.finished()
+    server.release()
     handle = await agent.start("is the optimization done?", user=USER, thread=THREAD)
     assert await first.worker([agent]).run_once()
     done = await handle.result(wait=5)
@@ -1057,12 +1045,11 @@ async def test_c_a_worker_of_another_process_runs_the_next_turn_with_the_task_li
     or bucket the servers share). A worker of another process that runs the conversation's
     next turn — nothing of the first turn in its memory — starts with it: the id its history
     has (the first turn's answer) is found, and the server is asked for the result."""
-    server.seconds = 0.2
     _, second = workers
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
     here, there = (chat(h, server, model) for h in workers)
     await say(here, "run the optimization")
-    await server.finished()
+    server.release()
     handle = await here.start("is the optimization done?", user=USER, thread=THREAD)
     assert await second.worker([there]).run_once()
     done = await handle.result(wait=5)
@@ -1084,11 +1071,10 @@ async def test_c_after_a_restart_the_next_turn_has_the_task_list(
     """The server that ran the first turn is gone, its agent and what it kept in memory with
     it; the one started in its place — the same run store, the same file store — runs the
     conversation's next turns: the task is checked and listed."""
-    server.seconds = 0.2
     first, second = workers
     await say(chat(first, server, Model(turns=[START, reports_the_id])), "run the optimization")
     await first.aclose()
-    await server.finished()
+    server.release()
     listing = [("list_async_tasks", {}), says_what_the_tool_said]
     model = Model(turns=[calls("check_async_task"), says_what_the_tool_said, *listing])
     restarted = chat(second, server, model)
@@ -1104,7 +1090,6 @@ async def test_c_two_servers_taking_turns_each_find_the_tasks_the_other_started(
     """A conversation's turns run where they land. The first server starts a task, the second
     another; back on the first — whose memory holds the list its own turn ended with, without
     the second's task — the list has both, as it has on the second."""
-    server.seconds = 60
     listing = [("list_async_tasks", {}), says_what_the_tool_said]
     model = Model(turns=[START, reports_the_id, START, reports_the_id, *listing, *listing])
     here, there = (chat(h, server, model) for h in workers)
@@ -1200,12 +1185,11 @@ async def test_c_a_file_store_out_of_reach_leaves_the_list_in_the_process(
         raise OSError("the bucket is out of reach")
 
     monkeypatch.setattr(harness.files, failing, refused)
-    server.seconds = 0.2
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
     agent = chat(harness, server, model)
     with caplog.at_level(logging.WARNING, logger="trellis.run"):
         first = await say(agent, "run the optimization")
-        await server.finished()
+        server.release()
         done = await say(agent, "is the optimization done?")
     assert first.status is RunStatus.SUCCESS and RESULT in done.answer, done.answer
     assert "the bucket is out of reach" in caplog.text
@@ -1221,13 +1205,12 @@ async def test_c_a_list_past_the_bound_is_kept_in_the_process_only(
     """What the file store keeps for a conversation is bounded (``pipeline.CARRIED_BYTES``): a
     list past it is not written — said in the log — and stays the process's."""
     monkeypatch.setattr(pipeline, "CARRIED_BYTES", 64)
-    server.seconds = 0.2
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
     agent = chat(harness, server, model)
     with caplog.at_level(logging.WARNING, logger="trellis.run"):
         await say(agent, "run the optimization")
     assert kept_files(harness) == [] and "over the 64 bytes" in caplog.text
-    await server.finished()
+    server.release()
     assert RESULT in (await say(agent, "is the optimization done?")).answer
 
 
@@ -1242,7 +1225,6 @@ async def test_c_a_kept_list_that_cannot_be_read_back_is_left_out_and_said(
     off, another program's file): another server's turn starts without a list, said in the
     log — the id is refused, as it was before the store kept the list — and the turn that
     next ends with tasks writes the file anew."""
-    server.seconds = 60
     first, second = workers
     turns = [START, reports_the_id, calls("check_async_task"), says_what_the_tool_said]
     model = Model(turns=[*turns, START, reports_the_id])
@@ -1272,14 +1254,15 @@ async def test_c_with_agent_runs_as_the_run_store_another_server_has_the_task_li
     is the document's, and nothing of the list is in a run's record. The task's run, started
     and held by the first, is ended by the second when its check reads the result."""
     service = RunsService(runs_contract())
-    server.seconds = 0.2
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    # the task ends once the first server's turn has: one that ended first (a loaded machine)
+    # is read by that turn itself, after its answer, which the script does not plan
     async with (
         Harness(config=Settings(), runs=service.client()) as first,
         Harness(config=Settings(), runs=service.client()) as second,
     ):
         await say(chat(first, server, model), "run the optimization")
-        await server.finished()
+        server.release()
         done = await say(chat(second, server, model), "is the optimization done?")
     assert done.status is RunStatus.SUCCESS and RESULT in done.answer, done.answer
     assert service.violations == [], "\n".join(service.violations)
@@ -1296,7 +1279,6 @@ async def test_g_a_turn_approved_after_another_turn_ended_loses_neither_turns_ta
     """A turn starts a task and waits for a person's approval; the conversation's next turn
     starts another task and ends; the first, approved, ends after it. What each ended with is
     merged task by task, not put in the other's place: the list has both."""
-    server.seconds = 60
     publishing = [START, ("publish", {"text": "started"})]
     listing = [("list_async_tasks", {}), says_what_the_tool_said]
     model = Model(turns=[*publishing, START, reports_the_id, "done", *listing])
@@ -1318,7 +1300,6 @@ async def test_g_a_turn_waiting_for_an_approval_has_its_task_in_the_next_turns_l
     """A task started before a turn waits for a person's approval runs on the server whatever
     the person decides: the list a paused turn holds is kept as an ended turn's is, so the
     conversation's next turn — while the first still waits — lists the task."""
-    server.seconds = 60
     listing = [("list_async_tasks", {}), says_what_the_tool_said]
     model = Model(turns=[START, ("publish", {"text": "started"}), *listing])
     agent = arm(chat(harness, server, model), [publish])
@@ -1334,7 +1315,6 @@ async def test_g_a_turn_cancelled_at_its_approval_cancels_its_task_too(
     """The person cancels the turn at its approval: the turn ends there, no attempt runs, and
     the task it had started is cancelled with it, on its server and as its run. The next turn
     lists it, cancelled."""
-    server.seconds = 60
     model = Model(turns=[START, ("publish", {"text": "started"}), *LISTING])
     agent = arm(chat(harness, server, model), [publish])
     paused = await say(agent, "run the optimization and publish that it started")
@@ -1355,7 +1335,6 @@ async def test_g_a_message_sent_while_a_workers_turn_works_waits_and_neither_tur
     """A worker's turn holds the conversation's turn as a turn sent directly does: it starts a
     task and is still working (a slow tool) when a message is sent directly, which waits for it
     (the run store's line), then starts another. The list has both tasks."""
-    server.seconds = 60
     entered, released = asyncio.Event(), asyncio.Event()
 
     @lc_tool
@@ -1606,7 +1585,6 @@ async def test_e_cancelling_the_turn_cancels_the_task_it_started(
     Agent Protocol's own cancel (Deep Agents' ``cancel_async_task``), and its run ends
     ``CANCELLED``, no longer held. The list the cancelled turn ended with is carried: the next
     turn finds the task there, cancelled."""
-    server.seconds = 60
     model = Model(turns=[START, "never said"], hold_from=1)
     agent = chat(harness, server, model)
     turn = asyncio.create_task(say(agent, "run the optimization"))
@@ -1646,7 +1624,6 @@ async def test_a_message_to_a_busy_conversation_that_has_a_background_task(
     (``queue``), takes the turn from the working run (``interrupt``) or is given to it before
     its next model call (``steer``) — and in each case the list is the one the first turn
     left: the task is found, none is started again, and it goes on running on its server."""
-    server.seconds = 60
     started, release = asyncio.Event(), asyncio.Event()
 
     @tool(side_effects="read")
@@ -1757,7 +1734,6 @@ async def test_through_the_ag_ui_routes_t1_t2_and_t3_work(server: StandIn) -> No
         async with httpx.AsyncClient(
             transport=transport, base_url="http://agui", headers={"x-user": USER}
         ) as http:
-            server.hold()
             first = await post(http, "run the optimization")
             assert first[-1]["outcome"] == {"type": "success"}, first[-1]
             assert server.task_id in first[-1]["result"]
@@ -1768,7 +1744,6 @@ async def test_through_the_ag_ui_routes_t1_t2_and_t3_work(server: StandIn) -> No
             # both turns ended while the task could not (held): neither waited for it
             assert server.status(server.task_id) == "running"
             server.release()
-            await server.finished()
             model.turns += [calls("check_async_task"), says_what_the_tool_said]
             third = await post(http, "is the optimization done?")
             assert RESULT in third[-1]["result"]
@@ -1811,7 +1786,6 @@ async def test_through_the_ag_ui_routes_a_turn_with_no_task_streams_what_it_did_
             transport=transport, base_url="http://agui", headers={"x-user": USER}
         ) as http:
             assert await types(http, "what is 2+2?", "no-task") == PLAIN_TURN
-            server.hold()  # it runs throughout, however long the turns take
             started = await types(http, "run the optimization", THREAD)
             assert "TOOL_CALL_RESULT" in started and server.status(server.task_id) == "running"
             assert await types(http, "what is 2+2?", THREAD) == PLAIN_TURN  # T2, list carried
@@ -1834,11 +1808,10 @@ async def test_g_the_next_turn_is_told_how_the_task_went_before_its_model_call(
     marked with langchain-core's notification metadata (source ``async_subagent``) — after the
     user's question, which stays the turn's. The harness records it as a notification, and the
     task's record the read updated is carried: the turn after is not told again."""
-    server.seconds = 0.2
     model = Model(turns=[START, reports_the_id, says_the_update, "Nothing new."])
     agent = chat(memory_harness, server, model)
     await say(agent, "run the optimization")
-    await server.finished()
+    server.release()
     second = await say(agent, "anything new?")
     assert second.answer == f"Done: {RESULT}", second.error
     shown = model.seen[2]
@@ -1862,8 +1835,7 @@ async def test_g_a_task_that_ends_while_the_turn_works_gives_the_model_another_t
 ) -> None:
     """After the turn's final answer Deep Agents reads its tasks once more: one that ended
     meanwhile gives the model another turn, which tells its result."""
-    server.seconds = 0.2
-    model = Model(turns=[START, "Started.", says_the_update], stall=0.3)
+    model = Model(turns=[START, ends_in(server, "Started."), says_the_update])
     done = await say(chat(harness, server, model), "run the optimization")
     assert done.status is RunStatus.SUCCESS and done.answer == f"Done: {RESULT}", done.error
     assert len(model.seen) == 3
@@ -1872,8 +1844,7 @@ async def test_g_a_task_that_ends_while_the_turn_works_gives_the_model_another_t
 async def test_g_the_extra_turn_counts_against_max_steps(harness: Harness, server: StandIn) -> None:
     """That extra turn is a model call as any: past ``max_steps`` it is not made, and the run
     ends with the answer it had — not LangChain's "Model call limits exceeded"."""
-    server.seconds = 0.2
-    model = Model(turns=[START, "Started.", says_the_update], stall=0.3)
+    model = Model(turns=[START, ends_in(server, "Started."), says_the_update])
     done = await say(chat(harness, server, model, max_steps=1), "run the optimization")
     assert done.status is RunStatus.SUCCESS and done.answer == "Started.", done.error
     assert len(model.seen) == 2
@@ -1922,7 +1893,6 @@ async def test_i_an_idle_chat_is_told_how_its_task_ended(
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
     model = Model(turns=[START, reports_the_id, says_the_update, "Nothing else."])
     agent = chat(harness, server, model)
-    server.hold()
     await say(agent, "run the optimization")
     await asyncio.sleep(0.2)  # a read or two while it works: nothing to tell
     server.release()
@@ -1946,6 +1916,49 @@ async def test_i_an_idle_chat_is_told_how_its_task_ended(
     assert len(server.calls) == asked
 
 
+async def test_i_a_task_that_ends_while_its_turn_is_finishing_is_told_once_the_turn_ends(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task ends after its turn last read it (its graph is done) and before the turn has
+    let go of the chat — too late for the turn, too early for an idle chat: the process that
+    holds its run reads it then and ends its run, and tells the chat by a turn of its own once
+    that turn has ended. Forced by the order of events: the server ends the task as the turn
+    finishes, and the turn goes on only once the reader has looked for a turn at work."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    model = Model(turns=[START, reports_the_id, says_the_update])
+    agent = chat(harness, server, model)
+    looked = asyncio.Event()
+    live, left = conversation.Turns.live, background.left
+
+    def looking(turns: conversation.Turns, key: str) -> conversation.Live | None:
+        looked.set()  # the reader's look at the chat: nothing else looks while a turn ends
+        return live(turns, key)
+
+    async def finishing(*args: Any) -> None:
+        if server.held:  # the turn that started the task, its graph done: the task ends now
+            monkeypatch.setattr(conversation.Turns, "live", looking)
+            server.release()
+            await looked.wait()
+        await left(*args)
+
+    monkeypatch.setattr(background, "left", finishing)
+    first = await say(agent, "run the optimization")
+    assert first.status is RunStatus.SUCCESS and len(model.seen) == 2, first.error
+
+    async def told() -> list[RunRecord]:
+        found = [r async for r in harness.runs.iterate(agent_id="bg", thread_id=THREAD)]
+        records = [await harness.runs.get(r.run_id) for r in found]
+        return [r for r in records if r and background.NOTIFIED in r.metadata and r.final]
+
+    async with asyncio.timeout(10):
+        while not await told():  # noqa: ASYNC110 - the keeper's progress
+            await asyncio.sleep(0.05)
+    [turn] = await told()
+    assert turn.output == f"Done: {RESULT}"
+    [task] = await task_runs(harness)
+    assert (task.status, task.output) == (RunStatus.SUCCESS, RESULT)
+
+
 async def test_i_remote_task_outcomes_start_three_tasks_in_a_row_and_the_fourth_is_refused(
     harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1955,15 +1968,15 @@ async def test_i_remote_task_outcomes_start_three_tasks_in_a_row_and_the_fourth_
     row start (depths 1, 2, 3), the fourth outcome's start is refused as a harness task's is
     (``background.CHAINED``), and its server is sent nothing."""
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
-    server.seconds = 0.1
     turns: list[Any] = [START, reports_the_id]  # the user's turn
     for n in (1, 2, 3):  # each outcome's turn starts another task
         turns += [START, f"Started task {n + 1}."]
     model = Model(turns=[*turns, START, says_what_the_tool_said])
     agent = chat(harness, server, model)
     # each task ends once no turn works — after the turn that started it ended: one that ended
-    # first (a loaded machine) is read by that turn itself, which the script does not plan
+    # first would be read by that turn itself, which the script does not plan
     server.ends_after = lambda: not agent.running
+    server.release()
     await say(agent, "run the optimization")
 
     async def chained() -> list[RunRecord]:
@@ -1991,7 +2004,6 @@ async def test_i_a_tasks_run_cancelled_elsewhere_cancels_the_task_on_its_server(
     task's run ends there, and the process holding that run cancels the task on its server
     (Deep Agents' ``cancel_async_task``) — not only the record."""
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
-    server.seconds = 60
     model = Model(turns=[START, "never said"], hold_from=1)
     here, there = (chat(h, server, model) for h in workers)
     turn = asyncio.create_task(say(here, "run the optimization"))
@@ -2014,12 +2026,11 @@ async def test_i_an_update_after_the_task_ended_starts_a_run_of_it(
 ) -> None:
     """``update_async_task`` after the task ended runs it again on its server (a new run on
     its thread): that run is a child run of the turn that sent it, held while it runs."""
-    server.seconds = 0.2
     turns = [START, reports_the_id, calls("check_async_task"), says_what_the_tool_said]
     model = Model(turns=[*turns, calls("update_async_task", message="Again."), "Sent."])
     agent = chat(harness, server, model)
     await say(agent, "run the optimization")
-    await server.finished()
+    server.release()
     await say(agent, "is it done?")
     [ended] = await task_runs(harness)
     assert ended.status is RunStatus.SUCCESS
@@ -2045,7 +2056,6 @@ async def test_i_a_task_that_failed_or_was_cancelled_on_its_server_ends_its_run_
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
     model = Model(turns=[START, reports_the_id, "Noted."])
     agent = chat(harness, server, model)
-    server.hold()
     await say(agent, "run the optimization")
     server.runs[server.task_id]["status"] = ended
     [task] = await task_runs(harness)
@@ -2066,7 +2076,6 @@ async def test_i_a_tasks_run_another_server_ended_is_held_here_no_more(
     """A check on another server ended the task's run: the process holding it lets go."""
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
     agent = chat(harness, server, Model(turns=[START, reports_the_id]))
-    server.hold()
     await say(agent, "run the optimization")
     [task] = await task_runs(harness)
     await harness.runs.finish(task.run_id, RunStatus.SUCCESS, output=RESULT)
@@ -2086,7 +2095,6 @@ async def test_i_a_task_whose_run_the_store_no_longer_has_is_ended_and_told_to_n
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
     model = Model(turns=[START, reports_the_id, "Nothing else."])
     agent = chat(harness, server, model)
-    server.hold()
     await say(agent, "run the optimization")
     [task] = await task_runs(harness)
     store = harness.runs
@@ -2120,15 +2128,11 @@ async def test_i_an_outcome_read_into_a_turn_the_model_never_got_is_told_at_the_
     """Past ``max_steps``, the model turn Deep Agents asked for after the final answer is not
     made: the outcome it read is not marked read — its notification leaves the turn and the
     task's record says it still works — so the next turn's model is told, memory on or off."""
-    server.seconds = 0.2
-    # the turn's last model call outlasts the task by far, so it ends within the turn even on
-    # a loaded machine; and it has ended before the next turn starts
-    model = Model(turns=[START, "Started.", says_the_update], stall=1.0)
+    # the task ends during the turn's last model call: within the turn, before the next
+    model = Model(turns=[START, ends_in(server, "Started."), says_the_update])
     agent = chat(memory_harness if memory else harness, server, model, max_steps=1)
     first = await say(agent, "run the optimization")
     assert first.answer == "Started." and len(model.seen) == 2
-    await server.finished()
-    model.stall = 0.0
     second = await say(agent, "anything new?")
     assert second.answer == f"Done: {RESULT}", second.error
     assert len([m for m in model.seen[2] if notified(m) is not None]) == 1  # told once
@@ -2141,7 +2145,6 @@ async def test_arch_19_a_task_whose_run_is_gone_from_the_store_is_held_no_more(
     read ends the holding — the hold let go, the reads over — and raises nothing (ARCH-19)."""
     monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
     agent = chat(harness, server, Model(turns=[START, reports_the_id]))
-    server.hold()
     await say(agent, "run the optimization")
     [task] = await task_runs(harness)
     assert isinstance(agent.adapter, LangGraphAdapter)
