@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 from trellis.harness import doctor
 from trellis.harness.sandbox import carry
@@ -83,6 +84,11 @@ class Box:
         self.files[path] = data
 
 
+def box_of(answers: dict[str, tuple[int, str, str]], files: dict[str, bytes]) -> Any:
+    """A :class:`Box`, as the ``Sandbox`` the functions take."""
+    return Box(answers, files)
+
+
 def runtime_of(tmp_path: Path, user: str | None = "u1") -> object:
     from types import SimpleNamespace
 
@@ -105,28 +111,26 @@ def runtime_of(tmp_path: Path, user: str | None = "u1") -> object:
 
 
 async def test_what_cannot_be_carried_is_a_warning_and_the_run_goes_on(tmp_path: Path) -> None:
-    from typing import Any
-
     rt: Any = runtime_of(tmp_path)
-    await carry.kept(rt, Box({"find": (0, "", "")}, {}))  # nothing to carry: nothing kept
+    await carry.kept(rt, box_of({"find": (0, "", "")}, {}))  # nothing to carry: nothing kept
     assert await rt.agent.harness.files.read(carry.folder(rt), carry.ARCHIVE) is None
-    failing = Box({"find": (0, "1 3 ./a.txt\n", ""), "tar": (2, "", "tar: no space")}, {})
+    failing = box_of({"find": (0, "1 3 ./a.txt\n", ""), "tar": (2, "", "tar: no space")}, {})
     await carry.kept(rt, failing)
     assert rt.warned == ["the working files were not kept: tar: no space"]
     big = f"1 {carry.FILE_BYTES + 1} ./huge.bin\n2 3 ./a.txt\n"
-    box = Box({"find": (0, big, "")}, {carry.STAGED: b"archive"})
+    box = box_of({"find": (0, big, "")}, {carry.STAGED: b"archive"})
     await carry.kept(rt, box)
     assert "not carried to the conversation's next turn: huge.bin" in rt.warned[-1]
     # the next run: its archive unpacked, what was left out said too
     again: Any = runtime_of(tmp_path)
-    await carry.restored(again, Box({"tar": (0, "", "")}, {}))
+    await carry.restored(again, box_of({"tar": (0, "", "")}, {}))
     said = carry.told(again)
     assert said is not None and "a.txt" in said and "huge.bin" in said
     assert carry.told(again) is None and carry.told(None) is None
     broken: Any = runtime_of(tmp_path)
-    await carry.restored(broken, Box({"tar": (2, "", "tar: bad archive")}, {}))
+    await carry.restored(broken, box_of({"tar": (2, "", "tar: bad archive")}, {}))
     assert broken.warned == ["the working files were not restored: tar: bad archive"]
     nobody: Any = runtime_of(tmp_path, user=None)  # no user's conversation: nothing carried
-    await carry.restored(nobody, Box({}, {}))
-    await carry.kept(nobody, Box({}, {}))
+    await carry.restored(nobody, box_of({}, {}))
+    await carry.kept(nobody, box_of({}, {}))
     assert nobody.restored is None

@@ -121,7 +121,7 @@ class FakeBox:
         if isinstance(self.outcome, Exception):
             raise self.outcome
         sink(1, b"out")
-        return ExecResult(exit_code=self.outcome, stdout="out", stderr="", duration_ms=1)
+        return ExecResult(exit_code=int(self.outcome), stdout="out", stderr="", duration_ms=1)
 
 
 async def asked(relay: Relay, line: str) -> bytes:
