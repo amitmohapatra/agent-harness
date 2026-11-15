@@ -1,0 +1,124 @@
+{
+  "first": "SUCCESS",
+  "first_answer": "started",
+  "live_sessions_after_turn_1": 1,
+  "child_runs": [
+    [
+      "RUNNING",
+      ""
+    ]
+  ],
+  "child_runs_ended": [
+    [
+      "SUCCESS",
+      "The market note on \"tents\" word for word:\n\n\"Note on tents: demand up 14% this quarter; reference code MKT-7731.\""
+    ]
+  ],
+  "hooks_in_turn_1": [
+    {
+      "event": "UserPromptSubmit",
+      "agent_id": null,
+      "tool": null,
+      "in_run": true,
+      "at": 3602.22
+    },
+    {
+      "event": "PreToolUse",
+      "agent_id": null,
+      "tool": "Agent",
+      "in_run": true,
+      "at": 3603.31
+    },
+    {
+      "event": "Stop",
+      "agent_id": null,
+      "tool": null,
+      "in_run": true,
+      "at": 3604.11
+    }
+  ],
+  "hooks_between": [
+    {
+      "event": "PreToolUse",
+      "agent_id": "af7d2c23ef271ec00",
+      "tool": "mcp__trellis__market_note",
+      "in_run": true,
+      "at": 3604.58
+    },
+    {
+      "event": "SubagentStop",
+      "agent_id": "af7d2c23ef271ec00",
+      "tool": null,
+      "in_run": true,
+      "at": 3605.35
+    },
+    {
+      "event": "UserPromptSubmit",
+      "agent_id": null,
+      "tool": null,
+      "in_run": false,
+      "at": 3605.43
+    },
+    {
+      "event": "Stop",
+      "agent_id": null,
+      "tool": null,
+      "in_run": false,
+      "at": 3606.51
+    }
+  ],
+  "second": "SUCCESS",
+  "second_answer": "The researcher's reference code is **MKT-7731**. The note says demand for tents is up 14% this quarter.",
+  "code_reached_turn_2": true,
+  "hooks_in_turn_2": [
+    {
+      "event": "UserPromptSubmit",
+      "agent_id": null,
+      "tool": null,
+      "in_run": true,
+      "at": 3612.14
+    },
+    {
+      "event": "Stop",
+      "agent_id": null,
+      "tool": null,
+      "in_run": true,
+      "at": 3612.89
+    }
+  ],
+  "same_live_session": true,
+  "spent_1": {
+    "status": "SUCCESS",
+    "accounted": 1,
+    "input_tokens": 11386.0,
+    "output_tokens": 157.0,
+    "cached": 10063.0,
+    "cost": 0.000344,
+    "calls": 1.0
+  },
+  "spent_2": {
+    "status": "SUCCESS",
+    "accounted": 1,
+    "input_tokens": 6577.0,
+    "output_tokens": 38.0,
+    "cached": 6381.0,
+    "cost": 0.000107,
+    "calls": 1.0
+  },
+  "spent_children": [
+    {
+      "status": "SUCCESS",
+      "accounted": 4,
+      "input_tokens": 17491.0,
+      "output_tokens": 153.0,
+      "cached": 15902.0,
+      "cost": 0.000467,
+      "calls": 4.0
+    }
+  ],
+  "seconds": 11.0,
+  "wall": [
+    1794721400.498,
+    1794721411.52
+  ]
+}

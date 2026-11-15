@@ -391,9 +391,9 @@ turn the session runs by itself (a finished task's notification) is never a user
   own). What it grew by since the last result is shared by the tokens each used: the turn
   its own, a background run what its subagent's replies used since — so a subagent's
   work between two turns is charged to its run, and the next turn its own. The turn the
-  session runs for a finished task is charged to that task's run, which waits for it (30
-  seconds at most) before it ends. The shares are exact when every reply costs the same
-  per token, an estimate otherwise (another model, cached tokens). A turn left before its
+  session runs for a finished task is charged to that task's run — its tokens and a model
+  call as well as its cost —, which waits for it (30 seconds at most) before it ends. The
+  shares are exact when every reply costs the same per token, an estimate otherwise (another model, cached tokens). A turn left before its
   result — paused, or cancelled — is charged what it spent until it stopped: interrupted
   (nothing in the background) its result comes at once and is its own; with background
   work under way the CLI's turn goes on to its next tool call, so the replies' tokens are
@@ -406,7 +406,8 @@ turn the session runs by itself (a finished task's notification) is never a user
   the session runs for a finished task, is refused, and the conversation's next run says
   how many were (`claude_session` warning). A background shell command needs no call to
   go on (its `Bash` call was decided when it was made) and has no run; what it and
-  injected turns cost with no background run to charge is on the next turn.
+  injected turns cost with no background run to charge — their tokens as well as their
+  cost — is on the next turn.
 * Not done: a background subagent's own subagents have no run of their own kept open; a
   child run's end is on the stream of the turn that started it only while that turn is still
   being answered (`helper_finished`), not delivered to an open chat after it (Claude's next

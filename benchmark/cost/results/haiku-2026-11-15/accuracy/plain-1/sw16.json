@@ -1,0 +1,117 @@
+{
+  "suite": "complex",
+  "model": "claude-haiku-5-5",
+  "history": "thread",
+  "adapter": "react",
+  "variant": "main",
+  "window": 16000,
+  "date": "2026-11-15",
+  "usd": 0.008682,
+  "max_usd": 0.1,
+  "stopped": null,
+  "cases_total": 267,
+  "summary": {
+    "all": {
+      "cases": 4,
+      "scored_turns": 4,
+      "strict": {
+        "mean": 1.0,
+        "ci95": 0.0,
+        "n": 4
+      },
+      "judge_only": 0,
+      "unverified": 0,
+      "not_success": 0,
+      "checks": 7,
+      "checks_failed": 0,
+      "not_applicable": 0
+    },
+    "by_category": {
+      "adv_data": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 4,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_chain": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 1,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_data": {
+        "cases": 2,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "by_tier": {
+      "3": {
+        "cases": 4,
+        "scored_turns": 4,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 4
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 7,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "cost": {
+      "input_tokens": {
+        "mean": 31074.0,
+        "ci95": 26225.943009977036,
+        "n": 4
+      },
+      "output_tokens": {
+        "mean": 1435.0,
+        "ci95": 1244.2318501278878,
+        "n": 4
+      },
+      "model_calls": {
+        "mean": 3.75,
+        "ci95": 0.7955,
+        "n": 4
+      },
+      "seconds": {
+        "mean": 8.2515,
+        "ci95": 4.040130256986319,
+        "n": 4
+      }
+    },
+    "turns": 4
+  }
+}
