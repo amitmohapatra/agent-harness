@@ -53,6 +53,9 @@ HOST_ALLOWED = Settings(host_execution="allow")
 lookups: list[str] = []
 #: A command that writes (a file in Kimi's working directory): Kimi asks, and so a person.
 WRITES = "touch made.txt && echo resumed"
+#: A write of the user's own file, which Kimi asks about outside a git working tree: the
+#: user's to decide (the one rule), where a command is the deployment's.
+WRITE = ("Write", {"path": "made.txt", "content": "resumed"})
 
 
 @tool(side_effects="read")
@@ -175,28 +178,42 @@ async def test_kimis_tower_mode_is_off_however_kimi_is_told_to_turn_it_on(
     assert [e.data.get("code") for e in events if e.data.get("name") == "warning"] == warned
 
 
-async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
+async def test_a_write_asks_a_person_and_the_resume_continues_kimis_session(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    endpoint.plan = [("Bash", {"command": WRITES})]
-    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash")
+    endpoint.plan = [WRITE]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-write")
     paused = await agent.run("say it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None
-    assert paused.interrupt.tool_call.tool == "Bash"
-    assert paused.interrupt.tool_call.args == {"command": WRITES}
+    assert paused.interrupt.tool_call.tool == "Write"
+    assert paused.interrupt.tool_call.args == WRITE[1]
     assert paused.interrupt.question == (
-        "Approve Bash? Kimi Code asks before it runs this call. "
+        "Approve Write? Kimi Code asks before it runs this call. "
         "Allow once, allow for this conversation, or deny."
     )
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
-    assert done.answer == "Done. resumed"
-    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    assert done.answer is not None and done.answer.startswith("Done.")
+    assert (tmp_path / "kimi-work" / "made.txt").read_text() == "resumed"
     # the same session, told to call again: what came before is in it
     last = endpoint.requests[-1]["messages"]
-    assert any(RESUMED_CALL.format(tool="Bash") in text_of(m.get("content")) for m in last)
+    assert any(RESUMED_CALL.format(tool="Write") in text_of(m.get("content")) for m in last)
     assert any("say it" in text_of(m.get("content")) for m in last)
+
+
+async def test_a_command_on_a_host_the_deployment_allows_runs_unasked_and_announced(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's ``Bash`` on this machine, where the administrator allows commands here: the
+    command is the deployment's, never the user's question — it runs, announced."""
+    endpoint.plan = [("Bash", {"command": WRITES})]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash")
+    events = [e async for e in agent.stream("say it", user="u1")]
+    assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
+    assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["Bash"]
+    assert (tmp_path / "kimi-work" / "made.txt").exists()
 
 
 async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_call(
@@ -205,8 +222,9 @@ async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_ca
     """A pause answers Kimi's permission request (dismissed) and stops the turn
     (``session/cancel``); Kimi may take the cancel first — on a loaded machine it does — and
     its ``Bash`` then ends the waiting call itself, its result ``Aborted before command
-    started`` instead of "not run because the approval request was cancelled". Either way the
-    command did not run: the resume tells Kimi to call it again, and it runs once approved."""
+    started`` instead of "not run because the approval request was cancelled"; its ``Write``
+    likewise. Either way the call did not run: the resume tells Kimi to call it again, and it
+    runs once approved."""
     from trellis.harness.adapters import acp
 
     stop = acp.Attempt._stop
@@ -217,32 +235,31 @@ async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_ca
         await self.cancel()
         async with asyncio.timeout(30):
             while not any(  # noqa: ASYNC110 - a file Kimi writes
-                "Aborted before command started" in line
+                '"tool.result"' in line
                 for log in kimi_home_of("u1").glob("sessions/*/*/agents/main/wire.jsonl")
                 for line in log.read_text().splitlines()
-                if '"tool.result"' in line
             ):
                 await asyncio.sleep(0.01)
 
     monkeypatch.setattr(acp.Attempt, "_stop", cancelled_first)
-    endpoint.plan = [("Bash", {"command": WRITES})]
-    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash-cancelled-first")
+    endpoint.plan = [WRITE]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-write-cancelled-first")
     paused = await agent.run("say it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert not (tmp_path / "kimi-work" / "made.txt").exists()
     monkeypatch.setattr(acp.Attempt, "_stop", stop)
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
-    assert done.answer == "Done. resumed"
-    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    assert done.answer is not None and done.answer.startswith("Done.")
+    assert (tmp_path / "kimi-work" / "made.txt").read_text() == "resumed"
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
 async def test_a_command_that_only_reads_runs_without_asking_a_person(
     harness: Harness, tmp_path: Path, streamed: bool
 ) -> None:
-    """Kimi asks before every ``Bash`` command; one that only reads, the harness lets run as
-    Kimi's own read tools run: no pause."""
+    """Kimi asks before every ``Bash`` command; the harness lets each run, one that only reads
+    as any: the shell is the deployment's, as Kimi's own read tools run: no pause."""
     async with PlannedEndpoint(streamed=streamed).serving() as endpoint:
         endpoint.plan = [("Bash", {"command": "echo resumed | wc -l; which kimi 2>&1"})]
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-reads")
@@ -254,8 +271,8 @@ async def test_a_command_that_only_reads_runs_without_asking_a_person(
 @pytest.mark.parametrize(
     "rules",
     [
-        '[[permission.rules]]\ndecision = "allow"\npattern = "Bash(touch *)"\n',
-        '[[permission.allow]]\ntool = "Bash"\nmatch = "touch *"\n',
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Write"\n',
+        '[[permission.allow]]\ntool = "Write"\n',
     ],
     ids=["a-rule", "an-allow-entry"],
 )
@@ -270,12 +287,12 @@ async def test_a_call_kimis_own_config_allows_is_still_asked_about_once(
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
     (home / "config.toml").write_text("default_thinking = false\n" + rules)
-    endpoint.plan = [("Bash", {"command": "touch made.txt"})]
+    endpoint.plan = [WRITE]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed")
     paused = await agent.run("make it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None
-    assert paused.interrupt.tool_call.args == {"command": "touch made.txt"}
+    assert paused.interrupt.tool_call.args == WRITE[1]
     assert not (tmp_path / "kimi-work" / "made.txt").exists()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
@@ -295,17 +312,17 @@ async def test_a_config_whose_rules_are_inline_is_still_asked_about(
     Kimi asks, and a person is asked before the call runs."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
-    inline = '[permission]\nrules = [{ decision = "allow", pattern = "Bash(touch *)" }]\n'
+    inline = '[permission]\nrules = [{ decision = "allow", pattern = "Write" }]\n'
     (home / "config.toml").write_text(inline)
-    endpoint.plan = [("Bash", {"command": "touch made.txt"})]
+    endpoint.plan = [WRITE]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline")
     paused = await agent.run("make it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
     call = paused.interrupt.tool_call
-    assert call is not None and call.args == {"command": "touch made.txt"}
+    assert call is not None and call.args == WRITE[1]
     assert not (tmp_path / "kimi-work" / "made.txt").exists()
     own = (kimi_home_of("u1") / "config.toml").read_text()
-    assert own.startswith(inline) and '[[permission.ask]]\npattern = "Bash(touch *)"' in own
+    assert own.startswith(inline) and '[[permission.ask]]\npattern = "Write"' in own
 
 
 async def test_a_config_whose_whole_permission_is_inline_stops_the_run_before_its_prompt(
@@ -422,16 +439,13 @@ async def test_kimis_schedule_tools_leave_the_models_list_when_kimis_config_disa
     assert not [name for name in endpoint.offered()[-1] if name.startswith("Cron")]
 
 
-async def test_a_command_allowed_for_the_conversation_is_approved_for_kimis_session(
+async def test_a_write_allowed_for_the_conversation_is_approved_for_kimis_session(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    """APR-01 (DECISIONS B4). "Allow for this conversation" on a command Kimi asks about is
-    Kimi's own "Approve for this session" (its log says so), and the tool's next command asks
+    """APR-01 (DECISIONS B4). "Allow for this conversation" on a write Kimi asks about is
+    Kimi's own "Approve for this session" (its log says so), and the tool's next write asks
     nobody: one question."""
-    endpoint.plan = [
-        ("Bash", {"command": "touch made.txt"}),
-        ("Bash", {"command": "touch too.txt"}),
-    ]
+    endpoint.plan = [WRITE, ("Write", {"path": "too.txt", "content": "too"})]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-keeps")
     paused = await agent.run("make them", user="u1", thread="chat")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -465,14 +479,11 @@ async def test_a_config_that_approves_on_its_own_does_not_turn_the_approvals_off
     """APR-01, L46. ``default_permission_mode`` in Kimi's ``config.toml`` starts every session
     approving on its own, and Kimi's ACP server still says ``default``. The harness sets the
     mode that asks on each session — the first, and the one each resume continues in a new
-    process — so each command asks a person and runs only once approved."""
+    process — so each write asks a person and runs only once approved."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
     (home / "config.toml").write_text(f'default_permission_mode = "{starts_in}"\n')
-    endpoint.plan = [
-        ("Bash", {"command": "touch made.txt"}),
-        ("Bash", {"command": "touch too.txt"}),
-    ]
+    endpoint.plan = [WRITE, ("Write", {"path": "too.txt", "content": "too"})]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-config-mode")
     work = tmp_path / "kimi-work"
     paused = await agent.run("make them", user="u1")
@@ -613,7 +624,8 @@ async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
     endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
     """Kimi is told that ``outputs/`` of its working folder is the user's; a file it writes
-    there (its own ``Bash``, asked about and approved) moves to the file store on success."""
+    there (its own ``Bash``, unasked where the deployment allows commands on this machine)
+    moves to the file store on success."""
     from trellis.harness.sandbox import DELIVERS_HERE
 
     save = "mkdir -p outputs && printf 'a,b\\n1,2\\n' > outputs/sales.csv"
@@ -624,40 +636,39 @@ async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
         async def on_run_end(self, run: Any, result: Any) -> None:
             folders.append(run.files_folder())
 
-    h = Harness(config=Settings(files_url=f"memory://kimi-out-{id(tmp_path)}"))
+    allowed = Settings(host_execution="allow", files_url=f"memory://kimi-out-{id(tmp_path)}")
+    h = Harness(config=allowed)
     agent = h.wrap(kimi_target(endpoint, tmp_path), id="kimi-saver", hooks=[Ended()])
-    paused = await agent.run("save the sales", user="u1")
-    assert paused.interrupt is not None
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS, done.error
+    done = await agent.run("save the sales", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
     assert await h.files.read(folders[-1], "sales.csv") == b"a,b\n1,2\n"
     assert not (tmp_path / "kimi-work" / "outputs" / "sales.csv").exists()
     assert DELIVERS_HERE in endpoint.said()
     await h.aclose()
 
 
-async def test_a_bash_call_whose_arguments_stream_pauses_with_its_command(
+async def test_a_write_whose_arguments_stream_pauses_with_them(
     harness: Harness, tmp_path: Path
 ) -> None:
     """A provider streams a call's arguments after its name (Anthropic's, OpenAI's): Kimi asks
     permission before it starts the call, so the arguments are only in the call's updates."""
     async with PlannedEndpoint(streamed=True).serving() as endpoint:
-        endpoint.plan = [("Bash", {"command": WRITES})]
-        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash-streamed")
+        endpoint.plan = [WRITE]
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-write-streamed")
         paused = await agent.run("say it", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert paused.interrupt.tool_call is not None
-        assert paused.interrupt.tool_call.tool == "Bash"
-        assert paused.interrupt.tool_call.args == {"command": WRITES}
+        assert paused.interrupt.tool_call.tool == "Write"
+        assert paused.interrupt.tool_call.args == WRITE[1]
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
         assert done.status is RunStatus.SUCCESS, done.error
-        assert done.answer == "Done. resumed"
+        assert done.answer is not None and done.answer.startswith("Done.")
 
 
-async def test_a_rejected_bash_call_is_not_run_and_kimi_reads_why(
+async def test_a_rejected_write_is_not_run_and_kimi_reads_why(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    endpoint.plan = [("Bash", {"command": "rm -rf build"})]
+    endpoint.plan = [("Write", {"path": "build", "content": "x"})]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-reject")
     paused = await agent.run("clean", user="u1")
     assert paused.interrupt is not None
@@ -1054,19 +1065,19 @@ async def _paused(harness: Harness, run_id: str) -> bool:
 
 
 def _makes_it(body: dict[str, Any]) -> Any:
-    """A sub-agent whose work writes a file (its ``Bash``: Kimi asks first)."""
+    """A sub-agent whose work writes a file (its ``Write``: Kimi asks first)."""
     if body["messages"][-1].get("role") == "tool":
         return "made it"
-    return ("Bash", {"command": "touch made.txt"})
+    return WRITE
 
 
 async def test_a_background_sub_agents_call_kimi_asks_about_is_governed_in_its_own_run(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The background sub-agent's ``Bash`` asks permission after its turn ended (Kimi's
+    """The background sub-agent's ``Write`` asks permission after its turn ended (Kimi's
     approvals are its session's, not a turn's): the call is decided in the sub-agent's own run
     — a person is asked, so that run pauses, and the conversation's next turn asks it. Approved,
-    the command runs, the task ends and its run with it; then the turn's own prompt goes."""
+    the write runs, the task ends and its run with it; then the turn's own prompt goes."""
     stall = lambda body: 1.0 * _member(body)  # noqa: E731 - the sub-agent takes a while
     async with PlannedEndpoint(turns=_backgrounded(_makes_it), stall=stall).serving() as endpoint:
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background-asks")
@@ -1078,7 +1089,7 @@ async def test_a_background_sub_agents_call_kimi_asks_about_is_governed_in_its_o
         second = await agent.run("how is it going?", user="u1", thread="t1")
         assert second.status is RunStatus.PAUSED and second.interrupt is not None
         call = second.interrupt.tool_call
-        assert call is not None and call.tool == "Bash"
+        assert call is not None and call.tool == "Write"
         done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
         assert done.status is RunStatus.SUCCESS, done.error
         child = await _until(lambda: _ended(harness, summary.run_id))
@@ -1123,9 +1134,9 @@ async def test_a_command_kimi_runs_in_the_background_finishes_after_its_turn(
     }
     endpoint.plan = [("Bash", command)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background-bash")
-    paused = await agent.run("wait a bit", user="u1", thread="t1")
-    assert paused.interrupt is not None  # Kimi asks about a command that writes
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    # Kimi asks about a command that writes; the deployment's to allow, never the user's
+    done = await agent.run("wait a bit", user="u1", thread="t1")
+    assert done.interrupt is None
     assert done.status is RunStatus.SUCCESS and "task_id:" in str(done.answer), done.error
     made = tmp_path / "kimi-work" / "done.txt"
     assert not made.exists()  # still at work when the turn ended
@@ -1150,10 +1161,8 @@ async def test_a_kept_kimi_whose_hold_lapses_ends_with_its_command_and_its_sessi
     endpoint.plan = [("Bash", command)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-lapse")
     before = set(descendants(os.getpid()))
-    paused = await agent.run("wait a minute", user="u1", thread="t1")
-    assert paused.interrupt is not None
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS, done.error
+    done = await agent.run("wait a minute", user="u1", thread="t1")  # the command: unasked
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
     adapter = agent.adapter
     assert isinstance(adapter, ACPAdapter)
     session = adapter.live.get(conversation_key("default", "u1", "t1"))
@@ -1181,7 +1190,12 @@ async def test_kimi_through_bifrost_carries_the_runs_headers(tmp_path: Path) -> 
     """With Bifrost serving the harness and a model named, Kimi's model calls go to Bifrost's
     OpenAI route with the virtual key, the deny-all MCP scope and the run's dimensions."""
     async with PlannedEndpoint().serving() as endpoint:
-        settings = Settings(llm_gateway="bifrost", llm_base_url=endpoint.url, llm_api_key="vk-test")
+        settings = Settings(
+            llm_gateway="bifrost",
+            llm_base_url=endpoint.url,
+            llm_api_key="vk-test",
+            host_execution="allow",  # Kimi works in a folder of this machine
+        )
         async with Harness(config=settings, gateway=False) as h:
             target = kimi_target(endpoint, tmp_path, model="moonshot/kimi-k2")
             env = {k: v for k, v in target.env.items() if not k.startswith("KIMI_MODEL")}
@@ -1218,7 +1232,8 @@ async def test_a_sandboxed_kimi_runs_bash_and_writes_in_the_sandbox(
     target = kimi_target(endpoint, tmp_path, sandbox=sandbox(sandboxes))
     agent = harness.wrap(target, id="kimi-boxed")
     paused = await agent.run("note it", user="u1")
-    assert paused.interrupt is not None  # Bash asks, in the sandbox too
+    assert paused.interrupt is not None  # the write asks; the command, in the sandbox, does not
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "Write"
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     [made] = sandboxes.made()
