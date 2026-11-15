@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -734,6 +735,27 @@ async def test_an_approval_inside_the_task_is_asked_through_the_chat(
     # the model was told both outcomes: the question first, then the result
     statuses = [u["status"] for u in told(model.seen[-1])]
     assert statuses == ["waiting", "success"]
+
+
+async def test_an_answer_reaching_a_server_with_no_room_leaves_the_question_the_tasks(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The answer to a task's question, asked through the chat, reaching a server with no
+    room for more background work: the task does not go on there — said in the log — and its
+    run still waits on the question, for the conversation's next turn to ask."""
+    model = Model(turns=[PUBLISH, "Started.", *["Noted."] * 6])
+    agent = publishing(harness, model)
+    first = await chatted(agent, "publish the tides report")
+    task = await task_run(harness, first.run_id)
+    asking = await asked_in_the_chat(harness)
+    asked = asking.awaiting
+    monkeypatch.setattr(background, "AT_WORK", 0)  # no room left here
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        await agent.resume(asked.interrupt_id, "approve", reviewer=USER)
+    assert f"background task {task.run_id}: no room here to go on with" in caplog.text
+    waiting = await harness.runs.get(task.run_id)
+    assert waiting is not None and waiting.status is RunStatus.PAUSED
+    monkeypatch.undo()
 
 
 async def test_an_answer_reaching_another_worker_resumes_the_task_there(
