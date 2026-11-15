@@ -30,7 +30,7 @@ Harness on the Mac: 6,619 passed, 16 failed, 168 skipped, 99% coverage — the f
 the bugs below, out-of-date tests, and Linux-only tests (`/proc`); most skips are missing extras
 and the real Kimi CLI (`make install` is `uv sync` without extras; CI uses `--all-extras`).
 
-**Bugs fixed (harness commits 2c4f495c … a6b1b08f, each with a test that fails without it):**
+**Bugs fixed (harness 2c4f495c … 5f3ee697; each with a test, most checked to fail without it):**
 1. The hanging test (section 4) was a deadlock: `Turns.cancel` waited for a run that held its
    turn but had not begun its attempt (background runs got a conversation line at the fold).
 2. SCN-11: a failed harness read inside a node whose `RetryPolicy` retries the error raises it
@@ -47,33 +47,62 @@ and the real Kimi CLI (`make install` is `uv sync` without extras; CI uses `--al
 8. OpenAI `SandboxAgent` capability tools carry a risk (`CAPABILITY_SIDE_EFFECTS`): `load_skill`
    and `view_image` read, `exec_command`, `write_stdin`, `apply_patch` write.
 9. A rewound run records its question once in memory (under the original run's question id).
-10. Owner decisions built: `Agent.checkpoints(reader=)` for the run's own user only; the journal
-    keeps unknown fields for rolling upgrades (`DECISIONS.md`, last section).
+10. A client's own `max_retries` counts on a graph without `ModelHooks` (`accounting.retries_itself`):
+    the run store does not run the whole run again on top of the client's tries.
+11. New (Linux CI, real Kimi CLI): after a resume Kimi gives the repeated call a new id, so the
+    run's `before_tool` hooks were asked again; a hook's verdict is now journaled by the call's
+    content and order (`Replay.by_content`).
+
+**Owner decisions built (`DECISIONS.md`, last section):**
+- Rewind of ended runs, opt-in: `h.wrap(rewindable=True)`. agent-contracts `27a818d` (a finished
+  `RunRecord` may carry a kept checkpoint), agent-runs `7dfe8df` (`finish`/`cancel` take
+  `keep_checkpoint`, `finish` a final `checkpoint`; SDK and `docs/openapi.json`), harness
+  `913ddcc7` (the ending sends the journal as it ends; `Agent.checkpoints` / `Agent.rewind` take
+  such an ended run; `LocalRuns` keeps it too). A sub-agent's run keeps none.
+- `Agent.checkpoints(reader=)`: the run's own user only (admin path waits for a harness role model).
+- The journal keeps unknown fields (`extra="allow"`) for rolling upgrades.
+- `require_sandbox` (`TRELLIS_REQUIRE_SANDBOX`, off by default): `h.wrap` refuses Claude Code
+  without its sandbox enabled and an `ACPAgent` without `sandbox=`.
+- A framework gate's approval after a rewind counts (no code change: a rewound journal starts
+  without earlier approvals).
 
 **Tests brought up to date:** AG-UI event numbers (H-AGUI), the journal's per-write `effects`
-record (rewind), queued memory writes spooled at close (SCN-6), macOS sandbox path grants.
+record (rewind), queued memory writes spooled at close (SCN-6), macOS sandbox path grants, a
+race in `test_i_an_outcome_read_into_a_turn...` (the task ends well within the turn).
+agent-runs `e1a2492`: the rate-limit test independent of machine speed.
 
 **Checked, already fixed on main:** SEC-R-3, SEC-R-4, SEC-R-6, SEC-R-8 (each has its test), so
 `REVIEW_security.md` no longer exposes an open finding.
 
+**Linux run (CI mirror: Python 3.13, all extras, Kimi Code 2.6.2):** 6,779 passed, 22 failed,
+2 skipped. Of the 22: 19 pass alone (load: 3 workers in a ~7 GB VM), 2 were bug 11 (fixed), 1
+the race above (fixed). The 89% coverage that run printed is an artifact: source files were
+edited while it ran, so line numbers shifted (untouched files match the Mac's 99%). The 2 skips
+need `aiosqlite`, not in the lock. **Not yet done: one clean full Linux run with no edits during
+it** — it is the confirmation that everything holds together, coverage gate included.
+
+**Why the Mac and Linux runs differ:** Linux is what CI runs. On the Mac `make install` is
+`uv sync` without extras (CI: `--all-extras`) and the real Kimi CLI is absent, so ~166 tests skip
+there; Linux-only tests read `/proc`; OpenAI's local sandbox uses `sandbox-exec` on macOS (the
+tests grant their temp folder). Locally put `.venv/bin` first on `PATH` (the stand-in Claude CLI's
+`#!/usr/bin/env python3` takes a system Python 3.9 otherwise).
+
 **Out of scope by the owner:** the Kimi swarm (terminal-only `/swarm`, not reachable over ACP)
 and Claude `RemoteTrigger` (stays disallowed): neither is used in the enterprise deployment.
 
-**Still open after this session:**
-- Offline harness bugs: Kimi session/file cleanup when a hold lapses; Kimi `Skill` call cannot
-  ask; Kimi config with inline allow rules refused; Claude sub-agent thinking, server tools and
-  `compact_boundary` not recorded; a client's own `max_retries` not counted without
-  `ModelHooks`; a `SKILL.md` read through `/skills/` not a recorded call; remote background-task
-  chain depth.
-- Decision builds: rewind of ended runs (agent-runs `finish` keeps the checkpoint, opt-in);
-  `require_sandbox`.
-- Left by the owner for later: BG-11 and the live-stack suites (features, scenarios, real
-  memory recall); the memory-service bugs (section 5); security tests SEC-01..07; performance
-  (section 7); cleanup (section 8); the Haiku phase.
+**Still open after this session (in order):**
+1. One clean full Linux run (no edits during it) and the coverage gate; fix what it shows.
+2. Offline harness bugs: Kimi session/file cleanup when a hold lapses; Kimi `Skill` call cannot
+   ask; Kimi config with inline allow rules refused (these two may be Kimi limits: document if
+   so); Claude sub-agent thinking, server tools and `compact_boundary` not recorded; a
+   `SKILL.md` read through `/skills/` not a recorded call; remote background-task chain depth.
+3. Left by the owner for later: BG-11 and the live-stack suites (features, scenarios, real
+   memory recall); the memory-service bugs (section 5); security tests SEC-01..07; performance
+   (section 7); cleanup (section 8); the Haiku phase.
 - Note for the cleanup: ARCH-6 says delete `_node_retries` (now `middleware.graph_retries`); the
   SCN-11 fix reads a node's `RetryPolicy` through it, so it cannot simply go.
-- Local runs: put `.venv/bin` first on `PATH` (the stand-in Claude CLI's `#!/usr/bin/env
-  python3` takes a system Python 3.9 otherwise); Linux-only tests need Linux (`/proc`).
+- CI: every GitHub Actions run on main stays queued (no runner); restoring it is the fastest way
+  to run the whole suite on each change.
 
 ## 0. Read this first
 
