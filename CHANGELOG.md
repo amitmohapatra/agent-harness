@@ -64,15 +64,16 @@ guard where the harness runs them:
   (`NoShell`). The model sees the same command tool either way. A deployment's own layer is
   installed with `trellis.harness.host.install(HostSandbox(...))`, refused at start when it
   cannot isolate.
-* **Breaking: a shell with no isolation the harness could give is refused at `h.wrap`**,
-  whatever the setting, naming `sandbox()`: Deep Agents' `execute` on a `LocalShellBackend`
-  (alone, a `CompositeBackend`'s default, a sub-agent's; `ReAct(backend=)` too), LangChain's
-  `ShellToolMiddleware` on the host, the OpenAI SDK's `UnixLocalSandboxClient`. Before, they ran
-  on the host as the service's user.
-* **Every framework's own shell runs through the isolation layer** (below).
+* **Breaking: Deep Agents' `execute` on a `LocalShellBackend` is refused at `h.wrap`**
+  (alone, a `CompositeBackend`'s default, a sub-agent's; `ReAct(backend=)` too), whatever the
+  setting, naming `sandbox()`. Before, it ran on the host as the service's user.
+* **Every framework's own shell runs through the isolation layer** — Claude Code's, Kimi
+  Code's, an OpenAI local shell tool's (below); the OpenAI SDK's Unix-local sandbox and
+  LangChain's host `ShellToolMiddleware`, whose processes the framework starts itself, run as
+  before, unisolated.
 * **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
   sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
-  host and an OpenAI local shell tool are refused at `h.wrap` (and for a run whose own
+  host, an OpenAI local shell tool or Unix-local sandbox and LangChain's host shell are refused at `h.wrap` (and for a run whose own
   `framework_options` would make one), naming the setting; the isolation layer's own commands
   are refused at the call. Commands in a sandbox are not affected. `TRELLIS_REQUIRE_SANDBOX` is
   gone (`Settings(require_sandbox=)` is refused, naming `host_execution`)

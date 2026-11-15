@@ -1237,10 +1237,9 @@ async def test_a_background_commands_end_read_in_a_later_turn_is_that_turns_answ
     gate = tmp_path / "kimi-work" / "go"
     async with PlannedEndpoint(turns=_waits_for_its_command(gate)).serving() as endpoint:
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-waits")
-        paused = await agent.run("start the command", user="u1", thread="t1")
-        assert paused.interrupt is not None  # Kimi asks before a command
-        started = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
-        assert started.status is RunStatus.SUCCESS, started.error
+        # Kimi asks before a command; the command is the deployment's: it runs, unasked
+        started = await agent.run("start the command", user="u1", thread="t1")
+        assert started.status is RunStatus.SUCCESS and started.interrupt is None, started.error
         before = len(endpoint.requests)
         waited = await agent.run(
             "wait for the command and say what it printed", user="u1", thread="t1"

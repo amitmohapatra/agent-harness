@@ -14,11 +14,14 @@ as the service's own user, never on a run user's approval. What runs a command h
   ``tools.convert.openai_local.isolated``), announced and audited; where the layer cannot
   isolate (:func:`cannot_isolate`, said once at the start), refused — Claude's left out —
   never run as the service's own user.
-* **Unisolated shells — Deep Agents' ``execute`` on a ``LocalShellBackend`` (alone, a
-  ``CompositeBackend``'s default, a sub-agent's; ``ReAct(backend=)`` too), LangChain's
-  ``ShellToolMiddleware`` on the host, the OpenAI SDK's ``UnixLocalSandboxClient``**: no
-  isolation the harness can give them, so refused at ``h.wrap`` whatever the setting, naming
-  ``sandbox()`` (which falls back to this machine's isolation layer when no Docker answers).
+* **The SDK's ``UnixLocalSandboxClient``** and **LangChain's ``ShellToolMiddleware`` on the
+  host**: a framework's own shell whose processes the framework starts itself (behind the
+  SDK's session API, the middleware's execution policy), which the isolation layer cannot
+  carry: run as it is, governed at each call as the framework's tools are.
+* **Deep Agents' ``execute`` on a ``LocalShellBackend``** (alone, a ``CompositeBackend``'s
+  default, a sub-agent's; ``ReAct(backend=)`` too): no isolation, and ``sandbox()`` is the same
+  library's isolated backend — refused at ``h.wrap`` whatever the setting, naming ``sandbox()``
+  (Docker, else this machine's isolation layer).
 
 ``deny`` refuses every one at ``h.wrap``, and a run whose own ``framework_options`` would make
 one, naming the setting. Isolated sandboxes are never refused: ``sandbox()``, a Deep Agents

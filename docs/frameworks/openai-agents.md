@@ -157,8 +157,9 @@ long-term memory.
 A sandbox on this machine — the SDK's `UnixLocalSandboxClient` (no OS isolation on Linux), as
 below — and a `LocalShellTool` or a `ShellTool` in the SDK's local environment (on the agent,
 an agent it hands off to or runs as a tool) run commands on the host. The Unix-local client
-has no isolation the harness can give it (the SDK runs its sandbox's processes itself, behind
-its session API): `h.wrap`, and a run given such a `run_config`, refuse it. A local shell tool's
+runs its sandbox's processes itself, behind the SDK's session API, which the harness cannot
+carry: it runs as the SDK runs it, without the harness's isolation (`TRELLIS_HOST_EXECUTION=deny`
+refuses it at `h.wrap`, and a run given such a `run_config`). A local shell tool's
 commands run through this machine's isolation layer instead of its executor
 (`tools.convert.openai_local.isolated`): each in the run's workspace, as the run's uid, with an
 environment of its own (a `LocalShellTool` call's `env` added), its result what the SDK's own
