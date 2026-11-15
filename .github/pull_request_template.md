@@ -1,6 +1,6 @@
 ## What and why
 
-<!-- What changes, and the gap it closes (link the docs/research/IMPROVEMENT_BACKLOG.md row). -->
+<!-- What changes, and the gap it closes (link its item in docs/research/handoff/REMAINING.md). -->
 
 ## Challenge the change ([design rules](https://github.com/amitmohapatra/agent-harness/blob/main/docs/research/DESIGN_RULES.md#challenge-every-change))
 

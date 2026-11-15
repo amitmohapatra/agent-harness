@@ -1,5 +1,7 @@
 # Scenario coverage audit: Trellis harness + memory service + agent-runs
 
+> **Archived 2026-11-15.** A snapshot of main on 2026-10-30; its gaps were tracked in the improvement backlog (archived beside it) and the open ones are in [handoff/REMAINING.md](../handoff/REMAINING.md) section 12.
+
 > Kept as a living reference ([improvement backlog](IMPROVEMENT_BACKLOG.md)). A snapshot of origin/main on 2026-10-30: statuses change as work lands, and the backlog holds the current status of each gap. `h:` paths are relative to this repository's root.
 
 Read-only audit of **origin/main** on 2026-10-30: harness `01bbec9`, memory service `839bf2f`, agent-runs `86fcc87` (contracts read from `agent-contracts` origin/main). Paths are `repo:path:line`, with `h:` = agent-harness, `m:` = agent-memory-service, `r:` = agent-runs, `c:` = agent-contracts. Code was read from a `git archive` of origin/main, not from the local checkouts (harness local `main` is 50 commits behind).

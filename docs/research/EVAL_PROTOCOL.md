@@ -1,6 +1,6 @@
 # Big-model judge protocol (keep rule for every harness change)
 
-> The keep rule of the [improvement backlog](IMPROVEMENT_BACKLOG.md): a harness change is kept only when it passes this protocol against main. The cases, the captured inputs and the verdicts of each run go beside the change (its PR), so the decision can be checked.
+> The keep rule (the open items are in [handoff/REMAINING.md](handoff/REMAINING.md)): a harness change is kept only when it passes this protocol against main. The cases, the captured inputs and the verdicts of each run go beside the change (its PR), so the decision can be checked.
 
 No strong-model API key is available, so the session's own big model acts as judge and as the
 "bigger model" reference. Every eval case records the exact model input (captured request) and

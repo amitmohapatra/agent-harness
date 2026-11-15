@@ -1,22 +1,24 @@
 # Improvement backlog
 
+> **Archived 2026-11-15.** Its still-open rows were folded into [handoff/REMAINING.md](../handoff/REMAINING.md#12-older-backlog-untouched-this-round) (section 12); the rows here are the record of what landed, with their evidence. Statuses here are not updated any more.
+
 Every open gap the research found, with where it stands. A living list: update a row when its
 work lands, is measured, or is dropped.
 
 **Keep rule.** Ship only measured improvements. A harness change is kept only if it passes the
-[evaluation protocol](EVAL_PROTOCOL.md) against main, on the same cases and the same model: a
+[evaluation protocol](../EVAL_PROTOCOL.md) against main, on the same cases and the same model: a
 big-model judge says the answer is correct and that the captured context was sufficient to
 answer. The context-sufficiency rate goes up (or stays at 100%), strict accuracy does not drop,
 the made-up rate does not rise, controls do not drop, and tokens, model calls and seconds are not
 materially up (accuracy wins ties against cost). A change that does not pass is not kept, however
 reasonable it looks.
 
-**Design rules.** Every change follows [DESIGN_RULES.md](DESIGN_RULES.md): the framework's own mechanism first, the harness adds only what is missing, library-first and research-backed, and the code is checked before every change. Every PR answers the [challenge checklist](DESIGN_RULES.md#challenge-every-change).
+**Design rules.** Every change follows [DESIGN_RULES.md](../DESIGN_RULES.md): the framework's own mechanism first, the harness adds only what is missing, library-first and research-backed, and the code is checked before every change. Every PR answers the [challenge checklist](../DESIGN_RULES.md#challenge-every-change).
 
 **Status.** *exists*: on main. *in flight*: being built, on the branch named. *next*: the
 next to build, once measured. *later*: deliberately deferred.
 
-The direction, the intelligent harness and what the model gets (context map, data cards, built-in tools by run state), is [ADR 0006](../adr/0006-what-the-model-gets.md).
+The direction, the intelligent harness and what the model gets (context map, data cards, built-in tools by run state), is [ADR 0006](../../adr/0006-what-the-model-gets.md).
 
 Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7, a snapshot of
 2026-10-30) and [SELF_EXPLANATION.md](SELF_EXPLANATION.md) (the explain shortlist).
@@ -59,22 +61,22 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Values that change fetched fresh; replayed results dated; a stale tool kept offered | exists (#66; earlier values marked: #79, #134. Freshness: `tool(freshness="live", max_age=)`, dated snapshots) | audit C1, C2, M5 |
 | Plain `ReAct` cuts a large result with no way back | exists (#66, #78: results kept and paged by every adapter, `FitWindow` cut says where the rest is) | audit D1, M4 |
 | Summation/aggregation without a sandbox: tool-side aggregation parameters, then a read-only query over saved results, then a sandbox or Code Mode | exists (#66: `query_result` on SQLite) | audit D2, E4 |
-| `query_result` on DuckDB, a required dependency (the SQLite fallback removed 2026-11-08: one dialect, one test run) | exists (#116: 4 tables of 50k rows load in 0.37 s, was 1.01 s; 8 calls at once over 500k rows 12 s, was 89 s) | [QUERY_ENGINE.md](QUERY_ENGINE.md), [ADR 0007](../adr/0007-query-engine.md): ties SQLite on accuracy (18/18), bounds a query's memory, a call 2x faster at 50k rows and 4.5x at 500k, 8 calls at once 6 to 9.5x faster |
-| An id past 64 bits rounded (CSV) or failing the load (JSON) in `query_result` | exists (#83) | [QUERY_ENGINE.md](QUERY_ENGINE.md) value fidelity |
-| SQLite fallback: a query's own values are not memory-bounded (+370 MB in 0.7 s) | gone with the fallback (2026-11-08); DuckDB's `memory_limit` bounds it | [QUERY_ENGINE.md](QUERY_ENGINE.md) safety; `tests/integration/test_query_safety.py` |
-| A run's results are loaded again on every query (either engine) | exists: a text's typed tables kept as Parquet by its content (`tools.query.Typed`); five queries of a 10 MB result 3.1 s → 0.8 s (CSV), 5.0 s → 1.3 s (JSON), answers identical | [ADR 0007](../adr/0007-query-engine.md) consequences |
+| `query_result` on DuckDB, a required dependency (the SQLite fallback removed 2026-11-08: one dialect, one test run) | exists (#116: 4 tables of 50k rows load in 0.37 s, was 1.01 s; 8 calls at once over 500k rows 12 s, was 89 s) | [QUERY_ENGINE.md](../QUERY_ENGINE.md), [ADR 0007](../../adr/0007-query-engine.md): ties SQLite on accuracy (18/18), bounds a query's memory, a call 2x faster at 50k rows and 4.5x at 500k, 8 calls at once 6 to 9.5x faster |
+| An id past 64 bits rounded (CSV) or failing the load (JSON) in `query_result` | exists (#83) | [QUERY_ENGINE.md](../QUERY_ENGINE.md) value fidelity |
+| SQLite fallback: a query's own values are not memory-bounded (+370 MB in 0.7 s) | gone with the fallback (2026-11-08); DuckDB's `memory_limit` bounds it | [QUERY_ENGINE.md](../QUERY_ENGINE.md) safety; `tests/integration/test_query_safety.py` |
+| A run's results are loaded again on every query (either engine) | exists: a text's typed tables kept as Parquet by its content (`tools.query.Typed`); five queries of a 10 MB result 3.1 s → 0.8 s (CSV), 5.0 s → 1.3 s (JSON), answers identical | [ADR 0007](../../adr/0007-query-engine.md) consequences |
 | Agent-written memories copying a tool value | later | audit C3 |
 
 ## Tools
 
 | Gap | Status | Evidence |
 |---|---|---|
-| Tool chains: output→input links from the tools' published schemas, said in descriptions, a hinted tool's chain kept offered | exists (#65: `tools/links.py`; matrix F28c; `--classes chain`) | [tools.md](../tools.md#tool-chains); on main the F28c cells fail: hints narrowed to `find_sku` drop `get_stock`. Proxy on a 2B model (#65): first step right 8/10 → 10/10, invented ids 4 → 2, +8.5% input tokens; an end-to-end re-run with a chat template that parses tool calls is next |
+| Tool chains: output→input links from the tools' published schemas, said in descriptions, a hinted tool's chain kept offered | exists (#65: `tools/links.py`; matrix F28c; `--classes chain`) | [tools.md](../../tools.md#tool-chains); on main the F28c cells fail: hints narrowed to `find_sku` drop `get_stock`. Proxy on a 2B model (#65): first step right 8/10 → 10/10, invented ids 4 → 2, +8.5% input tokens; an end-to-end re-run with a chat template that parses tool calls is next |
 | Learned plans with "next step" and argument bindings (earlier output → later argument) | exists (memory ADR 0018: `modules/tools/procedures.py`, `hints.py` `_from_earlier_step`) | memory `tests/unit/test_tool_learning.py` |
 | Learned plans matched by meaning, not only token Jaccard | exists (memory #53: `modules/tools/matching.py`, embeddings with a calibrated `procedure_cosine` floor) | memory `tests/eval/test_procedure_match_gate.py` |
 | B11: a learned literal (`ST-101`) prefilled when the task names another value | exists, fixed (memory `procedures._constant`, `hints._names_another`) | memory `test_tool_learning.py` B11 tests |
 | Long chains routed through Code Mode or a sandbox | next, where the Bifrost gateway runs (not measured: none on the benchmark machine): `benchmark/tool_chains` with Code Mode; gateway MCP listings carry no output schema, so their chains are not linked yet | `benchmark/cost` `chain` class |
-| Dependent tool chains measured end to end: depth 2, 3 and 5 (a date passed on), fan-out, fan-in, a step that fails once or stays down, an id in a ~110k-character kept result, a follow-up reusing the ids | exists (`benchmark/tool_chains`, 42 cases, a held-out split) | Haiku, 50 tools: 42/42 on `ReAct`, `create_agent` and Deep Agents, memory off, cold and warm; 4.4 model calls a case against a minimum of 4.1 (the parallel calls are already made at once). [results](../../benchmark/tool_chains/results/2026-11-01-haiku.md) |
+| Dependent tool chains measured end to end: depth 2, 3 and 5 (a date passed on), fan-out, fan-in, a step that fails once or stays down, an id in a ~110k-character kept result, a follow-up reusing the ids | exists (`benchmark/tool_chains`, 42 cases, a held-out split) | Haiku, 50 tools: 42/42 on `ReAct`, `create_agent` and Deep Agents, memory off, cold and warm; 4.4 model calls a case against a minimum of 4.1 (the parallel calls are already made at once). [results](../../../benchmark/tool_chains/results/2026-11-01-haiku.md) |
 | A planner arm (LLMCompiler's DAG, ReWOO's plan with placeholders) | not built: it could not beat plain `ReAct` on accuracy (42/42) and has 0.3 model calls a case to save | `benchmark/tool_chains` |
 | Narrowed to one hint, a fan-in sibling or a renamed argument's source is dropped: `find_store` beside `find_product`, `next_truck_date` → `date`, `store_id` → `from_store_id` | later: no live run lost a needed tool (0 of 42 cases on every memory arm: the hints name several tools, a learned skill names its steps) | model-free check in `benchmark/tool_chains`: 81 of 162 (case, single hint) pairs drop one |
 | Learned plans of calls made at once: they are recorded in the order they arrived, so two runs that ordered them differently split the prefix tree and the procedure stops at their common prefix | later (memory): seen once in a pilot (a reorder chain learned as `find_product` alone), not in the full warm run; record a model step's calls as one step, or order them by their data dependencies | memory `procedures._best_sequence`; `benchmark/tool_chains` warm arm |
@@ -88,7 +90,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | AG-UI activity summaries ("used N tools · ran K commands") from the tool events | exists (`agui/activity.py`) | `tests/integration/test_ask_user.py` |
 | MCP elicitation: an `mcp(...)` server's question in a call pauses the run as `ask` does (a choice, or a form with the server's schema) and the answer goes back to the server | exists (#80) | `tools/elicit.py`; matrix F18e; `tests/integration/test_mcp_elicitation.py` (both protocol eras) |
 | MCP resources: a server's resources readable by the model | exists (#82): one read tool whose description maps them; a large one kept and queried as any result | `tools/resources.py`; matrix F18r; `tests/integration/test_mcp_resources.py` |
-| MCP resources in the data map (ADR 0006 §1): the map is not built yet; today the read tool's description is the map | later: with the data map | [ADR 0006](../adr/0006-what-the-model-gets.md) |
+| MCP resources in the data map (ADR 0006 §1): the map is not built yet; today the read tool's description is the map | later: with the data map | [ADR 0006](../../adr/0006-what-the-model-gets.md) |
 | MCP resource updates: subscribe (2026-07-28 `Client.listen(resource_subscriptions=)`) so a changed resource marks its earlier reads out of date; today a read is live data (a dated snapshot when replayed) and the map says `lastModified` | later | the MCP SDK's `listen` |
 | MCP tasks (a long call answered later): the official SDK has no client for them (2.2 and 2.3 leave `tasks/*` out; 2026-07-28 makes them an extension the SDK does not ship), so nothing is built on our own copy of the protocol. The design when it ships: a call that returns a task pauses the run (the existing interrupt and resume; no worker waits), agent-runs' scheduler polls `tasks/get` (or the server's notification resumes it), the task's result is the call's result, and cancelling the run sends `tasks/cancel`; no new queue or store | later: when the SDK ships it | `mcp_types.methods` ("tasks/* deliberately absent") |
 
@@ -96,7 +98,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 
 | Gap | Status | Evidence |
 |---|---|---|
-| A published ReAct-vs-`create_agent` scorecard (accuracy, tokens, calls, seconds per class) | next: `benchmark/cost` variants `baseline` / `main` / `deep` exist; publish the scorecard per class | [evaluation.md](../evaluation.md) |
+| A published ReAct-vs-`create_agent` scorecard (accuracy, tokens, calls, seconds per class) | next: `benchmark/cost` variants `baseline` / `main` / `deep` exist; publish the scorecard per class | [evaluation.md](../../evaluation.md) |
 | A "test my tools" scenario command: run a team's own tools through the scenario suite | next | `examples/06_scenarios/tool_choice.py`, `tests/live/heldout.py` |
 | LangChain limits, errors and retries measured by a ReAct suite | in flight: `-reactnative` (#58) | audit I, E4 |
 | `delegate` removed; helpers are Deep Agents' `task` | done (#57) | audit E2; duplication audit A14 |
@@ -105,7 +107,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | A read-only call repeated in a later step of one run answered from the earlier result, with a harness-written note | measured, not built: on the small hosted model, 1 repeat of a call that had succeeded in 248 turns (a retry after a malformed result) and no stalls; a tool's data is live by default (`max_age` 0), so an earlier result is not current. `StallGuard` and `max_steps` stay the backstop. Re-test with a small local model | `-reactcache`; research: harness-written feedback cut repeats ~76% |
 | Decomposing multi-part questions (Plan-and-Solve, least-to-most), and selective self-consistency only on conflicting evidence or an unverified number, capped in cost | later | ADR 0006 |
 | Grammar-constrained tool calls for local models (llama.cpp grammars, XGrammar) | next: the chain measurement showed a 2B model writing its calls as text the server did not parse | #65; ADR 0006 |
-| The complex suite (retrieve, compute, chain, converse, explain, with edge cases) and a big-model reference answer per case | next | ADR 0006; [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md) |
+| The complex suite (retrieve, compute, chain, converse, explain, with edge cases) and a big-model reference answer per case | next | ADR 0006; [EVAL_PROTOCOL.md](../EVAL_PROTOCOL.md) |
 | Prompt cache: memory context before the history | done (`-reactcache`): sent with the question, after the history; the answer ending the history marked for a cache that keeps only what is marked. On the small hosted model, 15 multi-turn cases: cached share of a later turn's first call 0.70 → 0.80, of all input 0.858 → 0.877, uncached input −10%, accuracy unchanged | audit K1 |
 | Prompt cache for a model given by name: the harness's routed chat model is not a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` does nothing for it, and `ReAct` on `create_agent` has no caching middleware at all | done (`-promptcache`): `middleware.PromptCache` runs LangChain's middleware on the chat model the call is made with, in Deep Agents' own one's place; the history marker moved with it (Deep Agents' ran after the context moved, so it was never set). The small hosted model by name, #84's 18 multi-turn cases, 3 runs per arm, plain and Deep Agents: cached share of input 0 → 0.87, uncached input 610–620k → 78–79k (−87%), cost −62%, seconds per turn unchanged (4.0 → 4.0–4.1), strict accuracy 0.929 → 0.909 / 0.919 (within the runs' own spread; the turns that differ are correct answers the strict scorer missed). Through Bifrost the gateway caches. Anthropic's API given as an OpenAI-compatible endpoint, whose compatibility layer drops prompt caching (Anthropic's docs), is called with Anthropic's own client (`-anthropicnative`, `LLM_GATEWAY=openai-compatible` keeps the OpenAI client): the same cases through that endpoint, 4 runs per arm, cached share 0 → 0.88, uncached input 600–618k → 66–94k, cost $0.079 → $0.028, seconds per turn 4.8 → 4.0, strict accuracy 0.917 → 0.909 (the same turns miss on both). Any other OpenAI-compatible endpoint carries no breakpoints | `-reactcache` (found while measuring K1) |
 | Prompt cache for a team's own `create_agent` / `create_deep_agent` graph (`middleware()`), and a model's own earlier answer left unmarked | done (`-t9-cache`): `middleware()` ends with `PromptCache` (in Deep Agents' own caching middleware's place). An answer the model gave in the graph's own thread is sent as given: marking it changed the answers after it (`bf3-analytics-02` follow-up 1 of 8 right with the mark, 5 of 5 without, same cost); ReAct's replayed history is marked as before. Break-and-fix on the small hosted model, main then branch (one run each, the current scorer): `create_agent` strict 135 → 134 of 137 (the 3 turns it missed each miss on main in the gate's runs too), cached share 0 → 0.78, $0.306 → $0.135, 5.52 → 5.48 calls a case, 4.3 → 4.2 s a turn; Deep Agents strict 134 → 134, held-out 9 → 9, cached 0 → 0.85, $0.482 → $0.148, 5.69 → 5.48 calls, 4.9 → 4.4 s | task 9 |
@@ -117,7 +119,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 
 | Gap | Status | Evidence |
 |---|---|---|
-| A model profile for a model LangChain's route does not know (an Anthropic model on the OpenAI-compatible route refuses `temperature`): look the model up in the models.dev data that LangChain's installed provider packages ship (data, not rules on names), else use one documented profile setting | later | [ADR 0004](../adr/0004-provider-neutral-models.md) |
+| A model profile for a model LangChain's route does not know (an Anthropic model on the OpenAI-compatible route refuses `temperature`): look the model up in the models.dev data that LangChain's installed provider packages ship (data, not rules on names), else use one documented profile setting | later | [ADR 0004](../../adr/0004-provider-neutral-models.md) |
 | Test-order flake: `tests/integration/test_fit_window.py` fails when it runs after the unit suite, on main too. Fix it: nothing may fail | next | reported against main; reproduce first |
 | Memory draft #64: CI was red before its last push (the complexity ratchet: `replay_window`), and one merge commit lacks the commit trailer | CI fixed on `-explain2` (split in three); the trailer cannot be added without rewriting shared history | memory #64 |
 
@@ -171,7 +173,7 @@ mid-chain, pages without end, a 60,000-line log (`advdata-*`).
 2. Check for duplication: for each adapter, does the framework's own compaction (LangChain context editing, Deep Agents summarization, OpenAI Agents and Claude session trimming) overlap with `FitWindow` and clearing? Keep one owner per adapter.
 3. A holistic run with a small hosted model: the complex suite (#67) across `ReAct`, `create_agent`, Deep Agents, OpenAI Agents and the Claude Agent SDK, plus the memory capabilities and learning over time.
    - Cap the cost at about $5.
-   - Judge per [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md).
+   - Judge per [EVAL_PROTOCOL.md](../EVAL_PROTOCOL.md).
    - Fix the harness gaps it finds, then re-run the failures.
 4. Add the model provider's key again as an environment secret (`ANTHROPIC_API_KEY`, in the environment's settings). A copy in a session's scratch directory is lost on restart.
 5. B11 (a learned literal prefilled when the task names another value) needs no work: it is fixed and tested on memory main (see Tools above).
