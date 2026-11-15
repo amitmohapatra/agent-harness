@@ -26,7 +26,9 @@ spool directory (``TRELLIS_SPOOL_DIR``), after the next start. A write given up 
 spent on failures that may pass, a queue that stayed full, the process stopping with it still
 queued) is appended to ``<spool>/trellis-writes.jsonl`` when it can be described as data (a
 transcript, a tool record, an outcome, a decision, catalog entries: ``record=``), and the next
-harness that starts writing with the same directory replays the file and removes it. Writes
+harness that starts writing with the same directory replays the file and removes it — a
+harness's directory is its deployment's own (``settings.deployment_spool``), so it replays
+only the writes its own deployment left. Writes
 are idempotent, so a replayed write that had in fact landed is stored once. Without a spool
 directory — or for a write that is not data (a grounding check, the model key) — it is lost:
 logged, counted (``trellis.writes.undelivered``, ``outcome=lost``) and reported. The queue is in

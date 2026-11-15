@@ -27,6 +27,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   `POST /v1/messages` takes, which the transcript writes of at most 100 already fixed — and
   the log said only "Request validation failed". A failed write's warning event and log line
   now carry the memory service's details: each field it refused and why.
+* **The write spool is a deployment's own.** Every process of a machine user shared one spool
+  folder, so a process replayed another's undelivered memory writes — made with another key,
+  refused (403: 33 transcript writes of a stopped run on the comparison). A harness now keeps
+  and replays its writes in `<spool>/<deployment>/`, named by its memory service and key (a
+  digest): another deployment's process leaves them, and its own deployment's next process
+  replays them once ([memory.md](docs/memory.md#background-writes-what-is-guaranteed)). A spool
+  file an earlier version left directly in the spool folder is not replayed (whose writes they
+  are is not known) and stays there: move it into its deployment's folder (the one `trellis
+  doctor`'s spool check names) to have them replayed.
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 

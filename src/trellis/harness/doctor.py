@@ -40,7 +40,7 @@ from trellis.harness.gateways import (
     model_gateway,
     provider_keys,
 )
-from trellis.harness.settings import Settings, service_version, sourced
+from trellis.harness.settings import Settings, deployment_spool, service_version, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
 SECRETS: Final = frozenset(
@@ -161,9 +161,10 @@ async def checks(
         )
         rules = await _approval_rules(client, settings, [*agents, *_acting_as(key)])
     done = [c for c in (gateway, *memory, rules, runs) if c is not None]
-    if settings.spool_dir:
-        done.append(_spool(settings.spool_dir))
-        done.append(_records(settings.spool_dir))
+    spool = deployment_spool(settings)  # this deployment's folder in the spool directory
+    if spool is not None:
+        done.append(_spool(spool))
+        done.append(_records(spool))
     if docker:
         done.append(await _docker())
     return done

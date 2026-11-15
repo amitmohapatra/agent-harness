@@ -486,6 +486,45 @@ async def test_a_harness_replays_memory_writes_only_with_memory_on(tmp_path: Pat
         assert h._replay({"op": "record_messages", "scope": {}, "args": {}}) is None
 
 
+async def test_a_process_replays_only_its_own_deployments_spooled_writes(tmp_path: Path) -> None:
+    """MEM-: the spool was one folder per machine user, so a process replayed every other
+    process's undelivered writes — on the comparison of 2026-11-15, 33 transcript writes of a
+    stopped run were replayed by another arm, made with another key, and refused (403). Each
+    deployment (the memory service and the key its writes are made with) keeps its own: another
+    deployment's process sharing the directory leaves them, and the writes a stopped process
+    left are replayed once by its deployment's next processes, however many start."""
+    from tests.support.memory import FakeMemoryService
+    from trellis import Harness, Settings
+
+    service = FakeMemoryService()
+
+    def deployment(key: str) -> Harness:
+        settings = Settings(memory_url="http://memory", api_key=key, spool_dir=str(tmp_path))
+        return Harness(config=settings, memory=service.client())
+
+    async def answer(input: str, agent: Any) -> str:
+        return "ok"
+
+    service.fail.add("messages")  # the transcript cannot be written: it is spooled
+    stopped = deployment("key-a")
+    await stopped.wrap(answer, id="echo").run("hi", user="u1", thread="t1")
+    await stopped.writes.drain()
+    assert stopped.writes.spooled == 1  # left in the spool (the process is never closed)
+    service.fail.clear()
+    async with deployment("key-b") as other:  # another deployment on the same machine
+        other.writes.start()
+        await other.writes.drain()
+    assert service.named("messages") == []
+    async with deployment("key-a") as one, deployment("key-a") as two:
+        for later in (one, two):
+            later.writes.start()
+        for later in (one, two):
+            await later.writes.drain()
+    [replayed] = service.named("messages")
+    assert [m["content"] for m in replayed.body["messages"]] == ["hi", "ok"]
+    await stopped.aclose()
+
+
 async def test_background_writes_belong_to_no_run() -> None:
     from trellis.harness import runtime as runtime_module
 
