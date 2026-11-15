@@ -1939,25 +1939,30 @@ async def run_options_without(w: World) -> None:
 
 
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
-#: what its error says), and set far above it.
-TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
+#: what its error, or its warning, says), and set far above it.
+TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
     # one step more than a model call: HarnessTools.before_model (a steered message, ADR 0005)
     "react": ({"recursion_limit": 4}, "Recursion limit of 4 reached"),
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    # OpenAI Agents answers at its limit (the SDK's own max_turns handler): a warning says so
-    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
-    # Claude ends at its limit with Claude Code's own error_max_turns result: PARTIAL, warned
+    # the SDK's MaxTurnsExceeded outcome, said as the budget's warning (the run's turns)
+    "openai_agents": ({"max_turns": 1}, "its turn limit (max_turns=1) was reached"),
+    # Claude Code's own error_max_turns result, said as a step_limit warning and the budget's
     "claude": ({"max_turns": 1}, "the turn limit (1) was reached"),
-    # Kimi answers at its limit too: asked once more, in the same session
+    # Kimi's turn ended at loop_control.max_steps_per_turn: warned as Claude's is
     "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, "the step limit (1) was reached"),
 }
-#: The adapters whose run answers once more at the framework's limit (a ``step_limit`` warning).
-ANSWER_AT_LIMIT: Final = frozenset({"openai_agents", "kimi"})
-#: The adapters whose run ends ``PARTIAL`` at the framework's limit, asking nothing more (a
-#: ``step_limit`` warning): Claude Code ends the query at ``max_turns`` and leaves it there.
-PARTIAL_AT_LIMIT: Final = frozenset({"claude"})
+#: The adapters whose run ends ``PARTIAL`` at the framework's limit with what the agent said,
+#: asking the model nothing more (decision D1(b), docs/research/handoff/DECISIONS.md: "return
+#: what the library produced as PARTIAL, no extra call"): Claude Code ends the query at
+#: ``max_turns``, the OpenAI SDK raises ``MaxTurnsExceeded``, Kimi ends the turn at its step
+#: limit. The others' limit is an error the run fails with.
+PARTIAL_AT_LIMIT: Final = frozenset({"claude", "openai_agents", "kimi"})
+#: Of those, the ones that also say a ``step_limit`` warning (docs/frameworks/claude-agent-sdk.md,
+#: kimi.md); the OpenAI SDK's limit is said as the budget's warning alone
+#: (docs/frameworks/openai-agents.md, "Limits").
+STEP_LIMIT_WARNED: Final = frozenset({"claude", "kimi"})
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
     "middleware": {"recursion_limit": 50},
@@ -1981,16 +1986,15 @@ async def framework_options(w: World) -> None:
         assert o.record.metadata.get("framework_options") == tight, o.record.metadata
     else:
         o = await w.go([d.lookup()], plan, framework_options=tight)
-    if said is None:  # stopped at the limit with no answer (Kimi), not failed
-        assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
-        return
-    if w.adapter in ANSWER_AT_LIMIT | PARTIAL_AT_LIMIT:  # its warning on the stream
-        if w.adapter in ANSWER_AT_LIMIT:  # one last answer at the limit
-            o.succeeded()
-        else:
-            assert o.status is RunStatus.PARTIAL, (o.status, o.record.error)
-        warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
-        assert any(said in m for m in warned), o.custom(WARNING)
+    if w.adapter in PARTIAL_AT_LIMIT:  # what it said up to the limit, and why it stopped
+        assert o.status is RunStatus.PARTIAL, (o.status, o.answer)
+        # the plan's one step is a call with no text: the agent said nothing (D1(b): no last
+        # answer is asked for)
+        assert o.answer is None, o.answer
+        codes = ("budget", "step_limit") if w.adapter in STEP_LIMIT_WARNED else ("budget",)
+        for code in codes:
+            warned = [m.get("message", "") for m in o.custom(WARNING) if m.get("code") == code]
+            assert any(said in m for m in warned), (code, o.custom(WARNING))
         return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
     assert said in o.record.error.message, o.record.error.message
