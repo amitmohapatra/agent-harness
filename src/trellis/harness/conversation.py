@@ -37,7 +37,7 @@ import functools
 import hashlib
 import itertools
 import logging
-from collections.abc import AsyncIterator, Sequence, Set
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -422,6 +422,9 @@ class Live:
     inbox: list[Steer] = field(default_factory=list)
     #: set as it ends, with how it ended
     ended: asyncio.Event = field(default_factory=asyncio.Event)
+    #: what waits for it to let go of the conversation's turn: each run then, in order, by the
+    #: run's own task (``background.delivered``: an outcome it was too late to read)
+    later: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
     result: Any = None
     #: the conversation's line it took its turn in (none: a run outside any)
     line: Line | None = None
@@ -490,6 +493,8 @@ class Turns:
                 if self._live.get(key) is live:  # (runs with no line may hold a turn together)
                     del self._live[key]
                 live.ended.set()
+                for then in live.later:
+                    await then()
         finally:
             del self._here[run_id]
             mine.left.set_result(None)

@@ -40,7 +40,7 @@ from trellis.harness.adapters.langgraph import notified
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
 from trellis.harness.agui.threads import Threads
-from trellis.harness.conversation import Mode
+from trellis.harness.conversation import Live, Mode, Turns
 from trellis.harness.frontend import Frontend
 from trellis.harness.harness import LOCAL_TENANT
 from trellis.harness.result import Result
@@ -269,6 +269,77 @@ async def test_an_idle_chat_gets_the_result_by_a_turn_of_its_own_on_its_thread_s
     assert later.answer == "Nothing else." and len(told(model.seen[3])) == 1  # in its history
 
 
+def ends_in_the_tail(agent: Agent, gate: Gate, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The task the chat's first turn started ends after that turn's last look at it
+    (``background.left`` finds it working) and before the turn has let go of the chat: the turn
+    goes on only once the task's outcome has looked for a turn of the chat at work."""
+    looked = asyncio.Event()
+    live, left = Turns.live, background.left
+
+    def looking(turns: Turns, key: str) -> Live | None:
+        if turns is agent.turns:  # the chat's: the outcome's look (no turn starts meanwhile)
+            looked.set()
+        return live(turns, key)
+
+    async def finishing(*args: Any) -> None:
+        await left(*args)  # the turn's last look: its task works
+        if not gate.opened.is_set():  # the turn that started it: the task ends now
+            monkeypatch.setattr(Turns, "live", looking)
+            gate.opened.set()
+            await looked.wait()
+
+    monkeypatch.setattr(background, "left", finishing)
+
+
+async def test_an_outcome_reached_while_the_turn_is_finishing_is_told_once_the_turn_ends(
+    harness: Harness, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task ends after its turn's last look and before the turn has let go of the chat —
+    too late for the turn, too early for an idle chat (:func:`ends_in_the_tail`): a turn of the
+    chat's own tells it once that turn has let go."""
+
+    def reports(messages: list[BaseMessage]) -> str:
+        [update] = told(messages)
+        return f"The research on lighthouses is done ({update['status']})."
+
+    model = Model(turns=[START, "Started.", reports])
+    agent = chat(harness, gate, model)
+    ends_in_the_tail(agent, gate, monkeypatch)
+    first = await chatted(agent, "research lighthouses")
+    assert first.answer == "Started." and len(model.seen) == 2, first.error
+    task = await task_run(harness, first.run_id)
+    await until(lambda: _told_once(harness))
+    runs = [r async for r in harness.runs.iterate(agent_id="chat", thread_id=THREAD)]
+    own = await harness.runs.get(runs[0].run_id)
+    assert own is not None and own.metadata[background.NOTIFIED]["task_id"] == task.thread_id
+    assert own.output == "The research on lighthouses is done (success)."
+
+
+async def test_an_outcome_that_cannot_be_told_once_the_turn_let_go_is_logged_not_raised(
+    harness: Harness,
+    gate: Gate,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The outcome held off by a finishing turn (:func:`ends_in_the_tail`) is told by that
+    turn's own task once it let go: what fails then is said in the log, and the turn ends as it
+    did."""
+
+    async def refused(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the run store is out of reach")
+
+    agent = chat(harness, gate, Model(turns=[START, "Started."]))
+    ends_in_the_tail(agent, gate, monkeypatch)
+    monkeypatch.setattr(background, "notify", refused)
+    with caplog.at_level(logging.ERROR, logger="trellis.harness"):
+        first = await chatted(agent, "research lighthouses")
+    assert first.status is RunStatus.SUCCESS and first.answer == "Started.", first.error
+    task = await task_run(harness, first.run_id)
+    assert f"background task {task.run_id}: its outcome not delivered" in caplog.text
+    assert "the run store is out of reach" in caplog.text
+    assert await _own_turns(harness) == 0
+
+
 async def test_an_outcome_a_turn_already_told_is_quiet_when_a_turn_of_its_own_tells_it(
     harness: Harness, gate: Gate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -354,7 +425,9 @@ async def test_one_outcome_told_by_two_servers_at_once_is_one_turn_run_by_one(
     monkeypatch.setattr(store, "get", read)
     await until(lambda: _all_final(first_h))
     assert await _own_turns(first_h) == 1
-    assert not second_h.background._at_work and not first_h.background._at_work
+    # nothing left at work on either server — an attempt's task is forgotten once it is done,
+    # after its run's end is written (a loaded machine reads the store between the two)
+    await until(lambda: not second_h.background._at_work and not first_h.background._at_work)
 
 
 async def _own_turns(harness: Harness) -> int:
