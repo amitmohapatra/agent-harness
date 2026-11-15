@@ -6,8 +6,8 @@ tested. Nothing known is left out. Where a status is not confirmed it says so.
 
 Companion files in this folder: `FOLD_LEDGER.md` (the running record: what merged when,
 each job's report), `DECISIONS.md` and `ARCHITECTURE_DECISIONS.md` (decisions taken),
-`ARCHITECT_BRIEF.md`, `ROUND3_NOTE.txt`, `GATES_NOTE.txt`, `WRAP_NOTE.txt` (the standard and
-rules the coding jobs worked to), `REVIEW_architecture.md`, `REVIEW_performance.md`, `REVIEW_security.md` (the
+`ARCHITECT_BRIEF.md`, `GATES_NOTE.txt`, `WRAP_NOTE.txt`, `CLEAN_CODE_NOTE.txt` (the standard and
+rules the coding jobs worked to; the round's working orders are in `DECISIONS.md`), `REVIEW_architecture.md`, `REVIEW_performance.md`, `REVIEW_security.md` (the
 full findings with file and line), `TEST_PLAN.md` (the test catalogue and the limitations
 table), `inventory/` (what each library can do, and the collision and ReAct-parity design).
 
@@ -629,15 +629,45 @@ Memory (parked by the owner until this phase)
   this round's fixes: L1, L5, L23–L35, L42, L46 are reported fixed; L36, L38–L41, L43–L45,
   L47 are partly fixed and must be re-checked row by row; L2, L3, L7, L9–L16 are by design
   or library limits; L17, L18, L37 wait for the Haiku phase; L19–L22 are environment limits.
+- Still open from the retired improvement backlog (`../archive/IMPROVEMENT_BACKLOG.md`, written
+  before this round; checked against main on 2026-11-15 where the code could say):
+  - Conversation: `mode` (queue, interrupt, steer) on `Agent.start()` (AG-UI and A2A have
+    it); a steered message is recorded after the question in OpenAI Agents' and Claude's
+    transcripts; Claude and ACP sessions are kept per process (a turn on another worker starts
+    a new one); memory keys threads by tenant and thread only (a direct memory API user can
+    collide); agent-runs reads (runs, inbox) are tenant-wide for every key (agent-runs
+    `answering.py`); no test of a topic switch mid-thread; ADV-7 still reproduces with no
+    known window (held as known on `react`).
+  - Explaining: pilot arm E (the shortlist in `../archive/SELF_EXPLANATION.md`); what changed
+    since last time for tool values.
+  - Data and tools: agent-written memories copying a tool value; long chains through Code Mode
+    or a sandbox where Bifrost runs; gateway MCP tools have no output schema (bifrost-sdk
+    `ToolDef`), so their chains are not linked; narrowed to one hint, a fan-in sibling or a
+    renamed argument's source is dropped (no live run lost one); learned plans of calls made
+    at once split by arrival order (memory); cold catalogs of 100–500 tools re-run with hints
+    on; MCP resources in the data map (ADR 0006), resource-update subscriptions, MCP tasks
+    (once the official SDK ships them).
+  - `ReAct`: a "test my tools" scenario command; deterministic in-run verification (every
+    number traced to a tool or query result); decomposing multi-part questions and selective
+    self-consistency; grammar-constrained tool calls for local models.
+  - PII detection in memory and run records (later, by the owner's decision; prompt injection
+    is SEC-02, section 6).
 
 ---
 
 ## 13. Build machine (ephemeral) and where everything was saved
 
 Nothing that is a note, a decision, a review or a plan exists only on the build machine any
-more: all of it is in this folder (`earlier/README.md` lists the older material: two
-reports, the Confluence documentation set as an archive, and earlier memory-experiment
-notes). Code that existed only there is on backup branches named in `earlier/README.md`.
+more: all of it is in this folder or on this repository's `data/research-archive` branch,
+which holds the older material under `docs/research/handoff/earlier/` (the duplication audit
+of 31 Oct and the Haiku evaluation of 1 Nov, whose open findings were carried into the
+reviews and section 8 of this round; the Confluence documentation set as an archive, to be
+checked against the code before publishing; earlier memory-experiment notes) and the retired
+job notes `STOP_NOTE.txt`, `CONTINUE_NOTE.txt`, `ROUND3_NOTE.txt`. Code that existed only on
+the machine is on backup branches, not for merging: in agent-harness
+`claude/cool-maxwell-w5avo8-backup-aa-both`, `-backup-aa-final`, `-backup-aa-run`,
+`-backup-aa-score`, `-backup-aa-verify` and `claude/cool-maxwell-w5avo8-asked-answer`; in
+agent-memory-service `claude/cool-maxwell-w5avo8-backup-router-experiment`.
 
 Still only on the build machine, by choice (data, not notes): raw experiment outputs, test
 result files, benchmark databases, the private test stack `/var/tmp/cons/live57` (Postgres
