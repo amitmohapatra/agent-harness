@@ -85,3 +85,67 @@ def test_a_call_the_runs_end_cut_short_owes_no_tool_record(tmp_path: Path) -> No
     assert inv._inv2_tools({"run_a": own}, {"run_a": {}}) == [
         "INV-2 run run_a: calls that ran have no tool record: ['wait:{\"s\": 60}']"
     ]
+
+
+def _tried(*statuses: str | None) -> list[dict[str, Any]]:
+    """One attempt's events of the call ``run_a:k:0`` begun once per status — its result's
+    status, or ``None``: begun with no result (cut short) — then the run's end."""
+    ref, n = "run_a:k:0", 0
+    events: list[dict[str, Any]] = [{"type": "RUN_STARTED", "sequence": 0}]
+    for status in statuses:
+        events.append({"type": "TOOL_CALL_START", "tool_call_id": ref, "sequence": n + 1})
+        events.append({"type": "TOOL_CALL_END", "tool_call_id": ref, "sequence": n + 2})
+        n += 2
+        if status is not None:
+            n += 1
+            result = {"tool": "flaky", "status": status, "output": "x"}
+            events.append(
+                {"type": "TOOL_CALL_RESULT", "tool_call_id": ref, "sequence": n, "data": result}
+            )
+    events.append({"type": "RUN_FINISHED", "sequence": n + 1})
+    return [{"event": e} for e in events]
+
+
+def test_a_call_its_graph_tries_again_after_its_error_started_once(tmp_path: Path) -> None:
+    """INV-10: a node's ``RetryPolicy`` runs a failed read again (``tools/convert/langchain``:
+    the try ended and recorded, the node's policy tries it again, the harness not on top) — the
+    same call, by the same id, begun again after its error: one start, not two (WF-07, a read
+    run exactly twice). A call begun again with no error before it is still a second start."""
+    inv = Invariants(tmp_path)
+    assert inv._inv10({"run_a": _tried("error", "ok")}) == []
+    assert inv._inv10({"run_a": _tried("error", "error", "ok")}) == []
+    twice = ["INV-10 run run_a: tool calls started more than once: ['run_a:k:0']"]
+    assert inv._inv10({"run_a": _tried("ok", "ok")}) == twice
+    assert inv._inv10({"run_a": _tried(None, "ok")}) == twice
+
+
+def _memory(path: str, response: Any, key: str, request: Any = None) -> Exchange:
+    return Exchange(
+        service="memory",
+        method="GET" if request is None else "POST",
+        path=path,
+        query={},
+        request=request,
+        status=200,
+        response=response,
+        auth={"X-API-Key": key},
+    )
+
+
+def test_a_second_tenants_key_reading_its_own_tenant_crosses_no_boundary(tmp_path: Path) -> None:
+    """INV-5: a test that uses a second tenant's key on purpose (s02: another tenant's key reads
+    none of the runs) has that key's harness ask memory whose key it is (``GET /v1/keys/self``),
+    and memory answers the key's own tenant: no boundary crossed. A memory answer naming a
+    tenant other than its key's own still is one."""
+    inv = Invariants(tmp_path)
+    inv.traffic.exchanges += [
+        _memory("/v1/keys/self", {"tenant_id": "scen"}, "key-a"),
+        _memory("/v1/context", {"items": []}, "key-a", {"scope": {"tenant_id": "scen"}}),
+        _memory("/v1/keys/self", {"tenant_id": "scen2"}, "key-b"),
+        _memory("/v1/threads", {"threads": [{"tenant_id": "scen2"}]}, "key-b"),
+    ]
+    assert inv._inv5() == []
+    inv.traffic.exchanges.append(_memory("/v1/threads", {"tenant_id": "scen2"}, "key-a"))
+    assert inv._inv5() == [
+        "INV-5 memory GET /v1/threads answered tenant scen2 to a key of tenant scen"
+    ]
