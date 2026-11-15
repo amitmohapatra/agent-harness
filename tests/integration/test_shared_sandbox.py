@@ -251,7 +251,12 @@ async def test_the_next_turn_finds_the_files_its_conversation_carries_in_a_fresh
     assert await provider.labelled({}) == []
 
 
-def test_without_a_provider_a_sandbox_is_the_tenants_shared_container() -> None:
+def test_without_a_provider_a_sandbox_is_the_tenants_shared_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis.harness import sandbox as sandbox_module
+
+    monkeypatch.setattr(sandbox_module, "docker_answers", lambda: True)
     chosen = sandbox(image="registry.test/img:1").provider_for()
     assert isinstance(chosen, SharedDockerSandbox) and chosen.image == "registry.test/img:1"
     assert RunEventType.CUSTOM  # the stream's audit events are CUSTOM ones

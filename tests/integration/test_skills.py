@@ -299,6 +299,7 @@ async def test_reading_a_skill_is_a_recorded_read_of_the_run_never_asked(
 
 
 # --------------------------------------------------------------------------- Claude
+@pytest.mark.host_execution
 async def test_claude_reads_the_runs_skills_as_a_local_plugin_written_for_the_run(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -319,6 +320,7 @@ async def test_claude_reads_the_runs_skills_as_a_local_plugin_written_for_the_ru
     assert options.skills == "all"
 
 
+@pytest.mark.host_execution
 async def test_a_resumed_claude_run_finds_its_skills_where_they_were(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -354,6 +356,7 @@ async def test_a_resumed_claude_run_finds_its_skills_where_they_were(
     assert other.status is RunStatus.PAUSED and list(await asyncio.to_thread(started)) != [first]
 
 
+@pytest.mark.host_execution
 async def test_claudes_plugin_holds_each_tenants_and_users_own_skills(
     memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
@@ -380,6 +383,7 @@ async def test_claudes_plugin_holds_each_tenants_and_users_own_skills(
 
 
 # --------------------------------------------------------------------------- OpenAI
+@pytest.mark.host_execution
 async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: Harness) -> None:
     from agents import RunConfig
     from agents.sandbox import SandboxAgent, SandboxRunConfig
@@ -406,6 +410,7 @@ async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: H
     assert "Check every JOIN." in str(result.answer) and "No SELECT *." in str(result.answer)
 
 
+@pytest.mark.host_execution
 async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_goes_on(
     harness: Harness,
 ) -> None:
@@ -442,6 +447,7 @@ async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_go
     assert "sql-review cannot be read" in model.said() and "unavailable" in model.said()
 
 
+@pytest.mark.host_execution
 async def test_an_openai_sandbox_agent_loads_each_tenants_and_users_own_skill(
     memory_service: FakeMemoryService,
 ) -> None:
@@ -454,7 +460,8 @@ async def test_an_openai_sandbox_agent_loads_each_tenants_and_users_own_skill(
 
     memory_service.tenant = None  # a platform key: each run names its tenant
     harness = declaring(
-        Harness(config=Settings(), memory=memory_service.client()),
+        # the SDK's Unix-local sandbox runs on this machine: this deployment allows it
+        Harness(config=Settings(host_execution="allow"), memory=memory_service.client()),
         load_skill="read",
         exec_command="read",
     )

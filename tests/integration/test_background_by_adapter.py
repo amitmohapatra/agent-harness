@@ -431,6 +431,7 @@ async def test_b_an_openai_sandbox_agents_shell_runs_a_command_across_the_turns_
     assert {"exec_command", "write_stdin"} <= set(model.tools[0])  # the SDK's two tools
 
 
+@pytest.mark.host_execution
 async def test_b_today_with_a_sandbox_session_per_run_the_command_ends_with_its_turn(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -570,6 +571,7 @@ async def test_d_a_function_queues_a_child_run_and_a_later_turn_reads_its_result
 
 
 # --------------------------------------------------------------------------- C. an ACP agent
+@pytest.mark.host_execution
 async def test_c_today_an_acp_agents_process_ends_with_each_turn_and_its_session_goes_on(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -591,6 +593,7 @@ async def test_c_today_an_acp_agents_process_ends_with_each_turn_and_its_session
     assert agent.adapter.steers(agent.target) is False  # and no message reaches a turn under way
 
 
+@pytest.mark.host_execution
 async def test_c_an_acp_agents_background_sub_agent_works_on_across_the_turns(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -627,6 +630,7 @@ KEY: Final = conversation_key(LOCAL_TENANT, USER, THREAD)
 LISTED: Final = "task_id: {}  agent: optimizer  status: running"
 
 
+@pytest.mark.host_execution
 async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapter(
     harness: Harness, server: StandIn, tmp_path: Path
 ) -> None:
@@ -684,6 +688,7 @@ async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapte
     assert LISTED.format(server.task_id) in mine.answer  # the graph's own list, as it left it
 
 
+@pytest.mark.host_execution
 async def test_e_an_async_sub_agent_and_a_live_claude_session_side_by_side_on_one_harness(
     server: StandIn, tmp_path: Path
 ) -> None:
@@ -694,7 +699,7 @@ async def test_e_an_async_sub_agent_and_a_live_claude_session_side_by_side_on_on
     prompts (and no task list). Closing the harness ends Claude's process; the sub-agent's
     task is its server's, and goes on."""
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
-    async with Harness(config=Settings()) as harness:
+    async with Harness(config=Settings(host_execution="allow")) as harness:
         model = Model(turns=[START, reports_the_id])
         deep = chat(harness, server, model)
         claude = harness.wrap(claude_options(tmp_path, scripts), id="claude")

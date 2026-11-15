@@ -138,6 +138,7 @@ async def test_children_that_only_read_run_at_once(harness: Harness) -> None:
     assert (await parent.run("x", user="u")).answer == "both"
 
 
+@pytest.mark.host_execution
 async def test_what_a_child_does_decides_whether_its_tool_reads(harness: Harness) -> None:
     async def nothing(input: str, agent: Runtime) -> str:
         return input

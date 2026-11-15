@@ -129,10 +129,13 @@ def crashed(exc: BaseException) -> bool:
 
 
 @pytest.fixture
-async def workers() -> AsyncIterator[tuple[Harness, Harness]]:
-    """Two worker processes: two harnesses sharing nothing but the run store."""
+async def workers(request: pytest.FixtureRequest) -> AsyncIterator[tuple[Harness, Harness]]:
+    """Two worker processes: two harnesses sharing nothing but the run store — a deployment
+    that allows commands on this machine for a test marked ``host_execution``."""
     store = LocalRuns()
-    pair = (Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store))
+    marked = request.node.get_closest_marker("host_execution") is not None
+    config = Settings(host_execution="allow") if marked else Settings()
+    pair = (Harness(config=config, runs=store), Harness(config=config, runs=store))
     yield pair
     for h in pair:
         await h.aclose()
@@ -362,6 +365,7 @@ async def test_an_sdk_agents_own_tool_is_not_run_again_on_another_worker(
     assert done == ["deliver o1"]
 
 
+@pytest.mark.host_execution
 async def test_claude_taken_over_starts_a_cli_of_its_own_whose_tools_answer(
     workers: tuple[Harness, Harness], tmp_path: Path
 ) -> None:

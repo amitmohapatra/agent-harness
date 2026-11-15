@@ -17,9 +17,13 @@
   That callback answers as the harness's: the team's own ``can_use_tool`` when it has one;
   else a call whose approval a person already answered in the hook runs (one call, one
   question), a call that only reads (a read tool, or a shell command
-  ``governance.shell.read_only`` reads as read-only) runs, and any other asks a person
-  (``bridge.asked``) with the choices of its risk, as a harness call — what Claude Code would
-  keep for its session ("don't ask again"), the run keeps: for this conversation, or always;
+  ``governance.shell.read_only`` reads as read-only) runs, the shell runs (its sandbox, or the
+  host the deployment allows it on: ``trellis.harness.host``; announced, never the user's to
+  answer), the network runs as the tool catalog let it through in the hook
+  (``bridge.outbound``: refused there with no word of an administrator's), and any other
+  asks a person (``bridge.asked``) with the choices of its risk, as a harness call — what
+  Claude Code would keep for its session ("don't ask again"), the run keeps: for this
+  conversation, or always;
 * records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
   calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
   it took — through the SDK's own ``PostToolUse`` / ``PostToolUseFailure`` hooks
@@ -138,6 +142,7 @@ from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
+from trellis.harness.host import CLAUDE_SHELLS
 from trellis.harness.journal import Pending, approvals_read, call_key
 from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
@@ -168,8 +173,9 @@ if TYPE_CHECKING:
 #: claude.ai design or project changed (``ClaudeDesign``, ``Projects``), a goal that keeps
 #: the session working (``ProposeGoal``).
 #: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
-#: or an ``approve_when``, in the tool catalog. What Claude Code asks its user about although
-#: it only reads — leaving plan mode with a plan, the network, a skill (:data:`CLAUDE_ASKS`)
+#: or an ``approve_when``, in the tool catalog. ``WebFetch`` and ``WebSearch`` are listed here
+#: but decided by the catalog alone (:data:`CLAUDE_NETWORK`). What Claude Code asks its user
+#: about although it only reads — leaving plan mode with a plan, a skill (:data:`CLAUDE_ASKS`)
 #: — a person answers. Any other tool says nothing of what it does: a person approves its
 #: calls (its risk in the catalog says more). A person asked about a call Claude runs picks
 #: as for a harness tool's — once, for this conversation, always (with a memory service), deny;
@@ -247,10 +253,15 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     ),
 }
 #: The tools Claude Code asks its user about although they only read: leaving plan mode with a
-#: plan (``ExitPlanMode``), the network (``WebFetch``, ``WebSearch``), a skill (``Skill``). A
+#: plan (``ExitPlanMode``), a skill (``Skill``). A
 #: person answers when it asks, as for a write — unless the tool catalog has a rule for the
 #: tool that lets it run (``tools.bridge.asked``).
-CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "WebFetch", "WebSearch", "Skill"})
+CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "Skill"})
+#: Claude Code's built-in tools that reach the network outside the deployment: the tool
+#: catalog decides them (``tools.bridge.outbound``: refused until an administrator gives them a
+#: risk or an ``approve_when``), never a question to the run's user; published with no risk of
+#: the harness's, so the catalog's is an administrator's.
+CLAUDE_NETWORK: Final = frozenset({"WebFetch", "WebSearch"})
 #: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
 #: ends a recommended option's label with.
 QUESTION_TOOL: Final = "AskUserQuestion"
@@ -1266,7 +1277,7 @@ def _spent(
         return sum(int(u.get(key) or 0) for u in usages)
 
     cached, written = total("cache_read_input_tokens"), total("cache_creation_input_tokens")
-    budget.account(
+    budget.reported(
         runtime,
         model=options.model,
         input_tokens=total("input_tokens") + cached + written,
@@ -1589,6 +1600,9 @@ def _governance(steps: Steps) -> Any:
         if steps.settling:  # the run paused: the model's reply to the pause takes no step
             return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         try:
+            refused = await _offline(given["tool_name"])
+            if refused is not None:  # the network the catalog does not allow
+                return _decided("deny", refused)
             return await _decide(steps, given, tool_use_id)
         except Exception as exc:
             log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
@@ -1596,6 +1610,17 @@ def _governance(steps: Steps) -> Any:
             return _decided("deny", UNDECIDED.format(why=f"{type(exc).__name__}: {exc}"))
 
     return deciding_matcher(pre_tool_use)
+
+
+async def _offline(name: str) -> str | None:
+    """What a call of a built-in that reaches the network (:data:`CLAUDE_NETWORK`) is refused
+    with, before anything else decides it, when the tool catalog does not allow it
+    (``bridge.outbound``); ``None`` for any other call."""
+    if name not in CLAUDE_NETWORK:
+        return None
+    runtime = current()
+    assert runtime is not None  # the CLI asks inside the run it works for
+    return await bridge.outbound(_spec(runtime, name))
 
 
 async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
@@ -1669,9 +1694,11 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
     permission mode and rules let it through without asking otherwise): the team's own
     callback, when it has one; else a call that only reads runs — a read tool, or a shell
     command the CLI's ``shell`` reads as read-only (``Shell.read_only``: from every folder it
-    may be in, none known while another call that may move it is under way) — and any
-    other asks a person (``bridge.asked``); Claude's question to its user is the run's
-    (:func:`_answered`). A call not let through ends its step."""
+    may be in, none known while another call that may move it is under way) —, so does the
+    shell (:data:`CLAUDE_SHELLS`: in its sandbox, or on a host the deployment allows it on —
+    the deployment's decision, announced in the hook) and the network the catalog let through
+    (:data:`CLAUDE_NETWORK`), and any other asks a person (``bridge.asked``); Claude's
+    question to its user is the run's (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     from trellis.harness.tools.convert.claude import WAITING
@@ -1695,6 +1722,10 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif (
             steps.carries(getattr(context, "tool_use_id", None))
+            # the shell in its sandbox, or on a host the deployment allows it on, and the
+            # network as the catalog let it through: the deployment's, never the user's
+            or name in CLAUDE_SHELLS
+            or name in CLAUDE_NETWORK
             or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())
         ):  # a person approved this call (``PreToolUse``)
@@ -1751,8 +1782,13 @@ def _spec(runtime: Runtime, name: str) -> ToolSpec:
     """A call's tool as governance decides it: its risk as the run's tool set has it (an
     in-process server's tool: its annotations), else a built-in's
     (:data:`BUILTIN_SIDE_EFFECTS`)."""
-    risk = BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
-    return runtime.native.get(name) or ToolSpec(name=name, side_effects=risk)
+    return runtime.native.get(name) or ToolSpec(name=name, side_effects=_builtin_risk(name))
+
+
+def _builtin_risk(name: str) -> str:
+    """A built-in's risk as the harness says it (:data:`BUILTIN_SIDE_EFFECTS`), none for one
+    that reaches the network (:data:`CLAUDE_NETWORK`: the catalog's, an administrator's)."""
+    return UNDECLARED if name in CLAUDE_NETWORK else BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
 
 
 def _recorded(steps: Steps, shell: Shell) -> Any:
@@ -1862,7 +1898,7 @@ def native_spec(name: str) -> ToolSpec:
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
-    risk = BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
+    risk = _builtin_risk(name)
     spec = builtin(ToolSpec(name=name, side_effects=risk))
     return helper(spec) if name in SUBAGENT_TOOLS else spec
 

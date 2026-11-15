@@ -172,8 +172,10 @@ needs_docker = pytest.mark.skipif(not _docker_up(), reason=f"needs a Docker daem
 
 
 def settings(**changes: object) -> Settings:
-    """The environment's deployment, with ``changes`` (each a setting: checked)."""
-    return Settings(**{**Settings.from_env().model_dump(), **changes})
+    """The environment's deployment, with ``changes`` (each a setting: checked). The live suite
+    runs Claude Code and Kimi Code in folders of this development machine: its deployment
+    allows commands here (``TRELLIS_HOST_EXECUTION=allow``) unless ``changes`` say otherwise."""
+    return Settings(**{**Settings.from_env().model_dump(), "host_execution": "allow", **changes})
 
 
 class LiveHarness(Harness):

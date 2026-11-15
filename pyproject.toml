@@ -134,6 +134,7 @@ markers = [
   "features: purpose-level feature proofs against the real memory service and agent-runs (make test-features); skipped without them",
   "plan(*ids): the test plan's case ids a test covers (docs/testing/TEST_PLAN.md, docs/research/FEATURE_COVERAGE.md)",
   "scenario: user scenarios against the real memory service and agent-runs (make test-scenarios); skipped without them",
+  "host_execution: the test's harness fixtures (harness, memory_harness) allow commands on this machine outside a sandbox (TRELLIS_HOST_EXECUTION=allow): Claude Code, Kimi Code, a local shell under test",
 ]
 
 [tool.ruff]
@@ -175,6 +176,8 @@ known-first-party = ["trellis", "benchmark"]
 "src/trellis/harness/agui/**" = ["PLC0415"]
 # ReAct imports its frameworks (the react extra) when it builds a graph.
 "src/trellis/harness/react.py" = ["PLC0415"]
+# The host-execution check imports a framework only for an agent of that framework.
+"src/trellis/harness/host.py" = ["PLC0415"]
 
 [tool.pyright]
 pythonVersion = "3.12"

@@ -115,7 +115,11 @@ Commands run in a **shared** sandbox, not a container per user: one container pe
 (`SharedDockerSandbox`, `sandbox()`'s default), and inside it the harness enforces the user and
 run boundaries itself, through one isolation layer
 ([`isolation.py`](../src/trellis/harness/sandbox/isolation.py)) — the same layer commands on the
-host itself go through when an administrator allows them ([`isolated_run`](#commands-on-the-host-the-same-boundaries)).
+host itself go through ([`isolated_run`](#commands-on-the-host-the-same-boundaries)). A `sandbox()`
+given no provider works in the tenant's shared container when the Docker daemon answers, else
+in this machine's isolation layer (`HostSandbox`) when it can isolate here, else it has no
+shell: each command is refused with the reason, said once in the log (`NoShell`). The model
+sees the same command tool either way.
 
 **One container per tenant, never shared across tenants.** Its name is a digest of the tenant
 and of what it is made of (image, network, CPU, memory: `trellis-pool-<digest>`), and it is
@@ -189,8 +193,11 @@ container is `SandboxLost`), and a background process across commands.
 
 ### Commands on the host: the same boundaries
 
-When an administrator allows commands on the server itself (the `-hostshell` setting), they go
-through the same layer: `HostSandbox` and its one entry point —
+Commands on the server itself go through the same layer (allowed by default;
+`TRELLIS_HOST_EXECUTION=deny` switches them off: [governance.md](governance.md#commands-on-the-host)):
+`HostSandbox` and its one entry point — the default one, or the deployment's own, installed at
+start with `trellis.harness.host.install(HostSandbox(...))` (refused when `cannot_isolate()`
+says why) —
 
 ```python
 from trellis.harness.sandbox import HostSandbox, Limits, isolated_end, isolated_run
@@ -219,7 +226,9 @@ Kept results are bound at `/large_tool_results` (an empty mount point the layer 
 | Kimi Code, `kimi(sandbox=sandbox())` | its `Bash` and file writes: yes (its working folder is the workspace); its own reads are not isolated (they read the host) |
 | Claude Agent SDK's own `Bash` (its `SandboxSettings`) | no: the CLI's own sandbox on the machine it runs on; give it `sandbox().tools()` for commands the layer runs |
 | OpenAI Agents SDK's `SandboxAgent` and its clients | no: the SDK's own sandbox (Docker, Unix-local, hosted); give it a hosted or Docker client, or `sandbox().tools()` |
-| Deep Agents with a backend of its own (`LocalShellBackend`) | no: refused unless the administrator allows host commands |
+| Deep Agents with a backend of its own (`LocalShellBackend`) | no isolation: refused at `h.wrap`, naming `sandbox()` |
+| LangChain's host `ShellToolMiddleware` | no: the library's own shell on the host, run as it is; `TRELLIS_HOST_EXECUTION=deny` switches it off; `DockerExecutionPolicy` isolates it |
+| Claude Code's and an unsandboxed Kimi's own shell on the host | no: they run as the service's user, as today (announced and recorded); `TRELLIS_HOST_EXECUTION=deny` switches them off; a sandbox (Claude's own, `kimi(sandbox=sandbox())`) isolates them |
 
 ## The image: build in the libraries the agent needs
 
@@ -297,7 +306,9 @@ sandbox, named in the query's answer: what code makes of it (a chart, a formatte
 script) starts from that file. Both tools' descriptions say which does what; the model chooses.
 The same question gives the same figure with or without a sandbox.
 
-Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`). Its
+Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`) — their
+own shells, unsandboxed, as the service's user, unless the deployment says
+`TRELLIS_HOST_EXECUTION=deny` ([governance.md](governance.md#commands-on-the-host)). Its
 `outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
 so after its system prompt, Kimi in a block before its prompt — "Files you write in outputs/ of
 your working directory are given to the user when you finish. Write a file the user names, or
@@ -431,12 +442,17 @@ an OpenAI `SandboxAgent`'s capability tools are governed there).
 
 | Framework | Its own (in the installed package) | Under `h.wrap` |
 |---|---|---|
-| Deep Agents | a backend behind its file tools and `execute` (`create_deep_agent(backend=)`): `execute` runs commands when the backend implements `SandboxBackendProtocol` — `BaseSandbox` (`deepagents/backends/sandbox.py`: a subclass implements `execute` and `upload_files`), `LangSmithSandbox`, and `LocalShellBackend` (`deepagents/backends/local_shell.py`: the host's shell, with no isolation) | the graph runs as it is; gate `execute` with `interrupt_on`, which the harness turns into an approval ([frameworks/deepagents.md](frameworks/deepagents.md)) |
-| OpenAI Agents SDK | `SandboxAgent` (`agents/sandbox`) with capabilities `Filesystem`, `Shell` and `Compaction` by default, `Skills` and `Memory` on request; a session from `RunConfig(sandbox=SandboxRunConfig(client=...))`: `DockerSandboxClient`, `UnixLocalSandboxClient` (`agents/sandbox/sandboxes`: no OS isolation on Linux), and hosted clients under `agents.extensions.sandbox` (E2B, Modal, Daytona, Runloop, Vercel, Blaxel, Cloudflare) | the SDK refuses a `SandboxAgent` without a `RunConfig(sandbox=...)` (`UserError`): give it as `framework_options={"run_config": ...}` (below), or run it with `Runner.run` yourself and plug the blocks in ([blocks/openai-agents.md](blocks/openai-agents.md)). Its capabilities' tools (`exec_command`, `write_stdin`, `view_image`, `apply_patch`, `load_skill`) are governed and recorded like the agent's own function tools; a live `SandboxRunConfig(session=...)` on `h.wrap` (one sandbox for every user) is refused: give it per run, one per conversation |
-| Claude Agent SDK | the CLI's `Bash` and file tools (`ClaudeAgentOptions(tools=[...])`), confined by `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` on the machine the CLI runs on (macOS and Linux; a `network` setting of its own) | every built-in call goes through the harness's `PreToolUse` hook (hooks, governance by risk), then Claude Code's own check; what it asks about, the harness's `can_use_tool` answers (a read runs, any other asks a person) ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md)). With the sandbox on, the CLI approves a sandboxed `Bash` command itself (`SandboxSettings` `autoAllowBashIfSandboxed`, true by default): set it false so the CLI asks, and governance decides |
+| Deep Agents | a backend behind its file tools and `execute` (`create_deep_agent(backend=)`): `execute` runs commands when the backend implements `SandboxBackendProtocol` — `BaseSandbox` (`deepagents/backends/sandbox.py`: a subclass implements `execute` and `upload_files`), `LangSmithSandbox`, and `LocalShellBackend` (`deepagents/backends/local_shell.py`: the host's shell, with no isolation: refused at `h.wrap`, naming `sandbox()`) | the graph runs as it is; gate `execute` with `interrupt_on`, which the harness turns into an approval ([frameworks/deepagents.md](frameworks/deepagents.md)) |
+| OpenAI Agents SDK | `SandboxAgent` (`agents/sandbox`) with capabilities `Filesystem`, `Shell` and `Compaction` by default, `Skills` and `Memory` on request; a session from `RunConfig(sandbox=SandboxRunConfig(client=...))`: `DockerSandboxClient`, `UnixLocalSandboxClient` (`agents/sandbox/sandboxes`: no OS isolation on Linux; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`), and hosted clients under `agents.extensions.sandbox` (E2B, Modal, Daytona, Runloop, Vercel, Blaxel, Cloudflare) | the SDK refuses a `SandboxAgent` without a `RunConfig(sandbox=...)` (`UserError`): give it as `framework_options={"run_config": ...}` (below), or run it with `Runner.run` yourself and plug the blocks in ([blocks/openai-agents.md](blocks/openai-agents.md)). Its capabilities' tools (`exec_command`, `write_stdin`, `view_image`, `apply_patch`, `load_skill`) are governed and recorded like the agent's own function tools; a live `SandboxRunConfig(session=...)` on `h.wrap` (one sandbox for every user) is refused: give it per run, one per conversation |
+| Claude Agent SDK | the CLI's `Bash` and file tools (`ClaudeAgentOptions(tools=[...])`), confined by `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))` on the machine the CLI runs on (macOS and Linux; a `network` setting of its own; on Linux it needs bubblewrap and socat, and without them the CLI runs the command unsandboxed, warning only on its stderr); unconfined, it runs as the service's user, unless `TRELLIS_HOST_EXECUTION=deny` refuses it | every built-in call goes through the harness's `PreToolUse` hook (hooks, governance by risk), then Claude Code's own check; what it asks about, the harness's `can_use_tool` answers (a read runs, any other asks a person) ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md)). With the sandbox on, a sandboxed `Bash` command runs unasked, announced and recorded — the CLI approves it itself (`autoAllowBashIfSandboxed`, true by default), and when it asks, the harness lets it through: a command in the sandbox is the deployment's, not the user's to answer ([governance.md](governance.md#who-decides-what)) |
 
 The two can coexist (a framework's sandbox for its own tools, `sandbox()` for the harness's),
 but they are two sandboxes that do not share files; prefer one.
+
+Deep Agents' `LocalShellBackend` is refused at `h.wrap`, naming `sandbox()`. The frameworks'
+own shells on this machine — Claude Code's and Kimi Code's, the `UnixLocalSandboxClient`,
+LangChain's `ShellToolMiddleware` on the host — run as they do, without the harness's
+isolation; `TRELLIS_HOST_EXECUTION=deny` switches them off ([governance.md](governance.md#commands-on-the-host)).
 
 A framework's own sandbox runs under `h.wrap` too: its configuration is the framework's run
 options. An OpenAI `SandboxAgent` needs `RunConfig(sandbox=...)` on `Runner.run`, so give it as
@@ -448,6 +464,8 @@ from agents import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
+# on this machine with no isolation (TRELLIS_HOST_EXECUTION=deny refuses it): a Docker or a
+# hosted client isolates it
 box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
 agent = h.wrap(
     SandboxAgent(name="analyst", instructions="..."),

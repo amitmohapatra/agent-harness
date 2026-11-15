@@ -54,6 +54,42 @@ from trellis.harness.tools.base import Tool
 FRAMEWORK_OPTIONS: Final = "framework_options"
 
 
+#: The framework options that are the deployment's, by adapter: given on ``h.wrap`` (the
+#: deployment's code), never changed by a run's own ``framework_options`` (:func:`deployed`) —
+#: which MCP servers the agent reaches, what it runs without asking.
+DEPLOYMENT_ONLY: Final[Mapping[str, Mapping[str, str]]] = {
+    "claude_agent_sdk": {
+        "mcp_servers": "which MCP servers it reaches",
+        "allowed_tools": "the tools it runs without asking",
+        "permission_mode": "a permission mode that lets calls through without asking",
+    },
+    "acp": {"mcp_servers": "which MCP servers it reaches"},
+}
+#: The permission modes a run may still choose for itself: they let nothing through unasked.
+ASKING_MODES: Final = frozenset({"default", "plan"})
+
+
+def deployed(adapter: str, wrapped: Mapping[str, Any], own: Mapping[str, Any]) -> None:
+    """Refuse a run's own framework options (``own``) that change what the deployment gave on
+    ``h.wrap`` (``wrapped``) of :data:`DEPLOYMENT_ONLY`: a run's caller acts in a user's name,
+    and those are the administrator's. A permission mode that asks (:data:`ASKING_MODES`) is
+    the run's to choose."""
+    kept = DEPLOYMENT_ONLY.get(adapter, {})
+    changed = [
+        key
+        for key, value in own.items()
+        if key in kept
+        and value != wrapped.get(key)
+        and not (key == "permission_mode" and value in ASKING_MODES)
+    ]
+    if changed:
+        said = "; ".join(f"{key!r} ({kept[key]})" for key in changed)
+        raise ConfigurationError(
+            f"a run's framework_options cannot set {said}: that is the deployment's, given on "
+            "h.wrap(framework_options=...) or the agent's own options"
+        )
+
+
 def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
     """Framework options ``over`` (a run's) on ``base`` (its agent's): a key both give as a
     mapping (a LangGraph config's ``configurable``, ``metadata``) is merged the same way, key by

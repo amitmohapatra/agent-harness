@@ -956,7 +956,10 @@ async def run_case(
     """One case's chat on ``adapter`` (``variant``: how ``react`` is built), scored."""
     RAN.clear()
     service = FakeMemoryService(context_text="", shown=[])
-    config = Settings.from_env().model_copy(update={"runs_url": None, "otlp_endpoint": None})
+    # Claude Code and Kimi Code run in work folders of this machine: allowed for the suite
+    config = Settings.from_env().model_copy(
+        update={"runs_url": None, "otlp_endpoint": None, "host_execution": "allow"}
+    )
     spend = cx.Spend(prices.price_of(model) if isinstance(model, str) else None, None)
     on_langchain = adapter in runner.LANGCHAIN_ADAPTERS
     meter: cx.Captured | cx.Accounted = cx.Captured(spend) if on_langchain else cx.Accounted(spend)

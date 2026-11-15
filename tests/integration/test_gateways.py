@@ -454,6 +454,7 @@ async def test_a_model_known_to_answer_on_responses_never_falls_back(
     ("capability", "dropped"),
     [("Compaction", "its request parameters (context_management)"), ("Filesystem", "its tool")],
 )
+@pytest.mark.host_execution
 async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
     monkeypatch: pytest.MonkeyPatch, capability: str, dropped: str
 ) -> None:
@@ -472,7 +473,8 @@ async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
         capabilities=[capabilities.Shell(), getattr(capabilities, capability)()],
     )
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+    here = behind_bifrost().model_copy(update={"host_execution": "allow"})  # a Unix-local sandbox
+    async with Harness(config=here, gateway=fake.gateway()) as h:
         assert (await h.wrap(Agent(name="p", model="gpt-x"), id="p").run("x", user="u")).answer
         agent = h.wrap(target, id="box", framework_options={"run_config": config})
         result = await agent.run("x", user="u")
@@ -481,6 +483,7 @@ async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
     assert dropped in result.error.message
 
 
+@pytest.mark.host_execution
 async def test_a_sandbox_capability_goes_whole_to_a_model_bifrost_serves_on_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -492,7 +495,9 @@ async def test_a_sandbox_capability_goes_whole_to_a_model_bifrost_serves_on_resp
 
     fake = FakeGateway(turns=["compacted"])
     fake.serve_models(monkeypatch)
-    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    settings = Settings(
+        host_execution="allow", llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk"
+    )
     target = SandboxAgent(
         name="box", model="gpt-x", capabilities=[capabilities.Shell(), capabilities.Compaction()]
     )
@@ -742,6 +747,7 @@ def test_claude_is_routed_through_bifrosts_anthropic_route() -> None:
     assert routed_env({}, _claude_runtime(ProviderSDK()), {}) is None  # the CLI's own key
 
 
+@pytest.mark.host_execution
 async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> None:
     from claude_agent_sdk import ClaudeAgentOptions
 
@@ -749,7 +755,9 @@ async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> N
 
     record = tmp_path / "cli.json"
     env = {"FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]), "FAKE_CLAUDE_RECORD": str(record)}
-    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    settings = Settings(
+        host_execution="allow", llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk"
+    )
     async with Harness(config=settings, gateway=FakeGateway().gateway()) as h:
         agent = h.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="claude")
         assert (await agent.run("x", user="ada")).answer == "ok"
@@ -758,6 +766,7 @@ async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> N
     assert "x-bf-mcp-include-tools: " in sent and "x-bf-dim-agent: claude" in sent
 
 
+@pytest.mark.host_execution
 async def test_a_kept_claude_process_names_no_one_turns_run_to_the_gateway(tmp_path: Any) -> None:
     """SEC: Claude Code reads its gateway headers once, as it starts. A conversation's process
     serves many turns, so the headers it starts with name what holds for all of them — the
@@ -770,7 +779,9 @@ async def test_a_kept_claude_process_names_no_one_turns_run_to_the_gateway(tmp_p
 
     record = tmp_path / "cli.json"
     env = {"FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]), "FAKE_CLAUDE_RECORD": str(record)}
-    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    settings = Settings(
+        host_execution="allow", llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk"
+    )
     async with Harness(config=settings, gateway=FakeGateway().gateway()) as h:
         agent = h.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="claude")
         for _ in range(2):

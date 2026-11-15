@@ -174,3 +174,24 @@ def test_ordinary_nesting_is_untouched_by_the_depth_limit() -> None:
     for _ in range(MAX_DEPTH - 1):
         deep = [deep]
     assert DEFAULT.redact_output({"v": deep}) == {"v": deep}
+
+
+def test_a_credential_inside_longer_text_is_masked_where_it_stands() -> None:
+    """A command line, an error message, a tool's arguments: the credential in it goes, the
+    rest stays (a span's status message and tool arguments carry such text)."""
+    key = "sk-live-0123456789abcdef0123456789abcdef"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlMTIz"
+    out = redact_attributes(
+        {
+            "command": f"curl -H 'Authorization: Bearer abc123def456ghi' --key {key} x",
+            "error": f"the vendor refused {jwt}: try again",
+            "args": json.dumps({"command": f"deploy --token={key}"}),
+            "prose": "a task-management board, Bearer authentication, the ask-for-help desk",
+        }
+    )
+    assert out["command"] == "curl -H 'Authorization: [redacted]' --key [redacted] x"
+    assert out["error"] == "the vendor refused [redacted]: try again"
+    assert (
+        key not in out["args"] and json.loads(out["args"])["command"] == "deploy --token=[redacted]"
+    )
+    assert out["prose"] == "a task-management board, Bearer authentication, the ask-for-help desk"

@@ -81,6 +81,17 @@ _VALUE_PATTERNS = (
     ),
 )
 
+#: The same credentials inside longer text (a command line, an error message): masked where
+#: they stand, the rest of the text kept.
+_EMBEDDED = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"(?:sk|pk|rk)-[A-Za-z0-9_\-]{12,}"
+    r"|Bearer\s+(?=[A-Za-z0-9._\-]*\d)[A-Za-z0-9._\-]{10,}"
+    r"|eyJ[A-Za-z0-9._\-]{20,}"
+    r")",
+    re.IGNORECASE,
+)
+
 
 class Redactor:
     """The contracts ``TelemetryRedactor`` every span attribute goes through."""
@@ -127,6 +138,8 @@ class Redactor:
             text = _stringify(self._payload(held, depth + 1))
         elif any(p.match(text) for p in _VALUE_PATTERNS):
             return REDACTED
+        else:
+            text = _EMBEDDED.sub(REDACTED, text)
         return _truncate(text, MAX_VALUE_CHARS)
 
     def _payload(self, value: Any, depth: int = 0) -> Any:
