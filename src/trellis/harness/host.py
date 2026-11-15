@@ -193,7 +193,7 @@ def _openai(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
         UnixLocalSandboxSessionState,
     )
 
-    from trellis.harness.adapters.openai_agents import _coerced, reachable
+    from trellis.harness.adapters.openai_agents import reachable
 
     shells: list[HostShell] = []
     for agent in reachable(target):
@@ -208,9 +208,10 @@ def _openai(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
                         "'container_auto'}), or a SandboxAgent with a Docker or hosted client",
                     )
                 )
-    config = options.get("run_config")
-    sandbox = None if config is None else getattr(_coerced(config), "sandbox", None)
-    held = [getattr(sandbox, name, None) for name in ("client", "session", "session_state")]
+    # a run config, and its sandbox, as an object or the dict ``Runner.run`` takes (one with a
+    # field the SDK does not have is the SDK's to refuse when the run is made)
+    sandbox = _field(options.get("run_config"), "sandbox")
+    held = [_field(sandbox, name) for name in ("client", "session", "session_state")]
     local = (UnixLocalSandboxClient, UnixLocalSandboxSession, UnixLocalSandboxSessionState)
     if any(isinstance(given, local) for given in held):
         shells.append(
@@ -221,6 +222,13 @@ def _openai(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
             )
         )
     return shells
+
+
+def _field(given: Any, name: str) -> Any:
+    """``given``'s field ``name``: a dict's key, else an object's attribute (``None``: none)."""
+    if isinstance(given, Mapping):
+        return given.get(name)
+    return getattr(given, name, None)
 
 
 def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:

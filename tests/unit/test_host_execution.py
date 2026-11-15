@@ -344,3 +344,17 @@ def test_allowed_host_execution_runs_only_through_an_isolation_layer_that_can_is
         assert set(h.agents) == {"no-shell", "isolated"}
     finally:
         host.install(before)
+
+
+def test_a_run_config_given_as_dicts_is_read_as_the_sdk_takes_it() -> None:
+    """``run_config`` — and its sandbox — as the dicts ``Runner.run`` takes: a Unix-local
+    client in them is the host as in the SDK's objects; a field the SDK does not have is left
+    to the SDK, which refuses it when the run is made."""
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    agent = openai_sandbox_agent()
+    local = {"run_config": {"sandbox": {"client": UnixLocalSandboxClient()}}}
+    assert [s.what for s in host.found("openai_agents", agent, local)] == [
+        "the OpenAI Agents SDK's UnixLocalSandboxClient (no isolation)"
+    ]
+    assert host.found("openai_agents", agent, {"run_config": {"no_such": 1}}) == []

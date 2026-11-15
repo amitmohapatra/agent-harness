@@ -460,7 +460,8 @@ async def test_an_openai_sandbox_agent_loads_each_tenants_and_users_own_skill(
 
     memory_service.tenant = None  # a platform key: each run names its tenant
     harness = declaring(
-        Harness(config=Settings(), memory=memory_service.client()),
+        # the SDK's Unix-local sandbox runs on this machine: this deployment allows it
+        Harness(config=Settings(host_execution="allow"), memory=memory_service.client()),
         load_skill="read",
         exec_command="read",
     )
