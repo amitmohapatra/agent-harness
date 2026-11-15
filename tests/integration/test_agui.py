@@ -12,8 +12,15 @@ from fastapi import FastAPI, Request
 
 from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
-from trellis import Harness, Runtime, Settings, tool
-from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
+from trellis import Ask, Harness, Hooks, Runtime, Settings, tool
+from trellis.contracts import (
+    AgentError,
+    RunEvent,
+    RunEventType,
+    RunOutcome,
+    ToolCall,
+    new_id,
+)
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType
 from trellis.harness.agui.hub import Hub
 from trellis.harness.agui.sse import decode
@@ -174,6 +181,27 @@ async def test_another_users_thread_named_alike_cannot_answer_its_interrupt(
     response = await client.post(f"{PATH}/run", json=resume, headers={"x-user": "u2"})
     assert response.status_code == 404  # u2's "t1" is not u1's
     assert finished(await post(client, resume))["result"] == "you said yes"
+
+
+class FinanceApproves(Hooks):
+    async def before_tool(self, call: ToolCall) -> Ask:
+        return Ask("A refund is finance's to approve", assignee="role:finance")
+
+
+async def test_a_question_a_rule_assigned_to_someone_else_is_not_the_users_to_answer() -> None:
+    """A hook's ``Ask`` naming someone else (finance) is theirs, answered through the inbox:
+    the user whose action it is cannot approve it on the chat surface."""
+    harness, http = serve(hooks=[FinanceApproves()])
+    async with http:
+        entry = finished(await post(http, body("refund")))["outcome"]["interrupts"][0]
+        assert entry["metadata"]["assignee"] == "role:finance"
+        approve = body(resume=[{"interruptId": entry["id"], "payload": True}])
+        refused = await http.post(f"{PATH}/run", json=approve)
+        assert refused.status_code == 409 and refused.json()["code"] == "CONFLICT"
+        assert "role:finance's to answer" in refused.json()["detail"]
+        record = await harness.runs.get(entry["id"].rsplit(".", 2)[0])
+        assert record is not None and record.awaiting is not None  # still waits for finance
+    await harness.aclose()
 
 
 async def test_a_client_reconnects_after_the_last_event_it_saw(client: httpx.AsyncClient) -> None:

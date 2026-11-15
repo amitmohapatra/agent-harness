@@ -928,6 +928,14 @@ def principal(user: str) -> str:
     return user if ":" in user else f"user:{user}"
 
 
+def answers(assignee: str | None, user: str) -> bool:
+    """Whether the run's ``user``, answering on a chat surface (AG-UI, A2A), answers a question
+    assigned to ``assignee``: one that is theirs, or anyone's. One a rule assigned to someone
+    else (a hook's ``Ask(assignee="role:finance")``) is that person's, answered through the
+    inbox (``h.inbox``, ``agent.resume``): never approved by the user whose action it is."""
+    return assignee is None or principal(assignee) == principal(user)
+
+
 def run_of(interrupt_id_: str) -> str:
     return interrupt_id_.rsplit(".", 2)[0]
 

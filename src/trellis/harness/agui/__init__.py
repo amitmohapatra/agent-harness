@@ -92,7 +92,7 @@ from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_u
 from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
-from trellis.harness.runtime import run_of
+from trellis.harness.runtime import answers, run_of
 from trellis.harness.schedules import zone_of
 from trellis.memory.errors import AuthorizationError, NotFoundError
 from trellis.runs import ConflictError
@@ -159,7 +159,8 @@ def _refusals(*statuses: int) -> dict[int | str, dict[str, Any]]:
         401: f"no trusted identity: the {IDENTITY_HEADER} header is missing or refused (or "
         "the deployment's identity(request) named nobody)",
         404: "no such run, interrupt, artifact or attached document for this caller",
-        409: "a resume that cannot be read as a decision, or that the run refuses (BAD_RESUME)",
+        409: "a resume that cannot be read as a decision, that the run refuses, or of a "
+        "question assigned to someone else (BAD_RESUME)",
         422: "a runId that is not a fresh identifier, or a file part not attached by its "
         "document id (a problem document), or a body that is not a RunAgentInput (FastAPI's "
         "validation error)",
@@ -346,6 +347,9 @@ class _Surface:
             or record.awaiting is None
         ):
             raise HTTPException(404, "no such interrupt for this thread")
+        assignee = record.awaiting.assignee
+        if not answers(assignee, user):
+            raise HTTPException(409, f"{BAD_RESUME}: it is {assignee}'s to answer, not yours")
         try:
             decision = _decision(answer, record.awaiting)
             record, resolution = await agent._resolution(
