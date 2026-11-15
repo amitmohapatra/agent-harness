@@ -14,7 +14,7 @@ import json
 import math
 import re
 import statistics
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +24,10 @@ from benchmark.cost import breakfix, carry, history, judge, longtasks, prices, r
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
-from trellis import Settings
+from trellis import Harness, Settings
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import KEPT_BY_RUN
+from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
 
@@ -1047,6 +1048,38 @@ def test_a_write_done_twice_or_a_call_repeated_fails_its_probe() -> None:
     found = cx.checked(turn, "SUCCESS", [], 1, calls=twice, happened={"restarts"})
     assert [c["ok"] for c in found[1:]] == [False, False, False, False, True]
     assert found[2]["found"] == ['shelf_audit({"category": "denim", "store": "S01"})']
+
+
+class Lapsing(LocalRuns):
+    """A run store that, as agent-runs does, gives a run whose lease lapsed to a worker again
+    only a while after the lapse (agent-runs' ticker queues it again after a backoff: 2.5 s to
+    5 s at the first lapse), not at the first claim after it."""
+
+    def _expire_leases(self, now: datetime) -> None:
+        super()._expire_leases(now - timedelta(seconds=2))
+
+
+async def test_a_restart_turns_run_is_taken_over_once_the_store_gives_it_out_again(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RUN-: ``long-flow-04`` timed out at 600 s on agent-runs, on every framework: the suite's
+    second worker asked once for the dead worker's run, as its lease lapsed, before agent-runs
+    had put it back on the queue, and nothing asked again. A worker keeps asking (its claim
+    loop, ``Worker.run``): the suite's takes the run over once the store gives it out again,
+    and every check of the turn holds."""
+    monkeypatch.setattr(cx, "RESTART_LEASE", 1)  # the dead worker's lease
+    h = Harness(config=Settings(), memory=False, gateway=False, runs=Lapsing())
+    out = tmp_path / "restart"
+    args = _args(out, cases="long-flow-04", adapter="react", timeout=30)
+    try:
+        await cx.bench(args, harness=h, progress=lambda _: None)
+    finally:
+        await h.aclose()
+    [row] = [json.loads(line) for line in _read(out.with_suffix(".jsonl"))]
+    [turn] = row["turns"]
+    assert turn["status"] == "SUCCESS", turn["error"]
+    assert [c for c in turn["checks"] if not c["ok"]] == []
+    assert "restarts" in [c["check"] for c in turn["checks"]]  # another worker finished it
 
 
 @pytest.mark.parametrize("adapter", ["langgraph", "react", "deepagents"])

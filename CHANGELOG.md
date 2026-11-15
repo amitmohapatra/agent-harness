@@ -36,6 +36,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   file an earlier version left directly in the spool folder is not replayed (whose writes they
   are is not known) and stays there: move it into its deployment's folder (the one `trellis
   doctor`'s spool check names) to have them replayed.
+* **Claude Agent SDK: a process's end inside a harness tool ends the attempt.** A
+  `BaseException` that is no cancellation (`SystemExit`, `KeyboardInterrupt`; the suite's
+  simulated worker death) raised by a harness tool ended the SDK's in-process tool server for
+  the rest of the CLI's life, while the CLI went on: the attempt carried on with every later
+  call failing, and `Harness.aclose` raised it at the end. The attempt now ends with it, as
+  any framework's does, the CLI kept healthy; the worker that takes the run over starts a CLI
+  of its own, which resumes the session.
+* **Cost benchmark: the worker restart case is taken over on agent-runs.** `long-flow-04` timed
+  out after 600 s on agent-runs for every framework: the suite's second worker asked once for
+  the dead worker's run, before agent-runs' ticker had queued it again, and nothing asked
+  again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
+  a worker process does) until the run pauses or ends.
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 

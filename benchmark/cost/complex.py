@@ -223,7 +223,8 @@ APPROVALS: Final = 5
 #: Who approves a turn's paused call (``Turn.approve``).
 REVIEWER: Final = "trellis-bench-reviewer"
 #: The lease, in seconds, of the worker that dies in a ``Turn.restart`` turn: every progress
-#: save renews it, so it outlasts a model call; another worker claims the run once it lapsed.
+#: save renews it, so it outlasts a model call; once it lapsed the run store gives the run to
+#: another worker (agent-runs after its ticker queued it again).
 RESTART_LEASE: Final = 30
 
 
@@ -249,9 +250,9 @@ class Turn:
     #: turn is the resumed run, and its ``asks`` probe says it paused
     approve: bool = False
     #: its run is queued and run by a worker that dies mid-run (a tool of the case's raises
-    #: ``longtasks.WorkerDied``, once); once its lease lapsed, another worker (another harness
-    #: sharing only the run store, as two worker processes share agent-runs) finishes it, and
-    #: its ``restarts`` probe says so
+    #: ``longtasks.WorkerDied``, once); another worker (another harness sharing only the run
+    #: store, as two worker processes share agent-runs), its claim loop asking until the store
+    #: gives the run out again, finishes it, and its ``restarts`` probe says so
     restart: bool = False
 
 
@@ -3952,8 +3953,8 @@ async def run_case(
     async def taken_over(t: Turn) -> Any:
         """The turn's run queued and run by a worker that dies mid-run (a tool raises
         ``longtasks.WorkerDied``: nothing more is written), then finished by another worker —
-        another harness sharing only the run store, which claims the run once the dead
-        worker's lease has lapsed."""
+        another harness sharing only the run store, whose claim loop takes the run once the
+        store gives it out again."""
         handle = handles[id(t)] = await agent.start(t.text, user=user_of(t), thread=conversation(t))
         return await worked(t, handle)
 
@@ -3982,11 +3983,21 @@ async def run_case(
                 again = other.wrap(
                     target, id=agent.id, hooks=[trace], run_timeout=run_seconds, **options
                 )
-                await asyncio.sleep(RESTART_LEASE)  # the dead worker's lease lapses
-                if await other.worker([again]).run_once():
+                # a worker process's claim loop: it keeps asking, and takes the run once the
+                # store gives it out again — at once on the in-process store, once agent-runs'
+                # ticker queued it again after the dead worker's lease lapsed (a backoff on)
+                taking = other.worker([again])
+                claiming = asyncio.create_task(taking.run())
+                try:
+                    result = await handle.result(wait=run_seconds)
+                finally:
+                    taking.stop()  # paused or ended: nothing left to claim
+                    await claiming
+                if (await handle.status()).attempt > claimed.run.attempt:
                     happened.setdefault(id(t), set()).add("restarts")
             finally:
                 await other.aclose()
+            return result
         return await handle.result(wait=run_seconds)
 
     async def asked(t: Turn) -> Any:
