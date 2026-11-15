@@ -114,7 +114,9 @@ the user Claude Code would ask:
   `REPL` — code run inside the CLI, which no isolation reaches — is left out. A file Claude
   writes itself there is made the run's, so its commands may change it.
   * **What is not isolated:** its file tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`) run in
-    the CLI, as the service's user, and reach what that user can (governed as above); a
+    the CLI, as the service's user (governed as above) — so a path outside the run's folders
+    (its working folder, `add_dirs`, its skills), which Claude Code asks about, is refused:
+    the service's files are never the run's to read or write; a
     command's background work ends with the run (its workspace goes), so a conversation whose
     Claude Code has its shell runs each turn in a process of its own — no live session: a
     background subagent does not outlive its turn either. Claude Code works in a run's

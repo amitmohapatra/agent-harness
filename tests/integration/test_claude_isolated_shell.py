@@ -166,6 +166,41 @@ async def test_the_services_environment_files_and_processes_are_out_of_reach(
     assert signal.startswith("Exit code 1")
 
 
+async def test_claudes_own_file_tools_reach_no_file_of_the_service(
+    harness: Harness, layer: HostSandbox, model: ScriptedClaude, tmp_path: Path
+) -> None:
+    """Claude Code's ``Read`` and ``Write`` run in its own process, as the service's user, not
+    in the workspace: a path outside the run's folders — a secret file of the service's — is
+    refused (Claude Code asks about it, and the harness says no), never read or written; the
+    run's own folder is read as ever."""
+    secret_file = Path(os.getcwd()) / ".claude-read-secret"
+    secret_file.write_text(SECRET)
+    planted = Path(os.getcwd()) / ".claude-planted"
+    try:
+        events = await ran(
+            harness,
+            model,
+            tmp_path,
+            [
+                {"tool": "Read", "input": {"file_path": str(secret_file)}},
+                {"tool": "Write", "input": {"file_path": str(planted), "content": "x"}},
+                bash("echo mine > notes.md"),
+                {"tool": "Read", "input": {"file_path": "notes.md"}},
+                {"text": "done"},
+            ],
+        )
+        assert not planted.exists()
+    finally:
+        secret_file.unlink()
+        planted.unlink(missing_ok=True)
+    assert succeeded(events)
+    read, wrote, _, again = said(model)
+    assert SECRET not in read and read.startswith("Read was not run: ")
+    assert "outside the folders this run works in" in read
+    assert wrote.startswith("Write was not run: ")
+    assert "mine" in again  # the run's own folder: read and written as ever
+
+
 async def test_another_runs_workspace_is_out_of_reach(
     harness: Harness, layer: HostSandbox, model: ScriptedClaude, tmp_path: Path
 ) -> None:

@@ -372,6 +372,23 @@ NOTICES: Final = {
 #: ``file_path``, a notebook's in ``notebook_path``): one written in the run's workspace is
 #: made the run's (``Relay.adopt``), so its commands may change it.
 FILE_TOOLS: Final = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+#: Claude Code's tools that read or write a file in its own process, as the service's user, and
+#: the argument naming it: one outside the folders the run may read (its working folder, the
+#: options' ``add_dirs``, its skills) is the service's, refused (:data:`OUTSIDE`).
+FILE_PATHS: Final = {
+    "Read": "file_path",
+    "Glob": "path",
+    "Grep": "path",
+    "Write": "file_path",
+    "Edit": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+#: What a file tool's call outside the run's folders is refused with.
+OUTSIDE: Final = (
+    "{tool} was not run: {path} is outside the folders this run works in, and Claude Code "
+    "reads and writes as this service there: its files are not the run's"
+)
 #: Claude Code's tool that runs code inside its own process (no shell the harness can run it
 #: in): left out while its shell runs through the isolation layer.
 IN_PROCESS: Final = ("REPL",)
@@ -1761,13 +1778,21 @@ def _deployed(runtime: Runtime, options: Any) -> bool:
 
 
 async def _checked_by(
-    own: Any, name: str, args: dict[str, Any], context: Any, *, deployed: bool, relay: Relay | None
+    own: Any,
+    name: str,
+    args: dict[str, Any],
+    context: Any,
+    *,
+    deployed: bool,
+    relay: Relay | None,
+    shell: Shell,
 ) -> Any:
     """The verdict on a call before the harness's own answer: a command, the deployment's, run
     in the run's workspace by ``relay`` (the team's own check first, when it has one); else
     the team's own ``can_use_tool``'s (``None``: none given) — a run's own, not ``deployed``,
-    refuses only: what it lets through is the harness's to answer (``None``)."""
-    from claude_agent_sdk import PermissionResultAllow
+    refuses only: what it lets through is the harness's to answer (``None``) —, a file tool's
+    call outside the run's folders refused (:data:`FILE_PATHS`: Claude Code asks about one)."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     if relay is not None and name in RELAYED:
         verdict = PermissionResultAllow() if own is None else await own(name, args, context)
@@ -1776,7 +1801,10 @@ async def _checked_by(
         return verdict
     verdict = await own(name, args, context) if own is not None else None
     if not deployed and isinstance(verdict, PermissionResultAllow):
-        return None
+        verdict = None
+    path = args.get(FILE_PATHS.get(name, ""))
+    if verdict is None and isinstance(path, str) and path and not shell.reaches(path):
+        return PermissionResultDeny(message=OUTSIDE.format(tool=name, path=path))
     return verdict
 
 
@@ -1806,7 +1834,9 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         spec = _spec(runtime, name)
-        verdict = await _checked_by(own, name, args, context, deployed=deployed, relay=steps.relay)
+        verdict = await _checked_by(
+            own, name, args, context, deployed=deployed, relay=steps.relay, shell=shell
+        )
         if verdict is not None:
             pass
         elif name == QUESTION_TOOL:
