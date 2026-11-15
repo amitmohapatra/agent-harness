@@ -747,6 +747,7 @@ class ClaudeAdapter:
             source = _queried(prompt, options) if live is None else live.served(turn, prompt)
             async with contextlib.aclosing(source) as messages:
                 async for message in messages:
+                    runtime.raise_stopped()  # a call the process's end stopped ends it here
                     steps.waiting()  # the next message is the next step's
                     found = getattr(message, "session_id", None)
                     if isinstance(found, str):

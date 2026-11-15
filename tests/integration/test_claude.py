@@ -382,6 +382,22 @@ def test_a_results_cache_writes_are_counted_apart_from_its_other_input() -> None
     }
 
 
+async def test_a_harness_tool_called_outside_a_run_raises_what_the_bridge_raised() -> None:
+    """The in-process server's handler takes only a process's end for one (``SystemExit``,
+    ``KeyboardInterrupt``: ``Runtime.stopped_by``); outside a run the bridge's own error is
+    raised as it is, as a cancellation is."""
+    from trellis.contracts.errors import ToolError
+    from trellis.harness.tools.convert.claude import tool_handler
+
+    spec = ToolSpec(name="now", input_schema={"type": "object"}, side_effects="read")
+
+    async def run(args: dict[str, Any]) -> Any:
+        return "noon"
+
+    with pytest.raises(ToolError, match="runs inside a Harness run"):
+        await tool_handler(Tool(spec, run))({})
+
+
 async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
     harness: Harness, tmp_path: Path
 ) -> None:

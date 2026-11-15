@@ -10,6 +10,7 @@ The features covered elsewhere: a function agent's writes and a ``ReAct`` run's 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -114,6 +115,19 @@ def wire(to: str) -> str:
     return f"wired {to}"
 
 
+def served(record: Path) -> list[dict[str, Any]]:
+    """The turns the scripted Claude Code CLIs served, each with its process's ``pid``."""
+    return [json.loads(line) for line in Path(f"{record}.turns").read_text().splitlines()]
+
+
+def crashed(exc: BaseException) -> bool:
+    """Whether ``exc`` is the worker's death: as raised, or as a framework's task group raised
+    it (the Claude Agent SDK runs a tool in one)."""
+    if isinstance(exc, BaseExceptionGroup):
+        return any(crashed(e) for e in exc.exceptions)
+    return isinstance(exc, Crash)
+
+
 @pytest.fixture
 async def workers() -> AsyncIterator[tuple[Harness, Harness]]:
     """Two worker processes: two harnesses sharing nothing but the run store."""
@@ -142,10 +156,11 @@ async def crash_then_finish(
     worker = first.worker([dying])
     claimed = await store.claim(worker.worker_id, [dying.id])
     assert claimed is not None
-    with pytest.raises(Crash):
+    with pytest.raises(BaseException) as died:
         await dying.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
+    assert crashed(died.value), died.value
     held, _ = store._leases[handle.id]
     store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     assert await second.worker([taking_over]).run_once()
@@ -345,6 +360,35 @@ async def test_an_sdk_agents_own_tool_is_not_run_again_on_another_worker(
     _, result = await crash_then_finish(workers, agent, "deliver o1")
     assert result.status is RunStatus.SUCCESS and result.answer == "delivered", result.error
     assert done == ["deliver o1"]
+
+
+async def test_claude_taken_over_starts_a_cli_of_its_own_whose_tools_answer(
+    workers: tuple[Harness, Harness], tmp_path: Path
+) -> None:
+    """RUN-: the worker dies inside a harness tool Claude Code called. The in-process tool
+    server of that worker's CLI dies with it (the SDK's task group ends with the exception),
+    as the whole process would — unless the attempt ends with the death, as every framework's
+    does (its CLI kept healthy). The worker that takes the run over starts a CLI of its own,
+    with its own ``trellis`` tool server, which resumes the session: the call the dead worker
+    was in is made again there, and answers. The dead worker's harness closes cleanly."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from tests.support.adapters import CLI
+
+    record = tmp_path / "cli.json"
+
+    def claude(h: Harness) -> Any:
+        # the call the worker died in, made again by the resumed session (as a model does
+        # once it reads that it did not complete), then the answer
+        script = [{"tool": "boom", "args": {}}, {"tool": "boom", "args": {}}, {"text": "{last}"}]
+        env = {"FAKE_CLAUDE_SCRIPT": json.dumps(script), "FAKE_CLAUDE_RECORD": str(record)}
+        return ClaudeAgentOptions(cli_path=CLI, env=env | {"FAKE_CLAUDE_SESSIONS": str(tmp_path)})
+
+    _, result = await crash_then_finish(workers, claude, "go", tools=[boom])
+    assert result.status is RunStatus.SUCCESS and result.answer == "fine", result.error
+    started = served(record)
+    assert len({turn["pid"] for turn in started}) == 2  # a CLI process of each worker's
+    assert started[-1]["resume"] is not None  # the second resumed the session
 
 
 # --------------------------------------------------------------------------- a graph's checkpoint
