@@ -191,6 +191,20 @@ shape) given to the conversation's model at its next model call or turn, or by a
 chat's own on its thread stream when it is idle; its questions asked through the chat
 (`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
 
+### Fixed: what the feature matrix found
+
+- A conversation's turn keeps the graph state it carries to its next turn (in the file store,
+  for any server) before its end is said, not after: the `carried_files_dropped` warning (files
+  left out past the 256 KiB bound) is one of the run's events before its `RUN_FINISHED` — it
+  came after it, where a stream had ended and AG-UI and A2A clients broke on an event past
+  the end — and a next turn sent as the turn ends, on another server, starts with the state.
+- A run taken over after its worker died while a harness tool ran makes that call again. The
+  agent's session, resumed on the same machine (Kimi's home is its user's there), holds the
+  call with the harness's "The run ended before this tool finished." as its result, and the
+  resumed prompt said to repeat only a call with "no result yet": the agent took the error for
+  the result and the run ended without that call's work. The prompt now names that result too
+  (the journal still runs the call once).
+
 ### Fixed: the last open harness bugs
 
 - Kimi: a conversation's kept process whose time is up (kept as long as a session is, idle, its

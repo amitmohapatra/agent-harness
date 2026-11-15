@@ -500,7 +500,7 @@ async def scenario_job_crash(w: World) -> None:
         record and record.error,
     )
     assert counted == dict.fromkeys(SCENARIOS, 1), (
-        f"scenarios worked out again after the crash: {counted}"
+        f"each scenario is worked out once across the crash (none again, none lost): {counted}"
     )
 
 
