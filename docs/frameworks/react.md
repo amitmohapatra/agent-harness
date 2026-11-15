@@ -808,7 +808,9 @@ result = await agent.rewind(
 ```
 
 `agent.checkpoints(run_id, reader=...)` reads, for the run's own user only, the history the run store keeps of a paused run (or of one a
-worker is running: what it last saved), read-only, a page of 20 at a time. `agent.rewind`
+worker is running: what it last saved; or, for an agent wrapped `h.wrap(..., rewindable=True)`,
+of one that has ended — the run store keeps its history past the end, its last state included,
+for its artifacts' retention), read-only, a page of 20 at a time. `agent.rewind`
 continues the run's conversation from one of those checkpoints, as LangGraph's time travel
 does — `values=` applied to that state first, as LangGraph's `update_state` applies them — in
 a **new run** of the same user and thread, to its end or its first pause:

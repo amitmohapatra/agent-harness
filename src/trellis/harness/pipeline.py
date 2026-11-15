@@ -847,7 +847,7 @@ async def _cancelled(
         )
         identity, events = runtime.identity, runtime.events
         ended = settles and await _settle_cancelled(
-            agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
+            agent, identity, events, runtime.worker_id, spent=budget.spent(runtime), runtime=runtime
         )
         if ended:
             await _children_ended(
@@ -980,6 +980,7 @@ async def _concluded(
             runtime.worker_id,
             reason=runtime.cancelled,
             spent=budget.spent(runtime),
+            runtime=runtime,
         )
         said = _transcript(runtime, extracted, RunStatus.CANCELLED)
         await agent.recorded_run(runtime, said)  # what it said so far
@@ -1465,15 +1466,41 @@ async def _partial(agent: Agent, runtime: Runtime, extracted: Extracted) -> Resu
 
 
 async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: Any) -> None:
+    kept = await _history_kept(
+        agent, runtime.identity, runtime.worker_id, runtime.replay.journal, runtime.parent
+    )
     await _recorded(
         agent,
         runtime.run_id,
         runtime.tenant,
         lambda: agent.harness.runs.finish(
-            runtime.run_id, status, worker_id=runtime.worker_id, tenant=runtime.tenant, **fields
+            runtime.run_id,
+            status,
+            worker_id=runtime.worker_id,
+            tenant=runtime.tenant,
+            **fields,
+            **kept,
         ),
         lambda r: r.status is status,
     )
+
+
+async def _history_kept(
+    agent: Agent,
+    identity: Identity,
+    worker_id: str | None,
+    journal: Journal | None,
+    parent: Runtime | None,
+) -> dict[str, Any]:
+    """What an ending sends to keep the run's checkpoint history past its end — the journal
+    as it ends, saved — for an agent whose ended runs are rewound (``h.wrap(rewindable=)``;
+    a sub-agent's run has no history of its own); nothing for any other."""
+    if not agent.rewindable or parent is not None or journal is None:
+        return {}
+    checkpoint = await journal.checkpoint(
+        agent.harness.runs.artifacts, identity.run_id, worker_id=worker_id, tenant=identity.tenant
+    )
+    return {"keep_checkpoint": True, "checkpoint": checkpoint}
 
 
 async def _recorded(
@@ -1598,6 +1625,7 @@ async def _settle_cancelled(
     *,
     spent: dict[str, float],
     reason: str | None = None,
+    runtime: Runtime | None = None,
 ) -> bool:
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
@@ -1605,10 +1633,17 @@ async def _settle_cancelled(
     over, elsewhere already): its open children then end with it (:func:`_children_ended`,
     its caller's to call)."""
 
+    journal, parent = (None, None) if runtime is None else (runtime.replay.journal, runtime.parent)
+    kept = await _history_kept(agent, identity, worker_id, journal, parent)
+
     async def write() -> bool:
         try:
             await agent.harness.runs.finish(
-                identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
+                identity.run_id,
+                RunStatus.CANCELLED,
+                worker_id=worker_id,
+                tenant=identity.tenant,
+                **kept,
             )
         except (LeaseLostError, ConflictError):
             log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)

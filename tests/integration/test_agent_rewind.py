@@ -120,10 +120,33 @@ async def test_an_ended_run_says_the_run_store_keeps_none_of_its_checkpoints(
     agent, _ = refunds(harness, [LOOKUPS[0], "paid"])
     ended = await agent.run("is o1 paid?", user="u")
     assert ended.status is RunStatus.SUCCESS
-    with pytest.raises(ConfigurationError, match=r"has ended \(success\).*until it ends"):
+    with pytest.raises(ConfigurationError, match=r"has ended \(success\).*rewindable"):
         await history(agent, ended.run_id)
     with pytest.raises(ConfigurationError, match=r"has ended \(success\)"):
         await agent.rewind(ended.run_id, "any", reviewer="u")
+
+
+async def test_an_agent_wrapped_rewindable_rewinds_a_run_that_ended(harness: Harness) -> None:
+    """``h.wrap(rewindable=True)``: the run store keeps an ended run's checkpoint history (its
+    last state included), so the run is read and rewound as a paused one is — its write past
+    the checkpoint asks a person before it is made again."""
+    model = ScriptedChat([*LOOKUPS, REFUND, "refunded", REFUND, "refunded again"])
+    graph = ReAct("You handle refunds.", model)
+    agent = arm(harness.wrap(graph, id="refunds-kept", rewindable=True), [order, refund, close])
+    first = await agent.run("refund o1", user="u", thread="t")
+    asked = first
+    if first.interrupt is not None:  # the refund asks first: approved for the conversation
+        asked = await agent.resume(
+            first.interrupt.interrupt_id, "approve", reviewer="u", remember="run"
+        )
+    assert asked.status is RunStatus.SUCCESS and asked.answer == "refunded", asked.error
+    states = await history(agent, asked.run_id)
+    assert states and said(states[0])[-1] == "refunded"  # its end is in the history
+    before = [s for s in states if said(s)[-1:] == ["o3: paid"]][-1]
+    rewound = await agent.rewind(asked.run_id, id_of(before), reviewer="u")
+    assert rewound.interrupt is not None  # the refund it made past the checkpoint asks again
+    again = await agent.resume(rewound.interrupt.interrupt_id, "approve", reviewer="u")
+    assert again.status is RunStatus.SUCCESS and again.answer == "refunded again", again.error
 
 
 # --------------------------------------------------------------------------- the rewind

@@ -68,7 +68,7 @@ h.writes.drain()`).
 
 ```text
 h.wrap(agent, *, id, version=None, description=None, hooks=(), judges=(), budget=None,
-       run_timeout=None, without=(), framework_options=None) -> Agent
+       run_timeout=None, without=(), framework_options=None, rewindable=False) -> Agent
 ```
 
 Attach the harness to `agent`: a `ReAct`, a compiled LangGraph graph (Deep Agents included),

@@ -235,6 +235,7 @@ class Harness:
         run_timeout: float | None = None,
         without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
+        rewindable: bool = False,
     ) -> Agent:
         """Attach the harness to ``agent`` — a compiled LangGraph graph (Deep Agents and
         ``ReAct`` included), an OpenAI Agents ``Agent``, ``ClaudeAgentOptions``, or
@@ -257,7 +258,11 @@ class Harness:
         ``grounding``, ``judges``: ``trellis.harness.features``), and ``framework_options``
         the framework's own options for each run's call, passed through unchanged (a LangGraph
         config's keys, ``Runner.run``'s arguments, ``ClaudeAgentOptions`` fields; each
-        framework's page says which the harness keeps for itself): a run's own go over them."""
+        framework's page says which the harness keeps for itself): a run's own go over them.
+        ``rewindable`` keeps an ended run's checkpoint history (the run store keeps it past the
+        end, for its artifacts' retention), so ``agent.rewind`` takes ended runs too — for an
+        agent whose runs keep their graph's checkpoints (``ReAct``, a ``middleware()`` graph);
+        off, a run is rewound while it is paused."""
         wrapped = Agent(
             self,
             agent,
@@ -270,6 +275,7 @@ class Harness:
             run_timeout=run_timeout,
             without=without,
             framework_options=framework_options,
+            rewindable=rewindable,
         )
         if wrapped.id in self.agents:
             raise ConfigurationError(f"an agent {wrapped.id!r} is already wrapped by this harness")

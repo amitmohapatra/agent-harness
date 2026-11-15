@@ -335,6 +335,7 @@ class Agent:
         run_timeout: float | None = None,
         without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
+        rewindable: bool = False,
     ):
         if run_timeout is not None and run_timeout <= 0:
             raise ConfigurationError(f"{id}: run_timeout is a number of seconds over 0")
@@ -368,6 +369,8 @@ class Agent:
         self.adapter = detect(target)
         if self.adapter.name == "langgraph":  # a middleware() graph: its checkpoint in the run
             self.target = checkpointing(target)
+        #: its ended runs keep their checkpoint history, to be rewound (``h.wrap``)
+        self.rewindable = rewindable and run_scoped(self.target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
         for gated in sorted(gated_tools(target)):
@@ -727,16 +730,16 @@ class Agent:
         new run makes it again, whatever was allowed for the run or the conversation before;
         a read is made again freely. What the run spent stays counted against the budget.
 
-        Refused: a run at work (queued or running, on any server), a run that has ended (the
-        run store keeps none of its checkpoints), a ``reviewer`` who is not the run's user, a
-        checkpoint that is none of the run's, a run that is not this agent's in ``tenant``
-        (the key's own; a platform key names it), and an agent whose runs keep no
-        checkpoints."""
+        Refused: a run at work (queued or running, on any server), a run that has ended with
+        no checkpoints kept (kept only for an agent wrapped ``rewindable``), a ``reviewer``
+        who is not the run's user, a checkpoint that is none of the run's, a run that is not
+        this agent's in ``tenant`` (the key's own; a platform key names it), and an agent whose
+        runs keep no checkpoints."""
         record, journal = await self._kept(run_id, tenant)
-        if record.status is not RunStatus.PAUSED:
+        if record.status is not RunStatus.PAUSED and not record.final:
             raise ConfigurationError(
                 f"run {run_id} is {record.status.value.lower()}: a run is rewound while it is "
-                "paused"
+                "paused, or once it has ended (an agent wrapped rewindable)"
             )
         user = _own_user(record, reviewer, "rewinds it")
         start = await self._start(
@@ -773,10 +776,11 @@ class Agent:
         record = await self.harness.runs.get(run_id, tenant=await self.harness._tenant(tenant))
         if record is None or record.agent_id != self.id:
             raise ConfigurationError(f"no run {run_id} of agent {self.id}")
-        if record.final:
+        if record.final and record.checkpoint is None:
             raise ConfigurationError(
-                f"run {run_id} has ended ({record.status.value.lower()}): the run store keeps a "
-                "run's checkpoints until it ends, so an ended run has none to read or rewind from"
+                f"run {run_id} has ended ({record.status.value.lower()}) with no checkpoints "
+                "kept: the run store keeps an ended run's checkpoints for an agent wrapped "
+                "rewindable (h.wrap(rewindable=True)) only"
             )
         artifacts = self.harness.runs.artifacts
         return record, await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id)

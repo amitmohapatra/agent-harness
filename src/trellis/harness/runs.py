@@ -214,7 +214,12 @@ class RunStore(Protocol):
     ) -> RunRecord: ...
 
     async def cancel(
-        self, run_id: str, *, reason: str | None = ..., tenant: str | None = ...
+        self,
+        run_id: str,
+        *,
+        reason: str | None = ...,
+        tenant: str | None = ...,
+        keep_checkpoint: bool = ...,
     ) -> RunRecord: ...
 
     async def pause(
@@ -238,6 +243,8 @@ class RunStore(Protocol):
         error: AgentError | None = ...,
         worker_id: str | None = ...,
         tenant: str | None = ...,
+        keep_checkpoint: bool = ...,
+        checkpoint: dict[str, Any] | None = ...,
     ) -> RunRecord: ...
 
     async def get(self, run_id: str, *, tenant: str | None = ...) -> RunRecord | None: ...
@@ -477,7 +484,12 @@ class LocalRuns:
         return self._requeued(record)
 
     async def cancel(
-        self, run_id: str, *, reason: str | None = None, tenant: str | None = None
+        self,
+        run_id: str,
+        *,
+        reason: str | None = None,
+        tenant: str | None = None,
+        keep_checkpoint: bool = False,
     ) -> RunRecord:
         record = self._require(run_id, tenant)
         if run_id in self._cancelling:
@@ -489,7 +501,7 @@ class LocalRuns:
             return record
         if run_id in self._queue:
             self._queue.remove(run_id)
-        return self._move(record, RunStatus.CANCELLED)
+        return self._move(record, RunStatus.CANCELLED, keep_checkpoint=keep_checkpoint)
 
     async def pause(
         self,
@@ -516,7 +528,9 @@ class LocalRuns:
         )
         self._resolutions.setdefault(record.run_id, []).append(entry)
         # a run of a key takes its place again when its answer is recorded
-        placed = {"placed_at": entry.recorded_at} if record.concurrency_key is not None else {}
+        placed: dict[str, Any] = (
+            {"placed_at": entry.recorded_at} if record.concurrency_key is not None else {}
+        )
         if resolution.decision is InterruptDecision.CANCEL:
             return self._move(record, RunStatus.CANCELLED, last_resolution=resolution, **placed)
         requeue = record.run_id in self._queued
@@ -545,10 +559,15 @@ class LocalRuns:
         error: AgentError | None = None,
         worker_id: str | None = None,
         tenant: str | None = None,
+        keep_checkpoint: bool = False,
+        checkpoint: dict[str, Any] | None = None,
     ) -> RunRecord:
         record = self._fenced(run_id, worker_id, tenant)
         self._leases.pop(run_id, None)
-        return self._move(record, status, output=output, error=error)
+        kept = {"checkpoint": checkpoint} if keep_checkpoint and checkpoint is not None else {}
+        return self._move(
+            record, status, output=output, error=error, keep_checkpoint=keep_checkpoint, **kept
+        )
 
     async def get(self, run_id: str, *, tenant: str | None = None) -> RunRecord | None:
         record = self._runs.get(run_id)
@@ -686,11 +705,15 @@ class LocalRuns:
         self._queue.append(run_id)
         self._queued.add(run_id)
 
-    def _move(self, record: RunRecord, status: RunStatus, **changes: Any) -> RunRecord:
+    def _move(
+        self, record: RunRecord, status: RunStatus, *, keep_checkpoint: bool = False, **changes: Any
+    ) -> RunRecord:
         if record.status is not status and not record.status.can_become(status):
             raise _conflict(f"run {record.run_id}: {record.status} cannot become {status}")
         if status.final:  # an ending clears what the run waited on and would resume from
-            changes.update(awaiting=None, checkpoint=None)
+            changes["awaiting"] = None
+            if not keep_checkpoint:  # unless its caller keeps it, to rewind it from
+                changes["checkpoint"] = None
             self._cancelling.pop(record.run_id, None)
         moment = datetime.now(UTC)
         if status is not RunStatus.RUNNING:  # a hold is on a running run only
