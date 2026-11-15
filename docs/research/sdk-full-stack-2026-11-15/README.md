@@ -254,9 +254,12 @@ runs after, with and without the change; its cause was not found.
 
 ## Not tested, and why
 
-* Bifrost: no gateway binary here; every model call went straight to Anthropic (OpenAI Agents
-  through Anthropic's OpenAI-compatible chat completions, so the Responses-only features —
-  hosted tools, `Compaction`, server-side threads — were not reachable).
+* Bifrost: every model call went straight to Anthropic (OpenAI Agents through Anthropic's
+  OpenAI-compatible chat completions), so the OpenAI Responses-only features — hosted tools,
+  the sandbox's `Compaction`, server-side threads — were not reachable. It needs a Bifrost of
+  this job's own (the `maximhq/bifrost:v2.5.1` image another job runs here now, with an
+  Anthropic provider key) and a model it serves on `/v1/responses`; the Bifrost container on
+  the machine is another job's and was not used.
 * Deep Agents summarization, Kimi and Claude compaction: they start near the context window's
   end, a cost out of proportion for a breadth pass.
 * OpenAI realtime/voice (refused by `h.wrap`, documented), Kimi swarms and goal mode
