@@ -66,12 +66,14 @@ switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` g
   the dead worker's run, before agent-runs' ticker had queued it again, and nothing asked
   again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
   a worker process does) until the run pauses or ends.
-* **A remote task that ends while its turn is finishing is told.** A Deep Agents async task
-  (`AsyncSubAgent`) that ended after its turn's graph last read it, but before the turn let go
-  of the chat, was read by the process holding its run, which ended the run and found the chat
-  busy: the outcome was told to nobody until the user's next message (a loaded machine lost the
-  chain of outcomes this way). That read now waits for the turn at work in its process to end,
-  then tells the chat by a turn of its own; one that finds the outcome told already stays quiet.
+* **A background task that ends while its turn is finishing is told.** A task that ended after
+  its turn last looked at it, but before the turn let go of the chat, found the chat busy and
+  was told to nobody until the user's next message — a Deep Agents async task (`AsyncSubAgent`,
+  read by the process holding its run: a loaded machine lost the chain of outcomes this way) and
+  a task of the harness's own alike (one that ended after the turn's last look,
+  `background.left`). An outcome told while a turn of the chat holds its turn in the process is
+  now told again by that turn's own task once it lets go (`background.delivered`), by a turn of
+  the chat's own; one that finds the outcome told already stays quiet.
 
 ### Fixed: gaps the SDK full-stack pass found
 
