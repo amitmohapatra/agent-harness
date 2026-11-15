@@ -422,6 +422,11 @@ class Agent:
         #: the large results each conversation's turns saved in this process (``tools.results``):
         #: its later turns read and query them where its history names them (``pipeline``)
         self.results = Conversations()
+        #: each conversation's turns this process wrote whose transcript is still on its way to
+        #: memory (queued past :data:`TURN_WRITE_SECONDS`), by run id: a rendered window's next
+        #: turn says them (:meth:`unwritten_said`), as a messages window's reads them from the
+        #: run store (:meth:`caught_up`)
+        self.unwritten: LRU[str, dict[str, list[Said]]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -1318,6 +1323,7 @@ class Agent:
             note = f"{note}\n{EARLIER_CHATS}"
         parts = (
             pushed.rendered,
+            self.unwritten_said(runtime, pushed.rendered) if window is Window.RENDERED else "",
             note,
             snapshots.note(stale),
             answering_note(pushed.rendered),
@@ -1354,6 +1360,19 @@ class Agent:
         except Exception as exc:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return window
+
+    def unwritten_said(self, runtime: Runtime, rendered: str) -> str:
+        """The conversation's turns this process wrote whose transcript is still on its way to
+        memory (:attr:`unwritten`) — those memory's ``rendered`` window does not say already —
+        as text after it: a rendered window names no message ids, so the run store's turns
+        cannot be matched to it (:meth:`caught_up` is the messages window's)."""
+        on_its_way = self.unwritten.get(runtime.conversation) or {}
+        turns = [
+            said
+            for run_id, said in on_its_way.items()
+            if run_id != runtime.run_id and not all(s.content in rendered for s in said)
+        ]
+        return conversation.latest([s for turn in turns for s in turn]) if turns else ""
 
     def conversation_budget(self, runtime: Runtime) -> int | None:
         """The tokens the conversation memory replays may take: what the run's next request
@@ -1466,9 +1485,18 @@ class Agent:
                     "the turn could not be written before the run returned; it is queued",
                     extra={"run_id": run_id, "error_class": type(exc).__name__},
                 )
+        conversation_key = runtime.conversation
+        on_its_way = self.unwritten.get(conversation_key) or {}
+        on_its_way[run_id] = list(messages)
+        self.unwritten[conversation_key] = on_its_way
+
+        async def written() -> None:
+            await memory.record_messages(messages, run_id, attempt)
+            on_its_way.pop(run_id, None)  # memory has it: its window says it from now on
+
         await self.harness.writes.submit(
             "memory.transcript",
-            lambda: memory.record_messages(messages, run_id, attempt),
+            written,
             events=runtime.events,
             record=memory.record(
                 "record_messages",
