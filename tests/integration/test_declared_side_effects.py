@@ -229,6 +229,27 @@ def test_the_catalog_is_told_the_default_of_a_tool_that_says_nothing() -> None:
     assert said["side_effects"] == "read" and "annotations" not in said
 
 
+@pytest.mark.parametrize(
+    ("risk", "said"),
+    [
+        ("read", {"readOnlyHint": True}),
+        ("write", {"destructiveHint": False}),
+        ("irreversible", {"destructiveHint": True}),
+    ],
+)
+def test_an_mcp_tool_whose_listing_gave_its_risk_is_published_saying_it(
+    risk: str, said: dict[str, bool]
+) -> None:
+    """An MCP tool a framework listed with its annotations (a Claude in-process server's) comes
+    as a spec whose ``side_effects`` they gave, with no annotations beside it: the catalog is
+    told the annotations that say that risk — not the protocol's default for a tool that says
+    nothing, which the catalog's derived ``irreversible`` would then put over the tool's own
+    word. Annotations given beside it are what is said."""
+    listed = ToolSpec(name="mcp__shop__stock", source="mcp", server="shop", side_effects=risk)
+    assert entry(listed, None)["annotations"] == said
+    assert entry(listed, {"readOnlyHint": True})["annotations"] == {"readOnlyHint": True}
+
+
 @pytest.mark.parametrize("framework", list(BUILDERS))
 @pytest.mark.parametrize("risky", RISKY, ids=[name for name, _, _ in RISKY])
 @pytest.mark.parametrize("defined", ["an MCP server's", "a bare function"])

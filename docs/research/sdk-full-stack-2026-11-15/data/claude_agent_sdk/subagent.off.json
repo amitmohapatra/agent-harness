@@ -1,0 +1,36 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "subagent",
+ "arm": "off",
+ "error": null,
+ "seconds": 5.5,
+ "spend": {
+  "requests": 5,
+  "in": 52397,
+  "out": 348,
+  "usd": 0.001422,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": false,
+ "calls": [
+  "SKU-8"
+ ],
+ "delegated": null,
+ "answers": [
+  "I've started the stock-checker subagent on SKU-8. I'll report the stock level when it finishes."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_6fe2c875e59d4552b51a62d4f071ffdf"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "cl-sub-98cb440e",
+ "records": null
+}

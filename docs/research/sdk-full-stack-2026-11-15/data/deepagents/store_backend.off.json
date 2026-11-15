@@ -1,0 +1,39 @@
+{
+ "sdk": "deepagents",
+ "feature": "store_backend",
+ "arm": "off",
+ "error": null,
+ "seconds": 4.5,
+ "spend": {
+  "requests": 4,
+  "in": 15866,
+  "out": 178,
+  "usd": 0.000301,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "in_own_store": [
+  "/prefs.md"
+ ],
+ "answers": [
+  "Done.",
+  "Your favourite city is Lisbon, according to `/memories/prefs.md`."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_0293fa6690124ead85576d91f041abf0",
+  "run_44a57bb1ae2341c3ad2b27b369b0b69d"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "da-store-858a56a7",
+ "records": null
+}

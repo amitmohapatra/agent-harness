@@ -1,0 +1,54 @@
+{
+ "sdk": "openai_agents",
+ "feature": "max_turns",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.2,
+ "spend": {
+  "requests": 1,
+  "in": 1896,
+  "out": 51,
+  "usd": 0.000215,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [
+  "SKU-1"
+ ],
+ "answers": [
+  null
+ ],
+ "statuses": [
+  "PARTIAL"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve stock? stock has not declared its side effects. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "stock",
+    "args": {
+     "sku": "SKU-1"
+    },
+    "task": "Check SKU-1, then SKU-2, then SKU-3, one tool call at a time.",
+    "step": null,
+    "idempotency_key": "fdb2f00ee249d94ca9eb8171"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_4f98a0b79b55477692c0c1fd8e12a8f6"
+ ],
+ "errors": [
+  "code='BUDGET_EXCEEDED' category=<ErrorCategory.POLICY: 'POLICY'> message=\"the run's budget is spent: its turn limit (max_turns=1) was reached\" retryable=False source=None details={} trace_id=None"
+ ],
+ "user": "oa-maxturns-2ee35ade",
+ "records": null
+}

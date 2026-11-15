@@ -1,0 +1,23 @@
+{
+ "sdk": "openai_agents",
+ "feature": "sandbox_local",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.5,
+ "spend": {
+  "requests": 2,
+  "in": 13660,
+  "out": 66,
+  "usd": 0.001399,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "The output is `42`."
+ ],
+ "errors": [
+  null
+ ]
+}

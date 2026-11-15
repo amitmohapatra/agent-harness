@@ -1,0 +1,19 @@
+{
+ "sdk": "langgraph",
+ "feature": "store",
+ "arm": "bare",
+ "error": null,
+ "seconds": 3.1,
+ "spend": {
+  "requests": 4,
+  "in": 1889,
+  "out": 120,
+  "usd": 0.000249,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "You're allergic to peanuts.",
+ "in_own_store": true
+}

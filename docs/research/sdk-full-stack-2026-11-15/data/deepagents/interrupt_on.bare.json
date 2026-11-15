@@ -1,0 +1,28 @@
+{
+ "sdk": "deepagents",
+ "feature": "interrupt_on",
+ "arm": "bare",
+ "error": null,
+ "seconds": 2.0,
+ "spend": {
+  "requests": 2,
+  "in": 8030,
+  "out": 99,
+  "usd": 0.000597,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "sent": [
+  "bob@example.com"
+ ],
+ "answers": [
+  "I sent the email to bob@example.com with the body \"the build is green\"."
+ ],
+ "asked": [
+  "{'action_requests': [{'name': 'send_email', 'args': {'to': 'bob@example.com', 'body': 'the build is green'}, 'description': \"Tool execution requires approval\\n\\nTool: send_email\\nArgs: {'to': 'bob@example.com', 'body': 'the build is green'}\"}], 'review_configs': [{'action_name': 'send_email', 'allow"
+ ],
+ "todos": null,
+ "files": []
+}

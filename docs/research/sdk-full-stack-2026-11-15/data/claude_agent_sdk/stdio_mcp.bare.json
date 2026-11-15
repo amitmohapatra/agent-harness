@@ -1,0 +1,28 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "stdio_mcp",
+ "arm": "bare",
+ "error": null,
+ "seconds": 4.7,
+ "spend": {
+  "requests": 3,
+  "in": 44300,
+  "out": 347,
+  "usd": 0.001085,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "SKU-7 has **12 units** in warehouse W2. The stock lookup doesn't say whether W2 is the central warehouse, so I can't confirm that's the one you mean."
+ ],
+ "tools_used": [
+  "ToolSearch",
+  "mcp__warehouse__warehouse_stock"
+ ],
+ "subtypes": [
+  "success"
+ ],
+ "deltas": null
+}

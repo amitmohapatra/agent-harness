@@ -1,0 +1,23 @@
+{
+ "sdk": "openai_agents",
+ "feature": "mcp",
+ "arm": "bare",
+ "error": null,
+ "seconds": 2.3,
+ "spend": {
+  "requests": 2,
+  "in": 936,
+  "out": 84,
+  "usd": 0.000136,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "There are 12 units of SKU-7 in the central warehouse, at location W2."
+ ],
+ "errors": [
+  null
+ ]
+}

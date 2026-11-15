@@ -1,0 +1,112 @@
+{
+ "sdk": "langgraph",
+ "feature": "checkpointer",
+ "arm": "stack",
+ "error": null,
+ "seconds": 3.0,
+ "spend": {
+  "requests": 2,
+  "in": 1235,
+  "out": 24,
+  "usd": 0.000136,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "Teal. You told me on 2026-11-15.",
+ "thread_messages": 5,
+ "status": "SUCCESS",
+ "run_ids": [
+  "run_ac795bdd72c746da9bce7da828a61b09",
+  "run_de6ed64767fb4e5dbbd461bd9fbe9307"
+ ],
+ "records": [
+  {
+   "run": {
+    "run_id": "run_ac795bdd72c746da9bce7da828a61b09",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "0062c2ba",
+    "user_id": "lc-a7ca7f23",
+    "agent_id": "lc-checkpointer",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_ac795bdd72c746da9bce7da828a61b09": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_ac795bdd72c746da9bce7da828a61b09": [
+     {
+      "role": "USER",
+      "content": "My favourite colour is teal. Just say noted."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Noted."
+     }
+    ]
+   },
+   "tools": {
+    "run_ac795bdd72c746da9bce7da828a61b09": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  },
+  {
+   "run": {
+    "run_id": "run_de6ed64767fb4e5dbbd461bd9fbe9307",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "0062c2ba",
+    "user_id": "lc-a7ca7f23",
+    "agent_id": "lc-checkpointer",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_de6ed64767fb4e5dbbd461bd9fbe9307": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_de6ed64767fb4e5dbbd461bd9fbe9307": [
+     {
+      "role": "USER",
+      "content": "What is my favourite colour?"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Teal. You told me on 2026-11-15."
+     }
+    ]
+   },
+   "tools": {
+    "run_de6ed64767fb4e5dbbd461bd9fbe9307": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

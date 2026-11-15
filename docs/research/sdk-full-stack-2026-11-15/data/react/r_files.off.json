@@ -1,0 +1,36 @@
+{
+ "sdk": "react",
+ "feature": "r_files",
+ "arm": "off",
+ "error": null,
+ "seconds": 6.0,
+ "spend": {
+  "requests": 4,
+  "in": 28022,
+  "out": 554,
+  "usd": 0.000814,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Done.",
+  "The launch code is **ORCHID-42**."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_3f1dd002cdb949168dedc20406fce4d8",
+  "run_270954ec1a1b40a9a019c8a51dd3112c"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "re-files-891cb245",
+ "records": null
+}

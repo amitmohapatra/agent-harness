@@ -1055,6 +1055,34 @@ async def test_an_sdk_approval_inside_an_agent_tool_continues_the_agent_inside(
     assert sorted(recorded(memory_service)) == [("check", "ok"), ("gated", "ok")]
 
 
+async def test_a_governed_call_inside_an_agent_tool_resumes_and_runs_once(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """An agent called as a tool whose own tool declares nothing (an SDK ``FunctionTool``):
+    governance asks about the call inside the agent tool's child run, so the run pauses on
+    it; the approval resumes the run — the agent tool called again, the approved call run
+    once — instead of failing on a handle that is the child's, not the run's (seen on Haiku,
+    docs/research/sdk-full-stack-2026-11-15). APR-06"""
+    inner = ScriptedModel(
+        [("look", {"order": "o1"}), ("look", {"order": "o1"}), "checked o1"], ids="checker_"
+    )
+    checker = Agent(name="checker", model=inner, tools=[look])
+    outer = ScriptedModel(
+        [("check", {"input": "check o1"}), ("check", {"input": "check o1"}), "all good"],
+        ids="desk_",
+    )
+    desk = Agent(name="desk", model=outer, tools=[checker.as_tool("check", "Check.")])
+    agent = declaring(memory_harness, check="read").wrap(desk, id="governed-inside")
+    paused = await agent.run("check o1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "look"
+    assert ran == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == "all good" and ran == ["look o1"]
+    assert all(c.status is RunStatus.SUCCESS for c in await children(memory_harness, done.run_id))
+
+
 async def resumed_spent(agent: Any, interrupt_id: str, run_id: str, **answer: Any) -> Any:
     """The resumed run's result, and what its end says it spent (``RUN_FINISHED``)."""
     events: list[Any] = []

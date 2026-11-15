@@ -1,0 +1,19 @@
+{
+ "sdk": "langgraph",
+ "feature": "pii",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.0,
+ "spend": {
+  "requests": 1,
+  "in": 73,
+  "out": 149,
+  "usd": 8.2e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "Your email address shows up as \"[REDACTED_EMAIL]\" in our conversation, so the actual address was removed before it reached me. I can't repeat it back.\n\nIf you tell me the address directly, I can use it in whatever you need, such as drafting a message or formatting something. Just keep in mind that anything you share here is visible in this conversation.",
+ "status": "SUCCESS"
+}

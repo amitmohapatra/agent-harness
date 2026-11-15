@@ -1,0 +1,26 @@
+{
+ "sdk": "deepagents",
+ "feature": "files",
+ "arm": "bare",
+ "error": null,
+ "seconds": 4.1,
+ "spend": {
+  "requests": 4,
+  "in": 16010,
+  "out": 165,
+  "usd": 0.00028,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Done.",
+  "The launch code in /notes.md is **ORCHID-42**."
+ ],
+ "asked": [],
+ "todos": null,
+ "files": [
+  "/notes.md"
+ ]
+}

@@ -294,7 +294,10 @@ await agent.run(
 ## Streaming
 
 `agent.stream(...)` yields each assistant text block as a text delta, the harness tool calls as
-`TOOL_CALL_*` events, then `RUN_FINISHED`.
+`TOOL_CALL_*` events, then `RUN_FINISHED`. With `include_partial_messages=True` on the options
+the CLI sends the model's text as it writes it (the SDK's `StreamEvent`s), and the run's
+stream carries each of those deltas as it comes instead of the whole block once, as the SDK's
+own stream does.
 
 ## Sub-agents and child runs
 
