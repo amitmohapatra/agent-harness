@@ -35,7 +35,7 @@ from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge, results
-from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
+from trellis.harness.tools.base import FIX_ARGUMENTS, SideEffects, Tool, arguments_of, not_run
 from trellis.harness.tools.convert.openai_local import Carried, run_here, spec_of, with_fields
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
@@ -194,15 +194,35 @@ async def _handed_on(
     return carried.live[-1] if carried.live and outcome.ok and not hooked else outcome.output
 
 
+#: What a ``SandboxAgent`` capability's own tools do, as governance sees them (the tool
+#: catalog's word overrides it), for a tool the SDK's capability made (:data:`CAPABILITY_TOOL`;
+#: a function of the agent's own of the same name says nothing): loading a skill and viewing an
+#: image read; a command run, typed into, or a patch applied writes — asked once a
+#: conversation, as any write, not at every call. A team that wants every command approved
+#: gives ``exec_command`` the risk ``irreversible`` (or an ``approve_when``) in the catalog.
+CAPABILITY_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
+    "load_skill": "read",
+    "view_image": "read",
+    "exec_command": "write",
+    "write_stdin": "write",
+    "apply_patch": "write",
+}
+#: The mark of a tool a sandbox capability made (``adapters.openai_agents._governing``).
+CAPABILITY_TOOL: Final = "_trellis_capability_tool"
+
+
 def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:
     """An agent's own ``FunctionTool`` as the run's tool set has it (an agent tool: a helper,
-    read), else undeclared (``openai_local.spec_of``): what the tool says of itself."""
-    return spec_of(
-        runtime,
-        tool.name,
-        description=tool.description or tool.name,
-        input_schema=tool.params_json_schema,
-    )
+    read), else — a sandbox capability's tool — its risk (:data:`CAPABILITY_SIDE_EFFECTS`),
+    else undeclared (``openai_local.spec_of``): what the tool says of itself."""
+    said: dict[str, Any] = {
+        "description": tool.description or tool.name,
+        "input_schema": tool.params_json_schema,
+    }
+    risk = CAPABILITY_SIDE_EFFECTS.get(tool.name) if getattr(tool, CAPABILITY_TOOL, False) else None
+    if risk is not None:
+        said["side_effects"] = risk
+    return spec_of(runtime, tool.name, **said)
 
 
 class PastItsOwnLimit(TimeoutError):

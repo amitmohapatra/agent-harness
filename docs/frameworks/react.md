@@ -800,7 +800,8 @@ written whole every 16th.
 #### Rewinding a paused run
 
 ```python
-states = [s async for s in agent.checkpoints(run_id, reader="ada")]  # newest first: the run's user only
+# newest first; only the run's own user reads them
+states = [s async for s in agent.checkpoints(run_id, reader="ada")]
 result = await agent.rewind(
     run_id, states[5].config["configurable"]["checkpoint_id"], reviewer="ada"
 )

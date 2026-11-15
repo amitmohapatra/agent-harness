@@ -785,3 +785,33 @@ def test_the_question_is_the_last_user_message_the_harness_put_after_the_context
     assert _question("a question as text", "ctx") is None
     assert _question([{"role": "system", "content": "ctx"}], "ctx") is None
     assert _question([{"role": "user", "content": "q"}], None) == "q"  # no context: from the top
+
+
+async def test_a_sandbox_capabilitys_own_tools_carry_their_risk() -> None:
+    """A tool a ``SandboxAgent`` capability made says nothing of itself; its risk is the
+    capability's (``CAPABILITY_SIDE_EFFECTS``): ``load_skill`` reads — it runs, nobody asked —
+    and ``exec_command`` writes. A function of the agent's own of the same name is undeclared."""
+    from agents import function_tool
+
+    from trellis.harness.tools.base import UNDECLARED
+    from trellis.harness.tools.convert.openai_agents import CAPABILITY_TOOL, own_spec
+
+    def load_skill(name: str) -> str:
+        """Load a skill."""
+        return name
+
+    def exec_command(cmd: str) -> str:
+        """Run a command."""
+        return cmd
+
+    loads, runs, mine = (
+        function_tool(load_skill),
+        function_tool(exec_command),
+        function_tool(load_skill),
+    )
+    setattr(loads, CAPABILITY_TOOL, True)
+    setattr(runs, CAPABILITY_TOOL, True)
+    runtime = SimpleNamespace(native={})
+    assert own_spec(runtime, loads).side_effects == "read"  # type: ignore[arg-type]
+    assert own_spec(runtime, runs).side_effects == "write"  # type: ignore[arg-type]
+    assert own_spec(runtime, mine).side_effects == UNDECLARED  # type: ignore[arg-type]

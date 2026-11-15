@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import functools
@@ -564,11 +565,20 @@ def _governing(kind: type) -> type:
     pauses as a harness pause does)."""
     from agents import FunctionTool
 
-    from trellis.harness.tools.convert.openai_agents import governed, held, own_spec
+    from trellis.harness.tools.convert.openai_agents import (
+        CAPABILITY_TOOL,
+        governed,
+        held,
+        own_spec,
+    )
 
     class Governing(kind):  # type: ignore[misc,valid-type]
         def tools(self) -> list[Any]:
-            made = [governed(tool) for tool in super().tools()]
+            own = super().tools()
+            for tool in own:  # its risk is the capability's (``CAPABILITY_SIDE_EFFECTS``)
+                with contextlib.suppress(AttributeError, TypeError):
+                    setattr(tool, CAPABILITY_TOOL, True)
+            made = [governed(tool) for tool in own]
             runtime = current()
             if runtime is None or runtime.agent.hooks:
                 return made
