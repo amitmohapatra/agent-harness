@@ -438,10 +438,10 @@ class Agent:
         if close is not None:
             await close()
 
-    def _session_gone(self, conversation: str, kept: tuple[str, Any]) -> None:
-        """The session kept for ``conversation``'s next turn is kept no more (its place given
-        to another conversation's, or dropped): the framework lets go of what it keeps of it,
-        where it keeps any (an ACP agent's files: ``ACPAdapter.session_gone``)."""
+    def _session_gone(self, _conversation: str, kept: tuple[str, Any]) -> None:
+        """The session ``kept`` for a conversation's next turn is kept no more (its place
+        given to another conversation's, or dropped): the framework lets go of what it keeps
+        of it, where it keeps any (an ACP agent's files: ``ACPAdapter.session_gone``)."""
         gone = getattr(self.adapter, "session_gone", None)
         if gone is not None:
             gone(kept[0])
