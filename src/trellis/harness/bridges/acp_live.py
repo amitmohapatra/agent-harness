@@ -744,6 +744,22 @@ class ACPSession(Keeper[Background]):
             task.cancel()
         await self._stack.aclose()
 
+    async def released(self) -> None:
+        """The conversation let go of the session for good: its next turn is not sent to
+        continue it (``Agent.sessions``) — at once, so a turn that comes while it closes takes
+        its earlier turns from the harness, as a turn on a server that kept no session does —
+        and once the process ended, the session's own files leave the agent's home
+        (``UsageLog.removed``: its user's Kimi home keeps its login and its config), whatever
+        closing meets."""
+        assert self.kept_in is not None  # a session is kept once it served a turn
+        kept = self.kept_in.get(self.key)
+        if kept is not None and kept[0] == self.session_id:
+            self.kept_in.pop(self.key)
+        try:
+            await self.close()
+        finally:  # a kept session's agent keeps a log (``adapters.acp._follows``)
+            self.log.removed()
+
 
 def shape(target: Any, env: Mapping[str, str], tools: Any, headers: str) -> str:
     """What a process started for ``target`` with ``env`` and the harness's ``tools`` has for

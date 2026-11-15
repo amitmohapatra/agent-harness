@@ -937,6 +937,7 @@ async def _chatted(
         chat.answers.append(str(said or result.status))
         chat.statuses.append(result.status.value)
         chat.calls.append(seen.calls)
+        ids.update(e.tool_call_id for e in seen.events if e.tool_call_id)  # once, on its stream
         made = [*seen.made(), *model_calls(requests(), ids)]
         chat.read.append(skills_read(made, shelf.names))
         chat.pinned.append(seen.pinned())

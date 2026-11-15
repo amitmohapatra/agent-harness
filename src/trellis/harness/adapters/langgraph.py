@@ -975,8 +975,7 @@ def hitl_approved(
 ) -> list[tuple[str, Any]]:
     """The calls a ``HumanInTheLoopMiddleware`` request's resume runs as a person decided —
     each call its decision approves, as the model made it, or edits, as edited
-    (:func:`hitl_response`); a rejected or answered call runs nothing, and a cancel decides
-    none."""
+    (:func:`hitl_response`); a rejected or answered call runs nothing."""
     approved: list[tuple[str, Any]] = []
     for (name, args), decision in _hitl_decided(request, resolution):
         if decision.get("type") == "approve":
@@ -1003,9 +1002,8 @@ def _hitl_decided(
     request: Mapping[str, Any], resolution: InterruptResolution
 ) -> list[tuple[tuple[str, dict[str, Any]], dict[str, Any]]]:
     """Each call a ``HumanInTheLoopMiddleware`` request holds, with the decision its resume
-    sends for it (:func:`hitl_response`); none on a cancel, which decides none."""
-    if resolution.decision is InterruptDecision.CANCEL:
-        return []
+    sends for it (:func:`hitl_response`). Never a cancel: a cancelled run takes no attempt
+    (``Agent._continue``), so no resume is sent."""
     sent = hitl_response(dict(request), resolution)
     decisions = [sent] if request.get("type") == TOOL_APPROVAL else sent["decisions"]
     return list(zip(hitl_calls(request), decisions, strict=False))

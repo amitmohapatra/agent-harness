@@ -16,7 +16,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -49,7 +49,7 @@ from trellis.harness.identity import conversation_key
 from trellis.harness.line import Followers, Line
 from trellis.harness.runlog import RunLog
 from trellis.harness.runs import LocalRuns, place
-from trellis.runs import ConflictError, Page, ResolutionEntry, RunsError
+from trellis.runs import ConflictError, Page, ResolutionEntry, RunsError, RunSummary
 
 THREAD = "chat-9"
 
@@ -225,6 +225,48 @@ async def test_a_workers_queued_turn_and_the_servers_turns_take_turns(
     assert (await second).status is RunStatus.SUCCESS
     assert await servers[0].worker([a]).run_once() is True
     assert [e[1] for e in log if e[0] == "start"] == ["one", "two", "three"]
+
+
+async def test_turns_resumed_with_no_line_run_together_and_leave_the_conversation_free() -> None:
+    """Paused turns of a conversation that a release before the line made (no
+    ``concurrency_key``: no line) take their turn at once when answered, together; whichever
+    ends first, the turn is free once both have ended, and the conversation's next message
+    runs."""
+    log: Log = []
+    gates = {"one": asyncio.Event(), "two": asyncio.Event()}
+
+    async def answer(input: str, agent: Runtime) -> str:
+        if input in gates:
+            said = await agent.ask(f"go on with {input}?")
+            log.append(("start", input, said))
+            await gates[input].wait()
+        log.append(("end", input))
+        return f"re: {input}"
+
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(answer, id="chat")
+        paused = [await agent.run(q, user="ada", thread=THREAD) for q in ("one", "two")]
+        store = cast("LocalRuns", h.runs)
+        for result in paused:
+            assert result.status is RunStatus.PAUSED and result.interrupt is not None
+            record = store._runs[result.run_id]
+            store._runs[result.run_id] = record.model_copy(update={"concurrency_key": None})
+        resumed = [
+            asyncio.create_task(
+                agent.resume(r.interrupt.interrupt_id, "answer", answer="yes", reviewer="ada")
+            )
+            for r in paused
+            if r.interrupt is not None
+        ]
+        await started(log, "one")
+        await started(log, "two")  # together: neither waits for the other
+        gates["two"].set()
+        assert (await resumed[1]).status is RunStatus.SUCCESS
+        gates["one"].set()
+        assert (await resumed[0]).status is RunStatus.SUCCESS
+        after = await asyncio.wait_for(agent.run("three", user="ada", thread=THREAD), 10)
+    assert after.status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "end"] == ["two", "one", "three"]
 
 
 async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
@@ -425,6 +467,88 @@ async def test_arch15_a_line_is_ordered_by_the_stores_places_reading_no_answers(
     await runs.aclose()
 
 
+class Lagging(LocalRuns):
+    """A store whose listings lag behind its records: a run listed as it was when the listing
+    was made (``listed``), whatever it is when it is read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listed: list[RunSummary] = []
+        self.gone: set[str] = set()
+
+    async def get(self, run_id: str, *, tenant: str | None = None) -> Any:
+        return None if run_id in self.gone else await super().get(run_id, tenant=tenant)
+
+    async def iterate(
+        self,
+        *,
+        status: RunStatus | None = None,
+        assignee: str | None = None,
+        agent_id: str | None = None,
+        thread_id: str | None = None,
+        concurrency_key: str | None = None,
+        parent_run_id: str | None = None,
+        limit: int = local_runs.PAGE_LIMIT,
+        tenant: str | None = None,
+        max_pages: int | None = None,
+    ) -> AsyncIterator[RunSummary]:
+        for summary in self.listed:
+            if status is None or summary.status is status:
+                yield summary
+        async for summary in super().iterate(
+            status=status,
+            assignee=assignee,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            concurrency_key=concurrency_key,
+            parent_run_id=parent_run_id,
+            limit=limit,
+            tenant=tenant,
+            max_pages=max_pages,
+        ):
+            yield summary
+
+
+async def test_a_run_listed_in_the_line_but_ended_when_read_holds_nobody_up() -> None:
+    """The line is the store's listing, each run then read once: a run the listing still
+    shows running that has ended when it is read — or is gone — is behind nobody, and the run
+    after it is first in the line."""
+    runs = Lagging()
+    ended = await runs.start(turn_of("ada"))
+    gone = await runs.start(turn_of("ada"))
+    mine = await runs.start(turn_of("ada"))
+    await runs.finish(ended.run_id, RunStatus.SUCCESS)
+    runs.listed = [
+        RunSummary.model_validate({**record.model_dump(), "status": RunStatus.RUNNING})
+        for record in (ended, gone)
+    ]
+    runs.gone.add(gone.run_id)  # read back: no such run
+    line = Line(runs, mine, LRU(), Followers(lambda: None))
+    assert await line.ahead() == []
+    assert await line.holder() == mine.run_id
+    await runs.aclose()
+
+
+async def test_an_earlier_turn_listed_but_gone_when_read_is_not_in_the_history() -> None:
+    """A conversation's earlier turns are the store's listing, each turn then read once: one
+    the listing still shows that is gone when it is read (removed meanwhile) is left out of
+    the next turn's history — the turns that are there are given, and the turn runs."""
+    runs = Lagging()
+    log: Log = []
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = chat(h, log, {})
+        first = await agent.run("one", user="ada", thread=THREAD)
+        record = await runs.get(first.run_id)
+        assert record is not None
+        ghost = {**record.model_dump(), "run_id": "run_gone", "status": RunStatus.SUCCESS}
+        runs.listed = [RunSummary.model_validate(ghost)]
+        runs.gone.add("run_gone")
+        second = await agent.run("two", user="ada", thread=THREAD)
+    assert second.status is RunStatus.SUCCESS
+    assert log[-2] == ("start", "two", ["one", "re: one"])  # the turn that is there, alone
+    await runs.aclose()
+
+
 async def test_arch15_a_line_run_without_a_place_is_a_clear_error_never_an_order() -> None:
     """A run store that sends no ``placed_at`` (older than this harness) cannot order a line:
     the line says so, naming the run, rather than guessing an order."""
@@ -475,6 +599,34 @@ async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
     for mode in ("interrupt", "steer"):
         result = await agent.run(mode, user="ada", thread=THREAD, mode=mode)
         assert result.answer == f"re: {mode}"
+
+
+async def test_a_line_that_cannot_be_read_at_a_renewal_leaves_the_turn_working(
+    servers: tuple[Harness, Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each renewal of a turn's hold reads its line for an interrupt sent to another server;
+    a run store that cannot be listed then is said, and the turn works on — it is not
+    stopped for a message nobody could read."""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a = chat(servers[0], log, gates)
+    runs = servers[0].runs
+    working = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    listed = runs.iterate
+
+    def down(**kwargs: Any) -> Any:
+        raise RunsError("the run store is down", code="UNAVAILABLE", status=503)
+
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        runs.iterate = down  # type: ignore[method-assign]
+        async with asyncio.timeout(10):
+            while "its conversation's line was not read" not in caplog.text:  # noqa: ASYNC110
+                await asyncio.sleep(0.05)
+        runs.iterate = listed  # type: ignore[method-assign]
+    assert not working.done()
+    gates["one"].set()
+    assert (await working).status is RunStatus.SUCCESS
 
 
 async def test_a_log_whose_run_ended_takes_nothing_more_whoever_listens() -> None:
@@ -600,6 +752,54 @@ async def test_a_waiting_run_the_store_ended_reports_the_stores_status_and_write
     record = await runs.get(waiting)
     assert record is not None and record.status is RunStatus.TIMEOUT
     assert [f for f in finished if f[0] == waiting] == []  # nothing written after the store
+    gates["one"].set()
+    assert (await first).status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+
+
+async def test_a_run_the_store_ended_while_it_waited_its_turn_never_runs() -> None:
+    """A run waiting in its conversation's line that the run store ends meanwhile (its
+    deadline, its time limit): when the line reaches it, it runs nothing and ends as the store
+    says, and the line goes on past it. (Its hold is renewed far less often than the turn
+    ahead takes here: :func:`test_a_waiting_run_whose_hold_the_store_refuses_stops_and_
+    overwrites_nothing` is the renewal's refusal.)"""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    async with Harness(config=Settings()) as h:
+        a = chat(h, log, gates)
+        first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+        await started(log, "one")
+        second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+        waiting = await thread_run(h.runs, "two")
+        await h.runs.finish(waiting, RunStatus.TIMEOUT)
+        gates["one"].set()
+        assert (await first).status is RunStatus.SUCCESS
+        ended = await asyncio.wait_for(second, 10)
+        assert ended.status is RunStatus.TIMEOUT and ended.run_id == waiting
+        assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+        third = await a.run("three", user="ada", thread=THREAD)
+        assert third.status is RunStatus.SUCCESS  # the line goes on
+
+
+async def test_a_waiting_run_whose_hold_the_store_refuses_stops_and_overwrites_nothing(
+    servers: tuple[Harness, Harness],
+) -> None:
+    """A run waiting its turn is held in the run store; once the store has ended it (its
+    deadline), the next renewal of that hold is refused and the run stops waiting at once —
+    before the turn ahead ends — running nothing. The store's ending is not overwritten:
+    the run was ended there, not here."""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a = chat(servers[0], log, gates)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+    waiting = await thread_run(servers[0].runs, "two")
+    await servers[0].runs.finish(waiting, RunStatus.TIMEOUT)
+    await asyncio.wait_for(asyncio.shield(second), 10)  # the turn ahead still works
+    assert not first.done()
+    found = await servers[0].runs.get(waiting)
+    assert found is not None and found.status is RunStatus.TIMEOUT
     gates["one"].set()
     assert (await first).status is RunStatus.SUCCESS
     assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran

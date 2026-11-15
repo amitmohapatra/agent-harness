@@ -305,7 +305,7 @@ def record_in_process() -> None:
 
 
 # --------------------------------------------------------------------------- processes, files
-def _children(root: int) -> dict[int, str]:
+def descendants(root: int) -> dict[int, str]:
     """Every live descendant process of ``root``: pid -> command line."""
     parents: dict[int, int] = {}
     commands: dict[int, str] = {}
@@ -865,7 +865,7 @@ def invariants(
     inv = Invariants(tmp_path)
     _UNDER_WAY[:] = [inv]
     monkeypatch.setattr(httpx.AsyncClient, "send", recording(inv.traffic))
-    before = set(_children(os.getpid()))
+    before = set(descendants(os.getpid()))
     temp = Path(tempfile.gettempdir())
     temp_before = {p.name for p in temp.iterdir()} if temp.is_dir() else set()
     yield inv
@@ -877,7 +877,7 @@ def invariants(
     deadline = time.monotonic() + 10
     left = {}
     while time.monotonic() < deadline:
-        left = {p: c for p, c in _children(os.getpid()).items() if p not in before}
+        left = {p: c for p, c in descendants(os.getpid()).items() if p not in before}
         if not left:
             break
         time.sleep(0.5)
