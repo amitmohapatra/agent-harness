@@ -29,7 +29,7 @@ from tests.support.kimi import (
 )
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Hooks, Settings, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness import compat
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
 from trellis.harness.adapters.claude import RESUMED_CALL
@@ -1237,28 +1237,29 @@ async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_k
     assert "sku,units" not in told and told.startswith("<system>ERROR")
 
 
-async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
+async def test_at_its_step_limit_kimi_ends_partial_with_what_it_said(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
     """Kimi ends a turn at its step limit (``loop_control.max_steps_per_turn``) as a finished
     turn with no answer: ACP's ``end_turn``, the reason only in its own log
-    (``loop.max_steps_exceeded``). As a ``ReAct`` run at ``max_steps`` does, the run asks once
-    more in the same session, told the limit is reached (``budget.LIMIT``): its answer is the
-    run's, said as a ``step_limit`` warning."""
+    (``loop.max_steps_exceeded``). As Claude's turn limit does (decision D1), the run ends
+    ``PARTIAL`` with what Kimi said, saying so as a ``step_limit`` warning — no paid last
+    answer: nothing more is asked of the model."""
     from trellis.harness.budget import TURN_LIMIT
 
     lookups.clear()
     endpoint.plan = [("lookup", {"topic": "tea"}), ("lookup", {"topic": "coffee"})]
     target = kimi_target(endpoint, tmp_path, env={"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"})
     agent = arm(harness.wrap(target, id="kimi-limit"), [lookup])
+    asked = len(endpoint.requests)
     events = [e async for e in agent.stream("tea and coffee?", user="u1")]
-    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
-    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
-    assert said.endswith("Done. facts about tea") and lookups == ["tea"]
+    done = events[-1]
+    assert done.type is RunEventType.RUN_FINISHED and done.outcome is RunOutcome.PARTIAL
+    assert lookups == ["tea"]
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
     assert warned == ["stopped: the step limit (1) was reached"]
-    # Kimi's session keeps it: told it holds for this turn only (a later turn calls tools again)
-    assert TURN_LIMIT.format(limit=1) in endpoint.said()
+    assert TURN_LIMIT.format(limit=1) not in endpoint.said()  # no last answer asked for
+    assert len(endpoint.requests) - asked == 1  # the one step, nothing after it
 
 
 #: More times than Kimi's own repeat breaker lets one call repeat before it ends the turn (12).

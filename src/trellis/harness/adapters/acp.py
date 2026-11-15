@@ -1307,18 +1307,21 @@ class Attempt:
 
     def _unanswered(self, answered: bool) -> str | None:
         """What the agent is told when its turn ended with no answer where the run asks once
-        more, in the same session (as ``ReAct`` answers at its limits), said as a warning: the
-        agent's step limit (:data:`AT_STEP_LIMIT`, ``budget.TURN_LIMIT``), or a loop on one
-        call — refused by the bridge (``bridge.stalled``, which said so) or ended by Kimi's own
-        repeat breaker (:data:`REPEAT_BREAKER`, ``bridge.TURN_STALLED``). ``None``: not asked."""
+        more, in the same session, said as a warning: a loop on one call — refused by the
+        bridge (``bridge.stalled``, which said so) or ended by Kimi's own repeat breaker
+        (:data:`REPEAT_BREAKER`, ``bridge.TURN_STALLED``). ``None``: not asked. At the agent's
+        step limit (:data:`AT_STEP_LIMIT`) nothing is asked (decision D1, as Claude's turn
+        limit): the run ends ``PARTIAL`` with what Kimi said, the limit as the budget it spent
+        (``Runtime.budget_spent``) and a ``step_limit`` warning — no paid last answer."""
         usage, runtime = self.usage, self.runtime
         limit = usage.limited if usage is not None else None
         if limit is not None:
-            usage.limited = None  # type: ignore[union-attr]  # read: asked once
-            stopped = f"stopped: the step limit ({limit}) was reached"
-            log.warning("run %s %s", runtime.run_id, stopped)
-            runtime.events.warning("step_limit", stopped)
-            return budget.TURN_LIMIT.format(limit=limit)
+            usage.limited = None  # type: ignore[union-attr]  # read once
+            stopped = f"the step limit ({limit}) was reached"
+            log.warning("run %s stopped: %s", runtime.run_id, stopped)
+            runtime.events.warning("step_limit", f"stopped: {stopped}")
+            runtime.budget_spent = stopped
+            return None
         if answered:
             return None
         if bridge.stalled(runtime):
