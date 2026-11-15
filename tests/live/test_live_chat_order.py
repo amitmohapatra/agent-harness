@@ -190,10 +190,12 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
             started(f"server-{n}", [*command, str(folder)], served, ROOT)
             s.servers.append(f"http://127.0.0.1:{port}")
         asyncio.run(_up(*(f"{u}/ready" for u in s.servers)))
-        os.environ["RUNS_URL"] = runs_url  # what the invariants read the runs back from
-        yield s
+        with pytest.MonkeyPatch.context() as patch:
+            # what the invariants read the runs back from; the suite's own RUNS_URL comes back
+            # after this module, for the live tests that follow it in the session
+            patch.setenv("RUNS_URL", runs_url)
+            yield s
     finally:
-        os.environ.pop("RUNS_URL", None)
         for process in s.processes.values():
             process.terminate()
         for process in s.processes.values():
