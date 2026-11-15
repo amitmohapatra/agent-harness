@@ -364,6 +364,28 @@ async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
     assert [item["kind"] for item in found] == ["memory", "chunk"] and found[0]["id"] == "mem_1"
 
 
+async def test_a_transcript_longer_than_one_write_takes_is_sent_in_writes_it_takes() -> None:
+    """A long task's attempt (200 tool calls: 400 messages and more) is more than the 100
+    messages one ``POST /v1/messages`` takes (its ``maxItems``): sent whole, it was refused
+    (422) and the turn's transcript lost. It goes in writes of at most 100, in order."""
+    service = FakeMemoryService()
+    run = memory(service).bind(identity())
+    said = [Said(Speaker.USER, "go")]
+    for i in range(120):
+        said += [
+            Said(Speaker.ASSISTANT, "", (Called(f"c{i}", "lookup", {"k": i}),)),
+            Said(Speaker.TOOL, f"v{i}", tool_call_id=f"c{i}"),
+        ]
+    said.append(Said(Speaker.ASSISTANT, "done"))
+    await run.record_messages(said, "run_9", 1)
+    writes = service.named("messages")
+    assert [len(w.body["messages"]) for w in writes] == [100, 100, 42]
+    sent = [m["source_message_id"] for w in writes for m in w.body["messages"]]
+    assert sent == ["run_9:user:0", *(f"run_9:1:msg:{i}" for i in range(1, 242))]
+    assert len({w.idempotency_key for w in writes}) == 3  # each write its own retry key
+    assert service.violations == []
+
+
 async def test_records_carry_idempotency() -> None:
     service = FakeMemoryService()
     run = memory(service).bind(identity())

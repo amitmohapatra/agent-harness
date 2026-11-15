@@ -74,6 +74,10 @@ RECORDED_OUTPUT_MAX_BYTES: Final = 256 * 1024
 #: its tail (where a long message's question usually is), never refused with a 422 that would
 #: leave the run without its context and its tool records.
 QUESTION_MAX_CHARS: Final = 4000
+#: The most messages one write takes (``POST /v1/messages``: ``CreateMessagesRequest.messages``,
+#: its OpenAPI's ``maxItems``): a longer transcript (a long task's tool calls and results) is
+#: sent in writes of this many, in order, never refused whole with a 422 that would lose it.
+MESSAGES_PER_WRITE: Final = 100
 _CUT: Final = " … "
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
@@ -305,13 +309,15 @@ class RunMemory:
     # ------------------------------------------------------------------ records
     async def record_messages(self, messages: Sequence[Said], run_id: str, attempt: int) -> None:
         """One attempt's transcript - its tool calls and their results with it - in one
-        request. Each message names itself by its harness id (``Said.id``, the same on every
-        attempt: ``conversation.identified``), so a resumed attempt that sends the first
-        one's messages again has each stored once: the service stores a message it has seen
-        before once. A message with no harness id (a helper's turns) names itself by its run
-        (the question) or by its attempt and position. A message with its harness id
-        carries it in its ``custom_metadata`` too, with the run it was said in and the tool
-        call it makes or answers (one level: the service allows two)."""
+        request, or in order in several of :data:`MESSAGES_PER_WRITE` (each with a retry key
+        of its own) when it is longer than one takes. Each message names itself by its
+        harness id (``Said.id``, the same on every attempt: ``conversation.identified``), so a
+        resumed attempt that sends the first one's messages again has each stored once: the
+        service stores a message it has seen before once. A message with no harness id (a
+        helper's turns) names itself by its run (the question) or by its attempt and
+        position. A message with its harness id carries it in its ``custom_metadata`` too,
+        with the run it was said in and the tool call it makes or answers (one level: the
+        service allows two)."""
         batch = [
             _identified(said, run_id)
             | {
@@ -320,7 +326,12 @@ class RunMemory:
             }
             for index, said in enumerate(messages)
         ]
-        await self.ctx.history.add(batch, idempotency_key=f"{run_id}:{attempt}:transcript")
+        key = f"{run_id}:{attempt}:transcript"
+        for start in range(0, len(batch), MESSAGES_PER_WRITE):
+            part = batch[start : start + MESSAGES_PER_WRITE]
+            await self.ctx.history.add(
+                part, idempotency_key=key if start == 0 else f"{key}:{start}"
+            )
 
     async def record_tool(self, call: ToolCall, outcome: ToolOutcome) -> None:
         await self.ctx.record_tool(
