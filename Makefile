@@ -112,6 +112,12 @@ examples:  ## Run every example and the README walkthrough offline (scripted mod
 examples-live:  ## Run every example and the README walkthrough with the environment as it is (the real services that are set)
 	$(PY) scripts/run_examples.py --live
 
+.PHONY: dist-check
+dist-check:  ## The wheel and sdist hold only the package source: no tests, examples, docs or data
+	rm -rf build/dist
+	$(UV) build -q --out-dir build/dist/main .
+	python3 scripts/check_dist.py build/dist/main trellis
+
 .PHONY: docs-check
 docs-check:  ## Every link and anchor resolves; every snippet parses and names only the real API
 	$(PY) scripts/check_docs.py
