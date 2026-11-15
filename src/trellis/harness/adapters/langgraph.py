@@ -324,8 +324,9 @@ class LangGraphAdapter:
         state = fields_of(output.value)
         answer: Any = output.value
         messages: list[Any] = []
-        if isinstance(state, Mapping) and state.get("structured_response") is not None:
-            answer = state["structured_response"]
+        structured = state.get("structured_response") if isinstance(state, Mapping) else None
+        if structured is not None:
+            answer = structured
         elif isinstance(state, Mapping) and isinstance(state.get("messages"), list):
             answer = _answer_text(state["messages"])
         if isinstance(state, Mapping) and isinstance(state.get("messages"), list):
@@ -333,6 +334,8 @@ class LangGraphAdapter:
         transcript = added(messages) or (
             [Said(Speaker.ASSISTANT, answer)] if isinstance(answer, str) and answer else []
         )
+        if structured is not None:
+            transcript = _structured(transcript, structured)
         pause = None
         # a call waiting for its turn behind a pause asks nothing (``DEFERRED``)
         raised = [
@@ -1231,6 +1234,21 @@ def added(messages: Sequence[Any]) -> list[Said]:
         elif kind == "tool":
             out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
     return out
+
+
+def _structured(transcript: list[Said], answer: Any) -> list[Said]:
+    """The turn as said, ending with its structured ``answer`` as the assistant's message (its
+    JSON), as LangChain's provider strategy ends it (the model's reply is that JSON). Its tool
+    strategy ends with the model's call of the schema's tool and LangChain's message answering
+    it (``Returning structured response: ...``) — the only way ``create_agent`` ends on a
+    tool's message — which are no steps of the turn (the run makes no such call): they give
+    way to the answer."""
+    from pydantic_core import to_jsonable_python
+
+    if not transcript or transcript[-1].role is not Speaker.TOOL:
+        return transcript
+    said = json.dumps(to_jsonable_python(answer, fallback=str))
+    return [*transcript[:-2], Said(Speaker.ASSISTANT, said)]
 
 
 def notified(message: Any) -> dict[str, Any] | None:

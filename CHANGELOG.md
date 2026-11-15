@@ -36,6 +36,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   a stdio MCP server and lists its tools but leaves them out of its model's requests, given in
   ACP's `session/new` or in its own `mcp.json` alike; one over HTTP is offered at once
   ([kimi.md](docs/frameworks/kimi.md#models-swarms-and-limits)).
+* **Structured output in memory.** With LangChain's tool strategy (`ToolStrategy`) the turn
+  kept in memory ended with the schema's call and LangChain's `Returning structured response:
+  ...` message, and no assistant text; it now ends with the structured answer (its JSON) as
+  the assistant's message, as with the provider strategy.
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 
