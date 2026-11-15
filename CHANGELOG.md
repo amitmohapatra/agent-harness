@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: gaps the SDK full-stack pass found
+
+* **A run cancelled in its own process keeps its end in agent-runs' log.** `agent.cancel`
+  had agent-runs end the run `CANCELLED` before its attempt stopped, so the attempt's last
+  events — the call cut short (`TOOL_CALL_RESULT`, `cancelled`) and `RUN_FINISHED` with the
+  reason — were refused, and the log stopped at the call's arguments (every in-process
+  adapter, and a run cancelled while it waited its turn). The attempt now stops first, its
+  log takes its last events, and agent-runs' own cancel ends it, keeping the reason and who
+  asked. A run a worker holds is asked to stop through agent-runs first, as before.
+
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 
 * **OpenAI Agents: a governed call inside an agent tool resumes.** An `Agent.as_tool` agent

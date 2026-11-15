@@ -706,6 +706,30 @@ async def test_a_run_cancelled_while_it_waits_its_turn_never_runs(
     assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
 
 
+async def test_a_run_cancelled_here_while_it_waits_its_turn_has_its_end_in_its_log() -> None:
+    """RUN-CANCEL-LOG: a run waiting its turn here, cancelled here, against a store that keeps
+    runs' events as agent-runs does: its log is its start and its end (``RUN_FINISHED``
+    ``CANCELLED``, the reason), and the store's cancel ended it, keeping that reason."""
+    runs = LoggedRuns()
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    async with Harness(config=Settings(), runs=runs) as h:
+        a = chat(h, log, gates)
+        first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+        await started(log, "one")
+        second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+        waiting = await thread_run(runs, "two")
+        await a.cancel(waiting, reason="not needed")
+        assert (await asyncio.wait_for(second, 5)).status is RunStatus.CANCELLED
+        gates["one"].set()
+        await first
+    logged = runs.logged(waiting)
+    assert [e.type for e in logged] == [RunEventType.RUN_STARTED, RunEventType.RUN_FINISHED]
+    assert logged[-1].outcome is RunOutcome.CANCELLED
+    assert logged[-1].data["reason"] == "not needed"
+    assert runs.cancelled == {waiting: "not needed"}
+
+
 @pytest.mark.parametrize("how", ["run", "stream"])
 async def test_a_waiting_run_the_store_ended_reports_the_stores_status_and_writes_nothing(
     servers: tuple[Harness, Harness], how: str

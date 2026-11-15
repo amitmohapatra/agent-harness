@@ -1635,20 +1635,31 @@ async def _settle_cancelled(
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
     what it ``spent`` until then), and say whether it was ended here (not ended, or taken
     over, elsewhere already): its open children then end with it (:func:`_children_ended`,
-    its caller's to call)."""
-
-    journal, parent = (None, None) if runtime is None else (runtime.replay.journal, runtime.parent)
-    kept = await _history_kept(agent, identity, worker_id, journal, parent)
+    its caller's to call). A run ``agent.cancel`` stopped here (``Agent.cancelling``) is
+    ended by the store's cancel once its log has its last events: the store keeps why, and
+    who asked."""
+    runs = agent.harness.runs
+    end: Callable[[], Awaitable[RunRecord]]
+    if identity.run_id in agent.cancelling:
+        asked = agent.cancelling[identity.run_id]
+        end = functools.partial(runs.cancel, identity.run_id, reason=asked, tenant=identity.tenant)
+    else:
+        journal, parent = (
+            (None, None) if runtime is None else (runtime.replay.journal, runtime.parent)
+        )
+        kept = await _history_kept(agent, identity, worker_id, journal, parent)
+        end = functools.partial(
+            runs.finish,
+            identity.run_id,
+            RunStatus.CANCELLED,
+            worker_id=worker_id,
+            tenant=identity.tenant,
+            **kept,
+        )
 
     async def write() -> bool:
         try:
-            await agent.harness.runs.finish(
-                identity.run_id,
-                RunStatus.CANCELLED,
-                worker_id=worker_id,
-                tenant=identity.tenant,
-                **kept,
-            )
+            await end()
         except (LeaseLostError, ConflictError):
             log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
             return False
