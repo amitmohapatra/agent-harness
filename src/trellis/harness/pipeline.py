@@ -102,7 +102,7 @@ from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.schedules import Fired
-from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
+from trellis.harness.telemetry import RunTrace, agent_span, concluded, decided, metrics, output
 from trellis.harness.tools import bridge, stored
 from trellis.harness.tools.base import SOURCES
 from trellis.harness.tools.results import merged as merged_state
@@ -455,8 +455,9 @@ async def _attempt(
     # a sub-agent's run works inside its parent's tool call: not in that call, in its own run
     tokens = (_current.set(runtime), _call.set(None))
     agent.running[identity.run_id] = runtime
-    try:
-        with agent_span(_traced(runtime), runtime.task) as span:
+    # the attempt's span lasts until it is concluded: how it ended, and what it spent, are on it
+    with agent_span(_traced(runtime), runtime.task) as span:
+        try:
             if decision is not None:
                 decided(span, decision)
             async with clock:
@@ -471,31 +472,26 @@ async def _attempt(
                     streaming=listener is not None,
                 )
             output(span, jsonable(extracted.answer))
-    except RunCancelled as exc:
-        runtime.cancelled = str(exc)
-    except asyncio.CancelledError as exc:
-        stopped = await _cancelled(agent, runtime, journal, job, exc)
-    except Exception as exc:
-        # a framework may wrap or swallow the pause: the runtime is what says it paused
-        if runtime.pending is None:
-            error = exc
-    finally:
-        runtime.unwatched()
-        _call.reset(tokens[1])
-        _current.reset(tokens[0])
-        agent.running.pop(identity.run_id, None)
-    error = _stalled(runtime) or error
-    # out of time: the attempt's clock ended it, its worker did, or what failed it failed past
-    # the run's time — a call bounded by what was left of it (a model call's ``TimeoutError``)
-    # fires with the clock, and its error may reach the attempt first
-    late = error is not None and runtime.ends_at is not None and time.monotonic() >= runtime.ends_at
-    timed_out = (
-        budget.error if budget is not None and (clock.expired() or stopped or late) else None
-    )
-    bridge.unended(runtime, timed_out=timed_out is not None)
-    result = await _concluded(
-        agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
-    )
+        except RunCancelled as exc:
+            runtime.cancelled = str(exc)
+        except asyncio.CancelledError as exc:
+            stopped = await _cancelled(agent, runtime, journal, job, exc)
+        except Exception as exc:
+            # a framework may wrap or swallow the pause: the runtime is what says it paused
+            if runtime.pending is None:
+                error = exc
+        finally:
+            runtime.unwatched()
+            _call.reset(tokens[1])
+            _current.reset(tokens[0])
+            agent.running.pop(identity.run_id, None)
+        error = _stalled(runtime) or error
+        timed_out = _timeout_error(runtime, budget, clock.expired() or stopped, error)
+        bridge.unended(runtime, timed_out=timed_out is not None)
+        result = await _concluded(
+            agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
+        )
+        _traced_end(span, runtime, result)
     _kept_session(agent, runtime, journal, result)
     await _kept_results(agent, runtime, journal, result)
     await schedules.ended(agent, runtime, result)
@@ -927,6 +923,46 @@ def _out_of_time(job: Job | None, cancelled: asyncio.CancelledError) -> bool:
         and RELEASED not in cancelled.args
         and left is not None
         and left <= STOPPED_EARLY
+    )
+
+
+def _timeout_error(
+    runtime: Runtime, limits: Budget | None, ended: bool, error: Exception | None
+) -> AgentError | None:
+    """The attempt's time-out error when it ran out of time: its clock ended it, its worker did
+    (``ended``), or what failed it failed past the run's time — a call bounded by what was left
+    of it (a model call's ``TimeoutError``) fires with the clock, and its error may reach the
+    attempt first."""
+    late = error is not None and runtime.ends_at is not None and time.monotonic() >= runtime.ends_at
+    return limits.error if limits is not None and (ended or late) else None
+
+
+def _traced_end(span: Any, runtime: Runtime, result: Result) -> None:
+    """How the attempt ended, and what the run spent, on its span (``telemetry.concluded``)."""
+    asked = result.interrupt
+    interrupt = (
+        None
+        if asked is None
+        else {
+            "id": asked.interrupt_id,
+            "reason": asked.reason.value,
+            "question": asked.question,
+            "assignee": asked.assignee,
+            "tool": None if asked.tool_call is None else asked.tool_call.tool,
+            "component": asked.component,
+            "options": [o if isinstance(o, str) else o.value for o in asked.options] or None,
+        }
+    )
+    error = None if result.error is None else (result.error.code, result.error.message)
+    if error is None and runtime.cancelled is not None:
+        error = ("CANCELLED", runtime.cancelled)
+    concluded(
+        span,
+        result.status.value,
+        budget.spent(runtime),
+        root=runtime.parent is None,
+        error=error,
+        interrupt=interrupt,
     )
 
 

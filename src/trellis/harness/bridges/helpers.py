@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import AgentError, RunStart, RunStatus, stable_id
 from trellis.contracts.errors import is_pause_signal
+from trellis.harness import telemetry
 from trellis.harness.history import Said, Speaker, recorded
 from trellis.harness.identity import AGENT_GROUP
 
@@ -118,6 +119,8 @@ class Helper:
     kind: Kind | None = None
     #: how far the run had read its journal when it started (``Replay.cursor``)
     read: dict[str, int] = field(default_factory=dict)
+    #: its ``invoke_agent`` span (``telemetry.helper_span``), open while it works here
+    span: Any = None
 
 
 #: The helper whose work is running in this task (:meth:`Helpers.working`).
@@ -277,6 +280,9 @@ class Helpers:
         )
         parent.agent.harness.holds.hold(run_id, parent.tenant)
         helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)], kind=kind)
+        helper.span = telemetry.helper_span(
+            name, run_id, parent.run_id, task, framework=self.framework, kind=kind.value
+        )
         if kind is Kind.SUBAGENT:  # its framework starts it again after a pause in its work
             helper.read = parent.replay.cursor()
         helper.memory = self._memory(run_id)
@@ -304,7 +310,8 @@ class Helpers:
         makes are recorded under the helper's run (:func:`inside`)."""
         token = _INSIDE.set(helper)
         try:
-            yield
+            with telemetry.within(None if helper is None else helper.span):
+                yield
         finally:
             _INSIDE.reset(token)
 
@@ -461,6 +468,7 @@ class Helpers:
                 error=None if error is None else AgentError(code=UNFINISHED, message=error),
                 tenant=self.runtime.tenant,
             )
+        _span_ended(helper, status.value, output=output, error=error)
         ended(
             self.runtime.events,
             run_id=helper.run_id,
@@ -500,6 +508,7 @@ class Helpers:
         framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
         if paused:  # they wait with the run: let go of in the store, not left to lapse
             for helper in self._open.values():
+                _span_ended(helper, RunStatus.PAUSED.value, error="it waits with its run")
                 await self.runtime.agent.harness.holds.release(helper.run_id, self.runtime.tenant)
             return
         why = None if error is None else f"the run ended first: {type(error).__name__}"
@@ -614,6 +623,15 @@ class Helpers:
             events=parent.events,
             record=scoped.record("run_feedback", **feedback),
         )
+
+
+def _span_ended(
+    helper: Helper, status: str, *, output: str | None = None, error: str | None = None
+) -> None:
+    """The helper's span ended (once: an attempt that takes it up again starts another)."""
+    span, helper.span = helper.span, None
+    if span is not None:
+        telemetry.helper_ended(span, status, answer=output, error=error)
 
 
 def text_of(output: Any) -> str:

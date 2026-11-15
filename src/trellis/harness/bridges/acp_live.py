@@ -130,7 +130,7 @@ def accounted(runtime: Runtime, record: Mapping[str, Any], model: str | None) ->
     usage = record["usage"]
     cached = int(usage.get("inputCacheRead") or 0)
     written = int(usage.get("inputCacheCreation") or 0)
-    budget.account(
+    budget.reported(
         runtime,
         model=model or str(record.get("model") or "kimi"),
         input_tokens=int(usage.get("inputOther") or 0) + cached + written,

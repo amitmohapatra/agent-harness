@@ -1541,7 +1541,7 @@ class Attempt:
         usage = getattr(answer, "usage", None)
         if usage is None or self.usage is not None:
             return
-        budget.account(
+        budget.reported(
             self.runtime,
             model=self.target.model or ACP_MODEL,
             input_tokens=usage.input_tokens,

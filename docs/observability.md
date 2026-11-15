@@ -14,18 +14,58 @@ nothing (attributes are built only for a recording span).
 
 | Span | Attributes |
 |---|---|
-| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the conversation, as `session.id`), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, else `service.version`), `gen_ai.agent.version` and `langfuse.version` |
+| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the conversation, as `session.id`), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, else `service.version`), `gen_ai.agent.version` and `langfuse.version`. How the attempt ended: `trellis.run.status`, what the run spent so far (`trellis.spent.tokens`, `.cached_tokens`, `.cache_written_tokens`, `.cost`, `.model_calls`, `.tool_calls`); a failure (`ERROR`, `TIMEOUT`) the span's error status, `error.type` (the error's code) and `langfuse.observation.level=ERROR` with `langfuse.observation.status_message`; ended short (the step limit or a budget: `PARTIAL`; `CANCELLED`, with its reason) `level=WARNING` and the message; a resumed attempt `trellis.resumed` and `trellis.decision.*` (below) |
 | `retrieve memory` — the pushed context | `gen_ai.operation.name=retrieve`, `langfuse.observation.type=retriever`, input (the question), output (the rendered context) |
-| `execute_tool <tool>` — one per call | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` (`extension` for MCP, else `function`), `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `langfuse.observation.type=tool`, `trellis.tool.source`, `trellis.governance.action` (`run`, `announce` or `ask`: [governance.md](governance.md)) |
-| `chat <model>` — a model call of a graph with the harness's `ModelHooks` middleware (a `ReAct`'s) | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (when the prompt cache was used), `gen_ai.response.finish_reasons`, `langfuse.observation.type=generation`, input/output |
+| `execute_tool <tool>` — one per call: a harness tool's **and a framework's own built-in's** (by adapter, below) | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` (`extension` for MCP, else `function`), `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `langfuse.observation.type=tool`, `trellis.tool.source`, `trellis.governance.action` (`run`, `announce` or `ask` — `ask` when a person approved the call: [governance.md](governance.md)); a call that failed or timed out the error status, `error.type`, `trellis.tool.status` and level `ERROR`, what the model read its status message; one rejected (a person, a hook, a rule) level `WARNING`; one cut short by a pause `trellis.paused` (no error) |
+| `invoke_agent <helper>` — a sub-agent the framework spawns itself (a Deep Agent's `task`, Claude's subagent, Kimi's `Agent`, an OpenAI agent called as a tool: a child run) | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `langfuse.observation.type=agent`, `trellis.run_id` (its child run), `trellis.parent_run_id`, `trellis.helper.framework`, `.kind`, input (its task), output (its answer), `trellis.run.status`; its own tool calls and model replies nest under it. A harness sub-agent ([subagents.md](subagents.md)) is a run of its own: its attempt span is under the parent's `execute_tool` span, with `trellis.parent_run_id` |
+| `chat <model>` — a model call of a graph with the harness's `ModelHooks` middleware (a `ReAct`'s) | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (when the prompt cache was used), `gen_ai.usage.cost` (when the gateway said what it cost), `gen_ai.response.finish_reasons`, `langfuse.observation.type=generation`, input/output |
+| `chat <model>` — a model reply Claude Code, Kimi Code or the OpenAI Agents SDK made and reported (the harness does not make these calls) | `langfuse.observation.type=generation`, `gen_ai.request.model`, the `gen_ai.usage.*` above (cache reads and writes included), `gen_ai.usage.cost` where the framework reports one (Claude's `total_cost_usd`), `trellis.model_calls` (a Claude query's result counts its turn's replies); timed when reported |
+| `interrupt` — the run paused for a person (`langfuse.observation.type=event`, under the attempt) | `trellis.interrupt.id`, `.reason` (`APPROVAL`, `QUESTION`...), `.question` (also its input), `.assignee` (who is asked, when a hook named them), `.tool` (the call), `.component`, `.options` |
+| `decision` — the person's answer the next attempt goes on with (an event under it) | `trellis.decision.interrupt_id`, `.decision` (`APPROVE`, `EDIT`, `REJECT`...), `.reviewer`, `.comment`, `.remember`, `.choice` (`once`, `conversation`, `always`, `deny`; also its output) |
+| `partial`, `timeout`, `cancelled`, `error` — how an attempt ended short (an event under it) | `error.type`, the level and status message the attempt has |
 | `score <name>` — a grounding score, an evaluator's or feedback | `langfuse.observation.type=evaluator`, `trellis.run_id` (when the score is a run's), `trellis.score.name`, `.value`, `.comment`, and a `score` event; in the run's trace, or the trace an `EvalCase` names (`trace_id`) |
 | `invoke_agent <name>` — a callable's item in `evaluate(callable, ...)` | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `langfuse.trace.name`, `langfuse.observation.type=agent`, `user.id`, `trellis.run_id`, input/output, and the experiment attributes ([evaluation.md](evaluation.md#each-run-is-an-item-of-a-langfuse-experiment-v3-self-hosted-and-v4)) |
 
-A framework's own model calls are its instrumentation's (LangChain, OpenAI Agents and Claude
-all have OTel GenAI instrumentations); they nest under the attempt's span. A framework's own
-tools (Deep Agents' file tools, Claude Code's built-ins, an OpenAI `function_tool` of your own)
-are not harness tools and get no `execute_tool` span of the harness's
-([framework pages](README.md#which-target)).
+Every attribute name above follows the OTel GenAI semantic conventions or Langfuse's own
+OTel mapping (`langfuse.observation.type`, `.level`, `.status_message`, `.input`, `.output`,
+`langfuse.trace.metadata.*`; `gen_ai.usage.*` and `gen_ai.usage.cost` are a generation's
+usage and cost): [Langfuse: OpenTelemetry, property mapping](https://langfuse.com/integrations/native/opentelemetry),
+[observation types](https://langfuse.com/docs/observability/features/observation-types),
+[log levels](https://langfuse.com/docs/observability/features/log-levels). Langfuse prices
+and sums usage on generations only, so the run's spend is trace metadata, not a second count.
+
+### What reaches Langfuse, by adapter
+
+Every adapter: the attempt span (its outcome and spend), `retrieve memory`, an `execute_tool`
+span for each harness tool (your MCP servers' tools included), the `interrupt` and `decision`
+events of an approval or a question, the ending events, the scores, and a harness sub-agent's
+spans under its call. Beyond those, each framework's own steps:
+
+| Adapter | Its own tool calls (`execute_tool`) | Its sub-agents | Its model calls |
+|---|---|---|---|
+| `ReAct`, `create_agent` with `trellis.middleware()` | Deep Agents' file tools, `execute`, `task`; the provider's server tools (web search...) | `task` sub-agents: `invoke_agent <name>` | `chat` per call, with usage and cost (`ModelHooks`) |
+| a LangChain or LangGraph graph of your own | every tool of the graph (a `ToolNode`'s, a LangChain `@tool`), its state tools too | Deep Agents' `task` | the framework's instrumentation (LangChain's OTel, Langfuse's callback) |
+| Deep Agents (`create_deep_agent`) | `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `write_todos`, `execute`, `task` | `task` sub-agents, their calls under them | its instrumentation |
+| OpenAI Agents SDK | your `FunctionTool`s, hosted tools (file search, web search, code interpreter, image generation, hosted MCP), local shell, computer and sandbox actions | an agent called as a tool | `chat` per reply, with usage |
+| Claude Agent SDK (Claude Code) | every built-in (`Bash`, `Read`, `Write`, `Edit`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, `Task`/`Agent`...), its MCP servers' tools | its subagents (`agents=`, `Task`) and workflows | `chat` per query result, with usage, cache tokens and cost |
+| Kimi Code (ACP) | every tool it runs (its shell, file, search and `Agent` tools) | its `Agent` sub-agents and swarm members | `chat` per request its usage log records |
+| a function target | its `agent.tools.call(...)` calls | `h.wrap` sub-agents | its own instrumentation |
+
+A built-in's `trellis.governance.action` is what governance decided before the call ran
+(`bridge.permitted`): `ask` when a person approved it, `announce` or `run` otherwise; a hosted
+tool the provider ran inside the model's step was decided by nothing, and is `run`.
+
+### What goes elsewhere
+
+* **Metrics** (the counters below) go to the meter provider — a collector over OTLP — never to
+  Langfuse, which takes traces only.
+* **The run's audit record** — status, input, output, error, the interrupt kept for a person,
+  the spend, its parent and children — is agent-runs' (`RunRecord` and its event log); the
+  trace carries the run id that finds it.
+* **The memory service** keeps the transcript and the tool records, values as they are; a
+  background write that failed is a `write_failed <label>` span here, one that worked is only
+  the memory service's.
+* **Logs** go where the application's `logging` sends them ([Logs](#logs)).
 
 ### Trace attributes (Langfuse's mapping, verified against its OTel docs)
 
@@ -36,6 +76,7 @@ are not harness tools and get no `execute_tool` span of the harness's
 | `session.id` = the conversation (`h.conversation(user=, thread=)`: the tenant's, the user's and the thread's, so two users' threads named alike are two sessions), or the run id | session id |
 | `langfuse.trace.tags` = `[agent id, framework]` | tags |
 | `langfuse.trace.metadata.run_id`, `.tenant`, `.framework` | filterable trace metadata |
+| `langfuse.trace.metadata.status`, `.spent_tokens`, `.spent_cached_tokens`, `.spent_cache_written_tokens`, `.spent_cost`, `.spent_model_calls`, `.spent_tool_calls` (a run's own attempt sets them as it ends) | the run's outcome and spend, filterable |
 | `trellis.run_id`, `trellis.tenant`, `trellis.attempt` | span attributes (Datadog facets) |
 
 **One trace per run.** The trace id is derived from the run id (the first 128 bits of its
@@ -130,7 +171,10 @@ Whether the *harness* got slower is `make bench` (`tests/performance`, against t
 Traces mask credentials, and only traces: every span attribute passes
 `trellis.harness.redaction` once, where it is set. Names that look like secrets (`api_key`,
 `password`, `token`...) and values that look like credentials (bearer tokens, JWTs, `sk-...`,
-long key-like blobs) become `[redacted]`, long values are cut at 2000 characters. Names are
+long key-like blobs) become `[redacted]`, and the same credentials inside longer text (a
+command line, an error message) are masked where they stand; long values are cut at 2000
+characters. An error raised out of a span is recorded by the harness with its message
+redacted (the OTel SDK's own `record_exception` keeps it as it is). Names are
 matched by their words, not substrings (`gen_ai.usage.input_tokens` and `tokenizer` stay;
 `refresh-token` and `X-Api-Key` go), and a number is never treated as a credential. Mappings
 and lists are redacted recursively, and so is text that is a JSON object or array (a model's

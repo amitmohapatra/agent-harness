@@ -1261,7 +1261,7 @@ def _spent(
         return sum(int(u.get(key) or 0) for u in usages)
 
     cached, written = total("cache_read_input_tokens"), total("cache_creation_input_tokens")
-    budget.account(
+    budget.reported(
         runtime,
         model=options.model,
         input_tokens=total("input_tokens") + cached + written,
