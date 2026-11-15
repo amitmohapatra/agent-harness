@@ -372,6 +372,23 @@ NOTICES: Final = {
 #: ``file_path``, a notebook's in ``notebook_path``): one written in the run's workspace is
 #: made the run's (``Relay.adopt``), so its commands may change it.
 FILE_TOOLS: Final = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+#: Claude Code's tools that read or write a file in its own process, as the service's user, and
+#: the argument naming it: one outside the folders the run may read (its working folder, the
+#: options' ``add_dirs``, its skills) is the service's, refused (:data:`OUTSIDE`).
+FILE_PATHS: Final = {
+    "Read": "file_path",
+    "Glob": "path",
+    "Grep": "path",
+    "Write": "file_path",
+    "Edit": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+#: What a file tool's call outside the run's folders is refused with.
+OUTSIDE: Final = (
+    "{tool} was not run: {path} is outside the folders this run works in, and Claude Code "
+    "reads and writes as this service there: its files are not the run's"
+)
 #: Claude Code's tool that runs code inside its own process (no shell the harness can run it
 #: in): left out while its shell runs through the isolation layer.
 IN_PROCESS: Final = ("REPL",)
@@ -1755,7 +1772,9 @@ def _shell(options: Any, env: Mapping[str, str]) -> Shell:
 def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
     """The ``can_use_tool`` the CLI calls when Claude Code would ask its user about a call (its
     permission mode and rules let it through without asking otherwise): the team's own
-    callback, when it has one; else a call that only reads runs — a read tool, or a shell
+    callback, when it has one; else a file tool's call outside the run's folders is refused
+    (:data:`FILE_PATHS`: Claude Code reads and writes there as the service); else a call that
+    only reads runs — a read tool, or a shell
     command the CLI's ``shell`` reads as read-only (``Shell.read_only``: from every folder it
     may be in, none known while another call that may move it is under way) —, so does the
     shell (:data:`CLAUDE_SHELLS`: in its sandbox, or on a host the deployment allows it on —
@@ -1784,6 +1803,9 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
                 verdict = _relayed(steps.relay, name, verdict.updated_input or args)
         elif own is not None:
             verdict = await own(name, args, context)
+        elif (path := args.get(FILE_PATHS.get(name, ""))) and not shell.reaches(str(path)):
+            # a file tool's call outside the run's folders (:data:`FILE_PATHS`): the service's
+            verdict = PermissionResultDeny(message=OUTSIDE.format(tool=name, path=path))
         elif name == QUESTION_TOOL:
             try:
                 verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))

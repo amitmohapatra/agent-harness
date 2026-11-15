@@ -235,7 +235,7 @@ Kept results are bound at `/large_tool_results` (an empty mount point the layer 
 | `ReAct(backend=sandbox())`, `create_deep_agent(**sandbox().deep_agent())` | yes (`execute` and the file tools) |
 | a function or LangGraph agent with `sandbox().tools()`, any framework given those tools | yes |
 | Kimi Code, `kimi(sandbox=sandbox())` | its `Bash` and file writes: yes (its working folder is the workspace); its own reads are not isolated (they read the host) |
-| Claude Agent SDK's own `Bash`, `Monitor`, `PowerShell` (a background `Bash` too) | yes: each command runs in the run's workspace as its uid (`sandbox.relay`), Claude Code's working folder that workspace; its file tools run in the CLI as the service's user (not isolated) |
+| Claude Agent SDK's own `Bash`, `Monitor`, `PowerShell` (a background `Bash` too) | yes: each command runs in the run's workspace as its uid (`sandbox.relay`), Claude Code's working folder that workspace; its file tools run in the CLI as the service's user (not isolated: a path outside the run's folders is refused) |
 | OpenAI Agents SDK's `LocalShellTool`, local `ShellTool` | yes: each command in the run's workspace (the tool's own executor is not called), its result the SDK's |
 | OpenAI Agents SDK's `SandboxAgent` and its clients | no: the SDK's own sandbox (Docker, hosted); the Unix-local client runs as the SDK runs it, unisolated; give it a hosted or Docker client, or `sandbox().tools()` |
 | Deep Agents with a backend of its own (`LocalShellBackend`) | no isolation: refused at `h.wrap`, naming `sandbox()` |
