@@ -523,7 +523,7 @@ async def _continued_session(
     if kept is None:
         return False
     if mine is not None and await _served_elsewhere(agent, identity, mine):
-        agent.sessions.pop(conversation)
+        agent.sessions.discard(conversation)
         return False
     journal.session, transcripts = kept
     journal.transcripts = {name: list(entries) for name, entries in transcripts.items()}

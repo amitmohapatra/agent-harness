@@ -455,15 +455,14 @@ facts from the first. It reports recall, input tokens per turn and seconds per t
 
 ## Complex-questions suite
 
-`python -m benchmark.cost.complex` asks 81 conversations of the questions a ChatGPT or Claude
+`python -m benchmark.cost.complex` asks 84 conversations of the questions a ChatGPT or Claude
 user brings to an analytics assistant, over a fake retailer's data (2,000 SKUs, 50,000 sales
 lines, stock that moves between turns; `benchmark/cost/retail.py`), each scored against an
 answer Python computed from the same data: multi-hop tool chains, joins and statistics,
 formulas and what-ifs, follow-ups and corrections, explanations, fresh values, ambiguity,
 missing data, conflicting sources, failing or huge tool results and multi-part requests, in
-three tiers; and four requests the default deployment cannot meet (a chart, a custom Python
-script, an Excel file, a k-means clustering: no sandbox, no Code Mode, no file or image
-output), correct only when the answer says it cannot do it here, why, and what it can do
+three tiers; and three requests the default deployment cannot meet (a chart, a custom Python
+script, an Excel file: no sandbox, no Code Mode, no file or image output), correct only when the answer says it cannot do it here, why, and what it can do
 instead, with nothing made up (`cantdo`). `--scripted` replays every case's gold calls through the harness with the scripted
 chat model (no endpoint); `--model` runs the model the `LLM_*` settings serve, `--max-usd`
 stops the run at a spend (from the usage the replies report), `--cases` and `--rerun-failed`
@@ -551,10 +550,11 @@ is right when the run used its web tool (`WebSearch`, `WebFetch`, Kimi's `FetchU
 must still say the data is not there.
 
 
-**What a deployment can do, with exact answers (`cando`, `benchmark/cost/cando.py`).** Five
+**What a deployment can do, with exact answers (`cando`, `benchmark/cost/cando.py`).** Six
 conversations whose figure every variant must give — a workbook with the right rows, a chart
 with the right labels, a script with an exact figure, a k-means clustering from fixed starting
-centres, a file saved in one chat and read back in the next. Each figure comes from a query over
+centres (of the catalogue by price, and of the stores by revenue), a file saved in one chat and
+read back in the next. Each figure comes from a query over
 the kept result, so the case runs without a sandbox too; what only code makes (the chart, the
 script) is checked only where code runs, and the clustering applies only there. A `file` check
 (`Probe("file", ...)`) reads what the run kept for its user: the file's name, its lines, and the
