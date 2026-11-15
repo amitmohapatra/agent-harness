@@ -1041,6 +1041,23 @@ async def test_at_its_turn_limit_a_query_ends_partial_with_what_claude_said(
 
 
 @pytest.mark.parametrize("kept", [False, True], ids=["own-process", "live"])
+async def test_a_turn_counts_one_model_call_for_each_reply_claude_reports(
+    harness: Harness, tmp_path: Path, kept: bool
+) -> None:
+    """Claude Code reports each model response as an assistant message with its id and usage,
+    and ends the turn with one ``ResultMessage``. A turn of two tool calls and an answer is
+    three model calls, as the provider serves them — not one for its result (the comparison
+    of 2026-11-15 counted 1.07 a turn against the provider's 3.00) — in a process kept for the
+    conversation and in one process a query alike."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(2)]
+    own = {} if kept else {"max_budget_usd": 100.0}  # a budget of its own: a process a query
+    agent = harness.wrap(options(tmp_path, [*reads, {"text": "read"}], model="m", **own), id="n")
+    events = [e async for e in agent.stream("read both", user="u1", thread="t1")]
+    assert events[-1].data["result"] == "read"
+    assert events[-1].data["spent"]["model_calls"] == 3
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["own-process", "live"])
 async def test_a_conversation_reset_is_charged_what_the_session_cost_since(
     harness: Harness, tmp_path: Path, kept: bool
 ) -> None:

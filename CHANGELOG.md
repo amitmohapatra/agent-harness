@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: what the framework comparison of 2026-11-15 found
+
+* **Claude Agent SDK: a model call for each reply.** A run's `model_calls` counted one per
+  query result (1.07 a turn on Haiku, against the provider's 3.00): each model response the
+  CLI reports — an assistant message with its id and usage, the main agent's or a
+  subagent's — is now one model call, as the provider serves it.
+
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 
 * **OpenAI Agents: a governed call inside an agent tool resumes.** An `Agent.as_tool` agent
