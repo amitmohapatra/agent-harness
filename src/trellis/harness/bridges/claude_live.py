@@ -80,7 +80,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
-from trellis.harness.bounded import LRU
 from trellis.harness.bridges import live
 from trellis.harness.bridges.claude import (
     JournalSessions,
@@ -338,9 +337,6 @@ class LiveSession(Keeper[Background]):
         #: the turn left before its own result (paused, cancelled): the result that comes
         #: next is its own, what it spent its run's — never the conversation's next turn's
         self.left: Turn | None = None
-        #: where the conversation's session is kept for a turn with no live one
-        #: (``Agent.sessions``), once a turn was served
-        self.kept_in: LRU[str, Any] | None = None
         self._reader: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ its start
@@ -706,7 +702,6 @@ class LiveSession(Keeper[Background]):
     def _attach(self, turn: Turn) -> None:
         super()._attach(turn)
         self.left = None  # its result came (:meth:`settled`), or never will
-        self.kept_in = turn.runtime.agent.sessions
         if self.mirror is not None:
             store = turn.options.session_store
             assert isinstance(store, JournalSessions)  # as the process's is (its shape)

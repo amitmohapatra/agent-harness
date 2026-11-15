@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
+from tests.support.invariants import descendants
 from tests.support.kimi import (
     KIMI_BIN,
     PlannedEndpoint,
@@ -31,11 +33,14 @@ from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness import compat
-from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAdapter
 from trellis.harness.adapters.claude import RESUMED_CALL
+from trellis.harness.bridges import live
+from trellis.harness.bridges.acp_live import ACPSession
 from trellis.harness.budget import Budget
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.identity import conversation_key
 from trellis.harness.sandbox import sandbox
 from trellis.harness.tools import bridge
 from trellis.harness.tools.bridge import TURN_STALLED
@@ -1029,6 +1034,40 @@ async def test_a_command_kimi_runs_in_the_background_finishes_after_its_turn(
     async with asyncio.timeout(20):
         while not made.exists():  # noqa: ASYNC110 - a file the command writes
             await asyncio.sleep(0.1)
+
+
+async def test_a_kept_kimi_whose_hold_lapses_ends_with_its_command_and_its_sessions_files(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KIMI-LIVE-1, real Kimi: the process kept for a command it runs in the background ends
+    when the conversation's hold of it lapses (kept as long as a session is) — and the command
+    with it, no process of the test's left — no run is left ``RUNNING``, and the session's own
+    folder leaves its user's Kimi home, whose config stays."""
+    monkeypatch.setattr(live, "WORKING_SECONDS", 1.0)
+    command = {
+        "command": "sleep 60 && touch late.txt",
+        "run_in_background": True,
+        "description": "wait",
+    }
+    endpoint.plan = [("Bash", command)]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-lapse")
+    before = set(descendants(os.getpid()))
+    paused = await agent.run("wait a minute", user="u1", thread="t1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    adapter = agent.adapter
+    assert isinstance(adapter, ACPAdapter)
+    session = adapter.live.get(conversation_key("default", "u1", "t1"))
+    assert isinstance(session, ACPSession) and session.working  # kept: the command works
+    home = kimi_home_of("u1")
+    [folder] = home.glob(f"sessions/*/{session.session_id}")
+    async with asyncio.timeout(30):
+        while not session.closed or folder.exists() or set(descendants(os.getpid())) - before:  # noqa: ASYNC110 - processes and files
+            await asyncio.sleep(0.1)
+    assert not [s async for s in harness.runs.iterate() if s.status is RunStatus.RUNNING]
+    assert (home / "config.toml").is_file() and (home / "sessions").is_dir()
+    assert not (tmp_path / "kimi-work" / "late.txt").exists()
 
 
 async def test_kimis_answer_streams(

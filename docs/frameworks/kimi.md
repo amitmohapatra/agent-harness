@@ -239,6 +239,11 @@ that ends with nothing at work ends it, as ever.
   last turn whatever does, when a turn brings other settings (`framework_options`, other harness
   tools) or does not continue its session, and with the harness (`Harness.aclose`). Work that
   ends with it is said in the conversation's next run (`acp_session`); a restart loses it.
+  When its time is up, its place is given to another conversation, or the harness closes, the
+  session's own folder (`sessions/<workspace>/<session>`) leaves its user's Kimi home too — its
+  login and config stay — and the conversation's next turn starts a new session, given its
+  earlier turns by the harness (a session closed for other settings, or as the turn ends with
+  nothing at work, stays on disk: the next turn resumes it).
 * **On another worker.** A turn whose session another worker's process still holds (a background
   run it handed on, not ended) forks it (`session/fork`) and goes on there in a process of its own.
 * **Not kept:** a run with no `thread`, a sub-agent's run, a sandboxed run (its sandbox is the

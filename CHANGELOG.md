@@ -76,6 +76,15 @@ shape) given to the conversation's model at its next model call or turn, or by a
 chat's own on its thread stream when it is idle; its questions asked through the chat
 (`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
 
+### Fixed: the last open harness bugs
+
+- Kimi: a conversation's kept process whose time is up (kept as long as a session is, idle, its
+  place given to another conversation) or that the harness closes (`Harness.aclose`) leaves
+  nothing behind: the process and what it started end, its background runs end, and the
+  session's own folder leaves its user's Kimi home (its login and config stay). The
+  conversation's next turn starts a new session, given its earlier turns by the harness, where
+  it resumed a session whose files stayed on disk for good.
+
 ### Fixed: each library's own skills, through the harness
 
 - `ReAct(skills=src)`: its general-purpose helper (Deep Agents' `task`) is told the run's skills

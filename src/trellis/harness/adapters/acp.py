@@ -425,6 +425,16 @@ class UsageLog:
         found = self.home.glob(f"sessions/*/{self.session_id}/agents/{agent}/wire.jsonl")
         return sorted(path for path in found if path.parent.name not in self.skip)
 
+    def removed(self) -> None:
+        """The session's own files removed from Kimi's home: its folder
+        (``sessions/<workspace>/<session>``), its log in it. What Kimi keeps for every session
+        — its login, its config, its skills — stays. Only a folder of that name directly in a
+        workspace's is removed, whatever the agent named its session."""
+        for workspace in self.home.glob("sessions/*"):
+            folder = workspace / self.session_id
+            if folder.resolve().parent == workspace.resolve() and folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+
     def profile(self, agent: str) -> str | None:
         """The profile Kimi started the sub-agent ``agent`` (its id) with: its type, which a
         resumed agent keeps (its log's ``profile.bind``); ``None`` when no log of it says."""

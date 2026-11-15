@@ -17,6 +17,7 @@ import pytest
 from tests.integration.test_acp import children, fake, recorded
 from tests.support.arm import with_governance
 from tests.support.catalog import FakeCatalog
+from tests.support.invariants import descendants
 from trellis import Harness
 from trellis.contracts import RunStatus
 from trellis.harness import budget
@@ -304,7 +305,8 @@ async def test_work_that_ends_with_the_process_ends_its_run_and_the_next_turn_is
 ) -> None:
     """A session is kept at most ``live.WORKING_SECONDS`` after its last turn: the process
     ends then, its background sub-agent's run ends ``ERROR`` saying so, and the next turn —
-    in a new process, resuming the session — is told what was stopped."""
+    in a new process and a new session (the lapsed one's files are gone), given the earlier
+    turns by the harness — is told what was stopped."""
     monkeypatch.setattr(shared, "WORKING_SECONDS", 0.5)
     script = [
         {"agent": LOOK, "background": {"after": 30, "result": "never"}},
@@ -322,7 +324,96 @@ async def test_work_that_ends_with_the_process_ends_its_run_and_the_next_turn_is
     assert events[-1].error is None
     [said] = warned(events)
     assert said.startswith("Kimi Code's session was closed (it was kept as long as a session is)")
-    assert [s["how"] for s in recorded(tmp_path)["sessions"]] == ["new", "resume"]
+    assert [s["how"] for s in recorded(tmp_path)["sessions"]] == ["new", "new"]
+    assert "look" in recorded(tmp_path)["prompts"][-1]  # the first turn, from the harness
+
+
+def _team_home(tmp_path: Path) -> Path:
+    """The team's Kimi home of :func:`fake`'s agent: its login and its config."""
+    team = tmp_path / "home"
+    (team / "credentials").mkdir(parents=True)
+    (team / "config.toml").write_text('default_model = "k2"\n')
+    return team
+
+
+def _session_left(agent: Agent, session: acp_live.ACPSession) -> list[Path]:
+    """What is left of ``session``'s own files in its user's Kimi home."""
+    assert session.log is not None
+    return list(session.log.home.glob(f"sessions/*/{session.session_id}"))
+
+
+async def _no_child_left(before: set[int]) -> None:
+    """No process this test started is left (the agent's, and what it started)."""
+    await until(lambda: not set(descendants(os.getpid())) - before)
+
+
+async def test_a_session_whose_hold_lapses_leaves_no_process_no_running_run_and_no_files(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KIMI-LIVE-1. The conversation's hold of its kept session lapses (kept as long as a
+    session is): the process and what it started end, no run is left ``RUNNING``, the
+    session's own files leave its user's Kimi home — its login and its config stay — and the
+    conversation keeps no session for its next turn to continue."""
+    monkeypatch.setattr(shared, "WORKING_SECONDS", 0.5)
+    team = _team_home(tmp_path)
+    script = [{"agent": LOOK, "background": {"after": 30, "result": "never"}}, {"text": "go"}]
+    agent = harness.wrap(fake(tmp_path, script), id="bg-lapse")
+    before = set(descendants(os.getpid()))
+    first = await say(agent, "look")
+    session = kept(agent)
+    assert session is not None and _session_left(agent, session)
+    home = session.log.home
+    [child] = await children(harness, first.run_id)
+    assert (await ended(harness, child.run_id)).status is RunStatus.ERROR
+    await until(lambda: session.closed and not _session_left(agent, session))
+    await _no_child_left(before)
+    runs = [s async for s in harness.runs.iterate()]
+    assert not [s for s in runs if s.status is RunStatus.RUNNING]
+    assert (home / "config.toml").read_text() == (team / "config.toml").read_text()
+    assert (home / "credentials").resolve() == team / "credentials"
+    assert (home / "sessions").is_dir()  # only the session's own folder went
+    assert agent.sessions.get(conversation_key("default", USER, THREAD)) is None
+
+
+async def test_a_lapsing_session_leaves_a_newer_session_of_its_conversation_kept(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session the conversation keeps for its next turn is another one by then: that one
+    stays kept; only the lapsed session's files go."""
+    monkeypatch.setattr(shared, "WORKING_SECONDS", 0.5)
+    script = [{"agent": LOOK, "background": {"after": 30, "result": "never"}}, {"text": "go"}]
+    agent = harness.wrap(fake(tmp_path, script), id="bg-newer")
+    await say(agent, "look")
+    session = kept(agent)
+    assert session is not None
+    key = conversation_key("default", USER, THREAD)
+    agent.sessions[key] = ("session_newer", {})
+    await until(lambda: session.closed and not _session_left(agent, session))
+    assert agent.sessions.get(key) == ("session_newer", {})
+
+
+async def test_a_session_kept_when_the_harness_closes_leaves_no_process_and_no_files(
+    tmp_path: Path,
+) -> None:
+    """KIMI-LIVE-2. ``Harness.aclose`` with a kept session: its process and what it started
+    end, its background run is not left ``RUNNING``, and its files leave its user's Kimi home,
+    whose login and config stay."""
+    team = _team_home(tmp_path)
+    script = [{"agent": LOOK, "background": {"after": 30, "result": "never"}}, {"text": "go"}]
+    before = set(descendants(os.getpid()))
+    async with Harness() as harness:
+        agent = harness.wrap(fake(tmp_path, script), id="bg-aclose")
+        first = await say(agent, "look")
+        [child] = await children(harness, first.run_id)
+        session = kept(agent)
+        assert session is not None and _session_left(agent, session)
+    await _no_child_left(before)
+    assert not _session_left(agent, session)
+    record = await harness.runs.get(child.run_id)
+    assert record is not None and record.status is RunStatus.ERROR
+    home = session.log.home
+    assert (home / "config.toml").read_text() == (team / "config.toml").read_text()
+    assert (home / "credentials").resolve() == team / "credentials"
 
 
 async def test_a_process_that_dies_ends_its_background_runs(
