@@ -634,12 +634,11 @@ def event(
         given[LEVEL] = level
     if message is not None:
         given[STATUS_MESSAGE] = message[:PROPAGATED_MAX_CHARS]
-    with _tracer.start_as_current_span(name) as current:
-        if current.is_recording():
-            current.set_attributes(redact_attributes(given))
-            if level == "ERROR":
-                current.set_status(trace.Status(trace.StatusCode.ERROR, message))
-            _experimented(current)
+    with _tracer.start_as_current_span(name) as current:  # the attempt's records: so does this
+        current.set_attributes(redact_attributes(given))
+        if level == "ERROR":
+            current.set_status(trace.Status(trace.StatusCode.ERROR, message))
+        _experimented(current)
 
 
 def generation(
