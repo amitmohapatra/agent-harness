@@ -32,6 +32,8 @@ Spending: every result carries usage (:data:`STEP_TOKENS` a step) and a cost
 ``error_max_budget_usd`` result. ``{"cut": true}`` is a step whose reply reached the model's
 output limit with no answer: the query ends with the result the real CLI gives once its own
 recovery gave up (``success``, no text, ``stop_reason`` ``max_tokens``).
+``FAKE_CLAUDE_ANSWERS_WAITING`` (a JSON step) is the "model"'s reply to the pause's placeholder
+a harness tool answered with: one more step before the turn's result, as the real CLI's.
 ``--include-partial-messages`` sends each text as word deltas
 (``stream_event``) before its message.
 
@@ -274,6 +276,9 @@ class Cli:
         self.session: str | None = None
         #: whether the last tool call ended without running, or failed (not paused): done
         self.denied = False
+        #: whether the last tool call ran and its result was the pause's placeholder: the
+        #: "model" reads it as the call's result (:meth:`answer_waiting`)
+        self.waited = False
         #: every prompt the session's "model" was given: the user's and the injected ones
         self.heard: list[str] = []
         #: the prompts sent while a turn was under way, and the turns the session owes itself
@@ -1014,6 +1019,7 @@ class Cli:
                 raise Interrupted
             if not completed:
                 if interrupted:
+                    self.answer_waiting(session, step, read, context)
                     break
                 if not self.denied:
                     continue
@@ -1023,6 +1029,19 @@ class Cli:
         send(self.ended(session, last=last, turns=len(script)))
         if any(item.get("quit") for item in script):  # a CLI that ends of itself, cleanly
             sys.exit(0)
+
+    def answer_waiting(self, session: str, step: int, read: str, context: str) -> None:
+        """The "model"'s reply to the pause's placeholder (:data:`WAITING`), the result of a
+        harness tool's call that paused the run, with ``FAKE_CLAUDE_ANSWERS_WAITING`` (a JSON
+        step): one more step (paid) before the turn's result, as the bundled CLI (2.1.325)
+        sends the call's result to the model and the model answers it (seen with Haiku). A
+        denied permission or a hook's ``continue: false`` ends the turn with no reply."""
+        answer = os.environ.get("FAKE_CLAUDE_ANSWERS_WAITING")
+        waited, self.waited = self.waited, False
+        if answer is None or not waited:
+            return
+        self.steps += 1
+        self.step(session, step, json.loads(answer), read, context)
 
     def step(
         self, session: str, step: int, item: dict[str, Any], read: str, context: str
@@ -1260,6 +1279,7 @@ class Cli:
             content = [{"type": "text", "text": permission.get("message", "denied")}]
         read = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         waits = read == WAITING  # the run paused: the SDK stops reading, the process ends
+        self.waited = allowed and waits
         if not quiet:
             self.result(session, tool_id, content, parent)
         stops = waits or bool(permission.get("interrupt"))

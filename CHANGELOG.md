@@ -83,6 +83,14 @@ chat's own on its thread stream when it is idle; its questions asked through the
   to charge (a background shell command's end), to the conversation's next turn. Before, only
   its cost was charged: against Haiku through the real CLI, 6,388 input and 70 output tokens
   of such a turn were on no run's budget.
+- Claude: a query that pauses in a process of its own is charged its turn as the provider
+  billed it. Claude Code sends the pause's placeholder to the model as the paused call's
+  result, and the model's reply to it is billed; the harness left the process at the pause,
+  so the run was charged its replies' tokens and no dollars, and never that reply (51-83% of
+  the paused attempt's dollars against Haiku). The process is now read to its turn's result
+  (30 seconds at most; a call made in that reply is refused, ending the turn), and the run is
+  charged it: against Haiku, an approved and a rejected call match the provider's bill in
+  tokens and dollars.
 
 ### Fixed: each library's own skills, through the harness
 

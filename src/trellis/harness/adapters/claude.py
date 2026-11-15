@@ -45,14 +45,14 @@
   run, and a turn with no live session (another server, a restart, one closed) run as below:
   one process for the query, resuming the conversation's session;
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
-  ends — a conversation's live one stays, its turn ended, and the resumed attempt is
-  sent into it). The session the CLI kept (``ResultMessage.session_id``) is in the run's
-  journal, and the next attempt resumes it (``resume=``): Claude goes on from where it was —
-  its built-in tools are not run again — and, told which call a person answered about, calls
-  that tool
-  again, which the journal answers (a call a question was asked in runs as it was, whatever
-  words Claude makes it again with: ``Replay.made``). The session is kept in the run's journal
-  too, as the SDK's
+  ends, once read to its turn's result, which the run is charged: the model's billed reply
+  to the pause's placeholder is in it — a conversation's live one stays, its turn ended, and
+  the resumed attempt is sent into it). The session the CLI kept
+  (``ResultMessage.session_id``) is in the run's journal, and the next attempt resumes it
+  (``resume=``): Claude goes on from where it was — its built-in tools are not run again —
+  and, told which call a person answered about, calls that tool again, which the journal
+  answers (a call a question was asked in runs as it was, whatever words Claude makes it
+  again with: ``Replay.made``). The session is kept in the run's journal too, as the SDK's
   ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
   any machine. A session the CLI cannot continue (options keeping their own store, a transcript
   it refuses) is a warning, and the query runs again from its prompt against the journal;
@@ -73,6 +73,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import functools
@@ -81,7 +83,6 @@ import logging
 import os
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping, Sequence
-from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
 
@@ -309,6 +310,9 @@ FAILED_EVENT: Final = "PostToolUseFailure"
 STEERED_SAYS: Final = "The user adds, while you work: "
 #: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "claude_agent_sdk"
+#: How long a paused query's own process is read for its turn's result, the model's billed
+#: reply to the pause's placeholder in it (``_settled``), in seconds.
+SETTLE_SECONDS: Final = 30.0
 #: The result a query that reached its ``max_turns`` ends with (no answer).
 MAX_TURNS: Final = "error_max_turns"
 #: The ``stop_reason`` of a query's result whose last reply reached the model's output limit
@@ -583,7 +587,7 @@ class ClaudeAdapter:
             else self._attended(target, run, found)
         )
         try:
-            async with aclosing(source) as messages:
+            async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     await _subagents(helpers, message)
                     yield message
@@ -607,7 +611,7 @@ class ClaudeAdapter:
         options = _options(target, None, run, None, steps, kept=True)
         steps.waiting()
         try:
-            async with aclosing(found.served(_turn(run, options))) as messages:
+            async with contextlib.aclosing(found.served(_turn(run, options))) as messages:
                 async for message in messages:
                     steps.waiting()
                     yield message
@@ -629,7 +633,7 @@ class ClaudeAdapter:
         runtime = run.runtime
         limited = False
         try:
-            async with aclosing(self._attempted(target, native_input, run)) as messages:
+            async with contextlib.aclosing(self._attempted(target, native_input, run)) as messages:
                 async for message in messages:
                     if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
                         limited = True
@@ -660,7 +664,7 @@ class ClaudeAdapter:
         journal = runtime.replay.journal
         resumed, answered = journal.session, False
         # closed as it is left (``aclosing``): its CLI process ends here, in this loop
-        async with aclosing(self._query(target, native_input, run, resumed)) as messages:
+        async with contextlib.aclosing(self._query(target, native_input, run, resumed)) as messages:
             async for message in messages:
                 if (
                     resumed is not None
@@ -679,7 +683,7 @@ class ClaudeAdapter:
                 yield message
             else:
                 return
-        async with aclosing(self._query(target, native_input, run, None)) as again:
+        async with contextlib.aclosing(self._query(target, native_input, run, None)) as again:
             async for message in again:
                 yield message
 
@@ -734,7 +738,7 @@ class ClaudeAdapter:
             # closed as it is left (``aclosing``): a process of its own ends here, in this
             # loop; a live session's turn is interrupted when left before its result
             source = _queried(prompt, options) if live is None else live.served(turn, prompt)
-            async with aclosing(source) as messages:
+            async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     steps.waiting()  # the next message is the next step's
                     found = getattr(message, "session_id", None)
@@ -747,7 +751,10 @@ class ClaudeAdapter:
                     await _provided(steps, message)
                     yield message
                     if runtime.pending is not None:
-                        # the run paused: stop here; a process of its own goes with it
+                        # the run paused: stop here; a process of its own goes with it, once
+                        # its turn's result says what the attempt was billed
+                        if live is None:
+                            await _settled(messages, steps, spending)
                         return
         finally:
             steps.closed = True
@@ -816,6 +823,27 @@ class ClaudeAdapter:
         if found is not None and unsent:
             await found.asks(runtime)
         return found
+
+
+async def _settled(messages: AsyncIterator[Any], steps: Steps, spending: Spending) -> None:
+    """The rest of a paused query's own process, to its turn's result, which the run is
+    charged (``Spending.ended``): Claude Code sends the pause's placeholder to the model as the
+    paused call's result, and the model's reply to it is billed — 51-83% of a paused attempt's
+    cost with the bundled CLI on Haiku — while only a result says what the attempt cost, and
+    the reply's final token count. Nothing in it is the run's: its messages are not the run's
+    steps, and a call made in it is refused, ending the turn (``Steps.settling``). The CLI is
+    waited on no longer than :data:`SETTLE_SECONDS` (then what its replies said is charged)."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+
+    steps.settling = True
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(SETTLE_SECONDS):
+            async for message in messages:
+                if isinstance(message, ResultMessage):
+                    spending.ended(message, None)
+                    return
+                if isinstance(message, AssistantMessage):
+                    spending.replied(message)
 
 
 def _dated(context: str | None, run: Invocation, *, kept: bool) -> str | None:
@@ -1244,7 +1272,16 @@ class Steps:
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
     the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime", "served")
+    __slots__ = (
+        "adapter",
+        "answered",
+        "calls",
+        "closed",
+        "helped",
+        "runtime",
+        "served",
+        "settling",
+    )
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -1256,6 +1293,9 @@ class Steps:
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
+        #: the run paused, and its query's own process is read to its result (``_settled``):
+        #: a call the model makes then is refused, ending the turn
+        self.settling = False
         #: the tools the API ran itself whose result has not come, by Claude's id of the use:
         #: their name, arguments and when they were seen (:func:`_provided`)
         self.served: dict[str, tuple[str, dict[str, Any], float]] = {}
@@ -1508,7 +1548,11 @@ def _governance(steps: Steps) -> Any:
     is refused, saying why; were the refusal to fail too, Claude Code blocks the call (the
     matcher's ``on_failure``)."""
 
+    from trellis.harness.tools.convert.claude import WAITING
+
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        if steps.settling:  # the run paused: the model's reply to the pause takes no step
+            return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         try:
             return await _decide(steps, given, tool_use_id)
         except Exception as exc:

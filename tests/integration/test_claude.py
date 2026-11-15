@@ -5,9 +5,11 @@ in-process MCP tool calls included."""
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import (
@@ -218,8 +220,8 @@ async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
 async def test_a_query_that_pauses_counts_what_its_steps_spent(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A paused query ends before its ``ResultMessage``: the usage its assistant messages
-    carried is on the run's budget, and the query that finishes counts its result's, as
+    """A paused query's own process is read to its turn's ``ResultMessage``: the run is
+    charged its usage and cost, and the query that finishes counts its result's, as
     before."""
     from trellis.harness import budget
 
@@ -233,12 +235,102 @@ async def test_a_query_that_pauses_counts_what_its_steps_spent(
     agent = arm(harness.wrap(options(tmp_path, script, model="m"), id="refunds"), [refund])
     paused = await agent.run("refund o3", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "cost": None}
+    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "cost": 0.0}
     assert counted == [step]
     counted.clear()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS
     assert [(c["input_tokens"], c["output_tokens"]) for c in counted] == [(20, 10)]
+
+
+async def test_a_paused_query_is_charged_its_turn_as_billed_the_reply_to_the_pause_included(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code sends the pause's placeholder to the model as the paused call's result, and
+    the model's reply to it is billed (the bundled CLI on Haiku). The paused attempt is
+    charged its turn's result — both replies' tokens and the attempt's cost — and the run's
+    total after the resume is what the provider billed: four steps."""
+    from trellis.harness import budget
+
+    counted: list[dict[str, Any]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
+    )
+    refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o4"}}, {"text": "done"}]
+    paid = options(tmp_path, script, model="m")
+    paid.env |= {
+        "FAKE_CLAUDE_COST": "0.5",
+        "FAKE_CLAUDE_ANSWERS_WAITING": json.dumps({"text": "I will wait for the approval."}),
+    }
+    agent = arm(harness.wrap(paid, id="refunds"), [refund])
+    paused = await agent.run("refund o4", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and refunds == []
+    assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in counted] == [(20, 10, 1.0)]
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done" and refunds == ["o4"]
+    assert sum(c["input_tokens"] for c in counted) == 40
+    assert sum(c["output_tokens"] for c in counted) == 20
+    assert sum(c["cost"] for c in counted) == 2.0
+
+
+async def test_a_call_in_the_reply_to_the_pause_is_refused_and_ends_the_turn(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The run paused: a call the model makes answering the placeholder is no step of the
+    run's — refused, the turn ended — and the resume goes on as ever."""
+    refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o5"}}, {"text": "done"}]
+    target = options(tmp_path, script)
+    answer = {"id": "toolu_again", "builtin": "Read", "args": {"file_path": "notes.txt"}}
+    target.env["FAKE_CLAUDE_ANSWERS_WAITING"] = json.dumps(answer)
+    agent = arm(harness.wrap(target, id="refunds"), [refund])
+    paused = await agent.run("refund o5", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert built_ins(tmp_path) == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and refunds == ["o5"] and built_ins(tmp_path) == []
+
+
+async def test_a_paused_query_whose_result_does_not_come_pauses_all_the_same(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI that never gives the paused turn's result holds the pause no longer than
+    ``SETTLE_SECONDS``: the run is charged what its replies said, as before."""
+    from trellis.harness import budget
+
+    counted: list[dict[str, Any]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
+    )
+    monkeypatch.setattr(claude_adapter, "SETTLE_SECONDS", 0.2)
+    script = [{"tool": "refund", "args": {"order": "o6"}}, {"text": "done"}]
+    target = options(tmp_path, script, model="m")
+    target.env["FAKE_CLAUDE_ANSWERS_WAITING"] = json.dumps({"stall": 30})
+    agent = arm(harness.wrap(target, id="refunds"), [refund])
+    paused = await agent.run("refund o6", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in counted] == [(10, 5, None)]
+
+
+async def test_a_paused_query_that_ends_with_no_result_is_charged_its_replies() -> None:
+    """The rest of a paused query read to its end with no result: its replies are kept for
+    what the query's end charges (``Spending.left``), and anything else passed over."""
+    from claude_agent_sdk import AssistantMessage, SystemMessage
+
+    replies: list[Any] = []
+    reply = AssistantMessage(content=[], model="m", message_id="msg_1", usage={"output_tokens": 3})
+
+    async def rest() -> AsyncIterator[Any]:
+        yield SystemMessage(subtype="status", data={})
+        yield reply
+
+    steps = cast("Any", SimpleNamespace(settling=False))
+    spending = cast("Any", SimpleNamespace(replied=replies.append, ended=replies.append))
+    await claude_adapter._settled(rest(), steps, spending)
+    assert steps.settling and replies == [reply]
 
 
 async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
@@ -980,7 +1072,8 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
 ) -> None:
     """A resumed session's result carries the session's cost, what it cost before the
     process that resumed it included (the bundled CLI, driven against a scripted model).
-    A query that paused had no result: the attempt that resumes it is charged both. The
+    A query that paused is charged its turn's result: the attempt that resumes it, what the
+    session cost since. The
     query that reached its turn limit is charged its steps, and no more."""
     from trellis.harness import budget
 
@@ -998,7 +1091,7 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS
-    assert costs == [None, 1.5]  # the step that paused (no result: no cost), then all three
+    assert costs == [0.5, 1.0]  # the step that paused (its turn's result), then the two after
     costs.clear()
     steps = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
     limited = options(tmp_path, [*steps, {"text": "never"}], model="m", max_turns=2)
