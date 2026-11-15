@@ -275,6 +275,44 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
     assert headers["x-bf-dim-agent"] == "named"  # whose run, read per request
 
 
+async def test_an_openai_agent_named_in_bifrosts_provider_form_goes_through_bifrost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model named in Bifrost's ``provider/model`` form whose prefix the SDK's
+    ``MultiProvider`` gives no provider of its own (it would refuse it: ``Unknown prefix``) is
+    the gateway's to route: the turn goes to Bifrost under that name."""
+    fake = FakeGateway(turns=["routed"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="anthropic/claude-x"), id="prefixed")
+        result = await agent.run("x", user="u")
+    assert result.answer == "routed", result.error
+    [asked] = fake.responses.requests
+    assert asked["model"] == "anthropic/claude-x"
+
+
+async def test_an_application_that_chose_chat_completions_is_served_there_on_bifrost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``set_default_openai_api("chat_completions")`` is the application's own choice of API:
+    a model name on Bifrost is asked on chat completions alone, never tried on Responses
+    first."""
+    from agents import set_default_openai_api
+    from agents.models import _openai_shared
+
+    monkeypatch.setattr(_openai_shared, "_use_responses_by_default", True)  # put back after
+    set_default_openai_api("chat_completions")
+    fake = FakeGateway(turns=["routed"])
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        result = await h.wrap(Agent(name="a", model="gpt-x"), id="chat").run("x", user="u")
+    assert result.answer == "routed", result.error
+    assert fake.responses.requests == []  # never asked on Responses
+    [asked] = fake.completions
+    assert json.loads(asked.content)["model"] == "openai/gpt-x"
+
+
 def behind_bifrost() -> Settings:
     """The settings of a harness behind a Bifrost gateway."""
     return Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
@@ -331,6 +369,22 @@ async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_
     assert threaded.error is not None
     assert "conversation_id (a server thread)" in threaded.error.message
     assert len(fake.completions) == 1  # refused before any model call
+
+
+async def test_a_server_thread_at_the_first_fallback_is_refused_before_chat_completions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model's first call on a gateway that does not serve it on Responses carries a server
+    thread (``conversation_id``): chat completions cannot, so the call is refused at the
+    fallback, the thread named — nothing is asked on chat completions."""
+    fake = FakeGateway(turns=["never asked"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="plain", model="gpt-x"), id="plain")
+        threaded = await agent.run("x", user="u", framework_options={"conversation_id": "c1"})
+    assert threaded.error is not None
+    assert "conversation_id (a server thread)" in threaded.error.message
+    assert len(fake.refused) == 1 and fake.completions == []
 
 
 async def test_a_model_known_to_answer_on_responses_never_falls_back(
