@@ -2667,7 +2667,7 @@ def scenario_cases() -> list[Any]:
 #: endpoint of their own: the matrix's adversarial rows drive them).
 SCRIPTED: Final = ("langgraph", "react", "deepagents", "kimi")
 #: The harness bugs and gaps this suite found that are not fixed yet — each an entry of
-#: ``docs/research/IMPROVEMENT_BACKLOG.md`` (Adversarial suite) — by id: the turns (``case/n``)
+#: ``docs/research/archive/IMPROVEMENT_BACKLOG.md`` (Adversarial suite) — by id: the turns (``case/n``)
 #: whose harness check or strict score they fail on a scripted run, and on which adapters. A
 #: fix makes its turns pass, and ``test_bench_complex`` fails until its entry is removed; any
 #: other failure is a regression.

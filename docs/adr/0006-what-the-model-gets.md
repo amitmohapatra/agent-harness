@@ -2,7 +2,7 @@
 
 **Status:** Accepted as the direction (2026-10-30). The parts marked *proposed* below ship only
 after they pass the [evaluation protocol](../research/EVAL_PROTOCOL.md), each tracked in the
-[improvement backlog](../research/IMPROVEMENT_BACKLOG.md). Amended by
+[improvement backlog](../research/archive/IMPROVEMENT_BACKLOG.md). Amended by
 [ADR 0007](0007-query-engine.md): the query engine was measured, and DuckDB is chosen, with SQLite
 as the zero-dependency fallback.
 
@@ -11,7 +11,7 @@ as the zero-dependency fallback.
 What a model needs to answer is spread over the memory context, the history, results the run
 saved and tools that can fetch more. A small model cannot search for what it has not been told
 exists. A large one wastes its window when everything is pushed at it. The
-[scenario coverage audit](../research/SCENARIO_COVERAGE_AUDIT.md) found the gaps (follow-ups,
+[scenario coverage audit](../research/archive/SCENARIO_COVERAGE_AUDIT.md) found the gaps (follow-ups,
 undated results, large results, aggregation, explaining earlier answers). The
 [design rules](../research/DESIGN_RULES.md) say how each gap is closed.
 
@@ -115,7 +115,7 @@ Measured and not built (no gain on the small hosted model; re-test with a small 
 
 Answers about an earlier answer come from the run record (steps, sources, fetch times,
 approvals, message ids), never from the model's own account. "Why" and "how sure" are derived
-from the evidence (backlog; [SELF_EXPLANATION.md](../research/SELF_EXPLANATION.md)).
+from the evidence (backlog; [SELF_EXPLANATION.md](../research/archive/SELF_EXPLANATION.md)).
 
 ## Consequences
 
@@ -129,4 +129,4 @@ from the evidence (backlog; [SELF_EXPLANATION.md](../research/SELF_EXPLANATION.m
 - Each part is added at the harness level, so every adapter gets it. Per-call logic stays in
   `ReAct` ([DESIGN_RULES.md](../research/DESIGN_RULES.md)).
 - The rows marked new, in flight or backlog are tracked in the
-  [improvement backlog](../research/IMPROVEMENT_BACKLOG.md).
+  [improvement backlog](../research/archive/IMPROVEMENT_BACKLOG.md).

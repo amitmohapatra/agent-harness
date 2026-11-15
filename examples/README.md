@@ -77,7 +77,6 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 |---|---|
 | [hitl_forms_options_own_screen.py](05_features/hitl_forms_options_own_screen.py) | an approval rule in a hook, labelled options with several picks, a form (`form=`, `ui_schema=`), your own screen (`component=`, `props=`), a result from outside the run, `trellis.testing.Reviewer` |
 | [langgraph_interrupt_fields.py](05_features/langgraph_interrupt_fields.py) | a graph's own `interrupt({...})` with options, `multiple`, `component`, `props`, `assignee`; the inbox; resumed in place |
-| [subagents.py](05_features/subagents.py) | `ReAct(subagents=[...])`: a planner calling two agents, one asking a person through the planner |
 | [stored_prompts.py](05_features/stored_prompts.py) | a stored prompt of the gateway as a `ReAct`'s instructions (`stored(...)`, pinned per run) and for any framework (`h.prompt`) |
 | [sandbox.py](05_features/sandbox.py) | `ReAct(backend=sandbox())`: a script written and run with Deep Agents' `execute` in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
 | [skill_sources.py](05_features/skill_sources.py) | `trellis.skills`: a folder of `SKILL.md` skills and a team's own store combined (a user's version wins over the tenant's), read by `ReAct` through Deep Agents' own skills middleware and by a function through `list_skills`/`load_skill` |

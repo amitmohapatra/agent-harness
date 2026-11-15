@@ -5,7 +5,8 @@ with Deep Agents' own `write_todos`, and the harness's `Planning` stays out of i
 is not held back for a long task; and `write_todos` works at every window size whenever it is
 enabled. This page is the evidence for the change and the window sweep that checked it, on
 `claude-haiku-5-5` only (prices: `benchmark.cost.prices`). Data:
-[benchmark/cost/results/deepagents-planning-2026-11-15](../../../benchmark/cost/results/deepagents-planning-2026-11-15/);
+[benchmark/cost/results/deepagents-planning-2026-11-15](../../../benchmark/cost/results/deepagents-planning-2026-11-15/)
+(the raw files are on the `data/research-archive` branch, each listed with its sha256 in the folder's `MANIFEST.md`);
 scripts: [scripts](scripts/).
 
 ## What was there (read from the code, Deep Agents 0.7.38)

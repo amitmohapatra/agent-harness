@@ -2,7 +2,8 @@
 
 Real-model runs of main (`873e630`) with `claude-haiku-5-5` only, the key from the
 environment. Prices are `benchmark.cost.prices` (Haiku: $0.10 / $0.01 cached / $0.125
-cache write / $0.50 per million tokens). Data: [benchmark/cost/results/haiku-2026-11-15](../../../benchmark/cost/results/haiku-2026-11-15/);
+cache write / $0.50 per million tokens). Data: [benchmark/cost/results/haiku-2026-11-15](../../../benchmark/cost/results/haiku-2026-11-15/)
+(the case lists; the raw files are on the `data/research-archive` branch, each listed with its sha256 in the folder's `MANIFEST.md`);
 scripts: [scripts](scripts/). Total spend about $0.70 of the $40 allowed.
 
 | run | arm | score | record | spend |
@@ -132,7 +133,7 @@ result is charged. Findings:
   and 83% of these runs' dollars (51% and 60% in the round before, with the prompt cache
   warm). Now the process is read to its turn's result (30 s at most; a call made in the
   reply is refused, ending the turn) and the run is charged it. Re-run on Haiku
-  ([paused-charge](../../../benchmark/cost/results/haiku-2026-11-15/claude/paused-charge/)),
+  (`benchmark/cost/results/haiku-2026-11-15/claude/paused-charge/` on `data/research-archive`),
   provider against harness: approved 13,233 / 185, $0.000626 both (4 replies, 4.2 s);
   rejected 9,663 / 216, $0.000588 both (3 replies, 3.6 s); spend $0.0012.
 - **Not fixed (CLI behaviour)**: a subagent's or a paused reply's output tokens are the

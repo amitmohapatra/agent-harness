@@ -105,6 +105,20 @@ Legend: **Rec** = my recommendation.
   SDK approval pause share one function, parameterised by who asks (governance's choices, or
   the five decisions for the user's own gate). Tests and the docs table stay as they are.
 
+## The owner's working orders of the round (2026-11-14; from the retired job notes)
+
+- Every bug found and every planned item is coded with its tests, except the performance work
+  and the cleanup refactor (sections 7 and 8 of `REMAINING.md`); nothing is left open without
+  a written reason. Priority order: P0, P1, the review items (SEC, ARCH, PERF), then P2, P3.
+- No public argument, signature, endpoint or schema change unless the task says it is
+  approved; no new setting; no refactor beyond the item.
+- Test first: the test fails on the base for the expected reason, then passes; never skip,
+  xfail or loosen a test to pass. Commit and push after every item, so a branch is always safe
+  to merge at its head (a `WIP:` commit is finished or dropped before moving on).
+- Shared machine: one pytest process per job; PostgreSQL only on 127.0.0.1:55957 in databases
+  the job creates and drops (never `live57_*`, never port 55991); one memory-service process at
+  a time (the `/var/tmp/cons/memstack.lockdir` lock). The gates are in `GATES_NOTE.txt`.
+
 ## The five owner decisions (2026-11-15, owner: "you decide what is best as we are doing it for an enterprise company; a sandbox may or may not be available")
 - **Rewinding an ended run: yes, opt-in per agent.** agent-runs keeps an ended run's checkpoint
   only when asked (an additive flag on `finish`; a cancel takes the same final save), kept for

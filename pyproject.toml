@@ -111,6 +111,11 @@ build-backend = "hatchling.build"
 # beside it.
 packages = ["src/trellis"]
 
+[tool.hatch.build.targets.sdist]
+# only the package source and its metadata: no tests, examples, benchmarks, docs or data
+# (`make dist-check` fails on anything else in the wheel or the sdist)
+only-include = ["src/trellis", "README.md", "CHANGELOG.md"]
+
 [tool.uv]
 default-groups = ["dev"]
 

@@ -512,7 +512,7 @@ lead = ReAct(
 ```
 
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
-[examples/05_features/subagents.py](../../examples/05_features/subagents.py),
+[examples/06_scenarios/parallel_subagents_mixed_frameworks.py](../../examples/06_scenarios/parallel_subagents_mixed_frameworks.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
 
 ### A task in the background

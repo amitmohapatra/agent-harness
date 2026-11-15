@@ -227,8 +227,8 @@ announced writes; a check and the list read), and the mechanism is the harness's
 
 ## Run it
 
-* [`examples/05_features/subagents.py`](../examples/05_features/subagents.py) — a planner delegating to two
-  agents at once, one of which asks a person.
+* [`examples/06_scenarios/parallel_subagents_mixed_frameworks.py`](../examples/06_scenarios/parallel_subagents_mixed_frameworks.py)
+  — a planner delegating to three agents at once, one of which asks a person.
 * Tests: `tests/integration/test_subagents.py` (every adapter as a child, two at once, a child
   that asks, a worker killed inside a child, cancel, time), and against the real services
   `tests/live/test_live_subagents.py`.
