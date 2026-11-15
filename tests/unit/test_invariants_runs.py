@@ -43,3 +43,45 @@ def test_an_empty_claim_or_a_refused_create_names_no_run(tmp_path: Path) -> None
         _exchange("/v1/runs/claim", {"lease": {}}),
     ]
     assert inv.runs() == {}
+
+
+def _tool_events(tool: str, args: dict[str, Any], status: str, output: str) -> list[dict[str, Any]]:
+    ref = "run_a:k:0"
+    return [
+        {"event": {"type": "TOOL_CALL_ARGS", "tool_call_id": ref, "data": {"args": args}}},
+        {
+            "event": {
+                "type": "TOOL_CALL_RESULT",
+                "tool_call_id": ref,
+                "data": {"tool": tool, "status": status, "output": output},
+            }
+        },
+    ]
+
+
+def _with_memory(inv: Invariants) -> Invariants:
+    inv.traffic.exchanges.append(
+        Exchange(
+            service="memory",
+            method="GET",
+            path="/v1/keys/self",
+            query={},
+            request=None,
+            status=200,
+            response={},
+        )
+    )
+    return inv
+
+
+def test_a_call_the_runs_end_cut_short_owes_no_tool_record(tmp_path: Path) -> None:
+    """INV-2: a call the run's time limit cut short (``tools.bridge._cut``: "<tool> was cut
+    short: the run ran out of time") has no outcome of its own, as a cancelled one has none;
+    a call that timed out on its own limit is an outcome, and owes its record."""
+    inv = _with_memory(Invariants(tmp_path))
+    cut = _tool_events("wait", {"s": 60}, "timeout", "wait was cut short: the run ran out of time")
+    assert inv._inv2_tools({"run_a": cut}, {"run_a": {}}) == []
+    own = _tool_events("wait", {"s": 60}, "timeout", "wait took longer than its 5 s limit")
+    assert inv._inv2_tools({"run_a": own}, {"run_a": {}}) == [
+        "INV-2 run run_a: calls that ran have no tool record: ['wait:{\"s\": 60}']"
+    ]

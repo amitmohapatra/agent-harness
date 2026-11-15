@@ -791,8 +791,12 @@ def _executed(ev: dict[str, Any]) -> bool:
     data = ev.get("data") or {}
     # a call the harness refused before running it (a spent budget) says so in its output, its
     # status ``error`` as a failure's would be: "<tool> was not run: ..."
-    refused = str(data.get("output") or "").startswith(f"{data.get('tool')} was not run")
-    return str(data.get("status") or "ok").lower() not in NOT_RUN and not refused
+    output = str(data.get("output") or "")
+    refused = output.startswith(f"{data.get('tool')} was not run")
+    # a call the run's end cut short (cancelled, or out of time: ``tools.bridge._cut``) has no
+    # outcome of its own, so no tool record: "<tool> was cut short: ..."
+    cut = output.startswith(f"{data.get('tool')} was cut short:")
+    return str(data.get("status") or "ok").lower() not in NOT_RUN and not refused and not cut
 
 
 def _attempt_shape(where: str, evs: list[dict[str, Any]]) -> list[str]:
