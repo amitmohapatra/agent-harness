@@ -2150,11 +2150,14 @@ class PromptCache(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelCallResult[Any]:
         given = request.model
+        # what comes after it — the model call, and Deep Agents' memory, which marks its own
+        # block only for a chat model it knows as Anthropic's — is handed the routed name's
+        # model of this call (the route chosen once: the gateway's headers are on already)
+        made = cast(Any, given).resolved() if routed(given) else given
 
         async def sent(marked: ModelRequest[Any]) -> ModelResponse[Any]:
-            return await handler(history_marked(marked).override(model=given))
+            return await handler(history_marked(marked).override(model=made))
 
-        made = cast(Any, given).resolved() if routed(given) else given
         return await self.native.awrap_model_call(request.override(model=made), sent)
 
 

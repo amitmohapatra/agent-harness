@@ -264,3 +264,35 @@ def test_reacts_own_langgraph_cache_is_the_one_given(monkeypatch: pytest.MonkeyP
             backend=JournalBackend() if deep else None,
         )
         assert built.cache is given
+
+
+@pytest.mark.parametrize("given", ["name", "object"])
+async def test_deep_agents_memory_block_is_cached_on_a_routed_name_too(
+    memory_harness: Harness, anthropic: list[dict[str, Any]], tmp_path: Any, given: str
+) -> None:
+    """``ReAct(memory_files=...)`` on an Anthropic model: Deep Agents' memory middleware marks
+    its block of the instructions for the cache — on a model name the harness routes as on a
+    ``ChatAnthropic`` (it marks only a chat model it knows as Anthropic's)."""
+    from deepagents.backends import FilesystemBackend
+
+    (tmp_path / "AGENTS.md").write_text("Always answer in units.")
+    model = (
+        "anthropic:claude-x"
+        if given == "name"
+        else ChatAnthropic(model_name="claude-x", api_key="test-key")  # type: ignore[call-arg,arg-type]
+    )
+    target = ReAct(
+        "You answer stock questions.",
+        model,
+        tools=[stock],
+        context_window=50_000,
+        backend=FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True),
+        memory_files=["/AGENTS.md"],
+    )
+    agent = memory_harness.wrap(target, id=f"memory-cached-{given}")
+    result = await agent.run("How many a?", user="u1", thread="conv-1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    [body] = anthropic
+    marked = [b for b in body["system"] if "cache_control" in b]
+    assert any("Always answer in units." in b["text"] for b in marked), body["system"]
+    assert breakpoints(body) <= 4
