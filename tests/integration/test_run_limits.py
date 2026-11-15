@@ -361,6 +361,30 @@ async def test_a_run_stopped_twice_ends_once_with_the_first_reason(harness: Harn
     assert events[-1].data["reason"] == "the first reason"
 
 
+async def test_a_run_whose_open_children_cannot_be_listed_keeps_its_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A run's end is final before its open children are ended with it: a run store that
+    cannot list them then is said in the log, and the run's result stands."""
+    from trellis.harness.runs import LocalRuns
+    from trellis.runs import RunsError
+
+    class Unlisted(LocalRuns):
+        def iterate(self, **kwargs: Any) -> Any:
+            if kwargs.get("parent_run_id") is not None:
+                raise RunsError("the run store is down", code="UNAVAILABLE", status=503)
+            return super().iterate(**kwargs)
+
+    async def answers(input: str, agent: Runtime) -> str:
+        return f"re: {input}"
+
+    async with Harness(config=Settings(), runs=Unlisted()) as h:
+        with caplog.at_level(logging.WARNING, logger="trellis.run"):
+            result = await h.wrap(answers, id="answers").run("x", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "re: x"
+    assert "its open children could not be ended" in caplog.text
+
+
 async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(
     harness: Harness,
 ) -> None:
