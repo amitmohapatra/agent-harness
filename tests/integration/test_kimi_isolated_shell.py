@@ -8,16 +8,19 @@ conversation carries. Run as root, or with a password-less sudo."""
 
 from __future__ import annotations
 
+import http.server
 import os
 import secrets
+import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
 from tests.support.isolation import fresh_root, processes_of, root_helper
 from tests.support.kimi import PlannedEndpoint, kimi_target, needs_kimi
-from trellis import Harness, Settings
+from trellis import Harness, Settings, sandbox
 from trellis.contracts import RunEventType
 from trellis.harness.sandbox.base import RUN
 from trellis.harness.sandbox.isolation import HostSandbox, use_host
@@ -99,6 +102,57 @@ async def test_another_runs_workspace_is_out_of_reach_of_kimis_bash(
     finally:
         await layer.delete(other.ref)
     assert "the other run's" not in str(result.answer) and "rc=1" in str(result.answer)
+
+
+async def test_kimis_own_searches_reach_no_file_of_the_service(
+    harness: Harness, layer: HostSandbox, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's ``Grep`` (and ``Glob``, ``ReadMediaFile``) run in its own process on this
+    machine, as the service's user — not in the workspace, where its ``Read`` goes: a path
+    outside the run's folders is refused, its files never read."""
+    secret = tmp_path / "service" / "secret.env"
+    secret.parent.mkdir()
+    secret.write_text(SECRET)
+    endpoint.plan = [("Grep", {"pattern": "sk-service", "path": str(secret.parent)})]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-grep")
+    result = await agent.run("go", user="u1")
+    assert SECRET not in str(result.answer), result.answer
+    assert "outside the folders this run works in" in str(result.answer)
+
+
+class Internal(http.server.BaseHTTPRequestHandler):
+    """An address inside the deployment (a metadata server, an internal API): who reached it."""
+
+    reached: ClassVar[list[str]] = []
+
+    def do_GET(self) -> None:
+        Internal.reached.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"internal")
+
+    def log_message(self, *_: Any) -> None:
+        pass
+
+
+async def test_a_sandboxed_kimis_fetch_is_closed_as_any_kimis(
+    harness: Harness, layer: HostSandbox, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's ``FetchURL`` runs in its own process, on this machine's network, whether or not
+    the run has a sandbox: with ``sandbox=`` too, the tool catalog's closed default holds — no
+    request to an address inside the deployment."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Internal)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/latest/meta-data/"
+    Internal.reached.clear()
+    endpoint.plan = [("FetchURL", {"url": url})]
+    try:
+        target = kimi_target(endpoint, tmp_path, sandbox=sandbox(layer))
+        result = await harness.wrap(target, id="kimi-fetch").run("go", user="u1")
+    finally:
+        server.shutdown()
+    assert Internal.reached == [], result.answer
+    assert "the tool catalog does not allow it" in str(result.answer)
 
 
 async def test_where_commands_cannot_be_isolated_kimis_bash_is_refused_and_says_why(

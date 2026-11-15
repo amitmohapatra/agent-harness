@@ -31,6 +31,7 @@ from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
     EDITED,
     KIMI,
+    KIMI_ASKED,
     KIMI_BUILTINS,
     KIMI_ENV,
     REJECTED,
@@ -633,7 +634,7 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
         asked = (home / "config.toml").read_text().removeprefix(rules)
         assert asked == "".join(
             f'\n[[permission.rules]]\ndecision = "ask"\npattern = "{pattern}"\n'
-            for pattern in ("Bash(rm *)", "Skill", "FetchURL", "WebSearch")
+            for pattern in ("Bash(rm *)", *KIMI_ASKED)
         )
         assert len(list(home.glob("sessions/*/session_*"))) == 1
     assert (team / "config.toml").read_text() == rules and not (team / "sessions").exists()
@@ -644,8 +645,9 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
     [
         (
             '[permission]\nrules = [{ decision = "allow", pattern = "Bash(rm *)" }]\n',
-            '\n[[permission.ask]]\npattern = "Bash(rm *)"\n\n[[permission.ask]]\npattern = "Skill"\n'
-            '\n[[permission.ask]]\npattern = "FetchURL"\n\n[[permission.ask]]\npattern = "WebSearch"\n',
+            "".join(
+                f'\n[[permission.ask]]\npattern = "{p}"\n' for p in ("Bash(rm *)", *KIMI_ASKED)
+            ),
         ),
         ('permission = { rules = [{ decision = "allow", pattern = "Bash(rm *)" }] }\n', None),
     ],
