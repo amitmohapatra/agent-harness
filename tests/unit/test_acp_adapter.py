@@ -192,7 +192,7 @@ async def test_the_usage_log_is_read_until_it_stops_growing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(acp, "SETTLE_STEP", 0.0)
-    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi(), SimpleNamespace())  # type: ignore[arg-type]
     attempt.usage = SimpleNamespace(ended=True)  # type: ignore[assignment]  # its end is read
     reads = iter([2, 1, 1, 0, 5])
     monkeypatch.setattr(attempt, "_accounted", lambda: next(reads))
@@ -213,7 +213,7 @@ async def test_a_turns_end_logged_late_is_still_read(
     folder.mkdir(parents=True)
     log = folder / "wire.jsonl"
     log.write_text('{"type": "usage.record", "usage": {"output": 1}}\n')
-    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi(), SimpleNamespace())  # type: ignore[arg-type]
     attempt.runtime = SimpleNamespace()  # type: ignore[assignment]
     attempt.target = SimpleNamespace(model=None)  # type: ignore[assignment]
     attempt.usage = acp.UsageLog(tmp_path, "s1")
@@ -244,7 +244,7 @@ async def test_a_prompt_waits_for_the_agent_to_be_free_and_fails_when_it_never_i
     async def never() -> bool:
         return False
 
-    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi(), SimpleNamespace())  # type: ignore[arg-type]
     attempt.session = SimpleNamespace(settled=never)  # type: ignore[assignment]
     with pytest.raises(acp.ACPRunError, match="queued the prompt"):
         async for _ in attempt._turn("hi"):

@@ -9,6 +9,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1432,10 +1433,15 @@ async def test_a_users_message_that_starts_with_a_slash_is_words_not_a_command_o
     assert recorded(tmp_path)["prompts"][0].endswith("/compact everything")
 
 
-async def test_without_a_sandbox_the_agents_file_requests_are_refused(tmp_path: Path) -> None:
+async def test_where_its_writes_are_its_own_the_agents_file_requests_are_refused(
+    tmp_path: Path,
+) -> None:
+    """With no sandbox where this machine cannot isolate a command, the agent's files are its
+    own (no file capability): a file request out of turn is refused."""
     from acp import RequestError
 
-    attempt = acp.Attempt(acp.ACPAdapter(), None, fake(tmp_path, []))  # type: ignore[arg-type]
+    boxed: Any = SimpleNamespace(files=False)
+    attempt = acp.Attempt(acp.ACPAdapter(), None, fake(tmp_path, []), boxed)  # type: ignore[arg-type]
     with pytest.raises(RequestError):
         await attempt.read_text_file("s", "/etc/passwd")
 

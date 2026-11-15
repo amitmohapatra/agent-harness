@@ -1834,10 +1834,10 @@ class Attempt:
         limit: int | None = None,
         **kwargs: Any,
     ) -> Any:
-        return await self._boxed().read(path, line, limit)
+        return await self._boxed(files=True).read(path, line, limit)
 
     async def write_text_file(self, session_id: str, path: str, content: str, **kwargs: Any) -> Any:
-        return await self._boxed().write(path, content)
+        return await self._boxed(files=True).write(path, content)
 
     async def create_terminal(
         self,
@@ -1865,9 +1865,14 @@ class Attempt:
     async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
         return self._boxed().release(terminal_id)
 
-    def _boxed(self) -> Sandboxed:
+    def _boxed(self, *, files: bool = False) -> Sandboxed:
+        """The run's sandbox, for a terminal request — or a file request (``files``), which
+        it serves only where the agent's writes are the sandbox's (``Sandboxed.files``)."""
+        from acp import RequestError
 
         self._handles()
+        if files and not self.boxed.files:  # not offered: the agent asks out of turn
+            raise RequestError.method_not_found("fs (its files are its own in this run)")
         return self.boxed
 
     def _refused(self, call: _Call | None) -> None:
