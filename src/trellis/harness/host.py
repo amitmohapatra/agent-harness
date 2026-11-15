@@ -170,6 +170,7 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
                 HostShell(
                     "LangChain's ShellToolMiddleware on the host",
                     "ShellToolMiddleware(execution_policy=DockerExecutionPolicy())",
+                    "framework",
                 )
             )
     return shells
@@ -245,6 +246,7 @@ def _openai(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
                 "the OpenAI Agents SDK's UnixLocalSandboxClient (no isolation)",
                 "SandboxRunConfig(client=DockerSandboxClient(...)) or a hosted client "
                 "(agents.extensions.sandbox)",
+                "framework",
             )
         )
     return shells
@@ -258,7 +260,7 @@ def _field(given: Any, name: str) -> Any:
 
 
 def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
-    """Claude Code's own shell: it runs as it does (its own ``SandboxSettings``, as given)."""
+    """Claude Code's own shell (its commands run through the isolation layer: ``sandbox.relay``)."""
 
     def given(name: str) -> Any:
         return options[name] if name in options else getattr(target, name, None)
@@ -277,7 +279,7 @@ def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
         + ", ".join(sorted(CLAUDE_SHELLS))
         + ")"
     )
-    return [HostShell("Claude Code's own shell, as the service's user", fix, "framework")]
+    return [HostShell("Claude Code's own shell", fix, "framework")]
 
 
 def _acp(target: Any, options: Mapping[str, Any]) -> list[HostShell]:

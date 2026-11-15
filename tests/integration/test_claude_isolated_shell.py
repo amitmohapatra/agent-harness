@@ -269,7 +269,9 @@ async def test_where_commands_cannot_be_isolated_claude_codes_shell_is_off(
         use_host(replaced)
     [refused] = said(model)
     assert "id -u" not in refused and ("No such tool" in refused or "not" in refused)
-    [warned] = [r.getMessage() for r in caplog.records if "shell commands are off" in r.getMessage()]
+    [warned] = [
+        r.getMessage() for r in caplog.records if "shell commands are off" in r.getMessage()
+    ]
     assert "cannot be isolated" in warned and "helper false" in warned
     assert succeeded(events)
 

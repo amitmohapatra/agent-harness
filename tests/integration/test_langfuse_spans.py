@@ -157,7 +157,7 @@ async def test_claude_codes_built_ins_are_tool_spans_with_governances_action(
 ) -> None:
     script = [
         {"builtin": "Read", "args": {"file_path": "orders.csv"}},
-        {"builtin": "Bash", "args": {"command": f"rm -rf build --token {SECRET}"}},
+        {"builtin": "Write", "args": {"file_path": "notes.txt", "content": f"--token {SECRET}"}},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {"text": "done"},
     ]
@@ -168,11 +168,11 @@ async def test_claude_codes_built_ins_are_tool_spans_with_governances_action(
     assert done.status is RunStatus.SUCCESS, done
     tree = Tree(spans)
     assert built_in(tree, "Read", "coder", "run")["gen_ai.tool.call.result"] == "Read ran"
-    bash = built_in(tree, "Bash", "coder", "ask")  # a person approved it
-    assert bash["gen_ai.tool.call.id"] == "toolu_1"
+    wrote = built_in(tree, "Write", "coder", "ask")  # a person approved it
+    assert wrote["gen_ai.tool.call.id"] == "toolu_1"
     built_in(tree, "Grep", "coder", "run")
     failed_span(tree, "execute_tool Grep", "bad pattern")
-    asked_and_decided(tree, "Bash", "once")
+    asked_and_decided(tree, "Write", "once")
     # its model's replies: generations with usage and the cost the CLI reported
     generations = [attrs(s) for s in tree.spans if s.name.startswith("chat ")]
     assert generations and all(g["langfuse.observation.type"] == "generation" for g in generations)
@@ -196,6 +196,7 @@ async def test_kimis_tools_and_its_sub_agent_are_spans(
     script = [
         {"builtin": "Read", "args": {"path": "orders.csv"}, "output": "o1,o2"},
         {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""},
+        {"builtin": "Write", "args": {"path": "a.txt", "content": "x"}, "ask": True, "output": ""},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {
             "agent": {"description": "look", "prompt": "find tea", "subagent_type": "explore"},
@@ -222,11 +223,12 @@ async def test_kimis_tools_and_its_sub_agent_are_spans(
     assert done.status is RunStatus.SUCCESS, done
     tree = Tree(spans)
     built_in(tree, "Read", "kimi", "run")
-    built_in(tree, "Bash", "kimi", "ask")
-    commanded(tree, "Bash", "rm a.txt", "framework")
+    built_in(tree, "Bash", "kimi", "announce")  # a command: the deployment's, announced
+    commanded(tree, "Bash", "rm a.txt", "framework")  # the fake agent ran it itself
+    built_in(tree, "Write", "kimi", "ask")
     failed_span(tree, "execute_tool Grep", "bad pattern")
     built_in(tree, "Agent", "kimi", "run")
-    asked_and_decided(tree, "Bash", "conversation")
+    asked_and_decided(tree, "Write", "conversation")
     helper = tree.one("invoke_agent explore")
     found = attrs(helper)
     assert found["langfuse.observation.type"] == "agent"
@@ -543,7 +545,6 @@ async def test_a_frameworks_own_shell_commands_are_spans(
     framework's own), how long it took."""
     from agents import LocalShellTool
     from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
-
 
     script = [{"builtin": "Bash", "args": {"command": "ls -la"}}, {"text": "done"}]
     claude_agent = harness.wrap(claude(tmp_path, script), id="sh-claude")
