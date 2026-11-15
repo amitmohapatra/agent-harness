@@ -458,7 +458,12 @@ default, and the harness has no fallback to it; a team adds it through `middlewa
 ## Approvals, streaming, durable runs, surfaces, evaluation
 
 A tool that asks pauses the run; `agent.resume(...)` continues the graph from its checkpoint
-and the approved call runs once. `agent.stream(...)` yields each step's text and the tool
+and the approved call runs once. Whether it asks, and what the person may pick, is one rule for
+every tool a `ReAct` (or a langgraph-swarm of them) is given — a function, `mcp(...)`, the
+gateway's MCP tools, a LangChain or `langchain.mcp` tool: a read runs; a write and a tool that
+says nothing (an MCP tool with no annotations among them) ask with allow once, for this
+conversation, always (with memory), deny; an irreversible one asks every call
+([governance.md](../governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)). `agent.stream(...)` yields each step's text and the tool
 events. `start` + workers, `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` tools and
 `h.evaluate` work as for every target. `llm_judge` asks its own `model=`, else the gateway's
 judge alias — never the agent's own model ([evaluation.md](../evaluation.md#the-judges-model)).

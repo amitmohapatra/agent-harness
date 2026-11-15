@@ -55,8 +55,10 @@ result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="
 
 The graph's own tools are governed as its tool node runs them — the catalog's risk and rules,
 approvals, the journal, the records — their risk the tool catalog's (an administrator's, in the
-memory service), else the tool's own word (`tool.metadata = {"side_effects": "read"}`); a tool
-that says nothing asks a person at each call
+memory service), else the tool's own word (`tool.metadata = {"side_effects": "read"}`, or a
+`langchain.mcp` / langchain-mcp-adapters tool's server annotations); a tool that says nothing —
+an MCP tool whose server gave no annotations among them — asks a person at each call, who may
+allow it for the conversation or always, as on every adapter
 ([governance.md](../governance.md#a-tool-that-does-not-say-what-it-does)). `HarnessTools` offers the harness's tools at each model
 call: every MCP tool the Bifrost virtual key allows and — memory on — the memory tools
 (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`,
