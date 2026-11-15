@@ -76,9 +76,11 @@ relies on one. The test steers the model with `support.Forcing`: `list_tool_file
   not lower the limit: `_answer_now` keeps the model's own, and the 160 here is
   `tests/live/support.gateway_model`'s. With 1,024 the test failed the same way, twice.
 
-**Open:** the fix is a decision about the test. Forcing could also narrow the offered tools
-to the forced one, which works on any model. But the test asserts that every request offers
-all the Code Mode meta-tools, and that assertion would have to change.
+**Fixed in the test's own scaffolding.** `Forcing` now offers a forced step the forced tool
+alone. It records each step's tools as the harness built the request, before narrowing them.
+The test asserts on that record that every request offers every Code Mode meta-tool and no
+gateway name. It still checks on the wire that no gateway name is ever declared. Through
+Bifrost, the test and the hitl `ReAct` test, which also uses `Forcing`, now pass.
 
 ### What the live runs found
 
