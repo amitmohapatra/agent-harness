@@ -3816,8 +3816,10 @@ class Accounted(runner.Meter):
         self.spend = spend
         self.requests: list[dict[str, Any]] = []
 
-    def accounted(self, input_tokens: int, output_tokens: int, cached: int, written: int) -> None:
-        super().accounted(input_tokens, output_tokens, cached, written)
+    def accounted(
+        self, input_tokens: int, output_tokens: int, cached: int, written: int, calls: int
+    ) -> None:
+        super().accounted(input_tokens, output_tokens, cached, written, calls)
         self.spend.add(input_tokens, output_tokens, cached, written)
 
 
