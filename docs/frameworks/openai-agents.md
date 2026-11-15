@@ -156,10 +156,10 @@ long-term memory.
 
 A sandbox on this machine — the SDK's `UnixLocalSandboxClient` (no OS isolation on Linux), as
 below — and a `LocalShellTool` or a `ShellTool` in the SDK's local environment (on the agent,
-an agent it hands off to or runs as a tool) run commands on the host. The Unix-local client
-has no isolation: `h.wrap`, and a run given such a `run_config`, refuse it. A local shell tool
-runs its executor — code of yours — governed as your tool, unless the deployment says
-`TRELLIS_HOST_EXECUTION=deny` ([governance.md](../governance.md#commands-on-the-host)). A
+an agent it hands off to or runs as a tool) run commands on the host, without the harness's
+isolation (a local shell tool runs its executor — code of yours — governed as your tool);
+`TRELLIS_HOST_EXECUTION=deny` refuses them at `h.wrap`, and a run given such a `run_config`
+([governance.md](../governance.md#commands-on-the-host)). A
 `DockerSandboxClient`, a hosted client (`agents.extensions.sandbox`) and a hosted `ShellTool`
 are never refused.
 

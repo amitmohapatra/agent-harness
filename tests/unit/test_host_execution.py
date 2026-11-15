@@ -118,6 +118,8 @@ def openai_sandbox_agent() -> Any:
 #: ``deny`` switches off: the target, the framework options it is wrapped with, and what the
 #: refusal names besides the setting (the way to a sandbox instead).
 HOST_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]], str]] = {
+    "openai-unix-local": (openai_sandbox_agent, unix_local, "UnixLocalSandboxClient"),
+    "langchain-shell-middleware": (shell_middleware, dict, "DockerExecutionPolicy"),
     "openai-local-shell-tool": (openai_local_shell, dict, "LocalShellTool"),
     "openai-shell-tool": (openai_shell, dict, "ShellTool"),
     "openai-handoff": (openai_handoff_shell, dict, "ShellTool"),
@@ -148,8 +150,6 @@ UNISOLATED_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]
     "deepagents-composite-default": (deep_composite, dict, "LocalShellBackend"),
     "deepagents-subagent": (react_subagent_local, dict, "LocalShellBackend"),
     "react-backend": (react_local, dict, "backend=sandbox()"),
-    "langchain-shell-middleware": (shell_middleware, dict, "DockerExecutionPolicy"),
-    "openai-unix-local": (openai_sandbox_agent, unix_local, "UnixLocalSandboxClient"),
 }
 
 
@@ -266,8 +266,8 @@ def test_a_sandbox_or_no_shell_is_unaffected(way: str) -> None:
 
 async def test_a_runs_own_options_that_let_a_shell_out_are_refused() -> None:
     """A run's ``framework_options`` go over the agent's: where the deployment denies, a Claude
-    run that turns its sandbox off is refused before the run is made (by default it is made);
-    an OpenAI run given a Unix-local sandbox is refused whatever the setting."""
+    run that turns its sandbox off, an OpenAI run given a Unix-local sandbox, are refused before
+    the run is made (by default it is made)."""
     h = denying()
     boxed: Any = {"enabled": True, "allowUnsandboxedCommands": False}
     claude = h.wrap(ClaudeAgentOptions(sandbox=boxed), id="claude")
@@ -275,7 +275,7 @@ async def test_a_runs_own_options_that_let_a_shell_out_are_refused() -> None:
         await claude.start("hi", user="u", framework_options={"sandbox": {"enabled": False}})
     target, options = boxed_openai()
     box = h.wrap(target, id="box", framework_options=options)
-    with pytest.raises(ConfigurationError, match=r"sandbox\(\)"):
+    with pytest.raises(ConfigurationError, match=NAMED):
         await box.run("hi", user="u", framework_options=unix_local())
 
     allowed = allowing()
