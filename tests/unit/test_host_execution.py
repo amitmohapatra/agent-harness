@@ -17,7 +17,6 @@ from __future__ import annotations
 import tempfile
 import types
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -32,22 +31,15 @@ from trellis import Harness, ReAct, sandbox
 from trellis.contracts import ConfigurationError
 from trellis.harness import host
 from trellis.harness.adapters.acp import ACPAgent, kimi
-from trellis.harness.events import NOTICE
 from trellis.harness.host import _shell_middleware
-from trellis.harness.sandbox import ExecResult
 from trellis.harness.settings import Settings
 
 #: What every refusal names: the one setting an administrator turns.
-NAMED = r"TRELLIS_HOST_EXECUTION=allow"
+NAMED = r"TRELLIS_HOST_EXECUTION=deny"
 
 
 def folder() -> str:
     return tempfile.mkdtemp(prefix="trellis-host-")
-
-
-def made(root: str) -> str:
-    """What the command wrote in ``root``: on this machine, not in a sandbox."""
-    return (Path(root) / "made.txt").read_text().strip()
 
 
 def model() -> ScriptedChatModel:
@@ -122,18 +114,13 @@ def openai_sandbox_agent() -> Any:
     return SandboxAgent(name="box", instructions="work")
 
 
-#: Each way to a host shell: the target, the framework options it is wrapped with, and what
-#: the refusal names besides the setting (the way to a sandbox instead).
+#: Each way to a shell on this machine outside a sandbox that runs by default and that
+#: ``deny`` switches off: the target, the framework options it is wrapped with, and what the
+#: refusal names besides the setting (the way to a sandbox instead).
 HOST_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]], str]] = {
-    "deepagents-local-shell": (deep_local, dict, "LocalShellBackend"),
-    "deepagents-composite-default": (deep_composite, dict, "LocalShellBackend"),
-    "deepagents-subagent": (react_subagent_local, dict, "LocalShellBackend"),
-    "react-backend": (react_local, dict, "backend=sandbox()"),
-    "langchain-shell-middleware": (shell_middleware, dict, "DockerExecutionPolicy"),
     "openai-local-shell-tool": (openai_local_shell, dict, "LocalShellTool"),
     "openai-shell-tool": (openai_shell, dict, "ShellTool"),
     "openai-handoff": (openai_handoff_shell, dict, "ShellTool"),
-    "openai-unix-local": (openai_sandbox_agent, unix_local, "UnixLocalSandboxClient"),
     "claude-unsandboxed": (ClaudeAgentOptions, dict, "allowUnsandboxedCommands"),
     "claude-unsandboxed-allowed": (
         lambda: ClaudeAgentOptions(sandbox={"enabled": True}),  # Claude's default lets it out
@@ -154,21 +141,31 @@ HOST_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]], str
     "acp-unsandboxed": (lambda: ACPAgent(command=("some-agent", "acp")), dict, "sandbox=sandbox()"),
     "kimi-unsandboxed": (kimi, dict, "sandbox=sandbox()"),
 }
+#: The ways to a shell on this machine with no isolation the harness could give: refused
+#: whatever the setting, naming ``sandbox()``.
+UNISOLATED_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]], str]] = {
+    "deepagents-local-shell": (deep_local, dict, "LocalShellBackend"),
+    "deepagents-composite-default": (deep_composite, dict, "LocalShellBackend"),
+    "deepagents-subagent": (react_subagent_local, dict, "LocalShellBackend"),
+    "react-backend": (react_local, dict, "backend=sandbox()"),
+    "langchain-shell-middleware": (shell_middleware, dict, "DockerExecutionPolicy"),
+    "openai-unix-local": (openai_sandbox_agent, unix_local, "UnixLocalSandboxClient"),
+}
 
 
 def denying() -> Harness:
-    return Harness(config=Settings(), memory=False)
+    return Harness(config=Settings(host_execution="deny"), memory=False)
 
 
 def allowing() -> Harness:
-    return Harness(config=Settings(host_execution="allow"), memory=False)
+    return Harness(config=Settings(), memory=False)
 
 
-def test_the_setting_denies_by_default_and_the_environment_allows() -> None:
-    assert Settings().host_execution == "deny"
-    assert Settings.from_env({}).host_execution == "deny"
-    assert Settings.from_env({"TRELLIS_HOST_EXECUTION": "allow"}).host_execution == "allow"
+def test_the_setting_allows_by_default_and_the_environment_denies() -> None:
+    assert Settings().host_execution == "allow"
+    assert Settings.from_env({}).host_execution == "allow"
     assert Settings.from_env({"TRELLIS_HOST_EXECUTION": "deny"}).host_execution == "deny"
+    assert Settings.from_env({"TRELLIS_HOST_EXECUTION": "allow"}).host_execution == "allow"
     with pytest.raises(ValueError, match="host_execution"):
         Settings.from_env({"TRELLIS_HOST_EXECUTION": "yes"})
 
@@ -181,7 +178,7 @@ def test_the_old_require_sandbox_setting_is_refused_naming_the_new_one() -> None
 
 
 @pytest.mark.parametrize("way", sorted(HOST_PATHS))
-def test_a_host_shell_is_refused_by_default_naming_the_setting(way: str) -> None:
+def test_a_host_shell_is_refused_where_the_deployment_denies_naming_the_setting(way: str) -> None:
     target, options, fix = HOST_PATHS[way]
     h = denying()
     with pytest.raises(ConfigurationError, match=NAMED) as refused:
@@ -192,7 +189,7 @@ def test_a_host_shell_is_refused_by_default_naming_the_setting(way: str) -> None
 
 
 @pytest.mark.parametrize("way", sorted(HOST_PATHS))
-def test_a_host_shell_wraps_where_the_deployment_allows_it(way: str) -> None:
+def test_a_host_shell_wraps_by_default(way: str) -> None:
     target, options, _ = HOST_PATHS[way]
     h = allowing()
     h.wrap(target(), id=way, framework_options=options())
@@ -268,9 +265,9 @@ def test_a_sandbox_or_no_shell_is_unaffected(way: str) -> None:
 
 
 async def test_a_runs_own_options_that_let_a_shell_out_are_refused() -> None:
-    """A run's ``framework_options`` go over the agent's: a Claude run that turns its sandbox
-    off, an OpenAI run given a Unix-local sandbox, are refused before the run is made; allowed,
-    the same run is made."""
+    """A run's ``framework_options`` go over the agent's: where the deployment denies, a Claude
+    run that turns its sandbox off is refused before the run is made (by default it is made);
+    an OpenAI run given a Unix-local sandbox is refused whatever the setting."""
     h = denying()
     boxed: Any = {"enabled": True, "allowUnsandboxedCommands": False}
     claude = h.wrap(ClaudeAgentOptions(sandbox=boxed), id="claude")
@@ -278,29 +275,13 @@ async def test_a_runs_own_options_that_let_a_shell_out_are_refused() -> None:
         await claude.start("hi", user="u", framework_options={"sandbox": {"enabled": False}})
     target, options = boxed_openai()
     box = h.wrap(target, id="box", framework_options=options)
-    with pytest.raises(ConfigurationError, match=NAMED):
+    with pytest.raises(ConfigurationError, match=r"sandbox\(\)"):
         await box.run("hi", user="u", framework_options=unix_local())
 
     allowed = allowing()
     claude = allowed.wrap(ClaudeAgentOptions(sandbox=boxed), id="claude")
     run_id = await claude.start("hi", user="u", framework_options={"sandbox": {"enabled": False}})
     assert run_id
-
-
-async def test_allowed_a_host_shell_runs_its_command_here() -> None:
-    """Where the deployment allows it, Deep Agents' ``execute`` on a ``LocalShellBackend``
-    runs on this machine — announced, as a command of the framework's own is, the
-    administrator having decided — and the model reads its output."""
-    root = folder()
-    turns = [("execute", {"command": "echo host-ok > made.txt && cat made.txt"}), "done"]
-    scripted = ScriptedChatModel(turns=turns)
-    graph = ReAct("s", scripted, backend=LocalShellBackend(root_dir=root, virtual_mode=True))
-    events = [e async for e in allowing().wrap(graph, id="local").stream("run it", user="u")]
-    assert events[-1].error is None, events[-1].error
-    notices = [e.data["tool"] for e in events if e.data.get("name") == NOTICE]
-    assert notices == ["execute"]
-    assert "host-ok" in str(scripted.seen[-1][-1].content)
-    assert made(root) == "host-ok"
 
 
 def test_a_tool_whose_code_holds_an_empty_cell_is_no_shell() -> None:
@@ -321,24 +302,13 @@ def test_a_tool_whose_code_holds_an_empty_cell_is_no_shell() -> None:
 
 class Layer:
     """The isolation layer as the harness calls it (``sandbox.isolation.HostSandbox``): whether
-    it can isolate here, and each run's workspace, whose commands it records."""
+    it can isolate here."""
 
     def __init__(self, why: str | None = None) -> None:
         self.why = why
-        self.ran: list[tuple[str, str | None, str, str, float | None]] = []
 
     def cannot_isolate(self) -> str | None:
         return self.why
-
-    async def workspace(self, tenant: str, user: str | None, run: str) -> Any:
-        layer = self
-
-        class Box:
-            async def exec(self, command: str, *, timeout: float | None, **_: Any) -> ExecResult:  # noqa: ASYNC109 - the command's
-                layer.ran.append((tenant, user, run, command, timeout))
-                return ExecResult(exit_code=0, stdout="isolated-ok\n")
-
-        return Box()
 
 
 @pytest.fixture
@@ -357,49 +327,15 @@ def test_a_layer_that_cannot_isolate_refuses_host_execution_at_start() -> None:
         host.install(cast(Any, Layer("cannot switch to an unprivileged uid")))
 
 
-async def test_allowed_a_local_shell_runs_through_the_isolation_layer(
-    layer: Layer, tmp_path: Path
-) -> None:
-    """Under the installed layer, Deep Agents' ``execute`` on a ``LocalShellBackend`` runs
-    through its one entry point (``isolated_run``): the run's tenant, user and id, the command,
-    its timeout — not in the backend's folder; wrapped again, the backend is routed once."""
-    root = folder()
-    turns = [
-        ("execute", {"command": "touch here.txt"}),
-        ("execute", {"command": "ls", "timeout": 5}),
-        "done",
-    ]
-    scripted = ScriptedChatModel(turns=turns)
-    backend = LocalShellBackend(root_dir=root, virtual_mode=True)
-    graph = ReAct("s", scripted, backend=backend)
-    h = allowing()
-    agent = h.wrap(graph, id="isolated")
-    h.wrap(graph, id="isolated-again")
-    result = await agent.run("run it", user="ada")
-    assert result.answer == "done", result.error
-    assert [(t, u, c, s) for t, u, _, c, s in layer.ran] == [
-        ("default", "ada", "touch here.txt", 120.0),
-        ("default", "ada", "ls", 5.0),
-    ]
-    assert {r for _, _, r, _, _ in layer.ran} == {result.run_id}
-    assert "isolated-ok" in str(scripted.seen[-1][-1].content)
-    assert not (Path(root) / "here.txt").exists()
-    with pytest.raises(ConfigurationError, match="asynchronously"):
-        backend.execute("ls")
-    with pytest.raises(ConfigurationError, match="in a harness run"):
-        await backend.aexecute("ls")
+def test_an_installed_layer_is_the_hosts_and_returns_the_one_it_replaced(layer: Layer) -> None:
+    """The layer the deployment installs is ``sandbox()``'s and ``isolated_run``'s
+    (``use_host``); installing another returns it."""
+    from trellis.harness.sandbox.isolation import host_layer
 
-
-@pytest.mark.parametrize(
-    "way",
-    ["claude-unsandboxed", "kimi-unsandboxed", "openai-shell-tool", "langchain-shell-middleware"],
-)
-def test_allowed_a_shell_the_layer_cannot_carry_is_refused(layer: Layer, way: str) -> None:
-    """A framework's own shell process cannot go through the layer: under it, refused, naming
-    the layer's way in."""
-    target, options, _ = HOST_PATHS[way]
-    with pytest.raises(ConfigurationError, match=r"sandbox\(HostSandbox\(\)\)"):
-        allowing().wrap(target(), id=way, framework_options=options())
+    assert host_layer() is cast(Any, layer)
+    other = Layer()
+    assert host.install(cast(Any, other)) is layer
+    assert host_layer() is cast(Any, other)
 
 
 def test_a_run_config_given_as_dicts_is_read_as_the_sdk_takes_it() -> None:

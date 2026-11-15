@@ -1,27 +1,25 @@
-"""Shell commands are allowed by default, and isolation is the guard
-(``Settings.host_execution``: ``allow`` unless an administrator sets ``deny``).
+"""Shell commands are allowed by default; ``TRELLIS_HOST_EXECUTION=deny`` is the
+administrator's switch that turns off every shell outside a sandbox (``trellis.harness.host``).
 
-* Claude Code: the harness turns its own sandbox on when the team gave none; its shell runs
-  only where that sandbox can confine it (bubblewrap and socat on Linux, ``sandbox-exec`` on
-  macOS) — otherwise each command is refused, and the model reads why (the real CLI, missing
-  them, runs the command unsandboxed with a warning: never left to it). A team's own sandbox
-  that lets commands out is refused at ``h.wrap``.
-* Kimi Code: its own ``Bash`` on the host cannot go through the isolation layer, so with no
-  ``sandbox=`` each command is refused, Kimi told how to give it one (``kimi(sandbox=sandbox())``,
-  which falls back to the host's isolation layer).
-* Deep Agents' ``LocalShellBackend``, LangChain's ``ShellToolMiddleware`` on the host and the
-  OpenAI SDK's Unix-local sandbox run commands unisolated: refused at ``h.wrap`` whatever the
-  setting, naming ``sandbox()``.
-* ``sandbox()`` with no provider: Docker when its daemon answers, else the host's isolation
-  layer (``HostSandbox``) when it can isolate, else no shell — each command refused with the
-  reason, said once.
-* ``TRELLIS_HOST_EXECUTION=deny`` switches host shells off (the administrator's)."""
+* The harness's own commands on this machine go through its isolation layer: ``sandbox()``
+  with no provider is Docker when its daemon answers, else ``HostSandbox`` when it can isolate,
+  else no shell, each command refused with the reason (said once).
+* Claude Code's and Kimi Code's own shells run as they do, announced and recorded; a team's own
+  Claude ``SandboxSettings`` is honoured as given.
+* Deep Agents' ``LocalShellBackend``, LangChain's host shell and the OpenAI SDK's Unix-local
+  sandbox run with no isolation: refused at ``h.wrap`` whatever the setting, naming
+  ``sandbox()``.
+* ``deny`` refuses, per adapter, Claude Code's shell (``Bash``, ``PowerShell``, ``REPL``,
+  ``Monitor``) and Kimi's ``Bash`` on the host, an OpenAI local shell tool, and the isolation
+  layer's own commands; commands in a sandbox are not affected."""
 
 from __future__ import annotations
 
 import json
 import logging
-import sys
+import socket
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -29,17 +27,15 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 
 from tests.support.adapters import CLI
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.sandbox import FakeSandboxes
-from tests.unit.test_host_execution import HOST_PATHS, deep_local, react_local, shell_middleware
-from trellis import Harness, Settings, sandbox
+from tests.unit.test_host_execution import HOST_PATHS, UNISOLATED_PATHS
+from trellis import Harness, ReAct, Settings, sandbox
 from trellis.contracts import ConfigurationError, RunStatus
-from trellis.harness import host
 from trellis.harness import sandbox as sandbox_module
-from trellis.harness.adapters.acp import KIMI, ACPAgent
-from trellis.harness.sandbox import HostSandbox
+from trellis.harness.adapters.acp import kimi
+from trellis.harness.sandbox import HostSandbox, SandboxRef
 from trellis.harness.sandbox.shared import SharedDockerSandbox
-
-FAKE_ACP = str(Path(__file__).resolve().parents[1] / "support" / "fake_acp_agent.py")
 
 
 def claude(tmp: Path, *steps: dict[str, Any], **fields: Any) -> ClaudeAgentOptions:
@@ -55,162 +51,63 @@ def claude(tmp: Path, *steps: dict[str, Any], **fields: Any) -> ClaudeAgentOptio
     )
 
 
-def settings_sent(tmp: Path) -> dict[str, Any]:
-    """The ``--settings`` the CLI was started with."""
-    argv = json.loads((tmp / "cli.json").read_text())["argv"]
-    return json.loads(argv[argv.index("--settings") + 1])
-
-
-def ran(tmp: Path) -> list[str]:
-    log = tmp / "builtins.jsonl"
-    return (
-        [json.loads(line)["tool"] for line in log.read_text().splitlines()] if log.exists() else []
-    )
-
-
-def kimi_fake(tmp: Path, *steps: dict[str, Any], **fields: Any) -> ACPAgent:
-    env = {
-        "FAKE_ACP_SCRIPT": json.dumps([*steps, {"text": "done: {last}"}]),
-        "FAKE_ACP_RECORD": str(tmp / "record.json"),
-        "KIMI_CODE_HOME": str(tmp / "home"),
-    }
-    return ACPAgent(
-        command=(sys.executable, FAKE_ACP), env=env, cwd=str(tmp), profile=KIMI, **fields
-    )
-
-
-@pytest.fixture
-def confined(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A machine whose Claude Code sandbox can confine its shell."""
-    monkeypatch.setattr(host, "claude_unconfined", lambda: None)
+def deny() -> Harness:
+    return Harness(config=Settings(host_execution="deny"), memory=False)
 
 
 # --------------------------------------------------------------------------- the setting
-def test_shell_commands_are_allowed_by_default_and_deny_switches_them_off() -> None:
+def test_shell_commands_are_allowed_by_default_and_deny_is_the_only_other_value() -> None:
     assert Settings().host_execution == "allow"
+    assert Settings.from_env({}).host_execution == "allow"
     assert Settings.from_env({"TRELLIS_HOST_EXECUTION": "deny"}).host_execution == "deny"
     with pytest.raises(ValueError, match="host_execution"):
         Settings.from_env({"TRELLIS_HOST_EXECUTION": "maybe"})
-    h = Harness(config=Settings(), memory=False)
-    for way in ("claude-unsandboxed", "kimi-unsandboxed", "openai-shell-tool"):
-        target, options, _ = HOST_PATHS[way]
-        h.wrap(target(), id=way, framework_options=options())
-    off = Harness(config=Settings(host_execution="deny"), memory=False)
-    for way in ("claude-unsandboxed", "kimi-unsandboxed", "openai-shell-tool"):
-        target, options, _ = HOST_PATHS[way]
-        with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION"):
-            off.wrap(target(), id=way, framework_options=options())
 
 
-@pytest.mark.parametrize(
-    "build", [deep_local, react_local, shell_middleware], ids=["deepagents", "react", "langchain"]
-)
-def test_an_unisolated_shell_is_refused_whatever_the_setting(build: Any) -> None:
-    """``LocalShellBackend``, LangChain's host shell: no isolation the harness can give them —
-    refused at ``h.wrap``, naming ``sandbox()``, allowed or not."""
+@pytest.mark.parametrize("way", sorted(HOST_PATHS))
+def test_deny_switches_each_adapters_shell_off_and_the_default_wraps_it(way: str) -> None:
+    target, options, fix = HOST_PATHS[way]
+    with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=deny") as refused:
+        deny().wrap(target(), id=way, framework_options=options())
+    assert fix in str(refused.value)
+    allowed = Harness(config=Settings(), memory=False)
+    allowed.wrap(target(), id=way, framework_options=options())
+    assert way in allowed.agents
+
+
+@pytest.mark.parametrize("way", sorted(UNISOLATED_PATHS))
+def test_an_unisolated_shell_is_refused_whatever_the_setting(way: str) -> None:
+    target, options, fix = UNISOLATED_PATHS[way]
     for value in ("allow", "deny"):
         h = Harness(config=Settings(host_execution=value), memory=False)  # pyright: ignore[reportArgumentType]
-        with pytest.raises(ConfigurationError, match=r"sandbox\(\)"):
-            h.wrap(build(), id="unisolated")
+        with pytest.raises(ConfigurationError, match=r"sandbox\(\)") as refused:
+            h.wrap(target(), id=way, framework_options=options())
+        assert fix in str(refused.value)
+
+
+def test_deny_leaves_commands_in_a_sandbox_alone() -> None:
+    h = deny()
+    boxed: Any = {"enabled": True, "allowUnsandboxedCommands": False}
+    h.wrap(ClaudeAgentOptions(sandbox=boxed), id="claude-boxed")
+    h.wrap(kimi(sandbox=sandbox(FakeSandboxes())), id="kimi-boxed")
+    h.wrap(ReAct("s", ScriptedChatModel(turns=[]), backend=sandbox(FakeSandboxes())), id="react")
+    assert set(h.agents) == {"claude-boxed", "kimi-boxed", "react"}
 
 
 # --------------------------------------------------------------------------- Claude Code
-async def test_claude_gets_its_own_sandbox_when_the_team_gave_none(
-    tmp_path: Path, confined: None
-) -> None:
+async def test_a_teams_own_claude_sandbox_is_honoured_as_given(tmp_path: Path) -> None:
+    """The harness turns nothing of Claude Code's sandbox on or off: the team's settings go to
+    the CLI as given, and none when it gave none."""
+    given: Any = {"enabled": True, "excludedCommands": ["git"]}
     h = Harness(config=Settings(), memory=False)
-    step = {"builtin": "Bash", "args": {"command": "make test"}}
-    done = await h.wrap(claude(tmp_path, step), id="boxed").run("test", user="ada")
-    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
-    assert settings_sent(tmp_path)["sandbox"] == {
-        "enabled": True,
-        "allowUnsandboxedCommands": False,
-    }
-    assert ran(tmp_path) == ["Bash"]
-
-
-async def test_claude_shell_is_refused_with_the_reason_where_its_sandbox_cannot_confine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Without bubblewrap and socat the CLI would run the command unsandboxed (it says so on
-    its stderr, and goes on): the harness refuses each command instead, and says why once."""
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(host.shutil, "which", lambda name: None)
-    host.claude_unconfined.cache_clear()
-    try:
-        assert host.claude_unconfined() == (
-            "Claude Code's sandbox needs bubblewrap (bwrap) and socat on Linux, and bwrap, "
-            "socat are missing"
-        )
-        h = Harness(config=Settings(), memory=False)
-        step = {"builtin": "Bash", "args": {"command": "make test"}}
-        with caplog.at_level(logging.WARNING, logger="trellis.host"):
-            done = await h.wrap(claude(tmp_path, step), id="unboxed").run("test", user="ada")
-        assert done.status is RunStatus.SUCCESS, done
-        assert "Bash was not run: commands cannot be confined here" in str(done.answer)
-        assert "bubblewrap" in str(done.answer) and ran(tmp_path) == []
-        assert any("bubblewrap" in r.getMessage() for r in caplog.records)
-    finally:
-        host.claude_unconfined.cache_clear()
-
-
-@pytest.mark.parametrize(
-    "platform, found, why",
-    [
-        ("darwin", {"sandbox-exec"}, None),
-        ("darwin", set(), "Claude Code's sandbox needs sandbox-exec on macOS, and it is missing"),
-        ("linux", {"bwrap", "socat"}, None),
-        ("win32", set(), "Claude Code's sandbox runs on Linux and macOS, and this is win32"),
-    ],
-)
-def test_where_claude_codes_sandbox_can_confine(
-    monkeypatch: pytest.MonkeyPatch, platform: str, found: set[str], why: str | None
-) -> None:
-    monkeypatch.setattr(sys, "platform", platform)
-    monkeypatch.setattr(host.shutil, "which", lambda name: name if name in found else None)
-    host.claude_unconfined.cache_clear()
-    try:
-        assert host.claude_unconfined() == why
-    finally:
-        host.claude_unconfined.cache_clear()
-
-
-@pytest.mark.parametrize(
-    "box",
-    [
-        {"enabled": False},
-        {"enabled": True},
-        {"enabled": True, "allowUnsandboxedCommands": False, "excludedCommands": ["git"]},
-    ],
-    ids=["off", "lets-commands-out", "excluded-commands"],
-)
-def test_a_teams_sandbox_that_lets_commands_out_is_refused(tmp_path: Path, box: Any) -> None:
-    with pytest.raises(ConfigurationError, match="allowUnsandboxedCommands"):
-        Harness(config=Settings(), memory=False).wrap(claude(tmp_path, sandbox=box), id="out")
-
-
-def test_a_claude_with_no_shell_gets_no_sandbox(tmp_path: Path) -> None:
-    assert host.claude_sandbox(ClaudeAgentOptions(tools=["Read"])) is None
-    assert host.claude_sandbox(ClaudeAgentOptions()) == {
-        "enabled": True,
-        "allowUnsandboxedCommands": False,
-    }
-    given: Any = {"enabled": True, "allowUnsandboxedCommands": False, "network": {}}
-    assert host.claude_sandbox(ClaudeAgentOptions(sandbox=given)) == given
-
-
-# --------------------------------------------------------------------------- Kimi Code
-async def test_kimi_bash_on_the_host_is_refused_naming_a_sandbox(tmp_path: Path) -> None:
-    """Kimi's own ``Bash`` cannot go through the isolation layer: with no sandbox each command
-    is refused and Kimi told how to have one; with ``sandbox()`` it runs, unasked."""
-    step = {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""}
-    h = Harness(config=Settings(), memory=False)
-    done = await h.wrap(kimi_fake(tmp_path, step), id="host").run("tidy", user="ada")
-    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
-    told = json.loads((tmp_path / "record.json").read_text())["prompts"][-1]
-    assert "kimi(sandbox=sandbox())" in told
-    boxed = h.wrap(kimi_fake(tmp_path, step, sandbox=sandbox(FakeSandboxes())), id="boxed")
-    assert (await boxed.run("tidy", user="ada")).interrupt is None
+    await h.wrap(claude(tmp_path, sandbox=given), id="given").run("hi", user="ada")
+    argv = json.loads((tmp_path / "cli.json").read_text())["argv"]
+    assert json.loads(argv[argv.index("--settings") + 1])["sandbox"] == given
+    await h.wrap(claude(tmp_path), id="none").run("hi", user="ada")
+    argv = json.loads((tmp_path / "cli.json").read_text())["argv"]
+    assert "--settings" not in argv or "sandbox" not in json.loads(
+        argv[argv.index("--settings") + 1]
+    )
 
 
 # --------------------------------------------------------------------------- sandbox()
@@ -227,19 +124,66 @@ def test_a_sandbox_with_no_provider_falls_back_from_docker_to_the_hosts_isolatio
         none = sandbox().provider_for()
         sandbox().provider_for()
     assert isinstance(none, sandbox_module.NoShell) and none.why == "no root here"
-    assert [r.getMessage() for r in caplog.records if "no root here" in r.getMessage()][:1]
+    assert len([r for r in caplog.records if "no root here" in r.getMessage()]) == 1
     given = FakeSandboxes()
     assert sandbox(given).provider_for() is given
 
 
 async def test_with_no_shell_each_command_is_refused_with_the_reason() -> None:
-    from trellis.harness.sandbox import SandboxRef
-
-    none = sandbox_module.NoShell("no Docker daemon answers, and no root here")
+    none = sandbox_module.NoShell("no unshare here")
     ref = SandboxRef(provider=none.name, id="trellis-r1", labels={})
-    with pytest.raises(ConfigurationError, match="no Docker daemon answers"):
-        await none.create(ref)
-    with pytest.raises(ConfigurationError, match="no Docker daemon answers"):
-        await none.attach(ref)
+    for call in (none.create(ref), none.attach(ref)):
+        with pytest.raises(ConfigurationError, match=r"no Docker daemon answers.*no unshare here"):
+            await call
     await none.delete(ref)
     assert await none.labelled({}) == []
+
+
+async def test_deny_switches_the_isolation_layers_commands_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sandbox on this machine (``HostSandbox``) is a host command: under ``deny`` its first
+    call is refused, naming the setting, and its card is not read."""
+    monkeypatch.setattr(HostSandbox, "cannot_isolate", lambda self: None)
+    box = sandbox(HostSandbox())
+    turns = [("execute", {"command": "ls"}), "done"]
+    scripted = ScriptedChatModel(turns=turns)
+    agent = deny().wrap(ReAct("s", scripted, backend=box), id="host-box")
+    done = await agent.run("ls", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert "TRELLIS_HOST_EXECUTION=deny" in str(scripted.seen[-1][-1].content)
+
+
+@pytest.fixture
+def daemon(tmp_path: Path) -> Iterator[str]:
+    """A Docker daemon's ``/_ping`` on a unix socket: ``OK``."""
+    path = str(tmp_path / "docker.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen()
+
+    def answer() -> None:
+        conn, _ = server.accept()
+        with conn:
+            conn.recv(256)
+            conn.sendall(b"HTTP/1.0 200 OK\r\n\r\nOK")
+
+    threading.Thread(target=answer, daemon=True).start()
+    yield path
+    server.close()
+
+
+def test_docker_answers_where_its_daemon_does(
+    monkeypatch: pytest.MonkeyPatch, daemon: str, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sandbox_module, "docker_host", lambda: f"unix://{daemon}")
+    assert sandbox_module.docker_answers()
+    monkeypatch.setattr(sandbox_module, "docker_host", lambda: f"unix://{tmp_path}/none.sock")
+    assert not sandbox_module.docker_answers()
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    monkeypatch.setattr(sandbox_module, "docker_host", lambda: f"tcp://127.0.0.1:{port}")
+    assert not sandbox_module.docker_answers()
+    monkeypatch.setattr(sandbox_module, "docker_host", lambda: "npipe:////./pipe/docker")
+    assert not sandbox_module.docker_answers()

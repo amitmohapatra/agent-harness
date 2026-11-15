@@ -1,54 +1,37 @@
-"""Commands on this machine are the deployment's to allow, never a run's user's
-(``Settings.host_execution``, ``TRELLIS_HOST_EXECUTION``).
+"""Shell commands on this machine: allowed by default, with isolation as the guard
+(``Settings.host_execution``, ``TRELLIS_HOST_EXECUTION``: ``allow``, or ``deny``, the
+administrator's switch that turns them off).
 
-The person a run is for decides the actions taken in their name: governance asks them. The
-machine the harness runs on is not theirs — a command there reaches the deployment's files,
-credentials, network and other users' runs — so whether agents may run commands on it is an
-administrator's policy, set once for the deployment. An agent that would run a shell command
-here, not in an isolated sandbox, is refused where it is wrapped (``h.wrap``) and where a
-run's own ``framework_options`` would make it one (:func:`refuse`): a ``ConfigurationError``
-naming the setting and the sandbox to give it instead, before anything runs, unless the
-deployment allows it (``TRELLIS_HOST_EXECUTION=allow``). Allowed, governance decides each call
-as before — and the user's and tenant's boundaries still hold on the host: the deployment
-installs the isolation layer (:func:`install`: a ``sandbox.isolation.HostSandbox``, its one
-entry point ``isolated_run`` — a per-tenant base, a per-run uid and 0700 workspace, limits, an
-environment with no secret, a network policy, clean-up, a reaper, audit), which refuses at
-start when it cannot isolate here (it cannot switch uid, say: :data:`UNISOLATED`). Under it,
-Deep Agents' ``execute`` on a ``LocalShellBackend`` runs through ``isolated_run``
-(:func:`_through`), never as the service's own user, and a shell the harness cannot route
-there — a framework's own process (Claude Code, Kimi Code without a sandbox, an OpenAI local
-shell or Unix-local sandbox, LangChain's ``ShellToolMiddleware``) — is refused, naming the
-layer's way in (``kimi(sandbox=sandbox(HostSandbox()))``, ``ReAct(backend=sandbox(
-HostSandbox()))``). With no layer installed, an allowed command runs as the service's user:
-a deployment that allows host execution installs one.
+The person a run is for decides the actions taken in their name; the machine the harness runs
+on is the deployment's, so a command there runs only where it is confined to the run — never
+as the service's own user, never on a run user's approval. What runs a command here
+(:func:`found`), by each framework's own word for it, and what the harness does:
 
-What runs a command here (:func:`found`), by each framework's own word for it:
+* **Claude Code's and Kimi Code's own shell** (Claude's ``Bash``, ``PowerShell``, ``REPL``,
+  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``): run as they do, in their working folder
+  as the service's user — not through the harness's isolation layer, which cannot carry a
+  framework's own process — announced and recorded at each call. A team's own Claude
+  ``SandboxSettings`` is honoured as given; ``kimi(sandbox=sandbox())`` isolates Kimi's.
+* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``**: its executor is code of
+  yours on this machine, governed at each call as any tool of yours.
+* **Unisolated shells — Deep Agents' ``execute`` on a ``LocalShellBackend`` (alone, a
+  ``CompositeBackend``'s default, a sub-agent's; ``ReAct(backend=)`` too), LangChain's
+  ``ShellToolMiddleware`` on the host, the OpenAI SDK's ``UnixLocalSandboxClient``**: no
+  isolation the harness can give them, so refused at ``h.wrap`` whatever the setting, naming
+  ``sandbox()`` (which falls back to this machine's isolation layer when no Docker answers).
 
-* Deep Agents' ``execute`` on a ``LocalShellBackend`` (alone, or the default of a
-  ``CompositeBackend``, where ``execute`` goes), in a graph of your own, its ``task``
-  sub-agents' or ``ReAct(backend=)``;
-* LangChain's ``ShellToolMiddleware`` with any execution policy but Docker's or Codex's
-  sandbox (its default is ``HostExecutionPolicy``);
-* an OpenAI agent's ``LocalShellTool`` or ``ShellTool`` in the SDK's local environment (its
-  executor is code on this machine), on the agent or one it reaches (a handoff, an agent
-  tool), and the SDK's ``UnixLocalSandboxClient`` (its session, its state) in the run's
-  ``run_config``;
-* Claude Code with its shell (``Bash``, ``PowerShell``, ``REPL``, ``Monitor`` — its tools
-  unless a list leaves them out or ``disallowed_tools`` names them) and no sandbox, or a
-  sandbox that lets a command out (``allowUnsandboxedCommands``, true unless set false;
-  ``excludedCommands``);
-* an ACP agent (Kimi Code) with no ``sandbox``.
-
-An isolated sandbox is never refused: the harness's ``sandbox()``, a Deep Agents sandbox
-backend, a hosted client's, LangChain's Docker policy, and a framework's own confinement of
-its shell (Claude Code's sandbox with nothing let out, Codex's). Neither is an agent with no
-shell, nor code of your own that starts a process (a tool you wrote: you decided it)."""
+``deny`` refuses every one at ``h.wrap``, and a run whose own ``framework_options`` would make
+one, naming the setting. Isolated sandboxes are never refused: ``sandbox()``, a Deep Agents
+sandbox backend, a hosted client, LangChain's Docker or Codex policy, Kimi with a sandbox.
+The deployment may install the isolation layer it configured (:func:`install`: a
+``HostSandbox`` with a root helper, limits, network), refused at start when it cannot isolate;
+``sandbox()`` and ``isolated_run`` then use it."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from trellis.contracts import ConfigurationError
 
@@ -56,31 +39,25 @@ if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.sandbox.isolation import HostSandbox
 
-#: The variable an administrator allows commands on this machine with.
+#: The variable an administrator switches shell commands on this machine off with.
 HOST_EXECUTION_ENV: Final = "TRELLIS_HOST_EXECUTION"
-#: What an agent that would run commands here is refused with.
+#: What an agent that would run commands here is refused with where the deployment says deny.
 REFUSED: Final = (
-    "agent {agent!r} would run commands on this machine, outside a sandbox: {found}. This "
-    "deployment does not allow it, and a run's user cannot approve it. Give it a sandbox — "
-    "{fix} — or, where the deployment's administrator decides that commands may run here, "
-    f"set {HOST_EXECUTION_ENV}=allow (Settings(host_execution='allow'))"
+    "agent {agent!r} would run commands on this machine: {found}. This deployment switched "
+    f"them off ({HOST_EXECUTION_ENV}=deny), and a run's user cannot approve them. Give it a "
+    "sandbox — {fix}"
+)
+#: What an agent with a shell the harness cannot isolate is refused with, whatever the setting.
+UNISOLATED_SHELL: Final = (
+    "agent {agent!r} would run commands on this machine with no isolation: {found}. Under the "
+    "harness a command runs confined to its run: give it sandbox() (Docker, else this "
+    "machine's isolation layer) — {fix}"
 )
 #: What installing an isolation layer that cannot isolate here is refused with.
 UNISOLATED: Final = (
-    "commands on this machine cannot be isolated here: {why}. Host execution "
-    f"({HOST_EXECUTION_ENV}=allow) runs commands only through the isolation layer, never as "
+    "commands on this machine cannot be isolated here: {why}. The harness never runs them as "
     "the service's own user"
 )
-#: What a host shell the isolation layer cannot carry is refused with, once a layer is
-#: installed.
-UNROUTED: Final = (
-    "agent {agent!r} would run commands on this machine outside the isolation layer: {found}. "
-    "This deployment runs host commands only through it (its workspace, uid and limits per "
-    "run): give the agent the layer as its sandbox — kimi(sandbox=sandbox(HostSandbox())), "
-    "ReAct(backend=sandbox(HostSandbox())), sandbox(HostSandbox()).tools() — or {fix}"
-)
-#: Marks a ``LocalShellBackend`` whose ``execute`` runs through the isolation layer.
-ROUTED: Final = "_trellis_isolated"
 #: Claude Code's built-in tools that run a command or code on the machine its CLI runs on.
 CLAUDE_SHELLS: Final = frozenset({"Bash", "PowerShell", "REPL", "Monitor"})
 #: How the Deep Agents fix reads, for a graph of your own and for ``ReAct``.
@@ -88,28 +65,31 @@ DEEP_AGENTS_FIX: Final = (
     "ReAct(backend=sandbox()), or create_deep_agent(**sandbox().deep_agent()), in place of "
     "the LocalShellBackend"
 )
+#: What a way to a shell is: one the harness could isolate and does not (refused whatever the
+#: setting: ``sandbox()`` is the way), or a framework's own process (Claude Code's, Kimi
+#: Code's) or an executor of yours, which run as they do unless the deployment says ``deny``.
+Kind = Literal["unisolated", "framework", "yours"]
 
 
 @dataclass(frozen=True, slots=True)
 class HostShell:
-    """One way an agent would run commands on this machine: what it is, and the sandbox to
-    give it instead."""
+    """One way an agent would run commands on this machine: what it is, the sandbox to give it
+    instead, and its kind."""
 
     what: str
     fix: str
-    #: the ``LocalShellBackend`` whose ``execute`` the isolation layer can carry (:func:`_through`)
-    backend: Any = None
+    kind: Kind = "unisolated"
 
 
-#: The isolation layer installed for this machine's commands (:func:`install`), if any.
+#: The isolation layer the deployment installed (:func:`install`), if any.
 _isolation: HostSandbox | None = None
 
 
 def install(layer: HostSandbox | None) -> HostSandbox | None:
-    """Make ``layer`` the isolation layer every allowed command on this machine runs through,
-    and the host's for ``isolated_run`` (``sandbox.isolation.use_host``; ``None``: none) —
-    refused at start (:data:`UNISOLATED`) when it says it cannot isolate here. The layer it
-    replaces is returned."""
+    """Make ``layer`` this machine's isolation layer — ``sandbox()``'s and ``isolated_run``'s
+    (``sandbox.isolation.use_host``; ``None``: the default one) — refused at start
+    (:data:`UNISOLATED`) when it says it cannot isolate here. The layer it replaces is
+    returned."""
     from trellis.harness.sandbox.isolation import use_host
 
     why = None if layer is None else layer.cannot_isolate()
@@ -123,65 +103,23 @@ def install(layer: HostSandbox | None) -> HostSandbox | None:
 
 def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
     """Refuse ``agent`` run with framework ``options`` (its own, or a run's over them) when it
-    would run commands on this machine (:func:`found`) and the deployment does not allow it;
-    allowed, with an isolation layer installed, route what it can carry through it
-    (:func:`_through`) and refuse what it cannot (:data:`UNROUTED`)."""
+    would run commands here with no isolation the harness could give (:data:`UNISOLATED_SHELL`),
+    or — where the deployment says ``deny`` — with any shell here (:data:`REFUSED`)."""
     shells = found(agent.adapter.name, agent.target, options)
     if not shells:
         return
-    if agent.harness.settings.host_execution != "allow":
-        what = "; ".join(dict.fromkeys(s.what for s in shells))
-        fix = "; ".join(dict.fromkeys(s.fix for s in shells))
-        raise ConfigurationError(REFUSED.format(agent=agent.id, found=what, fix=fix))
-    layer = _isolation
-    if layer is None:
-        return
-    unrouted = [s for s in shells if s.backend is None]
-    if unrouted:
-        what = "; ".join(dict.fromkeys(s.what for s in unrouted))
-        fix = "; ".join(dict.fromkeys(s.fix for s in unrouted))
-        raise ConfigurationError(UNROUTED.format(agent=agent.id, found=what, fix=fix))
-    for shell in shells:
-        _through(shell.backend, layer)
+    held = [s for s in shells if s.kind == "unisolated"]
+    if held:
+        raise ConfigurationError(UNISOLATED_SHELL.format(agent=agent.id, **_said(held)))
+    if agent.harness.settings.host_execution == "deny":
+        raise ConfigurationError(REFUSED.format(agent=agent.id, **_said(shells)))
 
 
-def _through(backend: Any, layer: HostSandbox) -> None:
-    """``backend`` (a ``LocalShellBackend``) with its ``execute`` run through the isolation
-    layer's one entry point (``isolated_run``): in the run's workspace, as its uid, within the
-    layer's limits — never in its own folder as the service's user. Once per backend."""
-    from deepagents.backends.protocol import ExecuteResponse
-
-    from trellis.harness.runtime import current
-    from trellis.harness.sandbox.isolation import isolated_run
-    from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
-
-    if getattr(backend, ROUTED, None) is layer:
-        return
-
-    async def aexecute(command: str, *, timeout: int | None = None) -> ExecuteResponse:  # noqa: ASYNC109 - the command's
-        runtime = current()
-        if runtime is None:
-            raise ConfigurationError(
-                "a command on this machine runs in a harness run, through its isolation layer"
-            )
-        ran = await isolated_run(
-            runtime.tenant,
-            runtime.user,
-            runtime.run_id,
-            command,
-            timeout=REMOTE_TIMEOUT_SECONDS if timeout is None else float(timeout),
-            layer=layer,
-        )
-        return ExecuteResponse(output=ran.stdout + ran.stderr, exit_code=ran.exit_code)
-
-    def execute(command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        raise ConfigurationError(
-            "a command on this machine runs through its isolation layer, asynchronously "
-            "(the harness runs the graph so)"
-        )
-
-    backend.aexecute, backend.execute = aexecute, execute
-    setattr(backend, ROUTED, layer)
+def _said(shells: list[HostShell]) -> dict[str, str]:
+    return {
+        "found": "; ".join(dict.fromkeys(s.what for s in shells)),
+        "fix": "; ".join(dict.fromkeys(s.fix for s in shells)),
+    }
 
 
 def found(adapter: str, target: Any, options: Mapping[str, Any]) -> list[HostShell]:
@@ -199,10 +137,8 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
 
     shells: list[HostShell] = []
     for tool in graph_tools(target):
-        backend = _local_shell(files_backend(tool)) if tool.name == "execute" else None
-        if backend is not None:
-            what = "Deep Agents' execute on a LocalShellBackend"
-            shells.append(HostShell(what, DEEP_AGENTS_FIX, backend=backend))
+        if tool.name == "execute" and _local_shell(files_backend(tool)):
+            shells.append(HostShell("Deep Agents' execute on a LocalShellBackend", DEEP_AGENTS_FIX))
         middleware = _shell_middleware(tool)
         if middleware is not None and not _isolated(middleware):
             shells.append(
@@ -214,15 +150,14 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
     return shells
 
 
-def _local_shell(backend: Any) -> Any | None:
-    """The ``LocalShellBackend`` Deep Agents' ``execute`` on ``backend`` runs on this machine
-    with: the backend, or a ``CompositeBackend``'s default (where ``execute`` goes); else
-    ``None``."""
+def _local_shell(backend: Any) -> bool:
+    """Whether Deep Agents' ``execute`` on ``backend`` runs on this machine: a
+    ``LocalShellBackend``, or a ``CompositeBackend`` whose default is one."""
     from deepagents.backends import CompositeBackend, LocalShellBackend
 
     if isinstance(backend, CompositeBackend):
         return _local_shell(backend.default)
-    return backend if isinstance(backend, LocalShellBackend) else None
+    return isinstance(backend, LocalShellBackend)
 
 
 def _shell_middleware(tool: Any) -> Any | None:
@@ -271,6 +206,7 @@ def _openai(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
                         f"{agent.name!r}, run by its executor here",
                         "a ShellTool in a hosted environment (environment={'type': "
                         "'container_auto'}), or a SandboxAgent with a Docker or hosted client",
+                        "yours",
                     )
                 )
     # a run config, and its sandbox, as an object or the dict ``Runner.run`` takes (one with a
@@ -297,7 +233,7 @@ def _field(given: Any, name: str) -> Any:
 
 
 def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
-    """Claude Code's shell with no sandbox, or with a sandbox that lets a command out."""
+    """Claude Code's own shell: it runs as it does (its own ``SandboxSettings``, as given)."""
 
     def given(name: str) -> Any:
         return options[name] if name in options else getattr(target, name, None)
@@ -307,19 +243,8 @@ def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
     if not (offered & CLAUDE_SHELLS) - denied:
         return []
     box = given("sandbox") or {}
-    if not box.get("enabled"):
-        what = "Claude Code's shell with no sandbox"
-    elif box.get("allowUnsandboxedCommands", True):
-        what = (
-            "Claude Code's sandbox lets a command out (allowUnsandboxedCommands, true unless "
-            "set false)"
-        )
-    elif box.get("excludedCommands"):
-        what = (
-            f"Claude Code's sandbox runs {', '.join(map(str, box['excludedCommands']))} "
-            "outside it (excludedCommands)"
-        )
-    else:
+    confined = box.get("enabled") and box.get("allowUnsandboxedCommands") is False
+    if confined and not box.get("excludedCommands"):
         return []
     fix = (
         "ClaudeAgentOptions(sandbox={'enabled': True, 'allowUnsandboxedCommands': False}) "
@@ -327,7 +252,7 @@ def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
         + ", ".join(sorted(CLAUDE_SHELLS))
         + ")"
     )
-    return [HostShell(what, fix)]
+    return [HostShell("Claude Code's own shell, as the service's user", fix, "framework")]
 
 
 def _acp(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
@@ -340,6 +265,7 @@ def _acp(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
         HostShell(
             f"{label}'s shell with no sandbox",
             "ACPAgent(sandbox=sandbox()), kimi(sandbox=sandbox())",
+            "framework",
         )
     ]
 

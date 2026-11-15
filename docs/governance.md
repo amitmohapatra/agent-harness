@@ -21,7 +21,7 @@ tool records, and traced.
 | Decision | Whose | Where it is set |
 |---|---|---|
 | an action in the user's name: a refund, an email, a write to their records | the run's user — or the reviewer a rule names | governance asks them at the call ([below](#what-the-person-picks)): allow once, for this conversation, always, deny |
-| whether agents may run commands on the machine the harness runs on | the deployment's administrator | `TRELLIS_HOST_EXECUTION` (`Settings.host_execution`): `deny` by default ([below](#commands-on-the-host-the-deployments-to-allow)) |
+| whether agents may run shell commands on the machine the harness runs on, outside a sandbox | the deployment's administrator | `TRELLIS_HOST_EXECUTION` (`Settings.host_execution`): `allow` by default, `deny` switches them off ([below](#commands-on-the-host)) |
 | a tool's risk, and when its calls need a person | an administrator (or an accepted approval suggestion) | the tool catalog: `risk`, `approve_when` ([below](#one-place-for-approval-rules)) |
 | who answers an infrastructure tool's approval | an administrator, in code | a `before_tool` hook's `Ask(assignee="role:…")`: the call waits in that role's inbox, not the user's ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook)) |
 | which MCP servers an agent reaches, what it runs without asking (Claude's `allowed_tools`, a permission mode such as `acceptEdits` or `bypassPermissions`) | the deployment | the agent's options or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused |
@@ -33,7 +33,7 @@ tool records, and traced.
 | `Read`, `Grep`, `Glob` (Kimi's reads) in the workspace | nobody | run unasked, recorded |
 | `Write`, `Edit` of the user's own files | the user | the one rule: allow once, for this conversation, always (with memory), deny |
 | the shell (`Bash`) in the sandbox | the deployment | runs unasked, announced and recorded: the framework's own permission question is not the user's |
-| the shell on the host | the administrator | refused unless `TRELLIS_HOST_EXECUTION=allow` ([below](#commands-on-the-host-the-deployments-to-allow)); allowed, as in a sandbox |
+| the shell on the host | the administrator | runs as Claude Code or Kimi runs it — as the service's user, without the harness's isolation — unasked and announced; `TRELLIS_HOST_EXECUTION=deny` switches it off ([below](#commands-on-the-host)) |
 | the network out: Claude's `WebFetch`, `WebSearch`; Kimi's `FetchURL`, `WebSearch` | the administrator, in the catalog | **refused by default**: until the catalog gives the tool a risk (`read`: runs unasked) or an `approve_when` (asks when it holds); with memory off there is no catalog, and they are refused |
 | an MCP server's tool | the administrator chooses the servers; the user the actions in their name | the one rule, by what the tool says ([below](#one-rule-every-adapter-and-every-way-a-tool-arrives)) |
 
@@ -62,46 +62,51 @@ class OpsReviews(Hooks):
         return None  # the rest: governance decides, by the catalog
 ```
 
-### Commands on the host: the deployment's to allow
+### Commands on the host
 
-A shell command on the machine the harness runs on reaches the deployment's files,
-credentials, network and other users' runs: no end user can approve that. So an agent that
-would run commands there — not in an isolated sandbox — is refused where it is wrapped
-(`h.wrap`), and a run whose own `framework_options` would make it one is refused before it is
-made: a `ConfigurationError` naming `TRELLIS_HOST_EXECUTION` and the sandbox to give it instead.
-An administrator who decides that commands may run on this machine sets
-`TRELLIS_HOST_EXECUTION=allow` (`Settings(host_execution="allow")`); each call is then
-governed, journaled and recorded as before, and the tenant's and user's boundaries still hold
-on the host. The deployment installs the isolation layer at start —
-`trellis.harness.host.install(HostSandbox(...))`, the same layer as the shared sandbox's
-([sandbox.md](sandbox.md#commands-on-the-host-the-same-boundaries): a per-tenant base, a
-per-run uid and 0700 workspace, limits, an environment with no secret, a network policy,
-clean-up, a reaper, audit) — and that refuses at once when the layer cannot isolate here (it
-cannot switch uid, say), naming why. Under it, Deep Agents' `execute` on a `LocalShellBackend`
-runs through the layer's one entry point, `isolated_run`, never as the service's own user, and
-a shell the harness cannot route there — a framework's own process: Claude Code's, an
-unsandboxed Kimi's, an OpenAI local shell or Unix-local sandbox, LangChain's
-`ShellToolMiddleware` — is refused at `h.wrap`, naming the layer's way in
-(`kimi(sandbox=sandbox(HostSandbox()))`, `ReAct(backend=sandbox(HostSandbox()))`,
-`sandbox(HostSandbox()).tools()`). With no layer installed an allowed command runs as the
-service's own user, so a deployment that allows host execution installs one.
+Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What runs where:
+
+* **The harness's own commands on this machine go through its isolation layer.** `sandbox()`
+  with no provider is the tenant's shared Docker container when the daemon answers, else this
+  machine's isolation layer (`HostSandbox`: a per-tenant base, a per-run uid and 0700
+  workspace, limits, an environment with no secret, the network off, clean-up, a reaper,
+  audit — [sandbox.md](sandbox.md#commands-on-the-host-the-same-boundaries)) when it can
+  isolate here, else no shell: each command is refused with the reason, said once in the log.
+  Never a command as the service's own user. A deployment that configured its own layer (a
+  root helper, limits, a network) installs it at start with
+  `trellis.harness.host.install(HostSandbox(...))`, refused at once when it cannot isolate.
+* **A shell the harness could isolate and does not is refused, whatever the setting:** Deep
+  Agents' `execute` on a `LocalShellBackend` (alone, a `CompositeBackend`'s default, a
+  sub-agent's; `ReAct(backend=)` too), LangChain's `ShellToolMiddleware` on the host, the OpenAI
+  SDK's `UnixLocalSandboxClient` — at `h.wrap`, naming `sandbox()`.
+* **Claude Code's and Kimi Code's own shells run as they do today:** in their working folder,
+  as the service's own user, **without the harness's isolation** — announced and recorded at
+  each call, never asked of the run's user. A team's own Claude `SandboxSettings` is honoured
+  as given. To isolate them, run them in a sandbox: Claude Code's own
+  (`ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": False})`, which
+  needs bubblewrap and socat on Linux — without them the CLI runs the command unsandboxed,
+  warning only on its stderr), `kimi(sandbox=sandbox())`. An OpenAI agent's `LocalShellTool` or
+  local `ShellTool` runs its executor — code of yours — governed as any tool of yours.
+* **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
+  sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
+  host, an OpenAI local shell tool — refused at `h.wrap`, and a run whose own
+  `framework_options` would make one, naming the setting — and the isolation layer's own
+  commands, refused at the call. Commands in a sandbox are not affected.
+
 `trellis.harness.host` is the one place this is decided.
 
-| The way to a shell | On the host (refused unless allowed) | In a sandbox (never refused) |
+| The way to a shell | Default (`allow`) | `deny` |
 |---|---|---|
-| Deep Agents, `ReAct(backend=)` | `execute` on a `LocalShellBackend` (alone, the default of a `CompositeBackend`, a sub-agent's) | `sandbox()`, any other `SandboxBackendProtocol` backend (`BaseSandbox`, LangSmith's) |
-| LangChain `create_agent` | `ShellToolMiddleware` with `HostExecutionPolicy` (its default) or a policy of your own | `DockerExecutionPolicy`, `CodexSandboxExecutionPolicy` |
-| OpenAI Agents SDK | `LocalShellTool`, `ShellTool` in its local environment (on the agent, a handoff, an agent tool's agent), `UnixLocalSandboxClient` | a hosted `ShellTool` (`container_auto`), a `SandboxAgent` on Docker or a hosted client |
-| Claude Agent SDK | its shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) with no `sandbox`, or one that lets a command out (`allowUnsandboxedCommands`, true unless set false; `excludedCommands`) | `sandbox={"enabled": True, "allowUnsandboxedCommands": False}`, no `excludedCommands`; or no shell in its `tools` |
-| Kimi Code, an ACP agent | no `sandbox=` | `kimi(sandbox=sandbox())` |
+| `sandbox()` (ReAct, Deep Agents, `sandbox().tools()`), sandboxed Kimi | runs in Docker, else this machine's isolation layer, else refused with the reason | Docker or another provider runs; the isolation layer on this machine is refused |
+| Deep Agents `LocalShellBackend`, LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | refused, naming `sandbox()` | refused |
+| Claude Code's shell (no sandbox, or one that lets a command out) | runs as the service's user, unisolated, announced | refused |
+| Claude Code's shell in its own sandbox (`allowUnsandboxedCommands: False`, no `excludedCommands`) | runs in it | runs in it |
+| Kimi's `Bash` with no `sandbox=` | runs as the service's user, unisolated, announced | refused |
+| OpenAI `LocalShellTool`, local `ShellTool` (your executor) | governed as your tool | refused |
 
-Claude Code and Kimi Code run their own shells in the run's working folder by design. That
-folder is on the host, and their own permission prompt would leave the command to the person
-in the chat, so they follow the same rule: sandboxed, or allowed by the deployment. A tool of
-your own that starts a process is code you wrote and wrapped, not an agent's shell: it is
-governed by what it declares. The harness's own tools run no command on the host. Way 2
-([blocks/governance.md](blocks/governance.md)) wraps nothing: there the agent's process is
-yours, and so is the policy.
+A tool of your own that starts a process is code you wrote and wrapped, not an agent's shell:
+it is governed by what it declares. Way 2 ([blocks/governance.md](blocks/governance.md)) wraps
+nothing: there the agent's process is yours, and so is the policy.
 
 ## How a call is decided
 
@@ -433,8 +438,8 @@ asks, a read runs.
 Claude Code's built-ins go through the CLI's `PreToolUse` hook, where the harness decides them
 by risk (`Read` runs; `Write` and `Bash` are announced), then Claude Code's own permission check;
 what it would ask its user, a person is asked — with the rule's choices — unless the call only
-reads, or is its shell (in its sandbox, or on a host the administrator allows: announced, never
-the user's), or reaches the network as the catalog allows (`WebFetch`, `WebSearch`: refused
+reads, or is its shell (in its sandbox, or on the host unless the deployment says `deny`:
+announced, never the user's), or reaches the network as the catalog allows (`WebFetch`, `WebSearch`: refused
 until the catalog gives them a risk or an `approve_when`). In its default permission mode
 Claude Code asks before `Write` and `Edit`, so they ask as any write; a team that sets
 `acceptEdits` or `bypassPermissions` has chosen to let them through, as Kimi lets its own
@@ -448,6 +453,6 @@ are the frameworks' own permission settings, and the catalog's risk (`irreversib
 The person a run is for decides each tool call (above). Where its commands run, and within
 what, is the deployment's: one shared sandbox per tenant, a workspace and a uid of its own per
 run, limits, no network and no secret, clean-up at the run's end and the reaper, every command
-audited — and on the host only where an administrator allows it, through the same isolation
+audited — and on the host, when no Docker answers, through the same isolation
 layer ([sandbox.md](sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run)). A run's
 user cannot widen any of it.

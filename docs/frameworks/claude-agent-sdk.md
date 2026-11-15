@@ -95,9 +95,9 @@ the user Claude Code would ask:
   run, runs; nothing more is asked.
 * **When Claude Code would ask** its user, it asks the harness (its `can_use_tool`): a call
   that only reads runs. Its shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs too,
-  announced and recorded: it is in Claude Code's sandbox, or on a machine whose administrator
-  allows commands there (`TRELLIS_HOST_EXECUTION=allow`) — the deployment's decision, never
-  the user's ([below](#who-decides-what)). `WebFetch` and `WebSearch` are the tool catalog's
+  announced and recorded — in Claude Code's sandbox when the team gave one, else on this
+  machine as the service's user, without the harness's isolation — the deployment's, never the
+  user's ([below](#who-decides-what)); `TRELLIS_HOST_EXECUTION=deny` switches it off. `WebFetch` and `WebSearch` are the tool catalog's
   (below). Any other asks a person, who picks as for a harness tool: allow once, for this
   conversation, always (with a memory service), deny — allow once or deny for an irreversible
   tool. What Claude Code would keep for its session ("don't ask again"), the run keeps: a tool
@@ -224,7 +224,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 | `Read`, `Grep`, `Glob` in the workspace | nobody | they run, recorded |
 | `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny |
 | its shell in its sandbox | the deployment | runs unasked, announced (`tool_notice`) and recorded |
-| its shell on the host (no sandbox, or one that lets a command out) | the administrator | `h.wrap` refuses it unless `TRELLIS_HOST_EXECUTION=allow`; allowed, it runs as in a sandbox, never asked of the user |
+| its shell on the host (no sandbox, or one that lets a command out) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it, give Claude Code its own sandbox (below) |
 | `WebFetch`, `WebSearch` | the administrator, in the tool catalog | refused until the catalog gives the tool a risk or an `approve_when` |
 | MCP servers, `allowed_tools`, a `permission_mode` that lets calls through (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) | the deployment | on the options you wrap or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused (`default` and `plan` it may choose) |
 
@@ -232,7 +232,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 
 | | Where |
 |---|---|
-| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). Without it — or with a command let out of it (`allowUnsandboxedCommands`, which Claude Code takes as true unless set false; `excludedCommands`) — Claude Code's shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs on this machine, so `h.wrap` refuses the options unless the deployment allows that (`TRELLIS_HOST_EXECUTION=allow`), and so is a run whose `framework_options` turn the sandbox off; options whose `tools` leave the shell out (or `disallowed_tools` name it) need neither ([governance.md](../governance.md#commands-on-the-host-the-deployments-to-allow)) |
+| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`, honoured as given ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)): on Linux it needs bubblewrap and socat — without them the CLI runs commands unsandboxed, warning only on its stderr. Without one — or with a command let out of it (`allowUnsandboxedCommands`, which Claude Code takes as true unless set false; `excludedCommands`) — Claude Code's shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs on this machine as the service's user, not through the harness's isolation layer; `TRELLIS_HOST_EXECUTION=deny` refuses such options at `h.wrap`, and a run whose `framework_options` turn the sandbox off ([governance.md](../governance.md#commands-on-the-host)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far, no query more (a `step_limit` warning) |
@@ -245,7 +245,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
   ([skills.md](../skills.md#native-or-ours)).
 * **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
   `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`
-  — unconfined, they need the deployment's `TRELLIS_HOST_EXECUTION=allow`; the harness answers each
+  — unconfined, they run as the service's user (`TRELLIS_HOST_EXECUTION=deny` refuses them); the harness answers each
   call the CLI asks about (above); a `Bash` call in the sandbox runs unasked, announced,
   whatever `autoAllowBashIfSandboxed` says ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 * **Prompts:** the options take text: `system_prompt=(await h.prompt("triage")).text` for a

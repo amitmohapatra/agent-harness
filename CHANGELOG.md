@@ -5,32 +5,39 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
-### Changed (breaking): a command on the host is the deployment's to allow — `TRELLIS_HOST_EXECUTION`
+### Changed: shell commands on the host — isolated where the harness runs them, one switch to turn them off (`TRELLIS_HOST_EXECUTION`)
 
-An agent that would run commands on the machine the harness runs on, not in an isolated
-sandbox, is now **refused by default**: at `h.wrap`, and for a run whose own
-`framework_options` would make it one, with a `ConfigurationError` that names
-`TRELLIS_HOST_EXECUTION=allow` and the sandbox to give it instead. Before, each of these ran
-on the host, left at most to the chat user's approval — Deep Agents' `execute` on a
-`LocalShellBackend` (`ReAct(backend=)` too) and LangChain's `ShellToolMiddleware` ran their
-commands only announced, an OpenAI agent's `LocalShellTool` or local `ShellTool` and Claude
-Code's and Kimi Code's shells asked the run's user, and the SDK's `UnixLocalSandboxClient`
-ran with no isolation. The end user decides the actions taken in their name; the deployment's
-machine is the administrator's, who allows commands there with `TRELLIS_HOST_EXECUTION=allow`
-(`Settings(host_execution="allow")`). Isolated sandboxes are unaffected: `sandbox()`, a Deep
-Agents sandbox backend, LangChain's Docker or Codex policy, an OpenAI `SandboxAgent` on Docker
-or a hosted client, Claude Code's `sandbox={"enabled": True, "allowUnsandboxedCommands":
-False}`, `kimi(sandbox=sandbox())`; so is an agent with no shell (a Claude Code whose `tools`
-leave out `Bash`, `PowerShell`, `REPL` and `Monitor`). `TRELLIS_REQUIRE_SANDBOX` is gone (what
-it asked for is the default; `Settings(require_sandbox=)` is refused, naming the new setting),
-and it no longer passes a Claude Code sandbox that leaves `allowUnsandboxedCommands` unset —
-Claude Code's own default for it is true, which lets a command out of the sandbox
-([governance.md](docs/governance.md#commands-on-the-host-the-deployments-to-allow)).
+Shell commands stay allowed by default (`TRELLIS_HOST_EXECUTION=allow`), with isolation as the
+guard where the harness runs them:
+
+* **`sandbox()` with no provider** works in the tenant's shared Docker container when the
+  daemon answers, else in this machine's isolation layer (`HostSandbox`: a per-tenant base, a
+  per-run uid and 0700 workspace, limits, a scrubbed environment, the network off, audit) when
+  it can isolate here, else it has no shell: each command is refused with the reason, said once
+  (`NoShell`). The model sees the same command tool either way. A deployment's own layer is
+  installed with `trellis.harness.host.install(HostSandbox(...))`, refused at start when it
+  cannot isolate.
+* **Breaking: a shell with no isolation the harness could give is refused at `h.wrap`**,
+  whatever the setting, naming `sandbox()`: Deep Agents' `execute` on a `LocalShellBackend`
+  (alone, a `CompositeBackend`'s default, a sub-agent's; `ReAct(backend=)` too), LangChain's
+  `ShellToolMiddleware` on the host, the OpenAI SDK's `UnixLocalSandboxClient`. Before, they ran
+  on the host as the service's user.
+* **Claude Code's and Kimi Code's own shells run as before**, as the service's user, without
+  the harness's isolation; a team's own Claude `SandboxSettings` is honoured as given (on Linux
+  it needs bubblewrap and socat: without them the CLI runs the command unsandboxed, warning on
+  its stderr). `kimi(sandbox=sandbox())` and Claude's own sandbox are the ways to isolate them.
+* **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
+  sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
+  host and an OpenAI local shell tool are refused at `h.wrap` (and for a run whose own
+  `framework_options` would make one), naming the setting; the isolation layer's own commands
+  are refused at the call. Commands in a sandbox are not affected. `TRELLIS_REQUIRE_SANDBOX` is
+  gone (`Settings(require_sandbox=)` is refused, naming `host_execution`)
+  ([governance.md](docs/governance.md#commands-on-the-host)).
 
 **Claude Code and Kimi Code, tool by tool** (breaking where noted). Reads in the workspace run
 unasked and writes stay the user's under the one rule, as before. **The shell in the sandbox
 runs unasked**, announced and recorded: Claude Code's and Kimi's own permission question about
-a command is no longer the user's (on the host, where the administrator allows it, the same).
+a command is no longer the user's (on the host the same, unless the deployment says `deny`).
 **The network out is closed by default** — Claude's `WebFetch`, `WebSearch`, Kimi's
 `FetchURL`, `WebSearch`: refused, and the model told why, until the tool catalog gives the tool
 a risk or an `approve_when` (before, Claude's asked the user and Kimi's ran unasked); the
@@ -38,15 +45,10 @@ harness publishes them with no risk of its own, and a run's Kimi is configured t
 them so the catalog decides. **MCP servers, Claude's `allowed_tools` and a permission mode
 that lets calls through** (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) are the
 deployment's: a run's own `framework_options` that change them are refused, naming
-`h.wrap(framework_options=)`. **Host execution goes through the isolation layer**:
-`trellis.harness.host.install(HostSandbox(...))` refuses at start when the layer cannot isolate
-(no unprivileged uid to switch to, say); under it, Deep Agents' `execute` on a
-`LocalShellBackend` runs through `isolated_run`, and a framework's own shell process, which it
-cannot carry, is refused at `h.wrap`, naming `sandbox(HostSandbox())`
-([governance.md](docs/governance.md#who-decides-what)).
+`h.wrap(framework_options=)` ([governance.md](docs/governance.md#who-decides-what)).
 
 **Who decides what** is now said in one place: the end user only the actions taken in their
-name; infrastructure — the host, a tool's risk, who answers an infrastructure tool's approval
+name; infrastructure — shells on the host, a tool's risk, who answers an infrastructure tool's approval
 (`before_tool`'s `Ask(assignee="role:…")`, the catalog's `risk` and `approve_when`) — the
 administrator's, always audited ([governance.md](docs/governance.md#who-decides-what)).
 
@@ -63,7 +65,7 @@ the call's timeout; the limit hit is in the result, `limit`), with an environmen
 way it ends, a crash's takeover included — delivers its `outputs/`, then kills its processes,
 deletes its workspace and frees its uid; the reaper does so for runs that died. Every command is
 audited (`sandbox_command` on the run's stream, the `trellis.sandbox.audit` log). The same
-layer runs commands on the host when an administrator allows it (`HostSandbox`,
+layer runs commands on the host (allowed by default; `TRELLIS_HOST_EXECUTION=deny` switches them off) (`HostSandbox`,
 `isolated_run(tenant, user, run, command, limits)`), and refuses to when the service cannot
 switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
 `duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).

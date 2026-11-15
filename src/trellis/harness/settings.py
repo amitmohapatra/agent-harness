@@ -4,10 +4,10 @@ is in ``.env.example``): where the models are and how they are reached (``LLM_BA
 services are and the key they are reached with (``MEMORY_URL``, ``TRELLIS_API_KEY``,
 ``RUNS_URL``), where undelivered writes are kept (``TRELLIS_SPOOL_DIR``), where the files
 runs make for their users are (``TRELLIS_FILES_URL``), the two limits of schedules set in
-chat (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``) and whether an
-agent may run commands on this machine outside a sandbox (``TRELLIS_HOST_EXECUTION``: the
-administrator's, never a run's user's; ``trellis.harness.host``). Each setting lives in
-exactly one layer:
+chat (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``) and whether
+agents may run shell commands on this machine outside a sandbox (``TRELLIS_HOST_EXECUTION``:
+``allow`` by default, ``deny`` the administrator's switch; ``trellis.harness.host``). Each
+setting lives in exactly one layer:
 
 * **the environment** — what differs per deployment: the thirteen above. The tools' own variables
   are read by their own SDKs, or under their own names, never mirrored here: ``OTEL_*`` (the
@@ -84,8 +84,8 @@ VARIABLES: Final = {
 #: The settings a release took out, refused by name with what replaces them.
 REMOVED: Final = {
     "require_sandbox": (
-        "a command on this machine outside a sandbox is now refused unless the deployment "
-        "allows it: host_execution (TRELLIS_HOST_EXECUTION=allow) replaces require_sandbox"
+        "host_execution replaces require_sandbox: TRELLIS_HOST_EXECUTION=deny switches shell "
+        "commands on this machine outside a sandbox off"
     ),
 }
 
@@ -133,14 +133,13 @@ class Settings(BaseModel):
     #: How many schedules set in chat one user may have, per agent; ``Harness(
     #: schedule_limits=)`` overrides it per user.
     schedule_max_per_user: int = Field(default=20, ge=0)
-    #: Whether an agent may run commands on this machine — the harness's own, not an isolated
-    #: sandbox (``trellis.harness.host``: Deep Agents' ``LocalShellBackend``, LangChain's
-    #: ``ShellToolMiddleware`` on the host, an OpenAI agent's local shell or Unix-local
-    #: sandbox, Claude Code or an ACP agent such as Kimi Code without a sandbox). ``deny``
-    #: (the default): such an agent is refused where it is wrapped, and a run whose own
-    #: options would make it one, naming this setting; ``allow``: the deployment's
-    #: administrator has decided they may. Never a run's user's to approve.
-    host_execution: Literal["deny", "allow"] = "deny"
+    #: Whether agents may run shell commands on this machine outside a sandbox
+    #: (``trellis.harness.host``): ``allow`` (the default) — the harness's own through its
+    #: isolation layer, Claude Code's and Kimi Code's own shells as they run; ``deny`` — the
+    #: administrator's switch: every such shell refused where the agent is wrapped (and the
+    #: isolation layer's commands at the call), naming this setting. Commands in a sandbox are
+    #: not affected. Never a run's user's to approve.
+    host_execution: Literal["deny", "allow"] = "allow"
 
     @model_validator(mode="before")
     @classmethod

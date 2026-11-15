@@ -7,7 +7,7 @@ administrator's (``docs/governance.md#who-decides-what``).
 | ``Read``, ``Grep``, ``Glob`` (Kimi's reads) in the user's workspace | nobody: they run unasked |
 | ``Write``, ``Edit`` of the user's own files | the user, under the one rule: once, for this conversation, always |
 | the shell in the sandbox | nobody: it runs unasked, announced and recorded |
-| the shell on the host | the administrator: refused unless ``TRELLIS_HOST_EXECUTION=allow``, then as in a sandbox |
+| the shell on the host | runs as the framework runs it, unasked and announced, unless the administrator says ``TRELLIS_HOST_EXECUTION=deny`` |
 | the network out (``WebFetch``, ``WebSearch``; Kimi's ``FetchURL``, ``WebSearch``) | the administrator, in the tool catalog: refused until it gives the tool a risk or an ``approve_when`` |
 | MCP servers, permission modes | the deployment: on ``h.wrap``, never a run's own ``framework_options`` |
 """
@@ -119,11 +119,12 @@ async def test_claude_shell_in_its_sandbox_runs_unasked_announced_and_recorded(
 async def test_claude_shell_on_the_host_is_the_administrators_never_the_users(
     tmp_path: Path,
 ) -> None:
-    """Refused by default; where the administrator allows commands on this machine, it runs as
-    in a sandbox: announced, never asked of the user."""
+    """Refused where the administrator says ``deny``; by default it runs as Claude Code runs
+    it, as the service's user: announced, never asked of the user."""
     step = {"builtin": "Bash", "args": {"command": "make deploy"}}
-    with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=allow"):
-        Harness(config=Settings(), memory=False).wrap(claude(tmp_path, step, sandbox=None), id="h")
+    deny = Settings(host_execution="deny")
+    with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=deny"):
+        Harness(config=deny, memory=False).wrap(claude(tmp_path, step, sandbox=None), id="h")
     agent = allowing_host().wrap(claude(tmp_path, step, sandbox=None), id="host")
     events = [e async for e in agent.stream("deploy", user="ada")]
     assert events[-1].error is None, events[-1].error
@@ -216,8 +217,9 @@ async def test_kimi_shell_on_the_host_is_the_administrators_never_the_users(
     tmp_path: Path,
 ) -> None:
     step = {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""}
-    with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=allow"):
-        Harness(config=Settings(), memory=False).wrap(kimi_fake(tmp_path, step), id="h")
+    deny = Settings(host_execution="deny")
+    with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=deny"):
+        Harness(config=deny, memory=False).wrap(kimi_fake(tmp_path, step), id="h")
     agent = allowing_host().wrap(kimi_fake(tmp_path, step), id="host")
     events = [e async for e in agent.stream("tidy", user="ada")]
     assert events[-1].error is None, events[-1].error

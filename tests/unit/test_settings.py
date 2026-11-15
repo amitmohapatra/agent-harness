@@ -167,11 +167,12 @@ def test_env_example_documents_exactly_what_is_read() -> None:
     assert read == documented
 
 
-def test_a_deployment_wraps_no_shell_agent_without_a_sandbox_unless_it_allows_one() -> None:
-    """By default (``host_execution`` ``deny``) Claude Code without its sandbox enabled (or with
+def test_a_deployment_that_denies_wraps_no_shell_agent_without_a_sandbox() -> None:
+    """Where the deployment says ``deny``, Claude Code without its sandbox enabled (or with
     commands let out of it: Claude's own default lets them out) and an ACP agent without one are
     refused at ``h.wrap``, naming ``TRELLIS_HOST_EXECUTION``; with one they wrap, and a
-    framework that runs no shell of its own is not checked. ``allow`` wraps them all."""
+    framework that runs no shell of its own is not checked. ``allow``, the default, wraps them
+    all."""
     from claude_agent_sdk import ClaudeAgentOptions
 
     from trellis import Harness
@@ -187,9 +188,9 @@ def test_a_deployment_wraps_no_shell_agent_without_a_sandbox_unless_it_allows_on
         ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": True}),
         ACPAgent(command=("kimi", "acp")),
     ]
-    h = Harness(config=Settings(), memory=False)
+    h = Harness(config=Settings(host_execution="deny"), memory=False)
     for n, target in enumerate(refused):
-        with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION"):
+        with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=deny"):
             h.wrap(target, id=f"refused-{n}")
     boxed: Any = {"enabled": True, "allowUnsandboxedCommands": False}
     h.wrap(ClaudeAgentOptions(sandbox=boxed), id="claude-boxed")
