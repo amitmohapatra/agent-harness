@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 # the brain's model is built on LangChain's ChatOpenAI as imported here, before a test's
 # fixtures stand in for it (``conftest.openai_on_httpx``)
+from tests.scenarios.brains import CLI as CLAUDE_CLI
 from tests.scenarios.brains import SYSTEM, BrainChat, parse, token
 from tests.scenarios.kit import TOOLS
 from tests.support.arm import arm
@@ -136,3 +138,42 @@ async def test_lr02_a_two_hundred_step_task_on_a_small_window_keeps_every_reques
     assert max(counted) <= int(8_000 * 0.95), max(counted)
     biggest = max(len(json.dumps(r["messages"])) for r in chat.requests)
     assert biggest / 4 <= 8_000 * 1.25, biggest
+
+
+@pytest.mark.parametrize("memory", [False, True])
+async def test_claude_a_burst_to_one_chat_each_turn_continues_the_turn_before(
+    harness: Harness, memory_harness: Harness, memory: bool, tmp_path: Path
+) -> None:
+    """Three messages sent at once to one Claude conversation: each turn continues the session
+    the turn before it ended in, so the third has heard the first two. The turns still waiting
+    in this process's line (created after the latest turn served here, held here, not
+    ``QUEUED``) were taken for turns another worker served (``pipeline._served_elsewhere``):
+    the kept session was dropped and the turn began a new one, missing the turn before (s01's
+    Claude burst of 5 and 20: turn 3 saw turn 1 only)."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    h = memory_harness if memory else harness
+    # the run store lists a thread's runs as agent-runs does: newest created first (keyset
+    # ``created_at, run_id`` descending), the turns still waiting ahead of the one served
+    listed = h.runs.iterate
+
+    async def newest_created_first(**query: Any) -> Any:
+        runs = [
+            (await h.runs.get(r.run_id, tenant=query.get("tenant")), r)
+            async for r in listed(**query)
+        ]
+        for _, found in sorted(runs, key=lambda r: (r[0].created_at, r[1].run_id), reverse=True):
+            yield found
+
+    h.runs.iterate = newest_created_first  # type: ignore[method-assign]
+    env = {
+        "FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ANS {heard} CTX {context} LAST {last}"}]),
+        "FAKE_CLAUDE_SESSIONS": str(tmp_path),
+        "FAKE_CLAUDE_RECORD": str(tmp_path / "cli.json"),
+    }
+    agent = h.wrap(ClaudeAgentOptions(cli_path=CLAUDE_CLI, env=env), id="burst")
+    sent = [token("b", n) for n in range(1, 4)]
+    done = await asyncio.gather(*(agent.run(f"{t} burst", user="ada", thread="t1") for t in sent))
+    said = [parse(d.answer) for d in done]
+    assert [s.mine for s in said] == sent, said
+    assert set(sent[:2]) <= said[2].seen, said[2]  # the third turn heard the first two

@@ -406,7 +406,7 @@ async def _attempt(
         remaining = job.remaining_seconds
     budget = _budget(agent, record, remaining)
     journal = journal or Journal()
-    continued = await _continued_session(agent, identity, journal, record.attempt, parent)
+    continued = await _continued_session(agent, record, journal, parent)
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
     events = _emitter(agent, identity, record.attempt, listener, job)
@@ -502,25 +502,26 @@ async def _attempt(
 
 
 async def _continued_session(
-    agent: Agent, identity: Identity, journal: Journal, attempt: int, parent: Runtime | None
+    agent: Agent, record: RunRecord, journal: Journal, parent: Runtime | None
 ) -> bool:
-    """A conversation's turn on a target that keeps a session of its own (``Adapter.sessions``:
-    the Claude Agent SDK's, an ACP agent's) continues the one its framework kept for the
-    conversation's last turn in this process (``Agent.sessions``): its first attempt starts
-    with that session in its journal — the journal's own session path, as a resume after a
-    pause takes it — unless another worker served a turn of the conversation since
-    (:func:`_served_elsewhere`): the session kept here, which never saw that turn, is
+    """A conversation's turn (``record``) on a target that keeps a session of its own
+    (``Adapter.sessions``: the Claude Agent SDK's, an ACP agent's) continues the one its
+    framework kept for the conversation's last turn in this process (``Agent.sessions``): its
+    first attempt starts with that session in its journal — the journal's own session path, as
+    a resume after a pause takes it — unless another worker served a turn of the conversation
+    since (:func:`_served_elsewhere`): the session kept here, which never saw that turn, is
     dropped, and the turn starts a new one, as on a worker that kept none. Whether it does."""
+    identity = Identity.of(record)
     if not agent.adapter.sessions or parent is not None or identity.conversation == identity.run_id:
         return False
     conversation, mine = identity.conversation, agent.turned.get(identity.conversation)
     agent.turned[conversation] = identity.run_id  # the latest turn this process served
-    if attempt != 1 or journal.session:
+    if record.attempt != 1 or journal.session:
         return False
     kept = agent.sessions.get(conversation)
     if kept is None:
         return False
-    if mine is not None and await _served_elsewhere(agent, identity, mine):
+    if mine is not None and await _served_elsewhere(agent, identity, mine, record.created_at):
         agent.sessions.pop(conversation)
         return False
     journal.session, transcripts = kept
@@ -528,14 +529,16 @@ async def _continued_session(
     return True
 
 
-async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool:
+async def _served_elsewhere(agent: Agent, identity: Identity, mine: str, asked: datetime) -> bool:
     """Whether a turn of the conversation was started after ``mine`` — the latest this
-    process served — and not here: by another worker, whose framework session this
-    process's never saw (the run store's turns of the thread, of this user and agent; a
-    queued one has not started yet). The listing is newest first: it is read up to ``mine``,
-    or the first run last touched before ``mine`` began — the turns after are older — so a
-    conversation of any length costs its own read and one page, and one read more for each
-    run touched since."""
+    process served — and before this one (asked at ``asked``), and not here: by another
+    worker, whose framework session this process's never saw (the run store's turns of the
+    thread, of this user and agent; a queued one has not started yet, and one asked after
+    this turn comes after it in the conversation's line: a burst's later messages, waiting
+    their turn here). The listing is newest first: it is read up to ``mine``, or the first
+    run last touched before ``mine`` began — the turns after are older — so a conversation of
+    any length costs its own read and one page, and one read more for each run touched
+    since."""
     runs, tenant = agent.harness.runs, identity.tenant
     served = await runs.get(mine, tenant=tenant)
     if served is None:
@@ -552,7 +555,7 @@ async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool
             turn is not None
             and turn.parent_run_id is None
             and turn.user_id == identity.user
-            and turn.created_at > served.created_at
+            and served.created_at < turn.created_at < asked
         ):
             return True
     return False
