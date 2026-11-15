@@ -226,7 +226,7 @@ async def attempt(
         else agent.harness.holds.holding(record.run_id, record.tenant_id)
     )
     async with held:
-        return await _turned(
+        result = await _turned(
             agent,
             record,
             input,
@@ -239,6 +239,9 @@ async def attempt(
             parent=parent,
             mode=mode,
         )
+    if result.status is not RunStatus.PAUSED:  # ended: its own objects are let go of
+        agent.run_objects.discard(record.run_id)
+    return result
 
 
 async def _turned(

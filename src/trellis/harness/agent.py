@@ -412,6 +412,11 @@ class Agent:
         #: attempt's end is the store's cancel (``pipeline._settle_cancelled``); each only
         #: while its ``cancel`` waits for that end
         self.cancelling: dict[str, str | None] = {}
+        #: the framework options a run started here was given that are not JSON (objects: an
+        #: OpenAI Agents ``RunHooks``, a ``context``), by run id: its record keeps the JSON
+        #: ones only, so a resume in this process gets these again (:meth:`_continue`); let go
+        #: of when the run ends (``pipeline.attempt``) — the most recent kept
+        self.run_objects: LRU[str, dict[str, Any]] = LRU()
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
         self.turns = Turns()
         #: the conversations' ended turns ``conversation.earlier`` read (each ended run once)
@@ -481,7 +486,8 @@ class Agent:
         framework's own options for this run's call, over the agent's
         (``h.wrap(framework_options=)``; each framework's page says where they go). The run
         keeps the JSON ones with its record, for its later attempts (a resume); a value that
-        is not JSON (an object) is this call's only. ``document_ids``: the documents
+        is not JSON (an object) is kept in this process only: a resume here runs with it, one in
+        another process does not. ``document_ids``: the documents
         (``h.add_document``'s ``document_id``) the run's memory context draws its passages
         from, none else (unset: all the person's); kept with the run, its sub-agents' runs
         included. ``mode``: what the run does when another run of the same conversation
@@ -999,9 +1005,13 @@ class Agent:
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
+        given = dict(resumed.metadata)
         if app is not None:
-            given = {**resumed.metadata, FRONTEND: app.kept()}
-            resumed = resumed.model_copy(update={"metadata": given})
+            given[FRONTEND] = app.kept()
+        objects = self.run_objects.get(record.run_id)
+        if objects is not None:  # the run's own objects: in the process it was started in
+            given[FRAMEWORK_OPTIONS] = {**given.get(FRAMEWORK_OPTIONS, {}), **objects}
+        resumed = resumed.model_copy(update={"metadata": given})
         return await pipeline.attempt(
             self, resumed, record.input, journal=journal, resolution=resolution, listener=listener
         )
@@ -1702,6 +1712,9 @@ class Agent:
         record = RunRecord.from_start(start)
         if not framework_options:
             return record
+        objects = {key: value for key, value in framework_options.items() if not _json(value)}
+        if objects:
+            self.run_objects[record.run_id] = objects
         given = {**record.metadata, FRAMEWORK_OPTIONS: dict(framework_options)}
         return record.model_copy(update={"metadata": given})
 

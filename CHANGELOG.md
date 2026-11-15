@@ -20,6 +20,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   a turn of its own that ACP does not forward. The harness now waits for that turn and takes
   its answer from Kimi's log, as `kimi -p` does; its tokens are that run's, counted once
   ([kimi.md](docs/frameworks/kimi.md#background-work)).
+* **A run's own framework objects survive its pause in its process.** An OpenAI Agents
+  `RunHooks` or `context` object given to one run (`agent.run(framework_options=...)`) was lost
+  when governance paused the run (a tool that declares nothing asks): the resume ran with the
+  agent's options. The process the run started in now keeps them for its resume; a resume in
+  another process runs with the agent's, as documented — an object is not stored
+  ([configuration.md](docs/configuration.md#the-frameworks-own-run-options)).
 * **Docs: Kimi offers its model an MCP server over HTTP, not a stdio one.** Kimi 2.6.2 starts
   a stdio MCP server and lists its tools but leaves them out of its model's requests, given in
   ACP's `session/new` or in its own `mcp.json` alike; one over HTTP is offered at once
