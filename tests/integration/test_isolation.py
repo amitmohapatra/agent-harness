@@ -29,6 +29,7 @@ from trellis.harness.sandbox import ExecResult, SandboxLost, SandboxRef, Sandbox
 from trellis.harness.sandbox.base import RUN, TENANT
 from trellis.harness.sandbox.isolation import (
     AUDIT,
+    METADATA,
     REGISTRY,
     HostSandbox,
     Limits,
@@ -444,7 +445,7 @@ async def test_names_and_paths_a_shell_would_split_are_refused(layer: HostSandbo
 #: A command that tries the cloud metadata server: what it got, or why it could not.
 METADATA_TRY: Final = (
     "python3 -I -c 'import socket, sys\n"
-    'for host in ("169.254.169.254", "metadata.google.internal"):\n'
+    'for host in ("169.254.169.254", "metadata.google.internal", "169.254.170.2"):\n'
     "    s = socket.socket(); s.settimeout(3)\n"
     "    try:\n"
     '        s.connect((host, 80)); print(host, "REACHED")\n'
@@ -457,14 +458,15 @@ METADATA_TRY: Final = (
 async def test_the_cloud_metadata_server_is_out_of_every_commands_reach(
     helper: tuple[str, ...], root: str, network: Any
 ) -> None:
-    """Open or not, a command never reaches 169.254.169.254 (nor its names): open, the
-    layer's uids are refused it on the host's network, the service's own reach kept."""
+    """Open or not, a command never reaches 169.254.169.254 (nor its names), nor the rest of
+    the link-local range — an ECS task's role credentials at 169.254.170.2: open, the layer's
+    uids are refused it on the host's network, the service's own reach kept."""
     layer = HostSandbox(root, helper=helper, network=network)
     try:
         said = await run(layer, "r1", METADATA_TRY)
     finally:
         if network == "open":  # the rules stay for the layer's uids: removed after the test
-            for wall, address in (("iptables", "169.254.169.254"), ("ip6tables", "fd00:ec2::254")):
+            for wall, address in zip(("iptables", "ip6tables"), METADATA, strict=True):
                 top = (
                     layer.isolation.uid_base + layer.isolation.tenants * layer.isolation.tenant_uids
                 )
@@ -484,7 +486,7 @@ async def test_the_cloud_metadata_server_is_out_of_every_commands_reach(
                     "REJECT",
                 )
     assert "REACHED" not in said.stdout
-    assert said.stdout.count("refused") == 2, said
+    assert said.stdout.count("refused") == 3, said
 
 
 async def test_kubernetes_secret_folders_are_hidden_from_commands(
