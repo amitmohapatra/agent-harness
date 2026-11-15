@@ -220,12 +220,13 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         offered=None,
         tenant="default",
         user="u1",
-        agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderSDK())),
     )
+    options = ClaudeAgentOptions(system_prompt="Mine.")
+    gateway = SimpleNamespace(model_gateway=ProviderSDK())
+    runtime.agent = SimpleNamespace(harness=gateway, target=options, framework_options={})
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
     native = adapter.prepare_input(None, "go", None)
-    options = ClaudeAgentOptions(system_prompt="Mine.")
     items = [i async for i in adapter.stream(options, native, run)]
     assert items[:-1] == ["done"]
     assert isinstance(items[-1], Output) and items[-1].value == messages
