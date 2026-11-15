@@ -367,11 +367,16 @@ OWN_PROCESS: Final = "this query runs in a process of its own"
 #: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
 #: would let a call whose hook failed through to its own permission check.
 UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
-#: What a resumed session is told: the run goes on, and the call it paused on is made again.
+#: What a resumed session is told: the run goes on, and the call it paused on is made again —
+#: or the call its process stopped in, which the session may hold with the harness's
+#: ``tools.convert.mcp.STOPPED`` as its result (the worker died while it ran, and the session
+#: was resumed on the same machine): a model told only "no result yet" read that error as the
+#: call's result and never made it.
 RESUMED: Final = (
     "This task was paused (a person was asked, or the process stopped) and goes on now. If "
-    "your last tool call has no result yet, call that tool again with the same arguments: "
-    "it runs once. Then carry on with the task."
+    "your last tool call has no result yet, or its result says the run ended before it "
+    "finished, call that tool again with the same arguments: it runs once. Then carry on "
+    "with the task."
 )
 #: What a session resumed after a person answered about one tool call — its approval, or a
 #: question it asked while it ran — is told: that call, by the name Claude knows it by. The
