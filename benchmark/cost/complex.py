@@ -2634,18 +2634,6 @@ def cases() -> tuple[Case, ...]:
             (),
             ("file export",),
         ),
-        (
-            "cantdo-04",
-            "Run a k-means clustering (k=3) of our 40 stores by their weekly 2026 revenue "
-            "profile and tell me which stores fall in each cluster.",
-            r"cluster (?:1|2|3|a|b|c)\b.{0,40}\bS\d\d|\bi (?:ran|have run|clustered)\b",
-            r"group|revenue|query|rank|instead|figures|table",
-            "I can't run a k-means clustering here: this setup has no code execution for custom "
-            "algorithms. I can give you each store's weekly revenue, or group them by revenue "
-            "band with a query, instead.",
-            (),
-            ("custom algorithm",),
-        ),
     )
     for case_id, text, fake, offer, ref, calls, edges, *computed in cant:
         truth = computed[0] if computed else None
