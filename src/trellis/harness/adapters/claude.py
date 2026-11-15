@@ -1263,6 +1263,7 @@ def _spent(
         input_tokens=total("input_tokens") + cached + written,
         output_tokens=total("output_tokens"),
         cached=cached,
+        written=written,
         cost=cost,
         **({} if calls == 1 else {"calls": calls}),
     )

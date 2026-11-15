@@ -455,6 +455,7 @@ async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the
     assert seen[-1].data["spent"] == {
         "tokens": 45,
         "cached_tokens": 0,
+        "cache_written_tokens": 0,
         "cost": 1.5,
         "model_calls": 3,
         "tool_calls": 0,

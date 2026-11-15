@@ -235,7 +235,8 @@ async def test_a_query_that_pauses_counts_what_its_steps_spent(
     agent = arm(harness.wrap(options(tmp_path, script, model="m"), id="refunds"), [refund])
     paused = await agent.run("refund o3", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "cost": 0.0}
+    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "written": 0}
+    step |= {"cost": 0.0}
     assert counted == [step]
     counted.clear()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
@@ -331,6 +332,33 @@ async def test_a_paused_query_that_ends_with_no_result_is_charged_its_replies() 
     spending = cast("Any", SimpleNamespace(replied=replies.append, ended=replies.append))
     await claude_adapter._settled(rest(), steps, spending)
     assert steps.settling and replies == [reply]
+
+
+def test_a_results_cache_writes_are_counted_apart_from_its_other_input() -> None:
+    """Claude Code's usage names the input read from the prompt cache and the input written to
+    it (``cache_read_input_tokens``, ``cache_creation_input_tokens``): both are the run's input
+    tokens, and each is counted apart, so a cache write is priced at its own rate."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+
+    from trellis.harness import budget
+    from trellis.harness.bounded import LRU
+    from trellis.harness.journal import Journal, Replay
+
+    runtime: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    spending = claude_adapter.Spending(runtime, SimpleNamespace(model="m"), LRU(), None)
+    used = {"input_tokens": 10, "output_tokens": 5}
+    used |= {"cache_read_input_tokens": 50, "cache_creation_input_tokens": 1000}
+    spending.replied(AssistantMessage(content=[], model="m", message_id="msg_1", usage=used))
+    result = ResultMessage("success", 1, 1, False, 1, "s", total_cost_usd=0.01, usage=used)
+    spending.ended(result, None)
+    assert budget.spent(runtime) == {
+        "tokens": 1065,
+        "cached_tokens": 50,
+        "cache_written_tokens": 1000,
+        "cost": 0.01,
+        "model_calls": 1,
+        "tool_calls": 0,
+    }
 
 
 async def test_a_denied_call_resumes_the_session_told_it_will_not_run(

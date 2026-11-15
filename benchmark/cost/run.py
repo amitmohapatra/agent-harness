@@ -100,12 +100,14 @@ class Meter(BaseCallbackHandler):
         if refused:
             self.refused_tokens += int(refused.group(1))
 
-    def accounted(self, input_tokens: int, output_tokens: int, cached: int) -> None:
-        """One reply the harness accounted to the run's budget (an adapter not on LangChain)."""
+    def accounted(self, input_tokens: int, output_tokens: int, cached: int, written: int) -> None:
+        """One reply the harness accounted to the run's budget (an adapter not on LangChain):
+        ``cached`` of its input tokens read from the prompt cache, ``written`` written to it."""
         self.calls += 1
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cached_tokens += cached
+        self.written_tokens += written
 
 
 _METER: ContextVar[Meter | None] = ContextVar("trellis_bench_meter", default=None)
@@ -153,6 +155,7 @@ def _accounting_hook() -> None:
                 int(kw.get("input_tokens") or 0),
                 int(kw.get("output_tokens") or 0),
                 int(kw.get("cached") or 0),
+                int(kw.get("written") or 0),
             )
 
     account._metered = True  # type: ignore[attr-defined]

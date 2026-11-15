@@ -998,6 +998,35 @@ def test_a_lane_fails_once_or_for_good_and_a_write_is_kept_per_person() -> None:
     )  # a second one shows
 
 
+def test_a_runs_spend_prices_cache_writes_at_the_cache_write_rate() -> None:
+    """The comparison of 2026-11-15 priced Claude's 1,108,280 cache-write tokens as plain
+    input ($0.10 a million on Haiku, not the $0.125 its price lists): the run's spend was
+    $0.028 under the provider's. A reply the harness accounts (an adapter not on LangChain)
+    and one LangChain's callbacks report are each priced at the cache-write rate."""
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from trellis.harness import budget
+    from trellis.harness.journal import Journal, Replay
+
+    haiku = prices.price_of("claude-haiku-5-5")
+    assert haiku is not None and haiku.cache_write == 0.125
+    # 100,000 plain input tokens and 1,000,000 written to the cache
+    priced = (100_000 * 0.10 + 1_000_000 * 0.125) / 1_000_000
+    accounted = cx.Spend(haiku, None)
+    top: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    with run.metered(cx.Accounted(accounted), adapter="claude"):
+        budget.account(top, model="m", input_tokens=1_100_000, output_tokens=0, written=1_000_000)
+    assert accounted.usd == pytest.approx(priced)
+    called = cx.Spend(haiku, None)
+    used = {"input_tokens": 1_100_000, "output_tokens": 0, "total_tokens": 1_100_000}
+    reply = AIMessage("", usage_metadata=used | {"input_token_details": {"cache_creation": 10**6}})
+    cx.Captured(called).on_llm_end(LLMResult(generations=[[ChatGeneration(message=reply)]]))
+    assert called.usd == pytest.approx(priced)
+
+
 def test_a_write_done_twice_or_a_call_repeated_fails_its_probe() -> None:
     turn = cx.Turn(
         "q",

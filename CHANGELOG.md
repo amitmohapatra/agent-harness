@@ -11,6 +11,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   query result (1.07 a turn on Haiku, against the provider's 3.00): each model response the
   CLI reports — an assistant message with its id and usage, the main agent's or a
   subagent's — is now one model call, as the provider serves it.
+* **Cache writes are counted apart, and the cost benchmark prices them.** A reply's input
+  tokens written to the provider's prompt cache were folded into its input: the cost benchmark
+  priced them as plain input (Claude's run $0.028 under the provider's on Haiku). Every adapter
+  now accounts them apart (`budget.account(written=)`, `RUN_FINISHED`'s
+  `spent.cache_written_tokens`, [observability.md](docs/observability.md#events)), and the
+  benchmark prices them at `benchmark.cost.prices`' cache-write rate.
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 

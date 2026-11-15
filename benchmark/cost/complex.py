@@ -3422,10 +3422,16 @@ class Spend:
     cap: float | None
     usd: float = 0.0
 
-    def add(self, input_tokens: int, output_tokens: int, cached: int = 0) -> None:
+    def add(self, input_tokens: int, output_tokens: int, cached: int, written: int) -> None:
+        """A reply's tokens, priced: ``cached`` of its input read from the prompt cache,
+        ``written`` written to it (at the price's cache-write rate)."""
         if self.price is not None:
             self.usd += prices.dollars(
-                self.price, input_tokens=input_tokens, output_tokens=output_tokens, cached=cached
+                self.price,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached=cached,
+                written=written,
             )
 
     @property
@@ -3455,12 +3461,13 @@ class Captured(runner.Meter):
             self.requests.append({"messages": convert_to_openai_messages(batch), "tools": tools})
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        before = (self.input_tokens, self.output_tokens, self.cached_tokens)
+        before = (self.input_tokens, self.output_tokens, self.cached_tokens, self.written_tokens)
         super().on_llm_end(response, **kwargs)
         spent = (
             self.input_tokens - before[0],
             self.output_tokens - before[1],
             self.cached_tokens - before[2],
+            self.written_tokens - before[3],
         )
         self.spend.add(*spent)
         if self.requests:
@@ -3808,9 +3815,9 @@ class Accounted(runner.Meter):
         self.spend = spend
         self.requests: list[dict[str, Any]] = []
 
-    def accounted(self, input_tokens: int, output_tokens: int, cached: int) -> None:
-        super().accounted(input_tokens, output_tokens, cached)
-        self.spend.add(input_tokens, output_tokens, cached)
+    def accounted(self, input_tokens: int, output_tokens: int, cached: int, written: int) -> None:
+        super().accounted(input_tokens, output_tokens, cached, written)
+        self.spend.add(input_tokens, output_tokens, cached, written)
 
 
 async def scripted_endpoint(model: Any, sent: list[dict[str, Any]]) -> Any:
@@ -4086,6 +4093,7 @@ async def run_case(
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "cached_tokens": captured.cached_tokens if n == 0 else 0,
+                "cache_written_tokens": captured.written_tokens if n == 0 else 0,
                 "model_calls": captured.calls if n == 0 else 0,
                 "seconds": seconds,
                 "checks": checked(
