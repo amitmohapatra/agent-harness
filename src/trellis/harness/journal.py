@@ -579,6 +579,18 @@ class Replay:
             _IDENT.reset(named)
             _CALLING.reset(token)
 
+    @contextlib.contextmanager
+    def by_content(self) -> Iterator[None]:
+        """What the code inside reads and records of the journal is filed by the call's content
+        and order, not by its framework's id of the call: a framework may give the call it makes
+        again after a resume another id (Kimi Code does), and a record of what depends on the
+        call's content alone — a hook's verdict on it — is the same call's whatever its id."""
+        token = _IDENT.set(None)
+        try:
+            yield
+        finally:
+            _IDENT.reset(token)
+
     def announced(self, key: str, ident: str) -> None:
         """The framework makes call ``key`` under its id ``ident`` (a call it hands the harness
         later, through its MCP server, where the id is not given): :meth:`claimed`."""

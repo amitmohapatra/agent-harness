@@ -2017,10 +2017,13 @@ async def test_i_an_outcome_read_into_a_turn_the_model_never_got_is_told_at_the_
     made: the outcome it read is not marked read — its notification leaves the turn and the
     task's record says it still works — so the next turn's model is told, memory on or off."""
     server.seconds = 0.2
-    model = Model(turns=[START, "Started.", says_the_update], stall=0.3)
+    # the turn's last model call outlasts the task by far, so it ends within the turn even on
+    # a loaded machine; and it has ended before the next turn starts
+    model = Model(turns=[START, "Started.", says_the_update], stall=1.0)
     agent = chat(memory_harness if memory else harness, server, model, max_steps=1)
     first = await say(agent, "run the optimization")
     assert first.answer == "Started." and len(model.seen) == 2
+    await server.finished()
     model.stall = 0.0
     second = await say(agent, "anything new?")
     assert second.answer == f"Done: {RESULT}", second.error

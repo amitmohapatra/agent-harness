@@ -711,12 +711,14 @@ async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall,
     hooks = runtime.agent.hooks
     if not hooks:
         return call, None
-    journaled = content_key("hooks", key, runtime.replay.occurrence(key))
-    replayed, kept = runtime.replay.call(journaled)
+    with runtime.replay.by_content():  # the call's id may change across a resume (Kimi's)
+        journaled = content_key("hooks", key, runtime.replay.occurrence(key))
+        replayed, kept = runtime.replay.call(journaled)
     if not replayed:
         hooked, verdict = await hooks.tool(call)
         kept = {"args": hooked.args, "verdict": noted(verdict)}
-        runtime.replay.record_call(journaled, kept, stepped=True)
+        with runtime.replay.by_content():
+            runtime.replay.record_call(journaled, kept, stepped=True)
     return call.model_copy(update={"args": kept["args"]}), read(kept["verdict"])
 
 
