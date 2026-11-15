@@ -30,7 +30,8 @@ The decision starts from the tool's **risk**:
   A tool that declares none has no risk of its own (below).
 * For an MCP tool, the risk comes from its server's annotations, read with the protocol's
   defaults: `readOnlyHint` gives `read`; otherwise the tool is `irreversible` unless it says
-  `destructiveHint: false`, which gives `write`. A tool with no annotations is `irreversible`.
+  `destructiveHint: false`, which gives `write`. A tool with no annotations at all says
+  nothing: it has no risk of its own, like a function without `side_effects` (below).
 * For an OpenAPI operation, the method decides it.
 * A tool that says nothing of what it does has no risk of its own: its calls ask.
 
@@ -55,7 +56,7 @@ tool came in. Saying what it does is what lets it run, so say it where you can.
 | The tool | Where its side effects are said | When they are not |
 |---|---|---|
 | a function (`@tool`, `tool(fn)`, a bare function in `tools=[...]`, `governed(fn, gov)`), a source of your own | `side_effects=` (a source: on its `ToolSpec`) | each call asks |
-| an MCP server's tool (`mcp(...)`, the gateway's, a framework's own MCP server) | the server's annotations | `irreversible`: each call asks |
+| an MCP server's tool (`mcp(...)`, the gateway's, a framework's own MCP server) | the server's annotations | each call asks |
 | a LangChain tool of your graph | `tool.metadata = {"side_effects": "read"}` (or MCP-style `annotations`) | each call asks |
 | an OpenAI Agents `FunctionTool`, a hosted tool, a CLI built-in the harness has no word on | nowhere in code (or build it with the harness: `@tool(side_effects=...)`) | each call asks |
 | the harness's own tools, Deep Agents' and Claude Code's built-ins it knows | declared by the harness | — |
@@ -68,10 +69,37 @@ overrides everything else and no publish changes it:
 await scope.advanced.tools.put_catalog([{"name": "docs-search", "side_effects": "read"}])
 ```
 
-Until someone declares it there, the catalog keeps no risk for such a tool (an MCP tool that
-says nothing is the exception: the harness publishes the protocol's `destructiveHint: true`),
-and the harness's own rule decides: it asks at each call, and the person may allow it for the
-conversation. With memory off there is no catalog, and the same holds.
+Until someone declares it there, the catalog keeps no risk for such a tool (the harness
+publishes nothing of its risk: an MCP tool with no annotations is published without any), and
+the harness's own rule decides: it asks at each call, and the person may allow it for the
+conversation or always. With memory off there is no catalog, and the same holds.
+
+### One rule, every adapter and every way a tool arrives
+
+What a tool says is what a person is asked, wherever it came from — `trellis.mcp(...)`, the
+gateway's MCP listing, a function, a framework's own tool or MCP server (`langchain.mcp` or
+langchain-mcp-adapters tools, an OpenAI agent's `MCPServer*` or `FunctionTool`, Claude's
+`mcp__<server>__<tool>` and built-ins, Kimi's MCP servers and built-ins) — on ReAct,
+`create_agent`, a graph, Deep Agents, a langgraph-swarm, OpenAI Agents, the Claude Agent SDK
+(a query and a live session) and Kimi alike:
+
+| What the tool says | Risk | What happens |
+|---|---|---|
+| `readOnlyHint: true`, `side_effects="read"` | `read` | runs, nobody asked |
+| `destructiveHint: false` (not read-only), `side_effects="write"` | `write` | asks: allow once, for this conversation, always (with memory), deny |
+| no annotations at all, no `side_effects` | none declared | asks: allow once, for this conversation, always (with memory), deny |
+| annotations that leave it destructive by the MCP defaults (`destructiveHint: true`, or `readOnlyHint: false` with no `destructiveHint`), `side_effects="irreversible"` | `irreversible` | asks every call: allow once or deny |
+
+The catalog's `risk` (an administrator's) wins over all of it, `approve_when` and a
+`before_tool` hook's `Ask` decide as below, and a catalog that cannot be read fails closed. A
+framework that asks its own user about a call it runs (Claude Code's permission check, Kimi's
+permission request) asks the person with the same choices — its own reason, the rule's choices:
+what Claude Code or Kimi would keep for its session ("don't ask again", "approve for this
+session"), the run keeps for the conversation, or always. Two kinds of calls the rule cannot
+pause stay as they are: a provider's hosted tool (run inside the model's step: one that would
+ask is not offered) and a write a framework's own permission mode lets through without asking
+(Claude Code's `acceptEdits`, Kimi's own approval inside a git working tree). The matrix in
+`tests/matrix/test_approval_rule.py` walks every adapter and way with each risk and answer.
 
 ### What the person picks
 
@@ -100,8 +128,8 @@ offered, and a kept permission never honoured, for an `irreversible` tool, where
 kept: when the run's attempt could not read the user's permissions (the service away, a
 refusal) or the key cannot grant (an issuer's token, a key restricted to some principals), the
 person gets the three choices; while they cannot be read, the call asks (failing closed) and a
-warning is logged once. Without a memory service the three choices stay. A framework's own
-tools keep their own flow.
+warning is logged once. Without a memory service the three choices stay. A call a framework
+runs that its framework asks about offers the same choices (above).
 
 A `before_tool` hook's `Ask` is asked whatever was allowed beyond one call — for this
 conversation, always, or by the schedule that fired the run — as a PreToolUse "ask" is in
@@ -119,8 +147,8 @@ the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub
 (the sub-agent's own calls are governed) and Deep Agents' file tools and `execute`. A
 framework's own tools under its own permission flow — Claude Code's and Kimi's built-ins, an
 OpenAI agent's hosted tools — keep their own way: a `write` there is announced, and Claude
-Code or Kimi asks its own way. An MCP tool, an OpenAPI `POST`/`PUT`/`PATCH`, an `a2a(url)`
-agent and your own functions ask.
+Code or Kimi asks its own way, the person picking from the rule's choices. An MCP tool, an
+OpenAPI `POST`/`PUT`/`PATCH`, an `a2a(url)` agent and your own functions ask.
 
 **A schedule set in chat.** `schedule_task` names the tools its runs will call that change
 something (`tools`); those that would ask (a write, or one that says nothing; never an

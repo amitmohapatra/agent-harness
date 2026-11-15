@@ -5,6 +5,30 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
+
+An MCP tool whose server sent **no annotations at all** is now *undeclared*, as a function
+without `side_effects` is, on every way a tool arrives: it asks, and the person may allow it
+once, for this conversation, always (with a memory service) or deny. Before, on the harness's
+own `mcp(...)`, the gateway's MCP listing, an OpenAI agent's `MCPServer*` and Claude's
+in-process servers it was `irreversible` — asked at every call, never "for this conversation"
+or "always" — while the same tool through `langchain.mcp` / langchain-mcp-adapters was
+undeclared. Annotations that leave a tool destructive by the MCP defaults (`destructiveHint:
+true`, or `readOnlyHint: false` with no `destructiveHint`) still make it `irreversible`. The
+harness publishes nothing of such a tool's risk to the tool catalog (it published
+`destructiveHint: true`), so the catalog's risk for it is null and an administrator's still
+wins.
+
+A call a framework runs and asks its own user about — Claude Code's permission check (its
+built-ins, its own MCP servers' tools, in a query and in a live session) and Kimi's permission
+request — now offers the person the same choices as a harness tool's: always allow too, with a
+memory service (Claude Code's question offered no choice at all, and asked again at every
+call). What is allowed for the conversation or always holds as Claude Code's own "don't ask
+again" would. The tool catalog's word on such a tool (a risk, an `approve_when`) decides before
+the framework's own question, as for every tool.
+`tests/matrix/test_approval_rule.py` walks every adapter × way × risk × answer
+([governance.md](docs/governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)).
+
 ### Added: a provider's own tools in `ReAct`
 
 `ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web

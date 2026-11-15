@@ -1449,8 +1449,9 @@ def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     """A framework tool's risk as it declares it: ``side_effects`` (``read``, ``write``,
     ``irreversible``), else MCP-style annotations — ``annotations``, or as ``langchain.mcp``
     keeps a server's (``mcp.tool.annotations``) — read as an MCP tool's
-    (``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves each call
-    until the tool, or the catalog, says what it does)."""
+    (``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves its calls —
+    and may allow it for the conversation or always — until the tool, or the catalog, says what
+    it does). A ``langchain.mcp`` tool whose server gave no annotations says nothing too."""
     found = dict(metadata or {})
     declared = found.get("side_effects")
     if declared in get_args(SideEffects):

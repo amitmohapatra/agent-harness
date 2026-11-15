@@ -163,11 +163,13 @@ class MemoryCatalog:
 def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, object]:
     """A tool as the catalog stores it. ``side_effects`` only where they are known (a local
     tool declares them, an OpenAPI method implies them). An MCP tool sends its annotations
-    instead and the service derives the risk, so an administrator's stays; one the harness
-    holds irreversible for what it does not say (``tools.mcp.side_effects_of``: the protocol's
-    default) sends that default said, so the catalog derives the same risk. Any other tool that
-    says nothing sends nothing of it: the catalog keeps no risk for it, and the harness's own
-    rule decides (it asks)."""
+    instead and the service derives the risk, so an administrator's stays; one whose
+    annotations the harness holds irreversible by the protocol's defaults
+    (``tools.mcp.side_effects_of``: ``readOnlyHint`` false and no ``destructiveHint``) sends
+    that default said, so the catalog derives the same risk. A tool that says nothing — an MCP
+    tool with no annotations at all among them — sends nothing of it: the catalog keeps no risk
+    for it, and the harness's own rule decides (it asks, and can be allowed for the
+    conversation or always)."""
     stored: dict[str, object] = {
         "name": spec.name,
         "description": spec.description,
