@@ -238,7 +238,7 @@ the user Claude Code would ask:
 |---|---|
 | Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks. The options' `system_prompt` keeps what you wrote, with one line after it: that files written in `outputs/` of the working directory are given to the user (every run's are: [sandbox.md](../sandbox.md)). Options with no `system_prompt`, or one read from a file, are left as they are (none stays the SDK's default) and that line goes with the context |
 | What Claude Code says beside its replies | its rate limit near or reached (`rate_limit`), a model call tried again (`model_retry`), the session's context compacted (`compaction`), another model answering (`model_fallback`), a step its session store did not take (`session_store`) and a reply that failed (`model_error`) are warnings on the run's stream |
-| Reasoning, and tools the API ran | Claude's reasoning (a `thinking` block of the main agent) is a `reasoning` event on the run's stream: its text only — the block's signature goes nowhere, and none of it to memory or a log. A tool the API ran itself (`server_tool_use`: web search, code execution, the advisor) is recorded as a call of the run, a read nobody is asked about, with its result where the SDK's stream carries one (the advisor's) and without at the turn's result. A subagent's are not recorded |
+| Reasoning, and tools the API ran | Claude's reasoning (a `thinking` block) is a `reasoning` event on the run's stream: its text only — the block's signature goes nowhere, and none of it to memory or a log; a subagent's names the subagent's child run (`native_helper`: its `run_id` and `name`). A tool the API ran itself (`server_tool_use`: web search, code execution, the advisor) is recorded as a call of the run — of the subagent's child run when a subagent's step made it — a read nobody is asked about, with its result where the SDK's stream carries one (the advisor's) and without at the turn's result |
 | MCP elicitation | not reachable: when a team's own MCP server asks the user something (`elicitation/create`), the SDK (0.2.182) cannot hand it on — its control channel takes only `can_use_tool`, `hook_callback` and `mcp_message` (any other request is answered "Unsupported control request subtype"), and an in-process server's own requests to the client are refused ("not supported for SDK servers"). Claude Code declines the question; nobody is asked |
 | Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
 | Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn and a resumed attempt are each charged once |
@@ -391,9 +391,9 @@ turn the session runs by itself (a finished task's notification) is never a user
   own). What it grew by since the last result is shared by the tokens each used: the turn
   its own, a background run what its subagent's replies used since — so a subagent's
   work between two turns is charged to its run, and the next turn its own. The turn the
-  session runs for a finished task is charged to that task's run, which waits for it (30
-  seconds at most) before it ends. The shares are exact when every reply costs the same
-  per token, an estimate otherwise (another model, cached tokens). A turn left before its
+  session runs for a finished task is charged to that task's run — its tokens and a model
+  call as well as its cost —, which waits for it (30 seconds at most) before it ends. The
+  shares are exact when every reply costs the same per token, an estimate otherwise (another model, cached tokens). A turn left before its
   result — paused, or cancelled — is charged what it spent until it stopped: interrupted
   (nothing in the background) its result comes at once and is its own; with background
   work under way the CLI's turn goes on to its next tool call, so the replies' tokens are
@@ -406,7 +406,8 @@ turn the session runs by itself (a finished task's notification) is never a user
   the session runs for a finished task, is refused, and the conversation's next run says
   how many were (`claude_session` warning). A background shell command needs no call to
   go on (its `Bash` call was decided when it was made) and has no run; what it and
-  injected turns cost with no background run to charge is on the next turn.
+  injected turns cost with no background run to charge — their tokens as well as their
+  cost — is on the next turn.
 * Not done: a background subagent's own subagents have no run of their own kept open; a
   child run's end is on the stream of the turn that started it only while that turn is still
   being answered (`helper_finished`), not delivered to an open chat after it (Claude's next

@@ -560,6 +560,16 @@ script) is checked only where code runs, and the clustering applies only there. 
 (`Probe("file", ...)`) reads what the run kept for its user: the file's name, its lines, and the
 rows or labels it must hold (a workbook's cells read as CSV lines). No case sets its window.
 
+**Files and todos carried across turns (`carry`, `benchmark/cost/carry.py`).** Six
+conversations whose later turns need a file or a todo list an earlier turn made: a file read
+back, edited, overwritten, or kept through a turn that does not touch it; a todo list worked
+through over three turns. Each later answer is exact, and each turn that uses an earlier file
+checks that no file tool said it was not found (an answer given from the conversation's
+messages while the file was lost is still a failed check). For an agent with Deep Agents'
+tools from its first call: `--adapter react --variant deep`, `--adapter deepagents` (its own
+checkpointer) and `--adapter deepagents --variant unthreaded` (built with no checkpointer, so
+the harness carries its files and todos).
+
 `--variant` builds `ReAct` given one Deep Agents capability (`benchmark.cost.variants.CAPABILITIES`):
 `sandbox` (the run's sandbox as its backend: Docker, the image `TRELLIS_BENCH_SANDBOX_IMAGE`
 names; a fake one under `--scripted`), `subagents`, `memory-files`, `permissions`. Every case

@@ -451,7 +451,7 @@ async def start(
     """A task of ``agent`` (the sub-agent called ``name``) on ``description``, started from
     ``runtime``'s turn, whose conversation carries ``tasks``: its run started and at work
     here; its task record. Admitted first (:class:`Refused` otherwise): the turn is not past
-    the chain of outcomes (:func:`_depth`), the process has room (``Tasks.placed``), and the
+    the chain of outcomes (:func:`depth_of`), the process has room (``Tasks.placed``), and the
     conversation has fewer unfinished tasks than a run may have children working at once
     (:func:`_counted`)."""
     place = runtime.idempotency_key or new_id("call_")
@@ -459,7 +459,7 @@ async def start(
     thread = stable_id(place, BACKGROUND, name, prefix="task_")
     run_id = stable_id(place, BACKGROUND, name, prefix="run_")
     origin = {"name": name, "agent": runtime.agent_id, "thread": runtime.identity.thread}
-    origin |= {"depth": await _depth(runtime)}
+    origin |= {"depth": await depth_of(runtime)}
     origin |= {FRONTEND: runtime.frontend.kept()} if runtime.frontend is not None else {}
     with runtime.agent.harness.background.placed(run_id) as free:
         if not free:
@@ -472,10 +472,12 @@ async def start(
     return task_of(record, name)
 
 
-async def _depth(runtime: Runtime) -> int:
+async def depth_of(runtime: Runtime) -> int:
     """How many outcomes in a row, with no message of the user's between, led to ``runtime``'s
     turn: none for a turn a message began; for a turn of the chat's own (:func:`notify`), one
-    more than the turn that started the task it tells of. Past :data:`CHAIN` the turn starts
+    more than the turn that started the task it tells of — a task here, or one on a server of
+    the user's (``bridges.async_tasks``: its run's :data:`~trellis.harness.bridges.helpers.
+    HELPER` metadata carries the depth, :func:`origin_of`). Past :data:`CHAIN` the turn starts
     and updates nothing (:class:`Refused`): a result cannot keep work going by itself."""
     if runtime.notification is None:
         return 0
@@ -516,7 +518,7 @@ async def follow_up(
     run at work: ``Mode.INTERRUPT`` stops it first (here, as the conversation's line does;
     elsewhere, by its cancel), ``Mode.QUEUE`` waits for it. The task's record, updated.
     Admitted as a start is, but for the count (it is no new task): :class:`Refused` otherwise."""
-    origin = {**latest.metadata[BACKGROUND], "depth": await _depth(runtime)}
+    origin = {**latest.metadata[BACKGROUND], "depth": await depth_of(runtime)}
     place = runtime.idempotency_key or new_id("call_")
     run_id = stable_id(place, BACKGROUND, task["task_id"], prefix="run_")
     tasks = runtime.agent.harness.background
@@ -685,6 +687,7 @@ async def origin_of(parent: Agent, record: RunRecord) -> dict[str, Any] | None:
         "name": str(helper.get("name") or record.agent_id),
         "agent": above.agent_id,
         "task_id": str(helper.get("task_id") or record.run_id),
+        "depth": int(helper.get("depth") or 0),  # a remote task's turn's (``depth_of``)
     }
     found |= {FRONTEND: above.metadata[FRONTEND]} if FRONTEND in above.metadata else {}
     return found

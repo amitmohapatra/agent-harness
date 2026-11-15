@@ -662,6 +662,13 @@ def SkillsBackend(skills: SkillSet, scope: Scope | None = None) -> Any:
     return _BACKEND(skills, scope)
 
 
+def serves_skills(backend: Any) -> bool:
+    """Whether ``backend`` is a skills backend (:func:`SkillsBackend`): its files are the
+    store's skills, read-only — not the graph's state, though it reads them as Deep Agents'
+    ``StateBackend`` reads that."""
+    return _BACKEND is not None and isinstance(backend, _BACKEND)
+
+
 # --------------------------------------------------------------------------- Claude
 class ClaudeSkills(dict[str, str]):
     """A Claude local plugin (``{"type": "local", "path": ...}``) the harness fills with the

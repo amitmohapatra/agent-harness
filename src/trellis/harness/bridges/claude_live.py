@@ -80,7 +80,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
-from trellis.harness.bounded import LRU
 from trellis.harness.bridges import live
 from trellis.harness.bridges.claude import (
     JournalSessions,
@@ -159,11 +158,25 @@ SHARED_TASK: Final = (
 SHARED_SAID: Final = "{count} call(s) of workflow agents no one workflow could claim: {tools}"
 
 
+#: The token counts of a reply's (or a turn's result's) usage, read and written.
+TOKEN_KEYS: Final = (
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+)
+
+
+def _added(usage: Mapping[str, Any] | None, more: Mapping[str, Any]) -> dict[str, Any]:
+    """``usage`` with the token counts of ``more`` added to its own."""
+    used = usage or {}
+    return {**used, **{k: int(used.get(k) or 0) + int(more.get(k) or 0) for k in TOKEN_KEYS}}
+
+
 def _tokens(usage: Mapping[str, Any] | None) -> int:
     """The tokens a reply (or a turn's result) says it used, read and written."""
     used = usage or {}
-    keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-    return sum(int(used.get(key) or 0) for key in (*keys, "output_tokens"))
+    return sum(int(used.get(key) or 0) for key in TOKEN_KEYS)
 
 
 class Background(Kept):
@@ -335,12 +348,12 @@ class LiveSession(Keeper[Background]):
         #: the session's running cost as the last charged result carried it, shared with
         #: the spending of the query it serves (``bridges.claude.SessionCost``)
         self.cost = SessionCost()
+        #: the tokens of the turns the session ran that no run was charged (a background
+        #: shell command's end): the next turn served is charged them, with their cost
+        self._unclaimed: dict[str, Any] = {}
         #: the turn left before its own result (paused, cancelled): the result that comes
         #: next is its own, what it spent its run's — never the conversation's next turn's
         self.left: Turn | None = None
-        #: where the conversation's session is kept for a turn with no live one
-        #: (``Agent.sessions``), once a turn was served
-        self.kept_in: LRU[str, Any] | None = None
         self._reader: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ its start
@@ -706,7 +719,6 @@ class LiveSession(Keeper[Background]):
     def _attach(self, turn: Turn) -> None:
         super()._attach(turn)
         self.left = None  # its result came (:meth:`settled`), or never will
-        self.kept_in = turn.runtime.agent.sessions
         if self.mirror is not None:
             store = turn.options.session_store
             assert isinstance(store, JournalSessions)  # as the process's is (its shape)
@@ -757,14 +769,20 @@ class LiveSession(Keeper[Background]):
         charged (``SessionCost.grew_by``: all of a total that was reset) is shared by the
         tokens each used since — the turn its own usage, each background
         run what its subagent's replies used. The share of a turn no run is served for is
-        the run's whose task's end the session ran it for; with none, it stays for the
-        conversation's next turn, as the whole does with no background run to charge."""
+        the run's whose task's end the session ran it for, with that turn's tokens; with
+        none, it stays for the conversation's next turn, its tokens too, as the whole does
+        with no background run to charge."""
         open_ = [b for b in self.background.values() if not b.over]
         runs = [b for b in open_ if b.unbilled]
         after = None if own else next((b for b in open_ if b.ended is not None), None)
         for found in open_:
             if found.ended is not None:  # what its task cost is known now
                 found._settled.set()
+        if not taken and after is None:  # nobody's turn: its tokens are the next turn's
+            self._unclaimed = _added(self._unclaimed, result.usage or {})
+        elif taken and self._unclaimed:
+            result = dataclasses.replace(result, usage=_added(result.usage, self._unclaimed))
+            self._unclaimed = {}
         if result.total_cost_usd is None or not (taken or runs or after):
             return result
         total = float(result.total_cost_usd)
@@ -777,8 +795,8 @@ class LiveSession(Keeper[Background]):
             found.unbilled = 0
         if taken:
             return dataclasses.replace(result, total_cost_usd=share)
-        if after is not None:
-            after.spent(None, share)
+        if after is not None:  # the turn run for its task's end is its run's: tokens too
+            after.spent(result.usage, share)
         else:
             self.cost.owed(share)
         return result

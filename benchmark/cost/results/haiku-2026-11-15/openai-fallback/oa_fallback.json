@@ -1,0 +1,45 @@
+{
+  "run_1": {
+    "run": "run_cf24a27b6b3541818afad5f8033b97f4",
+    "status": "SUCCESS",
+    "asked_about": "stock_level",
+    "answer": "SKU-00938 has 314 units on hand.",
+    "error": null
+  },
+  "run_2": {
+    "run": "run_a4892827a96c4d129639a32ae0b54bca",
+    "status": "SUCCESS",
+    "asked_about": "stock_level",
+    "answer": "SKU-00938 has 314 units on hand.",
+    "error": null
+  },
+  "hosted_tool_on_fallback": {
+    "raised": "ConfigurationError: the gateway serves these models on chat completions only (it answered that it does not serve them on /v1/responses), which would drop: 'searcher': tool 'web_search' (Hosted tools are not supported with the ChatCompletions API. Got tool type: <class 'agents.tool.WebSearchTool'>, tool: WebSearchTool(user_location=None, filters=None, search_context_size='medium', external_web_acce"
+  },
+  "accounted": [
+    {
+      "run": "run_cf24a27b6b3541818afad5f8033b97f4",
+      "input_tokens": 1908,
+      "output_tokens": 54,
+      "cached": 0
+    },
+    {
+      "run": "run_cf24a27b6b3541818afad5f8033b97f4",
+      "input_tokens": 1989,
+      "output_tokens": 18,
+      "cached": 0
+    },
+    {
+      "run": "run_a4892827a96c4d129639a32ae0b54bca",
+      "input_tokens": 1908,
+      "output_tokens": 54,
+      "cached": 0
+    },
+    {
+      "run": "run_a4892827a96c4d129639a32ae0b54bca",
+      "input_tokens": 1989,
+      "output_tokens": 18,
+      "cached": 0
+    }
+  ]
+}

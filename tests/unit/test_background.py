@@ -428,8 +428,17 @@ async def test_a_child_run_of_a_turn_with_no_chat_is_told_nowhere() -> None:
         "name": "optimizer",
         "agent": "research",
         "task_id": "t_1",
+        "depth": 0,  # its run says none: started by a turn a message began
         "frontend": {"tools": []},
     }
+    deeper = await stored(
+        runs,
+        run_id="run_d",
+        thread_id="run_d",
+        parent_run_id=chat.run_id,
+        metadata={"native_helper": {"name": "optimizer", "task_id": "t_2", "depth": "2"}},
+    )
+    assert (await background.origin_of(agent, deeper) or {})["depth"] == 2
 
 
 async def test_a_chat_is_idle_whatever_another_users_thread_of_its_name_does() -> None:
@@ -586,7 +595,7 @@ async def test_sec_r_2_a_turn_past_three_outcomes_in_a_row_starts_nothing() -> N
     """A turn a message began is at no depth; a turn of the chat's own at the depth its run
     says, and refused past 3 — or when its run does not say (fail closed)."""
     runs = LocalRuns()
-    assert await background._depth(runtime(runs)) == 0
+    assert await background.depth_of(runtime(runs)) == 0
     told = notification_in(background.input_of({**TASK, "status": "success"}))
     for depth, admitted in ((1, True), (3, True), (4, False)):
         own = await stored(
@@ -594,13 +603,41 @@ async def test_sec_r_2_a_turn_past_three_outcomes_in_a_row_starts_nothing() -> N
         )
         run = runtime(runs, notification=told, run_id=own.run_id)
         if admitted:
-            assert await background._depth(run) == depth
+            assert await background.depth_of(run) == depth
         else:
             with pytest.raises(background.Refused, match="3 times in a row"):
-                await background._depth(run)
+                await background.depth_of(run)
     unsaid = await stored(runs, run_id="run_unsaid", metadata={"trellis_notified": {}})
     with pytest.raises(background.Refused):
-        await background._depth(runtime(runs, notification=told, run_id=unsaid.run_id))
+        await background.depth_of(runtime(runs, notification=told, run_id=unsaid.run_id))
+
+
+@pytest.mark.parametrize("tool", ["start_async_task", "update_async_task"])
+async def test_sec_r_2_a_remote_tasks_start_or_update_past_three_outcomes_is_refused(
+    tool: str,
+) -> None:
+    """BG-CHAIN-R: Deep Agents' start or update of a task on a server, in a turn of the chat's
+    own, is admitted as a harness task's is: at depth 3, below it and with no outcome before
+    it, it goes on; at 4 it fails saying so; a check is no start and goes on at any depth."""
+    from trellis.contracts import ToolError
+    from trellis.harness.bridges.async_tasks import AsyncTasks
+
+    runs = LocalRuns()
+    tasks = AsyncTasks()
+    called = SimpleNamespace(name=tool)
+    await tasks.starting(runtime(runs), called, {})  # a message began the turn
+    told = notification_in(background.input_of({**TASK, "status": "success"}))
+    for depth in (2, 3, 4):
+        own = await stored(
+            runs, run_id=f"run_r{depth}", metadata={"trellis_notified": {"depth": depth}}
+        )
+        run = runtime(runs, notification=told, run_id=own.run_id)
+        if depth <= 3:
+            await tasks.starting(run, called, {})
+        else:
+            with pytest.raises(ToolError, match="3 times in a row"):
+                await tasks.starting(run, called, {})
+            await tasks.starting(run, SimpleNamespace(name="check_async_task"), {})
 
 
 def test_sec_r_2_a_process_keeps_a_bounded_number_of_attempts_at_work(

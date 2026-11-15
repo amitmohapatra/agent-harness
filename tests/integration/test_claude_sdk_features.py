@@ -44,6 +44,7 @@ from trellis.harness.adapters.claude import (
     UNHELD_AGENTS,
     ClaudeAdapter,
 )
+from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import DELIVERS_HERE
@@ -566,6 +567,59 @@ async def test_claudes_reasoning_and_the_tools_the_api_ran_are_on_the_stream_and
     assert "advisor" in kept and "web_search" in kept  # the calls are recorded
     everywhere = kept + repr([e.model_dump() for e in events]) + caplog.text
     assert "SIG-SECRET" not in everywhere and "Weighing the refund." not in kept + caplog.text
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_subagents_reasoning_and_the_tools_the_api_ran_for_it_are_its_runs(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    path: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CLAUDE-SUB-1. What the provider did inside a subagent's model step is the subagent's:
+    its reasoning on the run's stream naming the subagent's child run (its text only: the
+    signature nowhere, none of it in memory), and a tool the API ran for it (web search, the
+    advisor) recorded as a read under the child run — never put to a person. The main agent's
+    stay the run's own."""
+    thought = {"type": "thinking", "thinking": "Weighing sources.", "signature": "SIG-SUB"}
+    searched = {"type": "server_tool_use", "id": "srv_9", "name": "web_search"}
+    advised = {"type": "server_tool_use", "id": "srv_8", "name": "advisor", "input": {}}
+    advice = {"type": "advisor_tool_result", "tool_use_id": "srv_8", "content": {"text": "go"}}
+    blocks = [thought, {**searched, "input": {"query": "refund law"}}, advised, advice]
+    mine = {"type": "thinking", "thinking": "Delegating.", "signature": "SIG-MAIN"}
+    said = {"id": "msg_main", "role": "assistant", "model": "fake", "content": [mine]}
+    script = [
+        {"frame": {"type": "assistant", "message": said, "parent_tool_use_id": None}},
+        {"agent": "researcher", "prompt": "find it", "steps": [{"blocks": blocks}, {"text": "x"}]},
+        {"text": "done"},
+    ]
+    researcher = AgentDefinition(description="Researches.", prompt="Research.")
+    target = options(tmp_path, script, agents={"researcher": researcher})
+    agent = memory_harness.wrap(target, id="sub-thinks")
+    with caplog.at_level("DEBUG"):
+        events = [e async for e in agent.stream("go", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "done", events[-1].data
+    [child] = [e.data for e in events if e.data.get("name") == "helper_started"]
+    reasoned = [e.data for e in events if e.data.get("name") == "reasoning"]
+    by_child = {"run_id": child["run_id"], "name": "researcher"}
+    assert reasoned == [
+        {"name": "reasoning", "text": "Delegating."},
+        {"name": "reasoning", "text": "Weighing sources.", HELPER: by_child},
+    ]
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert [(r["tool"], r["status"]) for r in results if r["tool"] != "Agent"] == [
+        ("advisor", "ok"),
+        ("web_search", "ok"),
+    ]
+    assert not [e for e in events if e.type is RunEventType.INTERRUPT]
+    await memory_harness.writes.drain()
+    made = {c.body["tool"]: c.scope["agent_run_id"] for c in memory_service.named("record_tool")}
+    assert made["advisor"] == made["web_search"] == child["run_id"]
+    kept = repr(memory_service.calls)
+    everywhere = kept + repr([e.model_dump() for e in events]) + caplog.text
+    assert "SIG-SUB" not in everywhere and "SIG-MAIN" not in everywhere
+    assert "Weighing sources." not in kept + caplog.text
 
 
 @pytest.mark.parametrize("path", PATHS)
