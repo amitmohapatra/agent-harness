@@ -2045,7 +2045,6 @@ async def test_i_a_tasks_run_another_server_ended_is_held_here_no_more(
     server.release()
 
 
-@pytest.mark.parametrize("memory", [False, True])
 async def test_i_a_task_whose_run_the_store_no_longer_has_is_ended_and_told_to_nobody(
     harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2083,6 +2082,7 @@ async def test_i_a_task_whose_run_the_store_no_longer_has_is_ended_and_told_to_n
     assert len(model.seen) == 2
 
 
+@pytest.mark.parametrize("memory", [False, True])
 async def test_i_an_outcome_read_into_a_turn_the_model_never_got_is_told_at_the_next(
     harness: Harness, memory_harness: Harness, server: StandIn, memory: bool
 ) -> None:
