@@ -333,17 +333,19 @@ async def _left_the_line(
     (``agent.cancel``, here or on another process), or ended in the run store before its turn
     came (its deadline, its time limit) — runs nothing: one cancelled is ended ``CANCELLED``
     here (with the sandbox a paused attempt left it), one ended is as the store says, and its
-    stream is its start and that ending."""
+    stream is its start and that ending. A run the store ended is as it says even when that
+    ending stopped it here (its hold refused: ``Harness._lost``): its result and its
+    ``RUN_FINISHED`` say ``TIMEOUT`` when the store does, and nothing is written."""
     identity = Identity.of(record)
     events = _emitter(agent, identity, record.attempt, listener, None)
     events.emit(RunEventType.RUN_STARTED, data={"agent_id": agent.id})
     reason = agent.turns.cancelled(record.run_id)
-    if reason is not None:
+    found = await agent.harness.runs.get(record.run_id, tenant=record.tenant_id)
+    assert found is not None
+    if reason is not None and not found.status.final:
         if await _settle_cancelled(agent, identity, events, None, spent={}, reason=reason):
             await sandbox.ended(agent, journal.sandbox if journal else None, record.run_id)
         return Result(run_id=record.run_id, status=RunStatus.CANCELLED)
-    found = await agent.harness.runs.get(record.run_id, tenant=record.tenant_id)
-    assert found is not None
     outcome = RunOutcome.from_status(found.status)
 
     async def written() -> None:
