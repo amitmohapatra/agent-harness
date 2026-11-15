@@ -1,5 +1,0 @@
-long57 exit 1
-ordinary exit 0
-sw16 exit 0
-sw8 exit 0
-swown exit 0

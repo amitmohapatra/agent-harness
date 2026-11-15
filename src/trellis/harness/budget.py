@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError
+from trellis.harness import telemetry
 from trellis.harness.bounded import SAID_ONCE
 
 if TYPE_CHECKING:
@@ -162,6 +163,23 @@ def account(
         spent["cache_written_tokens"] = spent.get("cache_written_tokens", 0) + written
         spent["cost"] = spent.get("cost", 0.0) + (cost or 0.0)
         spent["model_calls"] = spent.get("model_calls", 0) + calls
+
+
+def reported(runtime: Runtime, **spent: Any) -> None:
+    """A model reply its framework made and reported, which no span of the harness's covers
+    (Claude Code's, Kimi Code's, an OpenAI agent's): accounted as :func:`account` takes it,
+    and a ``chat`` generation with its usage and cost in the run's trace
+    (``telemetry.generation``)."""
+    account(runtime, **spent)
+    telemetry.generation(
+        spent["model"],
+        input_tokens=spent["input_tokens"],
+        output_tokens=spent["output_tokens"],
+        cached=spent.get("cached", 0),
+        written=spent.get("written", 0),
+        cost=spent.get("cost"),
+        calls=spent.get("calls", 1),
+    )
 
 
 def account_reply(runtime: Runtime, reply: Any) -> None:

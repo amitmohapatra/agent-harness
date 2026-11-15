@@ -649,8 +649,14 @@ async def delivered(
     (``update``: the ``TaskEvent`` and what the model reads of it, else :func:`update_of` the
     run) told to the chat it came from by a turn of the chat's own (:func:`notify`) when the
     chat is idle — a turn at work, or waiting for a person, gives its model the outcome itself
-    (at its next model call, after its answer, or at the conversation's next turn). ``ending``:
-    the turn of the chat that is ending now, which took no notice of it (:func:`left`)."""
+    (at its next model call, after its answer, or at the conversation's next turn). Told while
+    a turn of the chat holds its turn in this process, it is told again once that turn has let
+    go (``Live.later``, by the turn's own task — never by the caller's, which that turn may be
+    waiting on: a cancel of the task): a turn still at work may read the outcome itself (a turn
+    of the chat's own then finds it told, and is quiet: :func:`stale`), but one that is
+    finishing looked for the last time already (:func:`left`), and would leave it told by
+    nobody. ``ending``: the turn of the chat that is ending now, which took no notice of it
+    (:func:`left`)."""
     origin = await origin_of(parent, record)
     user = record.user_id
     if origin is None or not user:
@@ -659,9 +665,23 @@ async def delivered(
     if update is None:
         task = {"task_id": origin["task_id"], "agent_name": origin.get("name", "")}
         update = update_of(task, record)
-    if update is None or not await idle(parent, record.tenant_id, user, thread, ending=ending):
-        return
-    await notify(parent, record, update, user=user, thread=thread, origin=origin)
+    live = parent.turns.live(conversation_key(record.tenant_id, user, thread))
+    if update is None:  # it works: nothing to tell
+        pass
+    elif live is not None and live.run_id != ending:
+        told = update
+        live.later.append(lambda: _told_later(parent, record, told))
+    elif await idle(parent, record.tenant_id, user, thread, ending=ending):
+        await notify(parent, record, update, user=user, thread=thread, origin=origin)
+
+
+async def _told_later(parent: Agent, record: RunRecord, update: Mapping[str, Any]) -> None:
+    """``record``'s outcome (``update``) told once the chat's turn that held it off has let go
+    (:func:`delivered`); what fails is said in the log, never raised in that turn."""
+    try:
+        await delivered(parent, record, update=update)
+    except Exception:
+        log.exception("background task %s: its outcome not delivered", record.run_id)
 
 
 async def origin_of(parent: Agent, record: RunRecord) -> dict[str, Any] | None:
@@ -696,12 +716,10 @@ async def origin_of(parent: Agent, record: RunRecord) -> dict[str, Any] | None:
 async def idle(
     agent: Agent, tenant: str, user: str, thread: str, *, ending: str | None = None
 ) -> bool:
-    """Whether ``user``'s chat ``thread`` with ``agent`` has no turn at work (here, or in the
-    run store) and none waiting for a person — where a turn of its own may begin — but the one
-    ``ending`` now."""
-    live = agent.turns.live(conversation_key(tenant, user, thread))
-    if live is not None and live.run_id != ending:
-        return False
+    """Whether ``user``'s chat ``thread`` with ``agent`` has no turn at work in the run store
+    and none waiting for a person — where a turn of its own may begin — but the one ``ending``
+    now (one holding the chat's turn in this process, its end written already, is
+    :func:`delivered`'s to wait for)."""
     runs = agent.harness.runs
     async for summary in runs.iterate(
         agent_id=agent.id, thread_id=thread, tenant=tenant, limit=IDLE_RUNS, max_pages=1

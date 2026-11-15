@@ -113,7 +113,10 @@ The names are Deep Agents' where both have one. In four tiers:
   `StoreBackend` (the memory service's store when wrapped), `FilesystemBackend`,
   `CompositeBackend` — or the run's sandbox, `sandbox()`, where `execute` runs code
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
-  and governed as any tool (the reads read, the others write; the catalog may say more).
+  and governed as any tool (the reads read, the others write; the catalog may say more). A
+  `LocalShellBackend` (`execute` in the host's shell, unisolated) is refused at `h.wrap`:
+  give `backend=sandbox()`, which works in Docker, else this machine's isolation layer
+  ([governance.md](../governance.md#commands-on-the-host)).
 * `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
   calls the run makes that may call tools (LangChain's `ModelCallLimitMiddleware` counts them;
   at the limit the model is called once more, told the limit is reached and offered no tool, and
@@ -509,7 +512,7 @@ lead = ReAct(
 ```
 
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
-[examples/05_features/subagents.py](../../examples/05_features/subagents.py),
+[examples/06_scenarios/parallel_subagents_mixed_frameworks.py](../../examples/06_scenarios/parallel_subagents_mixed_frameworks.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
 
 ### A task in the background

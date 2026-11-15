@@ -12,8 +12,15 @@ from fastapi import FastAPI, Request
 
 from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
-from trellis import Harness, Runtime, Settings, tool
-from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
+from trellis import Ask, Harness, Hooks, Runtime, Settings, tool
+from trellis.contracts import (
+    AgentError,
+    RunEvent,
+    RunEventType,
+    RunOutcome,
+    ToolCall,
+    new_id,
+)
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType
 from trellis.harness.agui.hub import Hub
 from trellis.harness.agui.sse import decode
@@ -176,6 +183,27 @@ async def test_another_users_thread_named_alike_cannot_answer_its_interrupt(
     assert finished(await post(client, resume))["result"] == "you said yes"
 
 
+class FinanceApproves(Hooks):
+    async def before_tool(self, call: ToolCall) -> Ask:
+        return Ask("A refund is finance's to approve", assignee="role:finance")
+
+
+async def test_a_question_a_rule_assigned_to_someone_else_is_not_the_users_to_answer() -> None:
+    """A hook's ``Ask`` naming someone else (finance) is theirs, answered through the inbox:
+    the user whose action it is cannot approve it on the chat surface."""
+    harness, http = serve(hooks=[FinanceApproves()])
+    async with http:
+        entry = finished(await post(http, body("refund")))["outcome"]["interrupts"][0]
+        assert entry["metadata"]["assignee"] == "role:finance"
+        approve = body(resume=[{"interruptId": entry["id"], "payload": True}])
+        refused = await http.post(f"{PATH}/run", json=approve)
+        assert refused.status_code == 409 and refused.json()["code"] == "CONFLICT"
+        assert "role:finance's to answer" in refused.json()["detail"]
+        record = await harness.runs.get(entry["id"].rsplit(".", 2)[0])
+        assert record is not None and record.awaiting is not None  # still waits for finance
+    await harness.aclose()
+
+
 async def test_a_client_reconnects_after_the_last_event_it_saw(client: httpx.AsyncClient) -> None:
     events = await post(client, body("hello", runId="run-r"))
     replay = await client.get(f"{PATH}/runs/run-r/events", headers={"Last-Event-ID": "0"})
@@ -224,6 +252,46 @@ async def test_a_large_table_travels_as_an_artifact(client: httpx.AsyncClient) -
     assert len(content.json()["table"]) == 60
     missing = await client.get(f"{PATH}/runs/{run_id}/artifacts/art_missing")
     assert missing.status_code == 404
+
+
+async def test_another_users_artifact_is_not_found(client: httpx.AsyncClient) -> None:
+    """The data a paused run's question carries is its user's, as the run is: another user
+    of the tenant who has its run and artifact ids (a shared link) reads nothing."""
+    paused = finished(await post(client, body("table")))
+    reference = paused["outcome"]["interrupts"][0]["metadata"]["payload_ref"]
+    route = f"{PATH}/runs/{paused['runId']}/artifacts/{reference['artifact_id']}"
+    stranger = await client.get(route, headers={"x-user": "u2"})
+    assert stranger.status_code == 404 and "table" not in stranger.text
+    assert (await client.get(route)).status_code == 200
+
+
+async def test_a_run_id_another_replica_used_is_refused() -> None:
+    """A client's ``runId`` names a new run: one the run store has already — another user's
+    run served by another replica, or one this replica's buffers forgot — is refused, not
+    attempted again under the caller's name (its events, its record)."""
+    first, replica = Harness(config=Settings()), Harness(config=Settings())
+    replica.runs = first.runs  # two processes, one run store
+    apps = [FastAPI(), FastAPI()]
+    first.wrap(agent_fn, id="chat").serve_chat(apps[0], identity=user_of)
+    replica.wrap(agent_fn, id="chat").serve_chat(apps[1], identity=user_of)
+    owner, stranger = (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=a), base_url="http://agui", headers={"x-user": u}
+        )
+        for a, u in zip(apps, ("u1", "u2"), strict=True)
+    )
+    try:
+        asked = finished(decode((await owner.post(f"{PATH}/run", json=body("ask"))).text))
+        run_id = asked["runId"]
+        reused = await stranger.post(f"{PATH}/run", json=body("hello", runId=run_id))
+        assert reused.status_code == 422 and reused.json()["code"] == "VALIDATION"
+        record = await first.runs.get(run_id)
+        assert record is not None and record.user_id == "u1" and record.awaiting is not None
+    finally:
+        await owner.aclose()
+        await stranger.aclose()
+        await first.aclose()
+        await replica.aclose()
 
 
 async def test_a_large_table_is_served_by_another_replica_and_only_while_awaited() -> None:

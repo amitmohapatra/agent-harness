@@ -63,6 +63,10 @@ def claude(folder: Path, *scripts: list[dict[str, Any]]) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(cli_path=CLI, env=env)
 
 
+#: Claude Code runs its shell in a folder of this machine: this test deployment allows it.
+CLAUDE_HERE = Settings(host_execution="allow")
+
+
 async def children(store: LocalRuns, run_id: str) -> list[RunRecord]:
     found = [c async for c in store.iterate(parent_run_id=run_id)]
     return [r for r in [await store.get(c.run_id) for c in found] if r is not None]
@@ -91,7 +95,7 @@ async def test_a_sub_agents_run_ends_out_of_time_with_the_run_whose_call_it_work
 
 async def test_a_foreground_helper_ends_out_of_time_with_its_run(tmp_path: Path) -> None:
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         agent = arm(h.wrap(claude(tmp_path, [FOREGROUND]), id="helped", run_timeout=1.5), [look_up])
         ended = await agent.run("research", user="u1")
         assert ended.status is RunStatus.TIMEOUT and ended.error is not None
@@ -105,7 +109,7 @@ async def test_a_sub_agents_run_ends_with_the_run_whose_model_call_stalled() -> 
     its call was working in is not left ``RUNNING`` — its caller went away, and it ends
     ``CANCELLED`` there (only a parent's clock ends it as its parent ends)."""
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         worker = h.wrap(forever, id="worker")
 
         async def boss(input: str, agent: Runtime) -> str:
@@ -126,7 +130,7 @@ async def test_a_foreground_helper_ends_failed_with_the_run_whose_model_call_sta
     of as for a pause, and nothing ended it — it ends ``ERROR`` with its run now."""
     stalled = {**FOREGROUND, "steps": [{"tool": "look_up_as_the_model_stalls", "args": {}}]}
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         agent = arm(h.wrap(claude(tmp_path, [stalled]), id="helped"), [look_up_as_the_model_stalls])
         ended = await agent.run("research", user="u1")
         assert ended.status is RunStatus.ERROR and ended.error is not None
@@ -140,7 +144,7 @@ async def test_a_foreground_helper_and_a_sub_agents_run_are_cancelled_with_their
     tmp_path: Path,
 ) -> None:
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         worker = h.wrap(forever, id="worker")
 
         async def boss(input: str, agent: Runtime) -> str:
@@ -171,7 +175,7 @@ async def test_a_worker_stopping_its_attempt_ends_its_open_sub_agent_run_as_canc
     from trellis.runs import Job
 
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         worker = h.wrap(forever, id="worker")
 
         async def boss(input: str, agent: Runtime) -> str:
@@ -199,7 +203,7 @@ async def test_a_background_subagent_outlives_a_later_turn_that_runs_out_of_time
     tmp_path: Path,
 ) -> None:
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         scripts = [[BACKGROUND, {"text": "started it"}], [{"stall": 3}, {"text": "late"}]]
         agent = h.wrap(claude(tmp_path, *scripts), id="bg")
         first = await agent.run("research", user="u1", thread="t1")
@@ -226,7 +230,7 @@ async def test_a_background_subagent_outlives_the_turn_that_started_it_running_o
     """The turn starts a subagent in the background, then runs out of time: the subagent's
     run is not the turn's to end (it is handed on to its session), and goes on to its end."""
     store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=CLAUDE_HERE, runs=store) as h:
         scripts = [[BACKGROUND, {"stall": 3}, {"text": "late"}]]
         agent = h.wrap(claude(tmp_path, *scripts), id="bg")
         first = await agent.run("research", user="u1", thread="t1", run_timeout=1.5)

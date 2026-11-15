@@ -40,6 +40,8 @@ from trellis.runs import Job, RunSummary
 
 #: These tests are about what a write does once it runs, not whether it asks.
 pytestmark = pytest.mark.usefixtures("writes_unasked")
+#: Claude Code runs its shell in a folder of this machine: the tests' deployment allows it.
+HOST_ALLOWED = Settings(host_execution="allow")
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 done: list[str] = []
@@ -97,7 +99,7 @@ def a_full_child(service: FakeMemoryService, run_id: str, child_id: str, tools: 
 
 @pytest.fixture
 async def asks() -> AsyncIterator[Harness]:
-    async with with_governance(Harness(config=Settings()), ASKS) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), ASKS) as h:
         yield h
 
 
@@ -144,7 +146,7 @@ async def test_a_deep_agents_sub_agent_is_a_child_run_its_turns_in_memory(
 ) -> None:
     main = ScriptedChatModel(turns=[TASK, "o1 refunded"])
     sub = ScriptedChatModel(turns=[("refund", {"order": "o1"}), "refunded o1"])
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         result = await h.wrap(await deep(h, main, sub), id="desk").run("refund o1", user="u")
         assert result.status is RunStatus.SUCCESS and done == ["refund o1"]
         await h.writes.drain()
@@ -176,7 +178,7 @@ async def test_a_deep_agents_sub_agent_that_fails_is_a_failed_child(
 ) -> None:
     main = ScriptedChatModel(turns=[TASK, "the checker failed"])
     sub = ScriptedChatModel(turns=[])  # it has no reply to give: its model call fails
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         result = await h.wrap(await deep(h, main, sub), id="desk").run("refund o1", user="u")
         [child] = await children(h, result.run_id)
         await h.writes.drain()
@@ -232,11 +234,12 @@ def subagent(builtin: str) -> dict[str, Any]:
     }
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagents_built_in_asks_as_the_catalog_rules_and_a_rejection_holds(
     tmp_path: Path,
 ) -> None:
     governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
-    async with with_governance(Harness(config=Settings()), governance) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), governance) as h:
         agent = h.wrap(claude(tmp_path, [subagent("Bash"), {"text": "checked"}]), id="desk")
         paused = await agent.run("check o1", user="u")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -245,10 +248,11 @@ async def test_a_claude_subagents_built_in_asks_as_the_catalog_rules_and_a_rejec
     assert ended.status is RunStatus.SUCCESS and built_ins(tmp_path) == []
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
     tmp_path: Path, memory_service: FakeMemoryService
 ) -> None:
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
         options.env["FAKE_CLAUDE_BRIEFS"] = str(tmp_path / "briefs.jsonl")
         result = await h.wrap(options, id="desk").run("check o1", user="u")
@@ -273,6 +277,7 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
     a_full_child(memory_service, result.run_id, child.run_id, ["Read"])
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagent_is_one_child_run_when_the_run_store_takes_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -280,7 +285,7 @@ async def test_a_claude_subagent_is_one_child_run_when_the_run_store_takes_time(
     the message that carries the call — and each starts the helper by the call's id. With a
     run store that takes time to answer (agent-runs, over HTTP) the second comes while the
     first is still being recorded: it is the same helper, not a second child run."""
-    async with Harness(config=Settings()) as h:
+    async with Harness(config=HOST_ALLOWED) as h:
         start = h.runs.start
 
         async def slow(*args: Any, **kwargs: Any) -> Any:
@@ -299,6 +304,7 @@ async def test_a_claude_subagent_is_one_child_run_when_the_run_store_takes_time(
     )
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -322,6 +328,7 @@ async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
     assert (spent["input_tokens"], spent["output_tokens"]) == tokens
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
     tmp_path: Path,
 ) -> None:
@@ -338,7 +345,7 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
         {"text": "checked"},
     ]
     store = LocalRuns()
-    first, second = (Harness(config=Settings(), runs=store) for _ in range(2))
+    first, second = (Harness(config=HOST_ALLOWED, runs=store) for _ in range(2))
     try:
         dying = arm(first.wrap(machine(tmp_path, "one", script), id="desk"), [die])
         taking_over = arm(second.wrap(machine(tmp_path, "two", script), id="desk"), [die])
@@ -361,6 +368,7 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
     assert child.status is RunStatus.SUCCESS  # the same record, ended by the next worker
 
 
+@pytest.mark.host_execution
 async def test_two_claude_subagents_of_one_type_at_once_each_record_their_own_calls(
     tmp_path: Path, memory_service: FakeMemoryService
 ) -> None:
@@ -391,7 +399,7 @@ async def test_two_claude_subagents_of_one_type_at_once_each_record_their_own_ca
         },
         {"text": "checked both"},
     ]
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         result = await h.wrap(claude(tmp_path, script), id="desk").run("check both", user="u")
         assert result.status is RunStatus.SUCCESS and result.answer == "checked both"
         found = {r.input: r for r in await records(h, result.run_id)}
@@ -404,6 +412,7 @@ async def test_two_claude_subagents_of_one_type_at_once_each_record_their_own_ca
     assert made["Agent"] == result.run_id  # the calls that started them are the run's own
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagents_text_is_not_the_runs_own_text_on_its_stream(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -433,7 +442,7 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
     model = ScriptedModel([("check", {"input": "check o1"}), "ok"])
     governance = Governance(FakeCatalog({"check": Rule(risk="irreversible")}))
     async with with_governance(
-        Harness(config=Settings(), memory=memory_service.client()), governance
+        Harness(config=HOST_ALLOWED, memory=memory_service.client()), governance
     ) as h:
         agent = h.wrap(Agent(name="desk", model=model, tools=[tool_]), id="desk")
         paused = await agent.run("check o1", user="u")
@@ -540,7 +549,7 @@ def approved_where_recorded(service: FakeMemoryService, tool_name: str, run_id: 
 @pytest.fixture
 async def asks_with_memory(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
     async with with_governance(
-        Harness(config=Settings(), memory=memory_service.client()), ASKS
+        Harness(config=HOST_ALLOWED, memory=memory_service.client()), ASKS
     ) as h:
         yield h
 
@@ -602,12 +611,13 @@ async def test_an_agent_tools_approved_call_is_feedback_on_its_run(
     approved_where_recorded(memory_service, "refund", result.run_id)
 
 
+@pytest.mark.host_execution
 async def test_a_claude_subagents_approved_built_in_is_feedback_on_its_run(
     tmp_path: Path, memory_service: FakeMemoryService
 ) -> None:
     governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
     async with with_governance(
-        Harness(config=Settings(), memory=memory_service.client()), governance
+        Harness(config=HOST_ALLOWED, memory=memory_service.client()), governance
     ) as h:
         agent = h.wrap(claude(tmp_path, [subagent("Bash"), {"text": "checked"}]), id="desk")
         result = await agent.run("check o1", user="u")
@@ -623,6 +633,7 @@ async def test_a_claude_subagents_approved_built_in_is_feedback_on_its_run(
     approved_where_recorded(memory_service, "Bash", result.run_id)
 
 
+@pytest.mark.host_execution
 async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_their_run(
     tmp_path: Path, memory_service: FakeMemoryService
 ) -> None:
@@ -648,7 +659,7 @@ async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_
     ]
     governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
     async with with_governance(
-        Harness(config=Settings(), memory=memory_service.client()), governance
+        Harness(config=HOST_ALLOWED, memory=memory_service.client()), governance
     ) as h:
         agent = h.wrap(claude(tmp_path, script), id="desk")
         result = await agent.run("check both", user="u")

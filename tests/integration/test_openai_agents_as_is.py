@@ -126,6 +126,7 @@ def test_a_session_wrapping_another_is_made_each_conversations_with_it() -> None
 
 
 # --------------------------------------------------------------------------- run_config (P1)
+@pytest.mark.host_execution
 async def test_a_run_config_given_as_a_dict_is_the_sdks(harness: Harness) -> None:
     """``run_config`` as a dict, as ``Runner.run`` takes it — and as a queued run keeps it: made
     the SDK's ``RunConfig``; its own ``tool_not_found_behavior`` is kept (a made-up tool ends
@@ -489,6 +490,7 @@ def test_a_sandbox_memory_that_generates_is_said_where_it_is_wrapped(
     assert "Memory(generate=None)" in caplog.text
 
 
+@pytest.mark.host_execution
 async def test_a_run_with_tool_hooks_governs_the_sandboxs_tools_through_them(
     harness: Harness,
 ) -> None:
@@ -597,6 +599,7 @@ async def test_an_sse_server_and_a_server_managers_servers_are_governed_as_any_s
 
 
 # --------------------------------------------------------------------------- sandbox
+@pytest.mark.host_execution
 async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_sandbox(
     harness: Harness,
 ) -> None:

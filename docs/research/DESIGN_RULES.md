@@ -1,7 +1,7 @@
 # Design rules
 
 The standing rules for every harness and `ReAct` change. They sit with the
-[improvement backlog](IMPROVEMENT_BACKLOG.md) and the [evaluation protocol](EVAL_PROTOCOL.md).
+[open items](handoff/REMAINING.md) and the [evaluation protocol](EVAL_PROTOCOL.md).
 
 1. **The framework's own mechanism first.** Each adapter's framework (LangGraph, Deep Agents,
    OpenAI Agents, Claude Agent SDK, Kimi) is used for what it already does, through its own slot.

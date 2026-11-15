@@ -30,6 +30,7 @@ from trellis.contracts import (
     RunEventType,
     RunOutcome,
 )
+from trellis.harness import telemetry
 
 Listener = Callable[[RunEvent], None]
 _Written = TypeVar("_Written")
@@ -53,6 +54,9 @@ NOTICE: Final = "tool_notice"
 STREAMED: Final = "custom"
 #: The ``CUSTOM`` event name of ``trellis.current().log(...)``.
 LOG: Final = "log"
+#: The ``CUSTOM`` event name of a shell command's audit record (the isolation layer's
+#: ``sandbox_command``): also put on the tool call's span (``telemetry.command``).
+COMMAND: Final = "sandbox_command"
 #: The ``CUSTOM`` event name of a person's decision the run goes on with: at the start of the
 #: attempt that continues after it (``decision``, ``reviewer``, ``comment``, ``remember``), and
 #: for a call approved without asking because a reviewer approved its tool for the rest of the
@@ -153,6 +157,8 @@ class RunEvents:
         self.emit(type, tool_call_id=tool_call_id, message_id=message_id, data=data)
 
     def custom(self, name: str, **data: Any) -> None:
+        if name == COMMAND:  # a command's audit record: on the tool call's span too
+            telemetry.command(data)
         if not self.quiet:
             self.emit(RunEventType.CUSTOM, data={"name": name, **data})
 

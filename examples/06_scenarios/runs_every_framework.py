@@ -29,6 +29,7 @@ from langchain.agents import create_agent
 
 from trellis import Harness, ReAct, Runtime
 from trellis.contracts import RunStatus
+from trellis.harness.host import CLAUDE_SHELLS
 
 set_tracing_disabled(True)  # the SDK's own tracing goes to OpenAI; the harness traces via OTel
 QUESTION = "Summarise yesterday's orders."
@@ -49,7 +50,9 @@ async def main() -> None:
             "langgraph": create_agent(langchain_model([SUMMARY])),
             "deepagents": create_deep_agent(model=langchain_model([SUMMARY])),
             "openai": Agent(name="clerk", model=openai_agents_model([SUMMARY])),
-            "claude": ClaudeAgentOptions(**claude_cli([{"text": SUMMARY}], "trellis")),
+            "claude": ClaudeAgentOptions(  # no shell on this machine
+                disallowed_tools=sorted(CLAUDE_SHELLS), **claude_cli([{"text": SUMMARY}], "trellis")
+            ),
         }
         agents = [h.wrap(target, id=name, run_timeout=120) for name, target in targets.items()]
 

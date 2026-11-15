@@ -136,7 +136,7 @@ from trellis.harness.bridges.acp_live import (
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.governance.shell import Shell
+from trellis.harness.governance.shell import SHELLS, Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
 from trellis.harness.journal import Pending, call_key
 from trellis.harness.prompts import GatewayHeaders
@@ -226,7 +226,7 @@ KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
     "ReadMediaFile": "read",
     "Glob": "read",
     "Grep": "read",
-    "FetchURL": "read",
+    "FetchURL": "read",  # the catalog's alone: KIMI_NETWORK
     "WebSearch": "read",
     "TodoList": "read",
     "TaskList": "read",
@@ -247,6 +247,12 @@ KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
     "SetGoalBudget": "write",
     "Bash": "write",
 }
+#: Kimi Code's built-in tools that reach the network outside the deployment: the tool catalog
+#: decides them (``tools.bridge.outbound``: refused until an administrator gives them a risk
+#: or an ``approve_when``), never a question to the run's user; they declare no risk of the
+#: harness's (:func:`_risk`), so the catalog's is an administrator's. Kimi's own policy
+#: runs them unasked: a run's Kimi is configured to ask about them (:data:`KIMI_ASKED`).
+KIMI_NETWORK: Final = frozenset({"FetchURL", "WebSearch"})
 #: What Kimi Code is called when a person is asked about a call it asks about.
 KIMI_CODE: Final = "Kimi Code"
 #: Kimi Code's built-in tools whose work needs Kimi to go on running after the turn: a scheduled
@@ -580,7 +586,17 @@ KIMI_SHARED: Final = ("credentials", "skills", "agents", "plugins", "AGENTS.md",
 #: Kimi asks about all the same, so governance decides each call (a read, unless the catalog
 #: says more): a skill loaded (``Skill``) is a call of the run, as Claude's is. An ``ask`` rule
 #: of Kimi's config comes before that policy (its ``user-configured-ask``).
-KIMI_ASKED: Final = ("Skill",)
+KIMI_ASKED: Final = ("Skill", *sorted(KIMI_NETWORK), "Glob", "Grep", "ReadMediaFile")
+#: Kimi Code's tools that read files on this machine in its own process, as the service's user
+#: (a sandboxed run's ``Read`` goes to its sandbox over ACP: ``Sandboxed``), and the argument
+#: naming the folder or file: one outside the folders the run may read is refused
+#: (:data:`OUTSIDE`).
+KIMI_FILE_PATHS: Final = {"Glob": "path", "Grep": "path", "ReadMediaFile": "path"}
+#: Why such a call was not run.
+OUTSIDE: Final = (
+    "{path} is outside the folders this run works in, and {tool} reads it as this service: "
+    "its files are not the run's."
+)
 #: The forms an ``ask`` rule of Kimi's config takes after the team's config (``pattern``: its
 #: pattern, as TOML): a ``[[permission.rules]]`` entry, else — the team's ``rules`` written
 #: inline, which no table extends — a ``[[permission.ask]]`` one; Kimi reads both.
@@ -611,7 +627,14 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
             (home / name).symlink_to(team / name)
     config = team / "config.toml"
     given = config.read_text() if config.exists() else ""
-    patterns = [*kimi_allows(env, cwd), *KIMI_ASKED]
+    asked_config(home, given, [*kimi_allows(env, cwd), *KIMI_ASKED])
+    return str(home)
+
+
+def asked_config(home: Path, given: str, patterns: list[str]) -> None:
+    """``home``'s ``config.toml``: ``given`` (a Kimi configuration) with an ``ask`` rule after it
+    for each of ``patterns``, in the first of :data:`KIMI_ASK_FORMS` it takes after it (one that
+    takes none, as it is)."""
     asks = ""
     for form in KIMI_ASK_FORMS:
         added = "".join(form.format(pattern=json.dumps(p)) for p in patterns)
@@ -622,7 +645,6 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
     part = home / "config.toml.part"
     part.write_text(given + asks)
     part.replace(home / "config.toml")
-    return str(home)
 
 
 #: Why a run of an agent whose own configuration lets it run calls without asking got no
@@ -1255,8 +1277,7 @@ def native_spec(name: str, profile: Profile | None) -> ToolSpec:
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
-    builtins = profile.builtins if profile is not None else {}
-    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, UNDECLARED)))
+    spec = builtin(ToolSpec(name=name, side_effects=_risk(profile, name)))
     hands_on = profile is not None and name in profile.helpers | profile.swarms
     return helper(spec) if hands_on else spec
 
@@ -1563,7 +1584,7 @@ class Attempt:
         usage = getattr(answer, "usage", None)
         if usage is None or self.usage is not None:
             return
-        budget.account(
+        budget.reported(
             self.runtime,
             model=self.target.model or ACP_MODEL,
             input_tokens=usage.input_tokens,
@@ -1757,6 +1778,15 @@ class Attempt:
         spec = _spec(runtime, self.profile, name)
         runtime.model_ended(STEP)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
+        refused = await bridge.outbound(spec) if name in KIMI_NETWORK else None
+        path = args.get(KIMI_FILE_PATHS.get(name, ""))
+        if isinstance(path, str) and path and not self.shell.reaches(path):
+            refused = OUTSIDE.format(path=path, tool=name)
+        if refused is not None:
+            self._refused(known)
+            self.followup = REJECTED.format(tool=name, why=refused)
+            await self._stop()
+            return chosen(options, "reject_once")
         try:
             request = (tool_call.tool_call_id, options)
             decided = await _permitted(spec, args, self.shell, asks_as, request)
@@ -1919,6 +1949,9 @@ class RunHome:
         if self.target.sandbox is not None:
             env = {k: os.environ[k] for k in SANDBOXED_ENV if k in os.environ}
             env = {**env, **self.target.env, "HOME": str(self.home)}
+            # a configuration of its own, none of the team's: asking about the network, skills
+            # and the searches Kimi runs in its process on this machine (:data:`KIMI_ASKED`)
+            asked_config(self.agent_home, "", list(KIMI_ASKED))
         else:
             env = {**os.environ, **self.target.env}
             if variable is not None:
@@ -2121,7 +2154,11 @@ async def _permitted(
     the one let through). ``request``: the agent's permission request — its call's id, and
     whether it offers to keep an approval for its session (:func:`_keeps`: the person may then
     allow the tool for the conversation). A pause propagates."""
-    reads = spec.side_effects == "read" or shell.read_only(spec.name, args)
+    # a read; the shell (its sandbox, or the host the deployment allows it on:
+    # ``trellis.harness.host``) and the network the catalog let through (``bridge.outbound``)
+    # are the deployment's: announced, never the user's to answer
+    deployed = spec.name in SHELLS or spec.name in KIMI_NETWORK
+    reads = deployed or spec.side_effects == "read" or shell.read_only(spec.name, args)
     framework = None if reads else asks_as
     call_id, options = request
     return await bridge.permitted(
@@ -2250,8 +2287,14 @@ async def _filled(runtime: Runtime, message: str, mode: Any) -> Any:
 def _spec(runtime: Runtime, profile: Profile | None, name: str) -> ToolSpec:
     """A call of the agent's own, as governance decides it: the run's tool of that name (the
     tool catalog's word), else by its risk (its profile's built-ins; undeclared otherwise)."""
-    side_effects = (profile.builtins if profile else {}).get(name)
-    return runtime.native.get(name) or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
+    return runtime.native.get(name) or ToolSpec(name=name, side_effects=_risk(profile, name))
+
+
+def _risk(profile: Profile | None, name: str) -> str:
+    """A built-in's risk as its profile says it, none for a tool that reaches the network
+    (:data:`KIMI_NETWORK`: the catalog's, an administrator's) or one it has no word on."""
+    builtins = profile.builtins if profile is not None else {}
+    return UNDECLARED if name in KIMI_NETWORK else builtins.get(name, UNDECLARED)
 
 
 def _args(raw: Any, content: Any) -> dict[str, Any]:

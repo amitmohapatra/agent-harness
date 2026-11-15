@@ -641,8 +641,14 @@ def test_a_sandbox_name_is_at_most_63_characters_else_the_run_ids_digest() -> No
     assert named("r/1") != "trellis-r/1"  # not a name every provider takes: its digest too
 
 
-def test_without_a_provider_a_sandbox_is_dockers_of_the_image_given() -> None:
-    """Docker's, in the tenant's shared container (``SharedDockerSandbox``)."""
+def test_without_a_provider_a_sandbox_is_dockers_of_the_image_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker's, in the tenant's shared container (``SharedDockerSandbox``), where its daemon
+    answers (else this machine's isolation layer: ``test_host_default``)."""
+    from trellis.harness import sandbox as sandbox_module
+
+    monkeypatch.setattr(sandbox_module, "docker_answers", lambda: True)
     chosen = sandbox(image="registry.test/img:1").provider_for()
     assert isinstance(chosen, SharedDockerSandbox) and chosen.image == "registry.test/img:1"
     assert isinstance(chosen.docker, DockerSandbox)

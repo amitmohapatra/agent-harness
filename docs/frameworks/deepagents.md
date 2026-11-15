@@ -138,10 +138,13 @@ A Deep Agent compiled without a `store` gets the memory service as its store, so
   (its `SkillsMiddleware`, read through the backend) ([skills.md](../skills.md#native-or-ours)).
 * **Prompts:** Deep Agents takes text: `system_prompt=(await h.prompt("triage")).text` for a
   stored prompt of the gateway ([prompts.md](../prompts.md#native-or-ours)).
-* **Sandbox:** prefer its own backend for `execute` (`BaseSandbox`, `LangSmithSandbox`;
-  `LocalShellBackend` is the host's shell, unisolated), gated with `interrupt_on`; `**sandbox().deep_agent()`
-  when every command must be governed by the catalog and journaled
-  ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+* **Sandbox:** prefer its own backend for `execute` (`BaseSandbox`, `LangSmithSandbox`),
+  gated with `interrupt_on`; `**sandbox().deep_agent()` when every command must be governed by
+  the catalog and journaled ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+  `LocalShellBackend` is the host's shell, unisolated: a graph whose `execute` reaches one
+  (its own backend, a `CompositeBackend`'s default, a sub-agent's) is refused at `h.wrap`,
+  whatever the setting, naming `sandbox()` — which works in Docker, else this machine's
+  isolation layer ([governance.md](../governance.md#commands-on-the-host)).
 
 ## Approvals, streaming, durable runs, surfaces, evaluation
 

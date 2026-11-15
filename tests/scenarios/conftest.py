@@ -87,7 +87,9 @@ PLAN: dict[str, tuple[str, ...]] = {
 
 
 def settings(**changes: object) -> Settings:
-    return Settings(**{**Settings.from_env().model_dump(), **changes})
+    """The environment's deployment with ``changes``; the scenarios run Claude Code and Kimi
+    Code in folders of this machine, so it allows commands here (``TRELLIS_HOST_EXECUTION``)."""
+    return Settings(**{**Settings.from_env().model_dump(), "host_execution": "allow", **changes})
 
 
 def harness(*, key: str | None = None, memory: bool = True, **changes: object) -> Harness:

@@ -202,6 +202,10 @@ class Runtime:
     offered: set[str] | None = None
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
+    #: governance's action (``run``, ``announce``, ``ask``) on each call its framework runs
+    #: itself, by the call's key (``journal.call_key``), as decided before it ran
+    #: (``bridge.permitted``): what its ``execute_tool`` span says once it ran (``observed``)
+    governed: dict[str, str] = field(default_factory=dict)
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
@@ -926,6 +930,14 @@ def interrupt_id(run_id: str, attempt: int, n: int) -> str:
 def principal(user: str) -> str:
     """A run's user as an assignee (``user:<id>``); one already naming a kind is kept."""
     return user if ":" in user else f"user:{user}"
+
+
+def answers(assignee: str | None, user: str) -> bool:
+    """Whether the run's ``user``, answering on a chat surface (AG-UI, A2A), answers a question
+    assigned to ``assignee``: one that is theirs, or anyone's. One a rule assigned to someone
+    else (a hook's ``Ask(assignee="role:finance")``) is that person's, answered through the
+    inbox (``h.inbox``, ``agent.resume``): never approved by the user whose action it is."""
+    return assignee is None or principal(assignee) == principal(user)
 
 
 def run_of(interrupt_id_: str) -> str:

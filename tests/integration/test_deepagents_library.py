@@ -43,7 +43,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.runlog import LoggedRuns
 from trellis import Harness, Settings, middleware
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import RunCheckpointer
 
@@ -501,18 +501,19 @@ async def test_the_todo_list_stays_in_view_when_the_turns_that_wrote_it_do_not(
     assert "Your todo list" not in model.seen[1][-3].text  # the call shows it: said once
 
 
-async def test_a_local_shell_backends_execute_runs_the_command_as_a_write_of_the_run(
+def test_a_local_shell_backend_is_refused_under_the_harness_naming_sandbox(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """``LocalShellBackend`` gives ``execute`` a real shell: the library runs the command in
-    its folder, and the call is the run's — a write, announced and on its events."""
+    """``LocalShellBackend`` gives ``execute`` a real shell on this machine, with no isolation:
+    under the harness the graph is refused at ``h.wrap`` (whatever ``TRELLIS_HOST_EXECUTION``
+    says), naming ``sandbox()`` — the library's isolated backend, in Docker or this machine's
+    isolation layer."""
     backend = LocalShellBackend(root_dir=str(tmp_path), virtual_mode=True)
     model = ScriptedChatModel(turns=[("execute", {"command": "echo tides > t.txt"}), "done"])
     graph = create_deep_agent(model=model, backend=backend, checkpointer=InMemorySaver())
-    events = [e async for e in harness.wrap(graph, id="deep").stream("w", user="u", thread="t")]
-    assert results(events) == [("execute", "ok")] and events[-1].data["result"] == "done"
-    assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["execute"]
-    assert (tmp_path / "t.txt").read_text().strip() == "tides"
+    with pytest.raises(ConfigurationError, match=r"sandbox\(\)"):
+        harness.wrap(graph, id="deep")
+    assert not (tmp_path / "t.txt").exists()
 
 
 async def test_execute_without_a_sandbox_backend_is_the_librarys_own_refusal(

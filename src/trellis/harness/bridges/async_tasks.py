@@ -15,9 +15,8 @@ turn, as the task does — kept as a Claude subagent working in the background i
   leaves a run the store ends (cut off). This process reads the task
   (:meth:`AsyncTasks._watch`: after :data:`WATCH_SECONDS` at first, then less and less often,
   :func:`wait_before`): ended on its server (Deep Agents' own ``check_async_task``), its run
-  ends and the chat is told how — a turn of the chat's own when it is idle (once the turn
-  at work here, if one is, has ended), as a harness task's outcome is
-  (``background.delivered``); its run ended elsewhere (its turn
+  ends and the chat is told how — a turn of the chat's own when it is idle, as a
+  harness task's outcome is (``background.delivered``); its run ended elsewhere (its turn
   cancelled from another server), the task is cancelled on its server;
 * **its end** — when Deep Agents' own tools say the task ended: a later check or list
   (``check_async_task``, ``list_async_tasks``) reads its final status from its server, or the
@@ -101,14 +100,12 @@ def run_of(tenant: str, agent_id: str, task_id: str, again: str | None = None) -
 
 @dataclass(slots=True)
 class Kept:
-    """A task this process holds the run of: its helper, the agent whose run started it, the
-    conversation of that run, and Deep Agents' record of it (``AsyncTask``: its thread and its
-    run of now)."""
+    """A task this process holds the run of: its helper, the agent whose run started it, and
+    Deep Agents' record of it (``AsyncTask``: its thread and its run of now)."""
 
     helper: Helper
     agent: Agent
     tenant: str
-    conversation: str
     task: dict[str, Any]
     #: its reads (:meth:`AsyncTasks._watch`)
     watching: asyncio.Task[None] | None = None
@@ -204,7 +201,7 @@ class AsyncTasks:
         )
         helpers.detached(key)
         runtime.agent.harness.holds.hold(run_id, runtime.tenant)
-        kept = Kept(helper, runtime.agent, runtime.tenant, runtime.conversation, task)
+        kept = Kept(helper, runtime.agent, runtime.tenant, task)
         self._kept[run_id] = kept
         kept.watching = asyncio.get_running_loop().create_task(
             self._watch(run_id), context=contextvars.Context()
@@ -252,12 +249,7 @@ class AsyncTasks:
 
     async def _read(self, run_id: str, kept: Kept) -> None:
         """How the task goes on its server, as Deep Agents' own check reads it: ended, its run
-        ends and the chat is told — once the turn of the chat at work in this process, if one
-        is, has ended. A turn whose graph still works reads the outcome itself (Deep Agents'
-        pull, before a model call and after its answer: the chat's own turn then finds it told
-        and stays quiet, ``background.stale``); one that is finishing last read it too early,
-        and the chat is not idle until it has ended — told by nobody, were it not waited for
-        (``background.left`` reads the harness's own tasks only)."""
+        ends and the chat is told."""
         from trellis.harness import background
 
         task_id = kept.task["task_id"]
@@ -278,9 +270,6 @@ class AsyncTasks:
             event["result"] = said["result"]
         elif status is not RunStatus.SUCCESS and status is not RunStatus.CANCELLED:
             event["error"] = background.FAILED
-        live = kept.agent.turns.live(kept.conversation)
-        if live is not None:
-            await live.ended.wait()
         record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
         if record is not None:
             await background.delivered(kept.agent, record, update=event)

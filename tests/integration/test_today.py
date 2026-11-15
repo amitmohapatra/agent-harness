@@ -157,6 +157,7 @@ async def test_an_openai_agent_is_told_the_day_after_its_instructions(
     assert bare.system == [IN_UTC]  # no instructions of its own: the day alone
 
 
+@pytest.mark.host_execution
 async def test_claude_code_says_the_date_itself_so_the_harness_adds_none(
     harness: Harness, clock: list[datetime], tmp_path: Path
 ) -> None:
@@ -171,6 +172,7 @@ async def test_claude_code_says_the_date_itself_so_the_harness_adds_none(
     assert started["prompt"] == "what day is it?" and not started["context"]
 
 
+@pytest.mark.host_execution
 @needs_kimi
 async def test_kimi_code_says_the_date_itself_so_the_harness_adds_none(
     harness: Harness, tmp_path: Path

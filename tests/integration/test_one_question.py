@@ -82,6 +82,10 @@ from trellis.harness.governance.catalog import Rule
 from trellis.harness.governance.decision import ALWAYS
 from trellis.harness.subagents import asked_by
 
+#: Claude Code and Kimi Code run their shells in folders of this machine: this deployment of
+#: the tests allows it (TRELLIS_HOST_EXECUTION=allow).
+HOST_ALLOWED = Settings(host_execution="allow")
+
 #: The tool bodies that ran, in order: (tool, amount).
 RAN: list[tuple[str, int]] = []
 THREAD: Final = "chat-1"
@@ -407,7 +411,7 @@ async def test_one_question_a_call(
     hooks: list[Hooks] = [watch, *([Asking()] if source.hooked else [])]
     asked = Asked()
     answer = answering(source, flow)
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
 
         async def built(on: Harness, n: int) -> Any:
             # each turn's agent plans that turn's calls (any agent of the conversation reads
@@ -428,7 +432,7 @@ async def test_one_question_a_call(
                 first = await agent.run("go", user="ada", thread=thread)
             if flow.fresh and first.status is RunStatus.PAUSED:
                 async with Harness(
-                    config=Settings(), memory=memory_service.client(), runs=h.runs
+                    config=HOST_ALLOWED, memory=memory_service.client(), runs=h.runs
                 ) as other:
                     resumer = await built(other, n)
                     done = await settled(agent, first, asked, answer, resumer=resumer)
@@ -490,13 +494,13 @@ async def test_the_librarys_own_gate_is_the_one_question(
     decision = flow if flow in ("reject", "edit") else "approve"
     saver, watch, asked = InMemorySaver(), Watch(), Asked()
 
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         graph = await _gated(h, lib, fn, plan, saver)
         agent = arm(h.wrap(graph, id=f"gated-{lib}", hooks=[watch]), [fn])
         first = await agent.run("go", user="ada", thread=THREAD)
         if flow == "fresh-harness":
             async with Harness(
-                config=Settings(), memory=memory_service.client(), runs=h.runs
+                config=HOST_ALLOWED, memory=memory_service.client(), runs=h.runs
             ) as other:
                 again = await _gated(other, lib, fn, plan, saver)
                 resumer = arm(other.wrap(again, id=f"gated-{lib}", hooks=[watch]), [fn])
@@ -542,7 +546,7 @@ async def test_the_librarys_gate_on_a_tool_of_the_graphs_own_is_the_one_question
     graph = create_agent(model, tools=[wire], middleware=[gate], checkpointer=InMemorySaver())
     watch, asked = Watch(), Asked()
 
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = h.wrap(graph, id=f"own-{mode}-{side}", hooks=[watch])
         first = await agent.run("go", user="ada", thread=THREAD)
         done = await settled(agent, first, asked, always(decision))
@@ -580,7 +584,7 @@ async def test_a_task_sub_agents_call_is_one_question(
     amounts = (5, 6) if flow == "two-calls" else (5,)
     decision = "reject" if flow == "reject" else "approve"
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         target, tools = await _tasked(h, lib, [("pay", {"amount": a}) for a in amounts])
         agent = arm(h.wrap(target, id=f"tasks-{lib}", hooks=[watch]), tools)
         first = await agent.run("pay them", user="ada", thread=THREAD)
@@ -642,7 +646,7 @@ async def test_an_openai_function_tools_call_is_one_question(
         target = Agent(name="desk", model=model, tools=[gated])
         return declaring(on, settle=risk).wrap(target, id="desk", hooks=[watch])
 
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = built(h)
         if flow == "stream":
             first = await streamed(agent, "settle", asked, user="ada", thread=THREAD)
@@ -651,7 +655,7 @@ async def test_an_openai_function_tools_call_is_one_question(
         answer = lambda _: {"decision": decision}  # noqa: E731
         if flow == "fresh-harness":
             async with Harness(
-                config=Settings(), memory=memory_service.client(), runs=h.runs
+                config=HOST_ALLOWED, memory=memory_service.client(), runs=h.runs
             ) as other:
                 done = await settled(agent, first, asked, answer, resumer=built(other))
                 await other.writes.drain()
@@ -681,7 +685,7 @@ async def test_an_sdk_approval_inside_an_agent_tool_is_one_question(
     outer = PlannedModel([("check", {"input": "settle 5"})])
     desk = Agent(name="desk", model=outer, tools=[inner.as_tool("check", "Check.")])
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = declaring(h, settle="read", check="read").wrap(desk, id="desk", hooks=[watch])
         first = await agent.run("settle 5", user="ada", thread=THREAD)
         done = await settled(agent, first, asked, lambda _: {"decision": decision})
@@ -707,7 +711,7 @@ async def test_a_call_of_an_agent_handed_off_to_is_one_question(
     )
     desk = Agent(name="desk", model=PlannedModel([("transfer_to_refunds", {})]), handoffs=[refunds])
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         # a write of the agent's own is announced (its SDK's permission flow is its own): an
         # irreversible one asks
         agent = declaring(h, settle="irreversible").wrap(desk, id="desk", hooks=[watch])
@@ -739,7 +743,7 @@ async def test_a_local_shell_command_is_one_question(
     model = ScriptedModel([Items(call), Items(call), "done"])
     target = Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)])
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = h.wrap(target, id="ops", hooks=[watch], without={"schedules"})
         first = await agent.run("remove x", user="ada", thread=THREAD)
         done = await settled(agent, first, asked, lambda _: {"decision": decision})
@@ -760,7 +764,7 @@ async def test_an_mcp_server_tool_is_one_question(
     watch, asked = Watch(), Asked()
     async with (
         stdio(require_approval=policy) as server,
-        Harness(config=Settings(), memory=memory_service.client()) as h,
+        Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h,
     ):
         model = PlannedModel([("add_note", {"text": "milk"})], final="ok")
         target = Agent(name="desk", model=model, mcp_servers=[server])
@@ -798,7 +802,7 @@ async def test_a_call_whose_arguments_nest_is_one_decision_counted(
     watch, asked = Watch(), Asked()
     edited = {"items": ["a"], "where": {"shelf": "s2"}}
     answer = {"decision": decision, **({"answer": edited} if decision == "edit" else {})}
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = arm(h.wrap(follow, id="tagger", hooks=[watch]), [tag])
         first = await agent.run("tag", user="ada", thread=THREAD)
         done = await settled(agent, first, asked, lambda _: answer)
@@ -817,7 +821,7 @@ async def test_a_call_whose_arguments_nest_is_one_decision_counted(
 
 
 # --------------------------------------------------------------------------- Claude Code's own
-# A built-in Claude Code asks its user about (``can_use_tool``: ``Bash`` is not in its allowed
+# A built-in Claude Code asks its user about (``can_use_tool``: ``Edit`` is not in its allowed
 # tools): one question, on the query path and in a conversation's live session, the main
 # agent's call or a foreground subagent's. A built-in is Claude's: not journaled on the run's
 # trajectory and not a harness tool call of the budget — it is recorded once as the run's.
@@ -877,12 +881,12 @@ async def test_a_built_in_claude_code_asks_about_is_one_question(
     from claude_agent_sdk import AgentDefinition
 
     calls, decisions, run = CLAUDE_FLOWS[flow]
-    steps = [{"builtin": "Bash", "args": c} for c in calls]
+    steps = [{"builtin": "Edit", "args": c} for c in calls]
     deploys = {"agent": "deployer", "prompt": "deploy", "steps": [*steps, {"text": "deployed"}]}
     script = [deploys] if place == "subagent" else steps
     agents = {"deployer": AgentDefinition(description="Deploys.", prompt="Deploy it.")}
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         target = claude_options(tmp_path, [*script, {"text": "{last}"}], agents=agents)
         agent = h.wrap(target, id="deploys", hooks=[watch])
         thread = THREAD if path == "live" else None
@@ -894,7 +898,7 @@ async def test_a_built_in_claude_code_asks_about_is_one_question(
             memory_service,
             watch,
             asked,
-            "Bash",
+            "Edit",
             questions=len(calls),
             ran=len(run),
             harness_tool=False,
@@ -934,14 +938,14 @@ async def test_an_acp_agents_permission_request_is_one_question(
         decision = flow.removeprefix("subagent-")
         calls, decisions, run = [DEPLOY], [decision], [DEPLOY] if decision == "approve" else []
         agent_step = {"description": "deploy", "prompt": "deploy", "subagent_type": "coder"}
-        asks = {"builtin": "Bash", "args": DEPLOY}
+        asks = {"builtin": "Edit", "args": DEPLOY}
         script = [{"agent": agent_step, "asks": asks, "result": "deployed"}, {"text": "done"}]
     else:
         calls, decisions, run = ACP_FLOWS[flow]
-        steps = [{"builtin": "Bash", "args": c, "ask": True, "output": "ok"} for c in calls]
+        steps = [{"builtin": "Edit", "args": c, "ask": True, "output": "ok"} for c in calls]
         script = [*steps, {"text": "done"}]
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = h.wrap(acp_agent(tmp_path, script), id="ops", hooks=[watch])
         first = await agent.run("deploy", user="ada", thread=THREAD)
         done = await settled(agent, first, asked, deciding(decisions))
@@ -961,7 +965,7 @@ async def test_an_acp_agents_permission_request_is_one_question(
                 memory_service,
                 watch,
                 asked,
-                "Bash",
+                "Edit",
                 questions=len(calls),
                 ran=len(run),
                 harness_tool=False,
@@ -974,8 +978,8 @@ async def test_an_acp_agents_permission_request_is_one_question(
 
 # --------------------------------------------------------------------------- Claude, background
 # The combination no test had: a background subagent of a conversation's live session makes a
-# built-in call the catalog asks about (``Bash``, irreversible) AND that Claude Code asks about
-# too (``Bash`` is not in its allowed tools). The question waits in the subagent's run and is
+# built-in call the catalog asks about (``Edit``, irreversible) AND that Claude Code asks about
+# too (``Edit`` is not in its allowed tools). The question waits in the subagent's run and is
 # asked in the conversation's next turn: one question; approved, it runs once.
 
 
@@ -995,15 +999,15 @@ async def test_a_background_subagents_built_in_both_ask_about_is_one_question(
                 await asyncio.sleep(0.02)
 
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
-    catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
+    catalog = FakeCatalog({"Edit": Rule(risk="irreversible")})
     watch, asked = Watch(), Asked()
-    governed = Harness(config=Settings(), memory=memory_service.client())
+    governed = Harness(config=HOST_ALLOWED, memory=memory_service.client())
     async with with_governance(governed, Governance(catalog)) as h:
         agent = h.wrap(options(tmp_path, scripts), id="bg", hooks=[watch])
         first = await agent.run("research the market", user="ada", thread="t1")
         asked.results.append(first)
         [child] = [r async for r in h.runs.iterate(parent_run_id=first.run_id)]
-        (tmp_path / "tasks" / "t1.call").write_text(json.dumps({"builtin": "Bash", "args": DEPLOY}))
+        (tmp_path / "tasks" / "t1.call").write_text(json.dumps({"builtin": "Edit", "args": DEPLOY}))
         await when(child.run_id, RunStatus.PAUSED)
         turn = await agent.run("how is it going?", user="ada", thread="t1")
         done = await settled(agent, turn, asked, lambda _: {"decision": decision})
@@ -1013,8 +1017,8 @@ async def test_a_background_subagents_built_in_both_ask_about_is_one_question(
         assert len(asked.questions) == 1, [q.question for q in asked.questions]
         assert "Claude Code asks" not in asked.questions[0].question  # governance's question
         ran = 1 if decision == "approve" else 0
-        assert built_ins(tmp_path) == [{"tool": "Bash", "args": DEPLOY}] * ran
-        records = [c for c in memory_service.named("record_tool") if c.body["tool"] == "Bash"]
+        assert built_ins(tmp_path) == [{"tool": "Edit", "args": DEPLOY}] * ran
+        records = [c for c in memory_service.named("record_tool") if c.body["tool"] == "Edit"]
         assert len(records) == ran
         sent = [c for c in memory_service.named("feedback") if c.body["target_kind"] == "tool_call"]
         # fed back once, on the subagent's run, which asked and records the call
@@ -1032,10 +1036,10 @@ async def test_a_background_subagents_built_in_both_ask_about_is_one_question(
 
 
 class Confirming(Hooks):
-    """A hook asking its own question about each ``Bash`` call, then leaving it be."""
+    """A hook asking its own question about each ``Edit`` call, then leaving it be."""
 
     async def before_tool(self, call: ToolCall) -> None:
-        if call.tool == "Bash":
+        if call.tool == "Edit":
             runtime = current()
             assert runtime is not None
             await runtime.ask("Which environment?", options=["staging", "production"])
@@ -1047,8 +1051,8 @@ async def test_a_hooks_own_question_is_not_the_approval_of_the_call(
 ) -> None:
     touch = {"command": "touch notes.txt"}
     watch, asked = Watch(), Asked()
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        script = [{"builtin": "Bash", "args": touch}, {"text": "{last}"}]
+    async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
+        script = [{"builtin": "Edit", "args": touch}, {"text": "{last}"}]
         agent = h.wrap(claude_options(tmp_path, script), id="hooked", hooks=[watch, Confirming()])
         first = await agent.run("touch it", user="ada", thread=THREAD if path == "live" else None)
 
@@ -1061,4 +1065,4 @@ async def test_a_hooks_own_question_is_not_the_approval_of_the_call(
         assert done.status is RunStatus.SUCCESS, done
     approvals = [q for q in asked.questions if q.tool_call is not None]
     assert len(approvals) == 1, [q.question for q in asked.questions]
-    assert built_ins(tmp_path) == [{"tool": "Bash", "args": touch}]
+    assert built_ins(tmp_path) == [{"tool": "Edit", "args": touch}]

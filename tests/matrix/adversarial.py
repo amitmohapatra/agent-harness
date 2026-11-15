@@ -7,7 +7,7 @@ timing out, cancelled with their parent, asking for an approval, steered around.
 Each row is a :class:`~tests.matrix.model.Feature` (ids ``X..``, audit ``ADV``) on the same
 cells as the others; a row runs only in the modes where its point is (the surfaces are the
 other rows' concern), and a failure this suite found and that is not fixed yet is a ``Bug`` in
-``generate.KNOWN`` — and an entry of ``docs/research/IMPROVEMENT_BACKLOG.md`` (Adversarial
+``generate.KNOWN`` — and an entry of ``docs/research/archive/IMPROVEMENT_BACKLOG.md`` (Adversarial
 suite) — not a weakened assertion. The model-facing half (what the model must be told and
 answers) is ``benchmark.cost.adversarial``.
 """

@@ -32,7 +32,9 @@ Pilot first (LangGraph, 6 cases: $0.0008; Claude, 6 cases: $0.009), then breadth
 * `data/<sdk>/<feature>.<arm>.json` — what each case saw: answers, statuses, the questions
   asked, the tool calls, its spend and, on the stack, the run record, its events (from
   agent-runs' API), the children, the memory transcript, tool records and feedback rows.
-  `data/summary.json` and `data/tables.md` are built by `check.py`.
+  `data/summary.json` and `data/tables.md` are built by `check.py`. The per-case files are on
+  the `data/research-archive` branch, each listed with its sha256 in
+  [data/MANIFEST.md](data/MANIFEST.md); the summary and the tables stay here.
 * The stack: `scripts/scenarios/stack.sh` on databases of its own (`sdkfull_*`, port 55957),
   ports 18387 (memory) and 18397 (agent-runs); Docker for the OpenAI sandbox
   (`python:3.12-slim`).

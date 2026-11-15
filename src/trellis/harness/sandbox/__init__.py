@@ -42,16 +42,20 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import itertools
 import logging
+import os
 import posixpath
+import socket
 import time
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import ToolError, ToolSpec
+from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.bounded import LRU
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import (
@@ -66,9 +70,10 @@ from trellis.harness.sandbox.base import (
     SandboxSpec,
     SupportsPause,
     SupportsSnapshot,
+    audited,
     hint,
 )
-from trellis.harness.sandbox.docker import DockerSandbox
+from trellis.harness.sandbox.docker import DockerSandbox, docker_host
 from trellis.harness.sandbox.isolation import (
     HostSandbox,
     Limits,
@@ -133,6 +138,8 @@ PROBE: Final = (
 )
 #: The most a probe may take, in seconds (its sandbox made, the script run).
 PROBE_SECONDS: Final = 60.0
+#: The most a ``sandbox()`` given no provider waits for the Docker daemon's answer.
+PING_SECONDS: Final = 1.0
 #: The most distributions the card names; the rest are counted.
 CARD_PACKAGES: Final = 80
 #: The label of a sandbox made only to read the environment card.
@@ -263,6 +270,8 @@ class SandboxSource:
         that nothing else can be installed. Read once per process, in a sandbox made for it
         alone and deleted at once; ``""`` when it cannot be read (no daemon: said once in the
         log; an image without Python: said in the card)."""
+        if _host_denied(self.provider_for(), current()):
+            return ""  # no command on this machine: the deployment switched them off
         async with self._probing:
             if self._card is None:
                 self._card = await self._probed()
@@ -302,13 +311,11 @@ class SandboxSource:
         return {"backend": SandboxBackend(self, call_timeout=self.call_timeout)}
 
     def provider_for(self) -> SandboxProvider:
-        """The provider given: a ``sandbox()`` without one works in the tenant's shared
-        container (:class:`~trellis.harness.sandbox.shared.SharedDockerSandbox`: a workspace and
-        a uid of the run's own in it, through the isolation layer) on the Docker daemon
-        ``DOCKER_HOST`` names (else the docker context, else the local socket), of the spec's
-        image."""
+        """The provider given, else :func:`default_provider`'s: the tenant's shared container
+        on Docker when its daemon answers, else this machine's isolation layer, else no shell
+        (each command refused with the reason). Chosen once."""
         if self.provider is None:
-            self.provider = SharedDockerSandbox(self.spec.image)
+            self.provider = default_provider(self.spec.image)
         return self.provider
 
     async def opened(self, runtime: Runtime, *, changes: bool = False) -> Sandbox:
@@ -325,6 +332,8 @@ class SandboxSource:
 
     async def _opened(self, runtime: Runtime) -> Sandbox:
         provider = self.provider_for()
+        if _host_denied(provider, runtime):
+            raise ConfigurationError(HOST_DENIED)
         journal = runtime.replay.journal
         if journal.sandbox is None:
             await self._reaping(provider, runtime)
@@ -383,7 +392,7 @@ class SandboxSource:
         await self.with_results(runtime, box)
         command = str(args["command"])
         await self.seen(runtime, box)
-        result = await box.exec(command, timeout=runtime.remaining())
+        result = await audited(box, command, timeout=runtime.remaining())
         why = hint(result.exit_code, result.stderr, self.spec, result.limit)
         kept = await self.outputs_said(runtime, box, command)
         told = {"hint": why, OUTPUTS: kept}
@@ -505,13 +514,97 @@ def sandbox(
     return SandboxSource(provider, given, call_timeout)
 
 
+def default_provider(image: str | None = None) -> SandboxProvider:
+    """Where a ``sandbox()`` given no provider works: the tenant's shared container
+    (:class:`~trellis.harness.sandbox.shared.SharedDockerSandbox`, of ``image``) when the
+    Docker daemon ``DOCKER_HOST`` names answers (:func:`docker_answers`); else this machine,
+    through the isolation layer (:class:`~trellis.harness.sandbox.isolation.HostSandbox`), when
+    it can isolate here; else :class:`NoShell`, its reason said once. The model sees the same
+    command tool either way."""
+    if docker_answers():
+        return SharedDockerSandbox(image)
+    layer = HostSandbox()
+    why = layer.cannot_isolate()
+    return layer if why is None else NoShell(why)
+
+
+#: What a command in this machine's isolation layer is refused with where the deployment
+#: switched host commands off.
+HOST_DENIED: Final = (
+    "commands on this machine are switched off in this deployment (TRELLIS_HOST_EXECUTION="
+    "deny), the isolation layer's too: give the sandbox a Docker daemon, or another provider"
+)
+
+
+def _host_denied(provider: SandboxProvider, runtime: Runtime | None) -> bool:
+    """Whether ``provider`` runs commands on this machine (the isolation layer,
+    ``HostSandbox``) in a run whose deployment says ``deny``."""
+    if not isinstance(provider, HostSandbox) or runtime is None:
+        return False
+    return runtime.agent.harness.settings.host_execution == "deny"
+
+
+def docker_answers() -> bool:
+    """Whether the Docker daemon (``sandbox.docker.docker_host``: a ``unix://`` socket or a
+    ``tcp://`` address) answers its ``/_ping`` within :data:`PING_SECONDS`."""
+    where = docker_host()
+    try:
+        if where.startswith("unix://"):
+            held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            held.settimeout(PING_SECONDS)
+            held.connect(where.removeprefix("unix://"))
+        elif where.startswith("tcp://"):
+            name, _, port = where.removeprefix("tcp://").rstrip("/").partition(":")
+            held = socket.create_connection((name, int(port or 2375)), timeout=PING_SECONDS)
+        else:
+            return False
+        with held:
+            held.sendall(b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n")
+            return b" 200 " in held.recv(64)
+    except (OSError, ValueError):
+        return False
+
+
+class NoShell:
+    """``sandbox()`` where no Docker daemon answers and this machine cannot isolate a command
+    (``why``): each command refused with the reason (a ``ConfigurationError`` the model reads),
+    said once in the log; never run unisolated."""
+
+    name = "none"
+
+    def __init__(self, why: str) -> None:
+        self.why = why
+        self.said = (
+            "no shell for this run: no Docker daemon answers, and commands cannot be isolated "
+            f"on this machine: {why}"
+        )
+        _said_once(self.said)
+
+    async def create(self, ref: SandboxRef, spec: SandboxSpec | None = None) -> Sandbox:
+        raise ConfigurationError(self.said)
+
+    async def attach(self, ref: SandboxRef) -> Sandbox:
+        raise ConfigurationError(self.said)
+
+    async def delete(self, ref: SandboxRef) -> None:
+        return None
+
+    async def labelled(self, labels: Mapping[str, str]) -> list[SandboxRef]:
+        return []
+
+
+@functools.lru_cache(maxsize=16)
+def _said_once(said: str) -> None:
+    log.warning("%s", said)
+
+
 async def delivered(runtime: Runtime) -> None:
     """The run succeeded: each file written directly in :data:`OUTPUTS` kept in the file store
     for its user (``Runtime.save_file``: named in its journal, announced, served over AG-UI) —
     its sandbox's, before the sandbox is deleted, and that of the folder its framework works in
     on this machine (``Adapter.workdir``: Claude Code's, Kimi Code's), moved out of it so a
     later run does not give it again. A file that cannot be kept (its name, its size past
-    :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
+    :data:`OUTPUT_MAX_BYTES`, a link there: :func:`_written`) is left, said in a warning."""
     box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
     if box is not None and source is not None:
         tool = EXEC if EXEC in runtime.toolbox else "execute"
@@ -527,10 +620,22 @@ async def delivered(runtime: Runtime) -> None:
         files = sorted(f for f in here.iterdir() if f.is_file())
 
         async def read(name: str) -> bytes:
-            return await asyncio.to_thread((here / name).read_bytes)
+            return await asyncio.to_thread(_written, here / name)
 
-        sized = [(f.stat().st_size, f.name) for f in files]
+        sized = [(f.lstat().st_size, f.name) for f in files]
         await _kept(runtime, sized, read, agent.adapter.name, moved=lambda n: (here / n).unlink())
+
+
+def _written(path: Path) -> bytes:
+    """The bytes of the file at ``path`` itself, never of where a link there leads: any file
+    this process may read, which the run's own account may not (``O_NOFOLLOW``, so a link
+    put there after it was listed is refused too)."""
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:  # ELOOP: a link
+        raise ToolError("a link, not a file written there", source="tools") from exc
+    with os.fdopen(handle, "rb") as opened:
+        return opened.read()
 
 
 async def _kept(
@@ -688,6 +793,7 @@ __all__ = [
     "ExecResult",
     "HostSandbox",
     "Limits",
+    "NoShell",
     "Sandbox",
     "SandboxLost",
     "SandboxProvider",

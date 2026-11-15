@@ -20,7 +20,7 @@ examples are [examples/](../examples/README.md).
 | [versioning.md](versioning.md) | the versions this release was tested with, the policy, how to upgrade |
 | [adr/](adr/README.md) | the decisions behind the design |
 | [CHANGELOG.md](../CHANGELOG.md) | what changed in each release |
-| [research/](research/IMPROVEMENT_BACKLOG.md) | the living reference for improving the harness: the [improvement backlog](research/IMPROVEMENT_BACKLOG.md) (every open gap, its status and evidence), the [evaluation protocol](research/EVAL_PROTOCOL.md) every change must pass to be kept, the [design rules](research/DESIGN_RULES.md), the [query engine benchmark](research/QUERY_ENGINE.md), the [scenario coverage audit](research/SCENARIO_COVERAGE_AUDIT.md) and the [self-explanation research](research/SELF_EXPLANATION.md) |
+| [research/](research/README.md) | the reference for improving the harness: the [index of every report](research/README.md) (what each found, its date, current or superseded), the open items in [handoff/REMAINING.md](research/handoff/REMAINING.md), the [evaluation protocol](research/EVAL_PROTOCOL.md) every change must pass to be kept, the [design rules](research/DESIGN_RULES.md), the [query engine benchmark](research/QUERY_ENGINE.md) and the [feature coverage](research/FEATURE_COVERAGE.md) |
 
 ## Way 1: wrapped (the harness runs your agent)
 

@@ -46,6 +46,7 @@ from trellis.harness.a2a.translate import (
 from trellis.harness.conversation import Mode
 from trellis.harness.history import from_client
 from trellis.harness.identity import IdentityRefused
+from trellis.harness.runtime import answers
 from trellis.runs import ConflictError, NotFoundError
 
 if TYPE_CHECKING:
@@ -145,7 +146,12 @@ class RunExecutor(AgentExecutor):
         tenant: str,
     ) -> None:
         record = await self.agent.harness.runs.get(task_id, tenant=tenant)
-        if record is None or record.user_id != user or record.awaiting is None:
+        if (
+            record is None
+            or record.user_id != user
+            or record.awaiting is None
+            or not answers(record.awaiting.assignee, user)  # a rule assigned it elsewhere
+        ):
             await self._ask_again(
                 event_queue, task_id, context_id, "this task is not yours to answer"
             )

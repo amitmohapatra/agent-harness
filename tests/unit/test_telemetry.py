@@ -3,6 +3,7 @@ attempt of a run shares one trace; scores reach Langfuse with the OTLP credentia
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 
@@ -342,3 +343,66 @@ def test_an_agents_version_is_on_its_spans(spans) -> None:
     versioned, plain = (dict(s.attributes or {}) for s in spans.get_finished_spans())
     assert versioned["gen_ai.agent.version"] == versioned["langfuse.version"] == "2026.10"
     assert "gen_ai.agent.version" not in plain and "langfuse.version" not in plain
+
+
+SECRET = "sk-live-0123456789abcdef0123456789abcdef"
+
+
+class RunCancelled(Exception):
+    """Named as the harness's cancellation (``asking.RunCancelled``) is."""
+
+
+class GraphInterrupt(Exception):
+    """Named as LangGraph's pause is (``contracts.errors.is_pause_signal``)."""
+
+
+def test_what_raises_out_of_a_span_is_said_redacted_and_a_pause_is_no_error(spans) -> None:
+    from opentelemetry.trace import StatusCode
+
+    def raised(exc: BaseException) -> dict:
+        with (
+            pytest.raises(type(exc)),
+            telemetry.tool_span("t", "c1", {}, source="local", action="run"),
+        ):
+            raise exc
+        span = spans.get_finished_spans()[-1]
+        return {
+            "status": span.status.status_code,
+            "attrs": dict(span.attributes or {}),
+            "events": [(e.name, dict(e.attributes or {})) for e in span.events],
+        }
+
+    paused = raised(GraphInterrupt("asks"))
+    assert paused["status"] is StatusCode.UNSET and paused["attrs"]["trellis.paused"] is True
+    for cancel in (asyncio.CancelledError(), RunCancelled("stopped by its user")):
+        cut = raised(cancel)
+        assert cut["status"] is StatusCode.UNSET
+        assert cut["attrs"]["langfuse.observation.level"] == "WARNING"
+        assert cut["events"][0][0] == "cancelled"
+    failed = raised(ValueError(f"refused {SECRET}"))
+    assert failed["status"] is StatusCode.ERROR and failed["attrs"]["error.type"] == "ValueError"
+    assert failed["events"][0][1]["exception.message"] == f"refused {REDACTED}"
+    assert SECRET not in json.dumps(failed, default=str)
+
+
+def test_a_rejected_call_is_a_warning_and_a_helper_says_how_it_ended(spans) -> None:
+    from trellis.contracts import ToolOutcome, ToolStatus
+    from trellis.harness.bridges.helpers import Helper, _span_ended
+
+    with telemetry.tool_span("t", "c1", {}, source="local", action="ask") as span:
+        telemetry.failed(span, ToolOutcome(tool="t", status=ToolStatus.REJECTED, output="no"))
+    found = dict(spans.get_finished_spans()[-1].attributes or {})
+    assert found["langfuse.observation.level"] == "WARNING"
+    assert found["trellis.tool.status"] == "rejected" and "error.type" not in found
+
+    for status, level in (("PAUSED", "WARNING"), ("ERROR", "ERROR")):
+        helper = Helper("run_h", "run_p", "explore")
+        helper.span = telemetry.helper_span(
+            "explore", "run_h", "run_p", "look", framework="kimi", kind="subagent"
+        )
+        _span_ended(helper, status, error="why")
+        _span_ended(helper, status, error="why")  # once: its span is gone
+        ended = dict(spans.get_finished_spans()[-1].attributes or {})
+        assert ended["trellis.run.status"] == status
+        assert ended["langfuse.observation.level"] == level
+    assert helper.span is None

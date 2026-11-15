@@ -250,3 +250,19 @@ async def test_a_prompt_waits_for_the_agent_to_be_free_and_fails_when_it_never_i
         async for _ in attempt._turn("hi"):
             pass
     assert "queued the prompt" in QUEUED
+
+
+async def test_a_request_still_being_answered_as_the_attempt_ends_is_given_up() -> None:
+    """The attempt ending (``Attempt.stopped``) cancels a request it is still answering — a
+    decision, a command the agent waits on — and waits for it, before the connection closes;
+    one already answered is left as it is."""
+    import asyncio
+
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    pending = asyncio.get_running_loop().create_future()
+    answering = asyncio.create_task(asyncio.wait_for(pending, None))
+    answered = asyncio.create_task(asyncio.sleep(0))
+    await answered
+    attempt.handling |= {answering, answered}
+    await attempt.stopped()
+    assert answering.cancelled() and not answered.cancelled()

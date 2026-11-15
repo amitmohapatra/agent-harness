@@ -56,7 +56,9 @@ props=None, assignee=None, deadline=None, escalate_to=None)`.
 
 **Automatic.** The question is the run's user's to answer (`assignee="user:<user>"`) unless
 `assignee` names someone else (`user:…`, `role:…`); it is in their inbox
-(`h.inbox(assignee)`), and agent-runs' webhooks tell whoever waits ([below](#telling-people)). `escalate_to`
+(`h.inbox(assignee)`, answered with `agent.resume`), never the run's user's to answer on the chat
+surfaces (AG-UI's resume is `409`, A2A keeps the task waiting), and agent-runs' webhooks tell
+whoever waits ([below](#telling-people)). `escalate_to`
 needs a `deadline`: when it passes, agent-runs hands the question to `escalate_to` (once), or
 ends the run `TIMEOUT` when nobody is named. Runs kept in process (no `RUNS_URL`) do neither.
 The same question asked again in one run (same text, kind and options) is the same entry in
