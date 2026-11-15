@@ -609,6 +609,20 @@ Memory (parked by the owner until this phase)
 - OpenAI 0.23+ hides tool error details from the model by default: kept as the library's
   default; never decided.
 - Sandbox as the default for the Claude and Kimi adapters.
+- **Paused by the owner (2026-11-15): the shell-isolation work.** Branch
+  `claude/cool-maxwell-w5avo8-shiso` (head `1312fdc`, last commit a WIP of the job's uncommitted
+  changes when it was stopped — not checked). It holds two parts:
+  1. **Kept off main by the owner's decision:** Claude's, Kimi's and OpenAI's own shells routed
+     through the isolation layer (`sandbox/relay.py`, `_relayed.py`, the Claude `Bash` redirect,
+     `tools/convert/openai_local.py`, Kimi's terminal routing); Claude's own Read/Write kept to
+     the run's folders (security finding 9).
+  2. **Meant for main, not yet split out** (the split to `claude/cool-maxwell-w5avo8-sbxsafe` was
+     not started): the whole link-local range blocked from commands (security finding 8),
+     Kubernetes secret mounts hidden, the doctor checks (world-readable secrets, a reachable
+     Docker socket), a conversation's working files carried between turns (`sandbox/carry.py`),
+     one audit record per command (Langfuse and the log), the Kimi command-label fix.
+  Known on that branch: 3 failing tests in `test_killed_server.py` and 38 uncovered lines (carry,
+  relay, `_relayed`, shared, openai_local, acp_live), from the security review's full run.
 - **Resource limits the security review found missing (2026-11-15; found, not fixed).** Each
   lets one user or tenant exhaust what every tenant shares. Recommended defaults in brackets;
   none is coded until the owner decides:
