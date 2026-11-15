@@ -22,6 +22,7 @@ from langchain_core.messages import convert_to_messages
 
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.models import Script, ScriptedChat
 from tests.support.planned import Call
 from tests.support.sandbox import FakeSandboxes
@@ -557,6 +558,42 @@ async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand
     assert said in told and "300 rows" in told
     assert "query_result" in names(model.requests[1])
     assert last(model.requests[2]).splitlines()[1] == "41"
+
+
+async def test_a_sub_agent_that_names_a_run_tool_of_its_own_reads_its_table_queryable_too(
+    harness: Harness,
+) -> None:
+    """A ``ReAct`` sub-agent that names one of the run's tools in its own ``tools`` has it in
+    its graph, with no ``HarnessTools`` of its own: the call reaches the graph's tool node, and
+    is the harness's call there. A table it reads whole is kept as the run's are, its message
+    saying where ``query_result`` computes over every row — as in the main agent's loop — and
+    its ``query_result`` call, a tool its graph lacks, is answered there all the same."""
+    helper = ScriptedChatModel(
+        turns=[
+            ("sales_lines", {}),
+            ("query_result", {"file_path": LINES_KEPT, "sql": DISTINCT}),
+            "counted",
+        ]
+    )
+    counter = {
+        "name": "counter",
+        "description": "Counts sales.",
+        "model": helper,
+        "tools": [sales_lines],
+    }
+    model = ScriptedChatModel(
+        turns=[("task", {"description": "count", "subagent_type": "counter"}), "done"]
+    )
+    agent = harness.wrap(ReAct("s", model, tools=[sales_lines], subagents=[counter]), id="sub")
+    result = await agent.run("how many distinct SKUs sold?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
+    told = str(helper.seen[1][-1].content)
+    assert told.startswith(LINES)  # every row, as it came
+    said = results.QUERY.format(
+        table="sales_lines", columns="date, sku, units", path=LINES_KEPT, private=results.PRIVATE
+    )
+    assert said in told and "300 rows" in told
+    assert str(helper.seen[2][-1].content).splitlines()[1] == "41"
 
 
 SUMMARY: Final = "category,revenue,units\n" + "\n".join(

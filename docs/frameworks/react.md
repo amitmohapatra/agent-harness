@@ -630,13 +630,16 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   less and less often, up to every two minutes, never two servers in step —: ended, its run ends
   and the chat is told by a turn of its own, as a harness task's outcome is
   ([above](#a-task-in-the-background)). `update_async_task` and `cancel_async_task` reach it by
-  its id.
+  its id. Such outcomes may start or update a task three times in a row with no message from
+  the user between, as a harness task's may; the fourth start or update fails saying so, and
+  its server is sent nothing.
 * **Approvals** — a check or the list is a read; a start, an update and a cancel are writes of
   Deep Agents' own tools, announced on the stream and not asked about. To have a person
   approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
 * **Its own run** — each task is a child run of the turn that started it, as a `task`
   sub-agent is ([above](#sub-agents-and-child-runs)), and outlives that turn as the task does: its input
-  the task's text, its metadata (`native_helper`) the task's id, the server's `url` and the
+  the task's text, its metadata (`native_helper`) the task's id, the chat's `thread`, how many
+  outcomes in a row led to the turn that started it (`depth`), the server's `url` and the
   `graph_id` (never your `headers`), `helper_started` on the turn's stream. While the task
   runs, the run is `RUNNING` and held in the run store from the server that started it: a
   server that dies leaves a run the store ends (cut off). It ends when the task's end is

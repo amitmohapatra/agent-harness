@@ -155,6 +155,25 @@ def test_a_usage_log_reads_from_where_the_attempt_began(tmp_path: Any) -> None:
     assert [r["usage"]["output"] for r in usage.records()] == [2]
 
 
+@pytest.mark.parametrize("named", ["s1", "..", "../wd", "s1/agents"])
+def test_a_usage_logs_removal_takes_only_its_sessions_own_folder(
+    tmp_path: Path, named: str
+) -> None:
+    """KIMI-LIVE-1: the session's folder, in whichever workspace's it is, goes; another
+    session's, another workspace's, Kimi's config and login stay — whatever the agent named
+    its session (a name that climbs out of a workspace's folder removes nothing)."""
+    for workspace, session in [("wd", "s1"), ("wd", "s2"), ("other", "s3")]:
+        (tmp_path / "sessions" / workspace / session / "agents" / "main").mkdir(parents=True)
+    (tmp_path / "config.toml").write_text("")
+    (tmp_path / "credentials").mkdir()
+    acp.UsageLog(tmp_path, named).removed()
+    left = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.glob("sessions/*/*"))
+    gone = ["sessions/wd/s1"] if named == "s1" else []
+    assert left == sorted({"sessions/other/s3", "sessions/wd/s1", "sessions/wd/s2"} - set(gone))
+    assert (tmp_path / "config.toml").exists() and (tmp_path / "credentials").is_dir()
+    assert (tmp_path / "sessions" / "wd" / "s1" / "agents").is_dir() == (named != "s1")
+
+
 def test_a_run_home_of_an_agent_with_no_profile_keeps_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
