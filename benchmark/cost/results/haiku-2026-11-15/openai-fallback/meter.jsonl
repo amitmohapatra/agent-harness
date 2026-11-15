@@ -1,0 +1,6 @@
+{"t": 1794720345.807, "path": "/mcp", "status": 200, "model": null, "stream": false, "usage": null}
+{"t": 1794720345.956, "path": "/v1/responses", "status": 404, "model": null, "stream": false, "usage": null}
+{"t": 1794720346.818, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 54, "prompt_tokens": 1908, "total_tokens": 1962}}
+{"t": 1794720347.295, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 18, "prompt_tokens": 1989, "total_tokens": 2007}}
+{"t": 1794720348.006, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 54, "prompt_tokens": 1908, "total_tokens": 1962}}
+{"t": 1794720348.467, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 18, "prompt_tokens": 1989, "total_tokens": 2007}}

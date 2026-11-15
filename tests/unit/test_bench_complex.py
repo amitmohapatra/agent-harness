@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from benchmark.cost import breakfix, history, judge, longtasks, prices, run
+from benchmark.cost import breakfix, carry, history, judge, longtasks, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
@@ -137,7 +137,7 @@ def test_daily_series_fill_days_without_sales() -> None:
 # --------------------------------------------------------------------------- the cases
 def test_the_cases_cover_every_category_and_tier() -> None:
     cases = cx.cases()
-    apart = ("adv_", "bf_", "hist_", "long_", "cando")  # each a module of its own
+    apart = ("adv_", "bf_", "hist_", "long_", "cando", "carry")  # each a module of its own
     base = [c for c in cases if not c.category.startswith(apart)]
     assert 60 <= len(base) <= 85 and len({c.id for c in cases}) == len(cases)
     assert {c.category for c in cases} == set(cx.CATEGORIES)
@@ -146,7 +146,8 @@ def test_the_cases_cover_every_category_and_tier() -> None:
     assert set(kinds) == {*cx.STRICT_KINDS, "judge"}
     # the harness's own tools a gold call may use (memory's with memory on), and the made-up
     # name a malformed call uses
-    builtin = {"query_result", "read_file", "write_todos", "task", "memory_forget", "stock_levels"}
+    builtin = {"query_result", "read_file", "write_file", "edit_file", "write_todos", "task"}
+    builtin |= {"memory_forget", "stock_levels"}
     for c in cases:
         tools = {t.spec.name for t in (*r.TOOLS, *c.tools)} | builtin
         assert any(t.expect for t in c.turns), c.id
@@ -777,6 +778,46 @@ def test_the_long_set_picks_its_own_cases_of_many_steps() -> None:
 async def test_the_long_set_scores_its_reference_answers(tmp_path: Path, offline: None) -> None:
     report = await cx.bench(_args(tmp_path / "cx-long", cases="long"), progress=lambda _: None)
     assert report["summary"]["all"]["strict"]["mean"] == 1.0
+
+
+def test_the_carry_set_picks_its_own_conversations_of_more_than_one_turn() -> None:
+    got = cx.picked("carry", cx.cases())
+    assert [c.id for c in got] == [f"carry-{n:02d}" for n in range(1, 7)]
+    assert all(len(c.turns) > 1 and c.adapters == carry.ADAPTERS for c in got)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "variant"),
+    [("react", "deep"), ("deepagents", "main"), ("deepagents", cx.UNTHREADED)],
+)
+async def test_a_later_turn_finds_the_file_and_todos_an_earlier_turn_made(
+    tmp_path: Path, offline: None, adapter: str, variant: str
+) -> None:
+    """Each conversation's gold calls, run on an agent with Deep Agents' tools from the first
+    call — ReAct with a backend, ``create_deep_agent`` with a checkpointer of its own, and one
+    without (the harness carries its files and todos): no later turn's file tool says the file
+    an earlier turn wrote is not found, and every answer is right."""
+    out = tmp_path / f"{adapter}-{variant}"
+    report = await cx.bench(
+        _args(out, cases="carry", adapter=adapter, variant=variant), progress=lambda _: None
+    )
+    rows = [json.loads(x) for x in _read(out.with_suffix(".jsonl"))]
+    assert len(rows) == 6 and {x["variant"] for x in rows} == {variant}
+    failed = [
+        (x["case"], t["turn"], c["check"])
+        for x in rows
+        for t in x["turns"]
+        for c in t["checks"]
+        if not c["ok"]
+    ]
+    assert not failed, failed
+    assert report["summary"]["by_category"]["carry"]["strict"]["mean"] == 1.0
+
+
+def test_an_unthreaded_deep_agent_has_no_checkpointer_of_its_own() -> None:
+    own, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents")
+    bare, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents", variant=cx.UNTHREADED)
+    assert own.checkpointer is not None and bare.checkpointer is None
 
 
 def test_the_long_set_truths_are_worked_from_the_tools_own_output() -> None:
