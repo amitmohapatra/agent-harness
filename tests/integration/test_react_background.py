@@ -425,7 +425,9 @@ async def test_one_outcome_told_by_two_servers_at_once_is_one_turn_run_by_one(
     monkeypatch.setattr(store, "get", read)
     await until(lambda: _all_final(first_h))
     assert await _own_turns(first_h) == 1
-    assert not second_h.background._at_work and not first_h.background._at_work
+    # nothing left at work on either server — an attempt's task is forgotten once it is done,
+    # after its run's end is written (a loaded machine reads the store between the two)
+    await until(lambda: not second_h.background._at_work and not first_h.background._at_work)
 
 
 async def _own_turns(harness: Harness) -> int:
