@@ -464,8 +464,12 @@ async def test_a_write_allowed_for_the_conversation_is_approved_for_kimis_sessio
     resolved = [
         json.loads(line) for line in log.read_text().splitlines() if "interaction.resolved" in line
     ]
+    # the request the run paused on is resolved {"decision": "cancelled"} by the harness — or,
+    # when the process ends before that answer is applied (a loaded machine's order), by Kimi
+    # itself, {"cancelled": true, "reason": "agent_closed"}, with no decision; every approval
+    # is for the session
     assert [
-        r["response"].get("scope") for r in resolved if r["response"]["decision"] == "approved"
+        r["response"].get("scope") for r in resolved if r["response"].get("decision") == "approved"
     ] == [
         "session",
         "session",

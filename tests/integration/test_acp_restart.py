@@ -1,8 +1,9 @@
 """An ACP agent's run whose worker died mid-turn, taken over by another worker sharing the run
 store: the next attempt resumes the agent's session (the journal holds it) and, no person
 having been asked since, tells it only that the task goes on — to call again a call that has
-no result yet (``adapters.claude.RESUMED``); the write a person approved before is not made
-again."""
+no result yet, or whose result says the run ended before it finished
+(``adapters.claude.RESUMED``): the call the worker died in is made again, once; the write a
+person approved before is not made again."""
 
 from __future__ import annotations
 
@@ -97,3 +98,7 @@ async def test_a_turn_taken_over_after_its_worker_died_resumes_the_session_told_
     assert [s["how"] for s in record["sessions"]][-1] == "resume"  # the journal's session
     assert record["prompts"][-1] == RESUMED  # no person asked: it only goes on
     assert noted == ["tea"]  # the approved write, done once
+    # the read the worker died in was cut short (``convert.mcp.STOPPED``, in the session): made
+    # again after the takeover, its result the answer's — not the cut-short call's error
+    assert looked == ["tea", "tea"], looked
+    assert result.answer == "found: facts about tea", result.answer
