@@ -142,3 +142,26 @@ async def test_where_commands_cannot_be_isolated_a_shell_command_is_refused(
         use_host(replaced)
     [said] = shell_said(model)  # the SDK tells the model why its executor failed
     assert called == [] and "commands cannot be isolated on this machine" in said
+
+
+async def test_a_conversations_working_files_carry_to_its_next_shell_command(
+    harness: Harness, layer: HostSandbox
+) -> None:
+    """A file a shell command wrote in turn one is in the workspace of the conversation's turn
+    two, and its first command is told what came back."""
+    model = ScriptedModel(
+        [
+            Items(shell_call("echo kept > notes.txt")),
+            "done",
+            Items(shell_call("cat notes.txt", "c2")),
+            "done",
+        ]
+    )
+    agent = harness.wrap(
+        Agent(name="ops", model=model, tools=[ShellTool(executor=own_executor)]), id="carry"
+    )
+    await agent.run("write", user="u1", thread="t1")
+    await agent.run("read", user="u1", thread="t1")
+    said = outputs(model)[-1]["stdout"]
+    assert said.splitlines()[-1] == "kept" and "notes.txt" in said
+    assert said.startswith("Restored from this conversation's earlier turns")

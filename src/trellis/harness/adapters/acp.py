@@ -1306,10 +1306,11 @@ class Attempt:
         adapter: ACPAdapter,
         runtime: Runtime,
         target: ACPAgent,
-        boxed: Sandboxed | None = None,
+        boxed: Sandboxed,
     ) -> None:
         self.adapter = adapter
-        #: the run's sandbox, when the agent works in one: its file and terminal requests
+        #: the run's sandbox (the one given, else this machine's layer): its terminal and file
+        #: requests
         self.boxed = boxed
         self.runtime = runtime
         self.target = target
@@ -1629,7 +1630,7 @@ class Attempt:
     async def _ran(self, update: Any, call: _Call) -> None:
         failed = update.status == "failed"
         text = _output(update)
-        if not text and call.terminal is not None and self.boxed is not None:
+        if not text and call.terminal is not None:
             # run in the client's terminal: the agent's last update names it and says nothing
             text = self.boxed.said(call.terminal)
         await self._helpers_ended(update.tool_call_id, call, text, failed=failed)
@@ -1731,8 +1732,7 @@ class Attempt:
         """The attempt is ending, before the connection closes: its sandbox's commands stopped,
         and the agent's requests still being answered (a decision, a command it waits on)
         given up — the connection closes no answer can go out on."""
-        if self.boxed is not None:
-            await self.boxed.stopped()
+        await self.boxed.stopped()
         waiting = [t for t in self.handling if not t.done()]
         for task in waiting:
             task.cancel()
@@ -1866,12 +1866,8 @@ class Attempt:
         return self._boxed().release(terminal_id)
 
     def _boxed(self) -> Sandboxed:
-        from acp import RequestError
 
         self._handles()
-
-        if self.boxed is None:  # the capability was not given: the agent asks out of turn
-            raise RequestError.method_not_found("fs/terminal (this run has no sandbox)")
         return self.boxed
 
     def _refused(self, call: _Call | None) -> None:

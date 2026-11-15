@@ -28,6 +28,7 @@ from tests.support.kimi import (
     needs_kimi,
     result_text,
     text_of,
+    unreminded,
 )
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Hooks, Settings, tool
@@ -1148,6 +1149,64 @@ async def test_a_background_sub_agents_harness_tool_call_is_made_in_its_own_run(
         child = await _until(lambda: _ended(harness, summary.run_id))
     assert child.status is RunStatus.SUCCESS and child.output == "looked: facts about tea"
     assert lookups == ["tea"]
+
+
+#: What the scripted model says in the turn Kimi runs for a background command's end.
+NOTIFIED = "The background command said BG-77."
+#: The prompts :func:`_waits_for_its_command` answers.
+_PROMPT = re.compile(r"start the command|<notification")
+
+
+def _waits_for_its_command(gate: Path) -> Any:
+    """One turn starts a command in the background that ends once ``gate`` is there, then
+    waits for it (``WaitFor``), the gate made as the model asks to wait — so the command ends
+    while the turn is under way (in the run's workspace, which lives as long as the run); the
+    turn Kimi runs for the command's end (its notification) reads what the command wrote and
+    answers :data:`NOTIFIED`."""
+
+    def turn(body: dict[str, Any]) -> Any:
+        messages = body["messages"]
+        said = [unreminded(text_of(m.get("content"))) for m in messages]
+        asked = [
+            i for i, m in enumerate(messages) if m["role"] == "user" and _PROMPT.search(said[i])
+        ]
+        prompt = _PROMPT.search(said[asked[-1]])[0]  # type: ignore[index]
+        ran = [
+            said[i] for i in range(asked[-1] + 1, len(messages)) if messages[i]["role"] == "tool"
+        ]
+        if prompt == "<notification":  # it reads what the command wrote, then answers
+            return NOTIFIED if ran else ("Read", {"path": "out.txt"})
+        if not any("task_id:" in r for r in ran):
+            command = {
+                "command": f"while [ ! -f {gate.name} ]; do sleep 0.1; done; echo BG-77 > out.txt",
+                "run_in_background": True,
+                "description": "wait for the gate",
+            }
+            return ("Bash", command)
+        if len(ran) == 1:
+            return ("Bash", {"command": f"touch {gate.name}"})
+        if len(ran) == 2:
+            [task] = re.findall(r"task_id: (\S+)", " ".join(said))[-1:]
+            return ("WaitFor", {"task_id": task, "timeout": 30})
+        return "noted"
+
+    return turn
+
+
+async def test_a_background_commands_end_read_in_its_own_turn_is_that_turns_answer(
+    harness: Harness, tmp_path: Path, isolated: Any
+) -> None:
+    """KIMI-BG-ANSWER, real Kimi: a turn that waits for a command it ran in the background
+    (``WaitFor``) while the command ends — both in the run's workspace — Kimi steers the
+    command's notification into that turn, ends the turn right after the wait, and answers in a
+    turn of its own that ACP does not forward: the run answers with what that turn said, as
+    ``kimi -p`` does."""
+    gate = tmp_path / "go"
+    async with PlannedEndpoint(turns=_waits_for_its_command(gate)).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-waits")
+        waited = await agent.run("start the command and wait for it", user="u1", thread="t1")
+    assert waited.status is RunStatus.SUCCESS and waited.interrupt is None, waited.error
+    assert waited.answer == NOTIFIED
 
 
 async def test_a_command_kimi_runs_in_the_background_ends_with_its_run(

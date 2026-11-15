@@ -98,6 +98,7 @@ def succeeded(events: list[RunEvent]) -> bool:
 async def test_a_command_runs_in_the_runs_workspace_as_its_uid_and_claude_reads_it_as_its_own(
     harness: Harness, layer: HostSandbox, model: ScriptedClaude, tmp_path: Path
 ) -> None:
+    relays = set(glob.glob(f"{tempfile.gettempdir()}/trellis-relay-*"))
     events = await ran(
         harness,
         model,
@@ -124,7 +125,7 @@ async def test_a_command_runs_in_the_runs_workspace_as_its_uid_and_claude_reads_
     assert not await asyncio.to_thread(os.path.exists, home)
     assert await layer.labelled({RUN: events[-1].run_id}) == []
     assert processes_of(int(uid)) == []
-    assert glob.glob(f"{tempfile.gettempdir()}/trellis-relay-*") == []
+    assert set(glob.glob(f"{tempfile.gettempdir()}/trellis-relay-*")) <= relays
     audited = customs(events, "sandbox_command")
     assert [a["command"] for a in audited][:3] == [
         "id -u; pwd; echo err >&2; exit 3",
@@ -311,3 +312,21 @@ async def test_the_audit_log_has_each_command_with_its_user_and_run(
     records = [json.loads(r.getMessage()) for r in caplog.records if r.name == AUDIT]
     mine = [r for r in records if r["command"] == "echo audited"]
     assert mine and mine[0]["user"] == "u1" and mine[0]["run"] == events[-1].run_id
+
+
+async def test_the_teams_own_permission_check_decides_first_and_its_rewrite_is_what_runs(
+    harness: Harness, layer: HostSandbox, model: ScriptedClaude, tmp_path: Path
+) -> None:
+    """The options' own ``can_use_tool`` is asked before a command runs in the workspace: what
+    it denies does not run; the command it rewrites is the one that runs there."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    async def own(name: str, args: dict[str, Any], context: Any) -> Any:
+        if "secret" in str(args.get("command")):
+            return PermissionResultDeny(message="not that one")
+        return PermissionResultAllow(updated_input={**args, "command": "echo rewritten"})
+
+    script = [bash("cat secret.txt"), bash("echo as made"), {"text": "x"}]
+    await ran(harness, model, tmp_path, script, can_use_tool=own)
+    denied, rewritten = said(model)
+    assert "not that one" in denied and rewritten == "rewritten"

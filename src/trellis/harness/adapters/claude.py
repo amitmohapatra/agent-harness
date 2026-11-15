@@ -1952,9 +1952,7 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         if name in SHELLS and "agent_id" not in given:
             shell.ran(args)
         if name in FILE_TOOLS and steps.relay is not None:
-            written = args.get("file_path") or args.get("notebook_path")
-            if isinstance(written, str):
-                steps.relay.adopt(written)
+            steps.relay.adopt(str(args.get("file_path") or args.get("notebook_path") or ""))
         failed = given.get("hook_event_name") == FAILED_EVENT
         # a workflow agent's call says who made it (several workflows at once: the run's own)
         agent = (

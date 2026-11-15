@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import itertools
 import logging
 import os
 import secrets
@@ -96,9 +97,7 @@ class Relay:
         target = Path(os.path.normpath(found))
         if target == home or home not in target.parents:
             return
-        for each in [target, *target.parents]:
-            if each == home:
-                break
+        for each in itertools.takewhile(lambda p: p != home, [target, *target.parents]):
             with contextlib.suppress(OSError):
                 os.chown(each, self.box.uid, self.box.uid, follow_symlinks=False)
 

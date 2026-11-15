@@ -163,5 +163,7 @@ async def test_a_client_that_goes_has_its_command_killed(tmp_path: Path) -> None
         writer.close()  # the framework killed its client: its timeout, a task stopped
         async with asyncio.timeout(5):
             await box.cancelled.wait()
+            while relay._running:  # noqa: ASYNC110 - the connection's handler ends
+                await asyncio.sleep(0.01)
     finally:
         await relay.aclose()
