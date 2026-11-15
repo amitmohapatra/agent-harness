@@ -23,6 +23,50 @@ layer runs commands on the host when an administrator allows it (`HostSandbox`,
 switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
 `duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).
 
+### Fixed: what the framework comparison of 2026-11-15 found
+
+* **Claude Agent SDK: a model call for each reply.** A run's `model_calls` counted one per
+  query result (1.07 a turn on Haiku, against the provider's 3.00): each model response the
+  CLI reports — an assistant message with its id and usage, the main agent's or a
+  subagent's — is now one model call, as the provider serves it.
+* **Cache writes are counted apart, and the cost benchmark prices them.** A reply's input
+  tokens written to the provider's prompt cache were folded into its input: the cost benchmark
+  priced them as plain input (Claude's run $0.028 under the provider's on Haiku). Every adapter
+  now accounts them apart (`budget.account(written=)`, `RUN_FINISHED`'s
+  `spent.cache_written_tokens`, [observability.md](docs/observability.md#events)), and the
+  benchmark prices them at `benchmark.cost.prices`' cache-write rate.
+* **A server keeps at most 8 agent processes of a framework, not 16.** Claude's and Kimi's
+  conversations each keep their CLI between turns; at 16, the comparison held 3.3 GB of Claude
+  Code processes (about 200 MB each). The bound (`live.KEPT`) is now 8, about 1.6 GB: a ninth
+  conversation's turn takes the place of the idle session asked for longest ago, as before
+  ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md), [kimi.md](docs/frameworks/kimi.md)).
+* **A refused memory write says why.** Claude's transcripts of 57 and 51 calls (116 and 104
+  messages, one call a reply) were refused with a 422 on the comparison — more than one
+  `POST /v1/messages` takes, which the transcript writes of at most 100 already fixed — and
+  the log said only "Request validation failed". A failed write's warning event and log line
+  now carry the memory service's details: each field it refused and why.
+* **The write spool is a deployment's own.** Every process of a machine user shared one spool
+  folder, so a process replayed another's undelivered memory writes — made with another key,
+  refused (403: 33 transcript writes of a stopped run on the comparison). A harness now keeps
+  and replays its writes in `<spool>/<deployment>/`, named by its memory service and key (a
+  digest): another deployment's process leaves them, and its own deployment's next process
+  replays them once ([memory.md](docs/memory.md#background-writes-what-is-guaranteed)). A spool
+  file an earlier version left directly in the spool folder is not replayed (whose writes they
+  are is not known) and stays there: move it into its deployment's folder (the one `trellis
+  doctor`'s spool check names) to have them replayed.
+* **Claude Agent SDK: a process's end inside a harness tool ends the attempt.** A
+  `BaseException` that is no cancellation (`SystemExit`, `KeyboardInterrupt`; the suite's
+  simulated worker death) raised by a harness tool ended the SDK's in-process tool server for
+  the rest of the CLI's life, while the CLI went on: the attempt carried on with every later
+  call failing, and `Harness.aclose` raised it at the end. The attempt now ends with it, as
+  any framework's does, the CLI kept healthy; the worker that takes the run over starts a CLI
+  of its own, which resumes the session.
+* **Cost benchmark: the worker restart case is taken over on agent-runs.** `long-flow-04` timed
+  out after 600 s on agent-runs for every framework: the suite's second worker asked once for
+  the dead worker's run, before agent-runs' ticker had queued it again, and nothing asked
+  again. It now runs a worker's claim loop (`Worker.run`, which keeps asking with a backoff, as
+  a worker process does) until the run pauses or ends.
+
 ### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
 
 An MCP tool whose server sent **no annotations at all** is now *undeclared*, as a function
@@ -142,6 +186,20 @@ run store, its result a notification (langchain-core's notification metadata, De
 shape) given to the conversation's model at its next model call or turn, or by a turn of the
 chat's own on its thread stream when it is idle; its questions asked through the chat
 (`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
+
+### Fixed: what the feature matrix found
+
+- A conversation's turn keeps the graph state it carries to its next turn (in the file store,
+  for any server) before its end is said, not after: the `carried_files_dropped` warning (files
+  left out past the 256 KiB bound) is one of the run's events before its `RUN_FINISHED` — it
+  came after it, where a stream had ended and AG-UI and A2A clients broke on an event past
+  the end — and a next turn sent as the turn ends, on another server, starts with the state.
+- A run taken over after its worker died while a harness tool ran makes that call again. The
+  agent's session, resumed on the same machine (Kimi's home is its user's there), holds the
+  call with the harness's "The run ended before this tool finished." as its result, and the
+  resumed prompt said to repeat only a call with "no result yet": the agent took the error for
+  the result and the run ended without that call's work. The prompt now names that result too
+  (the journal still runs the call once).
 
 ### Fixed: the last open harness bugs
 

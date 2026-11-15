@@ -72,9 +72,12 @@ log = logging.getLogger("trellis.harness")
 IDLE_SECONDS: Final = 300.0
 #: How long a session is kept after its last turn, whatever still works in it.
 WORKING_SECONDS: Final = 6 * 3600.0
-#: The most sessions of a framework kept in this server process, over all its agents (each is
-#: an agent process, some 70 MB of its own).
-KEPT: Final = 16
+#: The most sessions of a framework kept in this server process, over all its agents. Each is
+#: an agent process of its own: a Claude Code CLI holds about 200 MB (16 measured at 3.3 GB on
+#: the framework comparison of 2026-11-15), so 8 bound what a server's kept processes take to
+#: about 1.6 GB. A turn that finds no place runs as a turn with no session does (a process
+#: that resumes the conversation), so the bound costs a start, never a turn.
+KEPT: Final = 8
 #: The most of them one user (an owner: a tenant's user) holds at once: one user's many
 #: working conversations — each kept up to :data:`WORKING_SECONDS` — leave the rest of the
 #: server's places to the others.

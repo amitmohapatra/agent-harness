@@ -1,5 +1,6 @@
 """Evaluation against the real services: ``h.evaluate`` over a dataset read from Langfuse,
-graded for grounding by the real memory service, and — with a gateway — by a real judge model.
+graded for grounding by the real memory service, and by a real judge model — through the gateway,
+or directly at the model's endpoint when there is none.
 Langfuse is a local stand-in that serves the dataset and records every score and dataset-run
 link the harness sends (what reaches Langfuse is the wire format, checked in the offline
 suite against its API definitions)."""
@@ -15,7 +16,6 @@ from tests.live.conftest import (
     MODEL,
     _env,
     live_harness,
-    needs_gateway,
     needs_memory,
 )
 from tests.live.support import StubLangfuse, memory_scope, seed
@@ -90,7 +90,6 @@ async def test_a_langfuse_dataset_is_graded_for_grounding_by_the_memory_service(
     assert {(s["name"], s["traceId"]) for s in scores} >= {("grounding", t) for t in traces}
 
 
-@needs_gateway
 @pytest.mark.skipif(
     not (_env("LLM_BASE_URL") and _env("LLM_API_KEY")),
     reason="the judge's model needs LLM_BASE_URL and LLM_API_KEY",

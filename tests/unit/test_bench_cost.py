@@ -266,11 +266,14 @@ def test_an_adapter_not_on_langchain_is_metered_by_what_the_harness_accounts() -
     with run.metered(adapter="openai") as meter:
         budget.account(top, model="m", input_tokens=100, output_tokens=7, cached=60)
         budget.account(runtime(top), model="m", input_tokens=5, output_tokens=1)
+        # a query's three replies at once (Claude: one result), and a cost apart from replies
+        budget.account(top, model="m", input_tokens=0, output_tokens=0, calls=3)
+        budget.account(top, model="m", input_tokens=0, output_tokens=0, cost=0.1, calls=0)
     budget.account(top, model="m", input_tokens=9, output_tokens=9)  # after the block
     assert (meter.calls, meter.input_tokens, meter.output_tokens, meter.cached_tokens) == (
-        1, 100, 7, 60,
+        4, 100, 7, 60,
     )  # fmt: skip
-    assert top.replay.journal.spent["model_calls"] == 3  # the run's own accounting unchanged
+    assert top.replay.journal.spent["model_calls"] == 6  # the run's own accounting unchanged
     with run.metered(adapter="react") as langchain:  # LangChain's callbacks count these
         budget.account(top, model="m", input_tokens=100, output_tokens=7)
     assert langchain.calls == 0

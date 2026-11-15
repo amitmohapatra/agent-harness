@@ -130,8 +130,9 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
         claimed = await runs.claim(worker.worker_id, [dying.id])
         assert claimed is not None
         job = Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=runs)
-        # the worker dies inside the SDK's tool call: its task group carries the crash out
-        with pytest.RaisesGroup(Crash, flatten_subgroups=True):
+        # the worker dies inside the SDK's tool call: the attempt ends with the crash itself
+        # (the SDK's tool server kept: ``Runtime.stopped_by``)
+        with pytest.raises(Crash):
             await dying.execute(job)
         held, _ = runs._leases[handle.id]
         runs._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))

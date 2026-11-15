@@ -156,6 +156,27 @@ async def test_the_turns_tool_calls_and_results_are_in_its_transcript(
     assert sent[2]["custom_metadata"]["run_record"]["status"] == "ok"
 
 
+async def test_a_turn_of_fifty_seven_calls_keeps_its_whole_transcript(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """MEM-: Claude makes one call a reply, so a long task's turn is two messages a call — the
+    comparison of 2026-11-15's ``long-flow-01`` made 57 calls on Haiku, a transcript of 116
+    messages, and memory refused it whole (422: one ``POST /v1/messages`` takes at most 100),
+    losing the turn. It is kept whole, in writes the service takes, in order."""
+    refunds.clear()
+    calls = [{"tool": "refund", "args": {"order": f"o{n}"}} for n in range(57)]
+    target = options(tmp_path, [*calls, {"text": "all refunded"}])
+    agent = arm(memory_harness.wrap(target, id="refunds"), [tool(refund.fn, side_effects="write")])
+    assert (await agent.run("refund them all", user="u1")).answer == "all refunded"
+    await memory_harness.writes.drain()
+    writes = memory_service.named("messages")
+    assert [len(w.body["messages"]) for w in writes] == [100, 16]
+    sent = [m for w in writes for m in w.body["messages"]]
+    assert [m["role"] for m in sent] == ["USER", *["ASSISTANT", "TOOL"] * 57, "ASSISTANT"]
+    results = [m["content"] for m in sent if m["role"] == "TOOL"]
+    assert results == [f"refunded o{n}" for n in range(57)]
+
+
 async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -235,7 +256,8 @@ async def test_a_query_that_pauses_counts_what_its_steps_spent(
     agent = arm(harness.wrap(options(tmp_path, script, model="m"), id="refunds"), [refund])
     paused = await agent.run("refund o3", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "cost": 0.0}
+    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "written": 0}
+    step |= {"cost": 0.0}
     assert counted == [step]
     counted.clear()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
@@ -331,6 +353,49 @@ async def test_a_paused_query_that_ends_with_no_result_is_charged_its_replies() 
     spending = cast("Any", SimpleNamespace(replied=replies.append, ended=replies.append))
     await claude_adapter._settled(rest(), steps, spending)
     assert steps.settling and replies == [reply]
+
+
+def test_a_results_cache_writes_are_counted_apart_from_its_other_input() -> None:
+    """Claude Code's usage names the input read from the prompt cache and the input written to
+    it (``cache_read_input_tokens``, ``cache_creation_input_tokens``): both are the run's input
+    tokens, and each is counted apart, so a cache write is priced at its own rate."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+
+    from trellis.harness import budget
+    from trellis.harness.bounded import LRU
+    from trellis.harness.journal import Journal, Replay
+
+    runtime: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    spending = claude_adapter.Spending(runtime, SimpleNamespace(model="m"), LRU(), None)
+    used = {"input_tokens": 10, "output_tokens": 5}
+    used |= {"cache_read_input_tokens": 50, "cache_creation_input_tokens": 1000}
+    spending.replied(AssistantMessage(content=[], model="m", message_id="msg_1", usage=used))
+    result = ResultMessage("success", 1, 1, False, 1, "s", total_cost_usd=0.01, usage=used)
+    spending.ended(result, None)
+    assert budget.spent(runtime) == {
+        "tokens": 1065,
+        "cached_tokens": 50,
+        "cache_written_tokens": 1000,
+        "cost": 0.01,
+        "model_calls": 1,
+        "tool_calls": 0,
+    }
+
+
+async def test_a_harness_tool_called_outside_a_run_raises_what_the_bridge_raised() -> None:
+    """The in-process server's handler takes only a process's end for one (``SystemExit``,
+    ``KeyboardInterrupt``: ``Runtime.stopped_by``); outside a run the bridge's own error is
+    raised as it is, as a cancellation is."""
+    from trellis.contracts.errors import ToolError
+    from trellis.harness.tools.convert.claude import tool_handler
+
+    spec = ToolSpec(name="now", input_schema={"type": "object"}, side_effects="read")
+
+    async def run(args: dict[str, Any]) -> Any:
+        return "noon"
+
+    with pytest.raises(ToolError, match="runs inside a Harness run"):
+        await tool_handler(Tool(spec, run))({})
 
 
 async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
@@ -1041,6 +1106,23 @@ async def test_at_its_turn_limit_a_query_ends_partial_with_what_claude_said(
     result = await agent.run("refund o1 and o2", user="u1")
     assert result.status is RunStatus.PARTIAL and result.error is not None
     assert result.error.code == BUDGET_EXCEEDED and f"turn limit ({limit})" in result.error.message
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["own-process", "live"])
+async def test_a_turn_counts_one_model_call_for_each_reply_claude_reports(
+    harness: Harness, tmp_path: Path, kept: bool
+) -> None:
+    """Claude Code reports each model response as an assistant message with its id and usage,
+    and ends the turn with one ``ResultMessage``. A turn of two tool calls and an answer is
+    three model calls, as the provider serves them — not one for its result (the comparison
+    of 2026-11-15 counted 1.07 a turn against the provider's 3.00) — in a process kept for the
+    conversation and in one process a query alike."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(2)]
+    own = {} if kept else {"max_budget_usd": 100.0}  # a budget of its own: a process a query
+    agent = harness.wrap(options(tmp_path, [*reads, {"text": "read"}], model="m", **own), id="n")
+    events = [e async for e in agent.stream("read both", user="u1", thread="t1")]
+    assert events[-1].data["result"] == "read"
+    assert events[-1].data["spent"]["model_calls"] == 3
 
 
 @pytest.mark.parametrize("kept", [False, True], ids=["own-process", "live"])

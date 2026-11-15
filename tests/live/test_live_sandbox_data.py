@@ -102,9 +102,25 @@ def results(events: list[RunEvent]) -> list[tuple[str, Any]]:
     ]
 
 
+#: The tenant the test's runs are of (``default`` with no memory service; else the one the
+#: service says ``TRELLIS_API_KEY`` is), and the sandboxes of it there before the test began —
+#: another session's, left by a run that crashed (the daemon is shared): not the test's runs',
+#: so not what it checks.
+TESTED: dict[str, str] = {}
+EARLIER: set[str] = set()
+
+
+@pytest.fixture(autouse=True)
+async def earlier(harness: Harness) -> None:
+    TESTED["tenant"] = await harness._tenant()
+    EARLIER.clear()
+    EARLIER.update(ref.id for ref in await PROVIDER.labelled({TENANT: TESTED["tenant"]}))
+
+
 async def left() -> list[str]:
-    """The sandboxes of this tenant still there."""
-    return [ref.id for ref in await PROVIDER.labelled({TENANT: "default"})]
+    """The sandboxes of the tested tenant still there, but those there before the test began."""
+    found = await PROVIDER.labelled({TENANT: TESTED["tenant"]})
+    return [r.id for r in found if r.id not in EARLIER]
 
 
 async def test_react_runs_code_over_a_kept_50k_row_result_and_writes_a_workbook_and_a_chart(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock
 
@@ -41,12 +42,12 @@ async def test_a_500_turn_conversation_is_checked_for_a_turn_served_elsewhere_in
         read, listed = Mock(wraps=store.get), Mock(wraps=store.iterate)
         monkeypatch.setattr(store, "get", read)
         monkeypatch.setattr(store, "iterate", listed)
-        assert not await pipeline._served_elsewhere(agent, now, mine)
+        assert not await pipeline._served_elsewhere(agent, now, mine, datetime.now(UTC))
         assert read.call_count + listed.call_count == 2
         monkeypatch.undo()
         elsewhere = await agent.run("on another server", user="ada", thread="t1")
         assert elsewhere.status is RunStatus.SUCCESS
-        assert await pipeline._served_elsewhere(agent, now, mine)
+        assert await pipeline._served_elsewhere(agent, now, mine, datetime.now(UTC))
 
 
 async def test_a_page_of_another_users_turns_on_a_thread_named_alike_is_not_served_elsewhere() -> (
@@ -65,7 +66,7 @@ async def test_a_page_of_another_users_turns_on_a_thread_named_alike_is_not_serv
         for n in range(PAGE_LIMIT):
             await agent.run(f"bob {n}", user="bob", thread="t1")
         now = Identity(tenant="default", user="ada", agent_id="long", run_id="run_now", thread="t1")
-        assert not await pipeline._served_elsewhere(agent, now, mine)
+        assert not await pipeline._served_elsewhere(agent, now, mine, datetime.now(UTC))
 
 
 async def test_200_observed_calls_of_10_kb_keep_the_journal_under_half_a_megabyte() -> None:

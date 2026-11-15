@@ -1108,11 +1108,13 @@ async def test_acps_own_usage_counts_when_the_agent_gives_it(
     monkeypatch.setattr(
         budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
     )
-    usage = {"totalTokens": 37, "inputTokens": 20, "outputTokens": 10, "cachedReadTokens": 7}
+    usage = {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10}
+    usage |= {"cachedReadTokens": 7, "cachedWriteTokens": 3}
     script = [{"prompt_usage": usage}, {"text": "ok"}]
     agent = harness.wrap(fake(tmp_path, script, profile=None), id="u")
     assert (await agent.run("x", user="u1")).status is RunStatus.SUCCESS
-    assert counted == [{"model": "acp", "input_tokens": 20, "output_tokens": 10, "cached": 7}]
+    said = {"model": "acp", "input_tokens": 20, "output_tokens": 10, "cached": 7, "written": 3}
+    assert counted == [said]
     counted.clear()
     (tmp_path / "k").mkdir()
     kimi_like = harness.wrap(fake(tmp_path / "k", script), id="k")

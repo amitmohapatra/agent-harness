@@ -121,13 +121,14 @@ class UsageAccounting(BaseCallbackHandler):
         if runtime is None or not isinstance(outputs, ClassifierResponse) or not outputs.usage:
             return
         used = outputs.usage
-        read = int((used.get("input_token_details") or {}).get("cache_read") or 0)
+        details = used.get("input_token_details") or {}
         budget.account(
             runtime,
             model=outputs.model,
             input_tokens=int(used.get("input_tokens") or 0),
             output_tokens=int(used.get("output_tokens") or 0),
-            cached=read,
+            cached=int(details.get("cache_read") or 0),
+            written=int(details.get("cache_creation") or 0),
         )
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:

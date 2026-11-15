@@ -182,7 +182,9 @@ async def test_a_two_hundred_step_task(h: Harness, adapter: str, uid: str, tmp_p
 async def test_a_budget_stops_a_long_task_where_it_says(
     h: Harness, uid: str, tmp_path: Path
 ) -> None:
-    agent, _ = await wrapped(h, "react", TOOLS, tmp_path, id=f"s13b-{uid}")
+    # a step limit past the budget: ReAct's own (12 steps) stopped the task first, a
+    # SUCCESS that never reached the budget
+    agent = arm(h.wrap(ReAct(SYSTEM, BrainChat(), max_steps=100), id=f"s13b-{uid}"), TOOLS)
     done = await agent.run(
         f"{token(uid, 1)} loop:60:lookup",
         user=f"ada-{uid}",
@@ -190,6 +192,7 @@ async def test_a_budget_stops_a_long_task_where_it_says(
         budget=Budget(max_tool_calls=25),
     )
     assert done.status is RunStatus.PARTIAL, (done.status, done.error)
+    assert parse(done.answer).mine == token(uid, 1), done.answer  # told to answer, it answered
     events = [e async for e in agent.events(done.run_id)]
     assert len([e for e in events if e.type is RunEventType.TOOL_CALL_START]) <= 25
 
@@ -284,6 +287,14 @@ async def test_a_deadline_ends_a_queued_run_and_a_working_one(
     assert time.monotonic() - began < 60
 
 
+def _working(pid: int) -> bool:
+    """Whether process ``pid`` is still at work (a zombie, its command line gone, is not)."""
+    try:
+        return bool(Path(f"/proc/{pid}/cmdline").read_bytes())
+    except OSError:
+        return False
+
+
 @pytest.mark.plan("BG-05", "BG-07", "LR-05")
 async def test_a_background_subagent_when_its_server_is_killed(
     uid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -302,6 +313,7 @@ async def test_a_background_subagent_when_its_server_is_killed(
         "agents": [{"adapter": "claude_agent_sdk", "id": agent_id, "claude": background}],
     }
     monkeypatch.setenv("FAKE_CLAUDE_TASKS", str(tasks))  # the server's CLI reads its tasks here
+    monkeypatch.setenv("FAKE_CLAUDE_PID", str(tmp_path / "cli.pid"))  # and says its pid here
     one = await Served(spec, tmp_path, "one").started()
     from trellis.harness.agui.sse import decode
 
@@ -341,3 +353,13 @@ async def test_a_background_subagent_when_its_server_is_killed(
             and ending.error is not None
             and ending.error.code == "holder_lost"
         ), ending
+        # the CLI its server left works on, as the bundled CLI does: its background subagent
+        # goes on to its end, and then the process ends. The scripted subagent works until it
+        # is told it is done: told so, its CLI ends, as a real one's ends with its work
+        pid = int((tmp_path / "cli.pid").read_text())
+        (tasks / "t1.done").write_text("researched")
+
+        async def gone() -> bool:
+            return not _working(pid)
+
+        assert await eventually(gone, within=30), f"the CLI {pid} its killed server left lives on"

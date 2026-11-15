@@ -188,14 +188,10 @@ async def test_react_own_subagent_in_the_background_over_agui(h: Harness, uid: s
 
 @plan("BG-10", "WF-08")
 async def test_claude_workflow_is_one_child_run(h: Harness, uid: str, tmp_path: Path) -> None:
-    claude = [
-        {
-            "workflow": {
-                "id": "w1",
-                "agents": [{"agent": "a", "prompt": "one"}, {"agent": "b", "prompt": "two"}],
-            }
-        }
-    ]
+    # a dynamic workflow's Workflow call, as the bundled CLI makes it: a script, its agents its
+    # own (the scripted CLI's shape since a workflow became one child run)
+    script = "export const meta = { name: 'probe', description: 'probe', phases: [] }\nreturn 1"
+    claude = [{"workflow": {"id": "w1", "name": "probe", "script": script}}]
     agent, _ = await wrapped(h, "claude_agent_sdk", TOOLS, tmp_path, id=f"s5w-{uid}", claude=claude)
     done = await agent.run(
         f"{token(uid, 1)} run the workflow", user=f"ada-{uid}", thread=f"t-{uid}"

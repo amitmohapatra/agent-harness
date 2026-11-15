@@ -2,7 +2,11 @@
 
 Claude names them ``mcp__trellis__<tool>``; the harness's ``can_use_tool`` lets them through
 (the bridge is their permission check). A call that pauses the run tells the CLI it waits
-(:data:`WAITING`): the run stops there, and the resumed session calls the tool again.
+(:data:`WAITING`): the run stops there, and the resumed session calls the tool again. A call
+that the process's own end stops (a ``BaseException`` that is no cancellation: ``SystemExit``,
+``KeyboardInterrupt``) ends the attempt with it (``Runtime.stopped_by``), as it ends any
+framework's: the SDK runs the call in its tool server's task group, which it would otherwise
+end for the rest of the process's life while the CLI went on, every later call failing.
 
 A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the model reads a
 preview naming where; the server's ``read_file`` pages it. The CLI lists a server's tools once,
@@ -23,6 +27,7 @@ each call to the turn being served (:func:`handler`: that turn's own tool of the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
@@ -32,7 +37,7 @@ from typing import Any, Final, cast
 from claude_agent_sdk import McpSdkServerConfig, create_sdk_mcp_server
 from claude_agent_sdk import tool as sdk_tool
 
-from trellis.harness.runtime import Paused
+from trellis.harness.runtime import Paused, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import Tool
 
@@ -46,6 +51,8 @@ ALWAYS_LOAD: Final = "alwaysLoad"
 #: What the CLI is told about a call that paused the run (a harness tool's, or a built-in's
 #: the permission check asked a person about).
 WAITING: Final = "Waiting for a person's approval."
+#: What the CLI is told about a call the process's own end stopped (the attempt ends with it).
+STOPPED: Final = "The worker running this call stopped before it finished; it did not complete."
 
 
 #: The key of a ``tools/call`` request's ``_meta`` under which Claude Code names the tool call
@@ -149,6 +156,12 @@ def _one(tool: Tool) -> Any:
             outcome = await bridge.call(tool, dict(args))
         except Paused:  # the run stops here (the harness reads the pause from the runtime)
             return {"content": [{"type": "text", "text": WAITING}], "is_error": True}
+        except BaseException as exc:
+            runtime = current()
+            if isinstance(exc, Exception | asyncio.CancelledError) or runtime is None:
+                raise
+            runtime.stopped_by = exc  # the attempt ends with it (``ClaudeAdapter``)
+            return {"content": [{"type": "text", "text": STOPPED}], "is_error": True}
         content = [{"type": "text", "text": results.readable(outcome.output, tool.name)}]
         return {"content": content, "is_error": not outcome.ok}
 

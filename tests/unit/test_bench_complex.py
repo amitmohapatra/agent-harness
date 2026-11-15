@@ -14,7 +14,7 @@ import json
 import math
 import re
 import statistics
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +24,10 @@ from benchmark.cost import breakfix, carry, history, judge, longtasks, prices, r
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
-from trellis import Settings
+from trellis import Harness, Settings
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import KEPT_BY_RUN
+from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
 
@@ -1040,6 +1041,35 @@ def test_a_lane_fails_once_or_for_good_and_a_write_is_kept_per_person() -> None:
     )  # a second one shows
 
 
+def test_a_runs_spend_prices_cache_writes_at_the_cache_write_rate() -> None:
+    """The comparison of 2026-11-15 priced Claude's 1,108,280 cache-write tokens as plain
+    input ($0.10 a million on Haiku, not the $0.125 its price lists): the run's spend was
+    $0.028 under the provider's. A reply the harness accounts (an adapter not on LangChain)
+    and one LangChain's callbacks report are each priced at the cache-write rate."""
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from trellis.harness import budget
+    from trellis.harness.journal import Journal, Replay
+
+    haiku = prices.price_of("claude-haiku-5-5")
+    assert haiku is not None and haiku.cache_write == 0.125
+    # 100,000 plain input tokens and 1,000,000 written to the cache
+    priced = (100_000 * 0.10 + 1_000_000 * 0.125) / 1_000_000
+    accounted = cx.Spend(haiku, None)
+    top: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    with run.metered(cx.Accounted(accounted), adapter="claude"):
+        budget.account(top, model="m", input_tokens=1_100_000, output_tokens=0, written=1_000_000)
+    assert accounted.usd == pytest.approx(priced)
+    called = cx.Spend(haiku, None)
+    used = {"input_tokens": 1_100_000, "output_tokens": 0, "total_tokens": 1_100_000}
+    reply = AIMessage("", usage_metadata=used | {"input_token_details": {"cache_creation": 10**6}})
+    cx.Captured(called).on_llm_end(LLMResult(generations=[[ChatGeneration(message=reply)]]))
+    assert called.usd == pytest.approx(priced)
+
+
 def test_a_write_done_twice_or_a_call_repeated_fails_its_probe() -> None:
     turn = cx.Turn(
         "q",
@@ -1060,6 +1090,38 @@ def test_a_write_done_twice_or_a_call_repeated_fails_its_probe() -> None:
     found = cx.checked(turn, "SUCCESS", [], 1, calls=twice, happened={"restarts"})
     assert [c["ok"] for c in found[1:]] == [False, False, False, False, True]
     assert found[2]["found"] == ['shelf_audit({"category": "denim", "store": "S01"})']
+
+
+class Lapsing(LocalRuns):
+    """A run store that, as agent-runs does, gives a run whose lease lapsed to a worker again
+    only a while after the lapse (agent-runs' ticker queues it again after a backoff: 2.5 s to
+    5 s at the first lapse), not at the first claim after it."""
+
+    def _expire_leases(self, now: datetime) -> None:
+        super()._expire_leases(now - timedelta(seconds=2))
+
+
+async def test_a_restart_turns_run_is_taken_over_once_the_store_gives_it_out_again(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RUN-: ``long-flow-04`` timed out at 600 s on agent-runs, on every framework: the suite's
+    second worker asked once for the dead worker's run, as its lease lapsed, before agent-runs
+    had put it back on the queue, and nothing asked again. A worker keeps asking (its claim
+    loop, ``Worker.run``): the suite's takes the run over once the store gives it out again,
+    and every check of the turn holds."""
+    monkeypatch.setattr(cx, "RESTART_LEASE", 1)  # the dead worker's lease
+    h = Harness(config=Settings(), memory=False, gateway=False, runs=Lapsing())
+    out = tmp_path / "restart"
+    args = _args(out, cases="long-flow-04", adapter="react", timeout=30)
+    try:
+        await cx.bench(args, harness=h, progress=lambda _: None)
+    finally:
+        await h.aclose()
+    [row] = [json.loads(line) for line in _read(out.with_suffix(".jsonl"))]
+    [turn] = row["turns"]
+    assert turn["status"] == "SUCCESS", turn["error"]
+    assert [c for c in turn["checks"] if not c["ok"]] == []
+    assert "restarts" in [c["check"] for c in turn["checks"]]  # another worker finished it
 
 
 @pytest.mark.parametrize("adapter", ["langgraph", "react", "deepagents"])

@@ -443,7 +443,7 @@ async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the
     second = await agent.run("thanks", user="u1", thread="t1")
     await following
     assert counted == [
-        (first.run_id, 30, 1.0, 1),  # two steps
+        (first.run_id, 30, 1.0, 2),  # two steps: two model calls
         (child.run_id, 15, 0.0, 1),  # the subagent's reply that made its call
         (child.run_id, 15, 0.0, 1),  # its last reply
         # what both cost, known at the session's next result and shared by their tokens;
@@ -455,6 +455,7 @@ async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the
     assert seen[-1].data["spent"] == {
         "tokens": 45,
         "cached_tokens": 0,
+        "cache_written_tokens": 0,
         "cost": 1.5,
         "model_calls": 3,
         "tool_calls": 0,

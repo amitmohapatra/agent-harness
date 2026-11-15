@@ -732,3 +732,73 @@ async def test_a_graphs_own_summarization_has_the_older_turns_and_fitting_only_g
     else:
         fitted = [str(e.data) for e in events if e.data.get("code") == "context_fit"]
         assert "did second" not in sent and any("turns" in said for said in fitted)
+
+
+# ------------------------------------------------------------------ one long turn
+async def test_a_latest_turn_too_long_for_the_window_has_its_older_steps_said_in_a_line_each() -> (
+    None
+):
+    """A turn of many small steps — 200 lookups, each a call and a short result — is over a
+    small window by itself, and no earlier step fits it: no result is long enough to cut, no
+    older turn is there to leave out. Its older steps are then left out, the oldest first and
+    only as far as it must, each said in a line of its own (the call and the head of its
+    result) in one note where they were, after the question; the latest steps stay whole, and
+    the request fits. It was sent whole: ``ReAct(context_window=8000)`` sent ~19,000 tokens on
+    the scenario suite's 200-step task (LR-02), where a real server refuses it and the run
+    fails."""
+    steps: list[Any] = []
+    for n in range(200):
+        call = {"id": f"call_{n:012d}", "name": "lookup", "args": {"key": f"k{n}"}}
+        steps += [
+            AIMessage(content="", tool_calls=[call]),
+            ToolMessage(f"value-of-k{n}", tool_call_id=f"call_{n:012d}"),
+        ]
+    question = HumanMessage("look up k0 to k199")
+    given = request([question, *steps], [lc("lookup")])
+    window = 8000
+    assert _size(given) > window  # over the window by its steps alone
+    out = await sent(FitWindow(window), given)
+    assert _size(out) <= int(window * 0.95), _size(out)
+    assert out.messages[0] is question
+    note = out.messages[1]
+    assert isinstance(note, HumanMessage) and not ours.typed(note)  # no question of the user's
+    left = int(ours.STEPS_LEFT_COUNT.search(note.text)[1])  # type: ignore[index]
+    lines = [line for line in note.text.splitlines() if line.startswith("- ")]
+    assert len(lines) == left and 'lookup({"key":"k0"}) -> value-of-k0' in lines[0]
+    kept = out.messages[2:]
+    calls = [c["id"] for m in kept for c in _calls(m)]
+    results = [m.tool_call_id for m in kept if isinstance(m, ToolMessage)]
+    assert calls == results == [f"call_{n:012d}" for n in range(left, 200)]  # the latest, whole
+    assert len(calls) >= ours.KEEP_STEPS
+    assert FITTED["steps"] >= 1
+    # a summarization after it has the turn: nothing of it is taken out
+    kept_whole = await sent(FitWindow(window, turns=False), given)
+    assert len(kept_whole.messages) == len(given.messages)
+
+
+def test_a_note_of_older_steps_lists_what_fits_and_cuts_each_line() -> None:
+    """The note's lines are each cut to a line (a long result's start, long arguments); when
+    the lines alone do not fit, the earliest are not listed and the note says how many; a turn
+    with no older step past the latest few, or no question, is left as it is."""
+    steps: list[Any] = []
+    for n in range(40):
+        calls = [
+            {"id": f"call_{n}_{k}", "name": "lookup", "args": {"key": "k" * 300}} for k in "ab"
+        ]
+        # the second call of each step has no result (the run ended before it came back)
+        steps += [
+            AIMessage(content="", tool_calls=calls),
+            ToolMessage("r" * 500, tool_call_id=calls[0]["id"]),
+        ]
+    question = HumanMessage("look them all up")
+    given = request([question, *steps], [])
+    out = ours._steps_said(given, 2500)
+    note = out.messages[1].text
+    assert "the first" in note and "not listed" in note
+    lines = [line for line in note.splitlines() if line.startswith("- ")]
+    assert lines and all(len(line) <= 2 * ours.STEP_LINE + 20 for line in lines)
+    assert lines[-1].endswith("-> ") and "…" in lines[-2]  # a call with no result, then a cut
+    few = request([question, *steps[: 2 * ours.KEEP_STEPS]], [])
+    assert ours._steps_said(few, 10) is few  # only the latest steps: nothing to leave out
+    unasked = request([question, *steps], []).override(state={"messages": []})
+    assert ours._steps_said(unasked, 10) is unasked  # no question of the user's in the state
