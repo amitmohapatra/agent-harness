@@ -609,6 +609,21 @@ Memory (parked by the owner until this phase)
 - OpenAI 0.23+ hides tool error details from the model by default: kept as the library's
   default; never decided.
 - Sandbox as the default for the Claude and Kimi adapters.
+- **Resource limits the security review found missing (2026-11-15; found, not fixed).** Each
+  lets one user or tenant exhaust what every tenant shares. Recommended defaults in brackets;
+  none is coded until the owner decides:
+  1. **Disk per run.** Only one file's size is capped (`Limits.file_mib`): eight 1 MiB files
+     went through with `file_mib=1`, so one run can fill the server's disk for every tenant.
+     A total cap per run's workspace (tmpfs `size=` or project quotas) [2 GB].
+  2. **Background tasks per user.** The cap is 16 per chat but 1,024 for the whole process, so
+     one user with about 64 chats takes every slot; each task also gets a full budget. A
+     per-user cap [32].
+  3. **Files a user keeps.** No cap on how many outputs one run keeps (each up to 50 MB) or on
+     a user's total in the file store. A per-run count and a per-user total [20 files a run,
+     5 GB a user].
+  4. **Memory of the per-tenant sandbox container.** No limit unless `spec.memory` is set;
+     per-process address-space limits times 256 processes can still exhaust the host. A
+     default [8 GB].
 
 ---
 
