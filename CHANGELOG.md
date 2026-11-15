@@ -5,6 +5,24 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: three SDK features under the harness (real Haiku, the real stack)
+
+* **OpenAI Agents: a governed call inside an agent tool resumes.** An `Agent.as_tool` agent
+  whose own `FunctionTool` declares nothing paused the run on that call (governance asks),
+  and the approval then failed the run (`AttributeError: 'Agent' object has no attribute
+  'aget_state'`): the pause carried the agent tool's own SDK handle, which the run took for
+  a LangGraph checkpointer's. A pause the framework gave no handle of is now answered from
+  the journal: the agent tool is called again and the approved call runs once.
+* **Claude Agent SDK: an in-process tool named in `allowed_tools` keeps its annotations.**
+  A `create_sdk_mcp_server` tool marked `readOnlyHint` (a read) asked a person at every call
+  when `allowed_tools` also named it, as the SDK's docs pre-approve an MCP tool: the name alone
+  took the place of the server's listing, which carries the risk. The server's listing now
+  decides it ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#using-an-existing-claude-agent-sdk-project)).
+* **Claude Agent SDK: `include_partial_messages` streams.** The run's stream gave one text
+  event per assistant message although the options asked the CLI for the model's deltas;
+  it now carries each delta as it comes, as the SDK's own stream does
+  ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#streaming)).
+
 ### Added: a provider's own tools in `ReAct`
 
 `ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web

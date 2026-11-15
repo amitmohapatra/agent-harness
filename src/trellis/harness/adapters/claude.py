@@ -467,17 +467,24 @@ class ClaudeAdapter:
         return [m async for m in self._helped(target, native_input, run)]
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        from claude_agent_sdk import AssistantMessage, TextBlock
+        from claude_agent_sdk import AssistantMessage, StreamEvent, TextBlock
 
         messages: list[Any] = []
+        streamed = False  # the message's text came as deltas (``include_partial_messages``)
         async for message in self._helped(target, native_input, run):
             messages.append(message)
             # the main agent's text: a subagent's (forwarded naming its ``Agent`` call) is
             # its own run's, as in the answer and the transcript
-            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        yield block.text
+            if isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
+                if (said := _text_delta(message.event)) is not None:
+                    streamed = True
+                    yield said
+            elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                if not streamed:
+                    for block in message.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            yield block.text
+                streamed = False
         yield Output(messages)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -1047,6 +1054,15 @@ def _noticed(runtime: Runtime, message: Any) -> None:
         runtime.events.warning(NOTICES[message.subtype], said)
     elif isinstance(message, AssistantMessage) and message.error:
         runtime.events.warning("model_error", f"Claude's reply failed: {message.error}")
+
+
+def _text_delta(event: Mapping[str, Any]) -> str | None:
+    """The text of one raw event of the model's stream (a ``StreamEvent``'s), if it is a
+    text delta: what the SDK's own stream gives as the model writes it."""
+    delta = event.get("delta") if event.get("type") == "content_block_delta" else None
+    if isinstance(delta, Mapping) and delta.get("type") == "text_delta":
+        return str(delta.get("text") or "")
+    return None
 
 
 def _transcript(messages: Sequence[Any]) -> list[Said]:
@@ -1735,22 +1751,25 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
 
 async def _declared(target: Any) -> list[ToolSpec]:
     """The tools ``ClaudeAgentOptions`` declare (:meth:`ClaudeAdapter.native`, less what the
-    agent was seen calling)."""
+    agent was seen calling). An in-process server's own listing comes first: a tool it lists
+    is the one with its annotations (its risk), which ``allowed_tools`` naming it does not
+    replace (:func:`unique` keeps the first)."""
     from trellis.harness.tools.convert.claude import SERVER, bare
 
-    given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
+    found: list[ToolSpec] = []
     denied = set(target.disallowed_tools or ())
-    found = [native_spec(name) for name in given if name not in denied]
-    found.extend(
-        native_spec(name)
-        for name in target.allowed_tools or ()
-        if name.startswith("mcp__") and bare(name) is None and name not in denied
-    )
     for server, config in configured_servers(target.mcp_servers).items():
         instance = config.get("instance") if isinstance(config, Mapping) else None
         if server != SERVER and config.get("type") == "sdk" and instance is not None:
             listed = await _sdk_tools(server, instance)
             found.extend(s for s in listed if s.name not in denied)
+    given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
+    found.extend(native_spec(name) for name in given if name not in denied)
+    found.extend(
+        native_spec(name)
+        for name in target.allowed_tools or ()
+        if name.startswith("mcp__") and bare(name) is None and name not in denied
+    )
     return found
 
 
