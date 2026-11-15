@@ -177,12 +177,12 @@ def test_a_deployment_that_requires_a_sandbox_wraps_no_shell_agent_without_one()
         [
             ClaudeAgentOptions(),
             ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": True}),
-            ACPAgent(command=["kimi", "acp"]),
+            ACPAgent(command=("kimi", "acp")),
         ]
     ):
         with pytest.raises(ConfigurationError, match="TRELLIS_REQUIRE_SANDBOX"):
             h.wrap(refused, id=f"refused-{n}")
     h.wrap(ClaudeAgentOptions(sandbox={"enabled": True}), id="claude-boxed")
-    h.wrap(ACPAgent(command=["kimi", "acp"], sandbox=object()), id="kimi-boxed")
+    h.wrap(ACPAgent(command=("kimi", "acp"), sandbox=object()), id="kimi-boxed")
     h.wrap(plain, id="no-shell")
     assert set(h.agents) == {"claude-boxed", "kimi-boxed", "no-shell"}
