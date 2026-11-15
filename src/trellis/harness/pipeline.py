@@ -590,18 +590,28 @@ async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
         runtime.carried = merged_state(runtime.carried, await _carried(agent, runtime))
 
 
-async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
-    """The large results a conversation's turn saved and the graph state it ended with
-    (``Runtime.carried``), kept for its later turns (:func:`_earlier_results`) — the state in
-    the file store too (:func:`_keep_carried`). A paused turn keeps its results in its journal
-    until it ends; its state is kept as it pauses: what it holds of the world outside (a
-    background task it started) is so whether the turn is ever approved or not. Then an outcome
-    its background tasks reached after it last read them is told (``background.left``)."""
+async def _kept_state(agent: Agent, runtime: Runtime) -> None:
+    """The graph state a conversation's turn ended with (``Runtime.carried``), kept for its
+    later turns (:func:`_earlier_results`) — in the file store too (:func:`_keep_carried`) —
+    before the attempt's end is said: a warning about it is one of the run's events, before
+    its ``RUN_FINISHED`` (where a stream ends), and the conversation's next turn, sent as
+    this one ends, finds it on any server. A paused turn's state is kept as it pauses: what
+    it holds of the world outside (a background task it started) is so whether the turn is
+    ever approved or not."""
     if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
     if runtime.carried:
         agent.results.left(runtime.conversation, runtime.carried)
         await _keep_carried(agent, runtime)
+
+
+async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
+    """The large results a conversation's turn saved, kept for its later turns
+    (:func:`_earlier_results`; its graph state was kept as it ended: :func:`_kept_state`). A
+    paused turn keeps its results in its journal until it ends. Then an outcome its background
+    tasks reached after it last read them is told (``background.left``)."""
+    if runtime.parent is not None or runtime.conversation == runtime.run_id:
+        return
     if journal.results and result.status is not RunStatus.PAUSED:
         agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
     # an outcome its background tasks reached since it last read them, told by a turn of its own
@@ -953,9 +963,10 @@ async def _concluded(
     error: Exception | None,
     timed_out: AgentError | None,
 ) -> Result:
-    """Record how the attempt ended: cancelled, out of time, paused, failed or answered. The
-    run's sandbox is paused with the run, and deleted when the run ends — unless agent-runs
-    runs it again (:func:`_again`)."""
+    """Record how the attempt ended: cancelled, out of time, paused, failed or answered — the
+    graph state its conversation carries kept first (:func:`_kept_state`). The run's sandbox
+    is paused with the run, and deleted when the run ends — unless agent-runs runs it again
+    (:func:`_again`)."""
     if runtime.lease_lost:
         # another worker may hold the run now (a framework may have swallowed the error)
         raise LeaseLostError(
@@ -963,6 +974,7 @@ async def _concluded(
             code="LEASE_LOST",
             status=409,
         )
+    await _kept_state(agent, runtime)
     try:
         stopped = runtime.cancelled is not None or timed_out is not None
         paused = None if stopped else _pause(runtime, extracted, error)
