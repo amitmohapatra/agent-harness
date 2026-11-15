@@ -52,8 +52,6 @@ from collections.abc import Hashable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from opentelemetry.trace import StatusCode
-
 from trellis.contracts import (
     InterruptDecision,
     InterruptResolution,
@@ -76,7 +74,7 @@ from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, RECORD, Made, call_key, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
-from trellis.harness.telemetry import metrics, tool_span
+from trellis.harness.telemetry import failed, held_command, metrics, shell_ended, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
     OUTCOME_UNKNOWN,
@@ -269,6 +267,7 @@ async def permitted(
         decision, call, rejected = await _decided(runtime, spec, call, verdict, kept=lasting)
     if rejected is not None:
         return rejected
+    runtime.governed[call_key(spec.name, call.args)] = decision.action.value
     if framework is None or decision.asks or call.args != args:
         return call
     return await asked(spec, args, framework, call_id=call_id, kept=kept)
@@ -297,8 +296,11 @@ async def asked(
         return call
     why = FRAMEWORK_ASKS.format(framework=framework)
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
-        _, call, rejected = await _decided(runtime, spec, call, Ask(why), kept=kept)
-    return call if rejected is None else rejected
+        decision, call, rejected = await _decided(runtime, spec, call, Ask(why), kept=kept)
+    if rejected is not None:
+        return rejected
+    runtime.governed[call_key(spec.name, call.args)] = decision.action.value
+    return call
 
 
 async def outbound(spec: ToolSpec) -> str | None:
@@ -408,14 +410,18 @@ async def observed(
     )
     outcome.latency_ms = round(max(0.0, time.time() - started) * 1000, 3)
     start_time = int(started * 1e9)
+    key = call_key(spec.name, args)
+    # governance's word on it before it ran (``permitted``); a call nothing decided before it
+    # ran (a provider's hosted tool, inside the model's step) ran as its framework ran it
+    action = runtime.governed.pop(key, "run")
     with tool_span(
-        spec.name, ref, args, source=spec.source, action="run", start_time=start_time
+        spec.name, ref, args, source=spec.source, action=action, start_time=start_time
     ) as span:
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
-        if not outcome.ok:
-            span.set_status(StatusCode.ERROR, str(outcome.status.value))
+        failed(span, outcome)
+        held_command(span, runtime.commands, args)  # the command it ran, isolated: its record
+        shell_ended(span, outcome, outcome.latency_ms)
     runtime.used.add(spec.name)
-    key = call_key(spec.name, args)
     if spec.side_effects != "read":  # the reads before it are not answered across it
         runtime.replay.wrote()
     if outcome.ok:  # made again (its framework begins that work again), it is not run twice
@@ -547,6 +553,8 @@ async def _ran(
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
             raise error
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
+        failed(span, outcome)
+        shell_ended(span, outcome, round((time.perf_counter() - started) * 1000, 3))
     hooks = runtime.agent.hooks
     # a framework's own tool's error it may be tried again after: its failure is the call's
     # only if no try follows (the ``on_error`` hooks are told then: ``_ended_or_owed``)

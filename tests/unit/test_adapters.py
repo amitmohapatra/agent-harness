@@ -63,6 +63,7 @@ from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.evals import _unfenced
 from trellis.harness.gateways import ProviderSDK
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
+from trellis.harness.host import CLAUDE_SHELLS
 from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query
@@ -218,6 +219,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         model_ended=lambda key: watched.append(("ended", key)),
         raise_stopped=lambda: None,  # no call stopped by the process's end
         offered=None,
+        restored=None,  # no working files came back
         tenant="default",
         user="u1",
     )
@@ -246,7 +248,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
-    assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
+    # nothing narrowed; Claude Code's shell off: the tests' isolation layer cannot isolate
+    off = sorted(CLAUDE_SHELLS)
+    assert sent.disallowed_tools == [*off, *OUTLIVES_THE_QUERY, *UNHELD_AGENTS]
     # the harness keeps large results; the user's own Claude folder, no auto memory
     assert sent.env == {
         MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS),

@@ -33,6 +33,7 @@ from openai.types.responses.response_output_item import LocalShellCall, LocalShe
 from tests.integration.test_openai_agents_features import shell_call, shell_said, twice
 from tests.support.arm import declaring
 from tests.support.computer import Screen
+from tests.support.isolation import isolating
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import Items, ScriptedModel
 from trellis import Harness, Runtime
@@ -54,44 +55,55 @@ def recorded(memory_service: FakeMemoryService) -> list[tuple[str, str]]:
     return [(c.body["tool"], c.body["status"]) for c in memory_service.named("record_tool")]
 
 
-@pytest.mark.host_execution
-async def test_an_edited_local_shell_command_runs_as_edited(harness: Harness) -> None:
+async def test_an_edited_local_shell_command_runs_as_edited(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
     def execute(request: Any) -> str:
         done.append(" ".join(request.data.action.command))
         return "ok"
 
+    memory_service.catalog = {"local_shell": {"side_effects": "irreversible"}}
     call = LocalShellCall(
         id="ls_1",
         call_id="call_ls",
         status="completed",
         type="local_shell_call",
-        action=LocalShellCallAction(type="exec", command=["rm", "-rf", "/"], env={}),
+        action=LocalShellCallAction(type="exec", command=["echo", "the", "root"], env={}),
     )
     model = ScriptedModel([*twice(call), "done"])
-    agent = harness.wrap(
+    agent = memory_harness.wrap(
         Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)]), id="edit"
     )
-    paused = await agent.run("clean", user="u")
-    assert paused.interrupt is not None
-    edited = {"action": {"type": "exec", "command": ["rm", "-rf", "build"], "env": {}}}
-    result = await agent.resume(paused.interrupt.interrupt_id, "edit", answer=edited, reviewer="r")
-    assert result.status is RunStatus.SUCCESS and done == ["rm -rf build"]
+    with isolating():
+        paused = await agent.run("clean", user="u")
+        assert paused.interrupt is not None
+        edited = {"action": {"type": "exec", "command": ["echo", "build"], "env": {}}}
+        result = await agent.resume(
+            paused.interrupt.interrupt_id, "edit", answer=edited, reviewer="r"
+        )
+    assert result.status is RunStatus.SUCCESS and done == []  # run isolated, as edited
+    said = [
+        str(item["output"])
+        for item in model.inputs[-1]
+        if isinstance(item, dict) and item.get("type") == "local_shell_call_output"
+    ]
+    assert said == ["build\n"]
 
 
-@pytest.mark.host_execution
 async def test_a_shells_structured_result_is_the_sdks_and_its_record_is_its_data(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     async def structured(request: Any) -> ShellResult:
-        return ShellResult(output=[ShellCommandOutput(stdout="a.txt", command="ls")])
+        return ShellResult(output=[ShellCommandOutput(stdout="not this", command="ls")])
 
     memory_service.catalog = {"shell": {"side_effects": "read"}}
-    model = ScriptedModel([Items(shell_call("ls")), "listed"])
+    model = ScriptedModel([Items(shell_call("echo a.txt")), "listed"])
     agent = memory_harness.wrap(
         Agent(name="ops", model=model, tools=[ShellTool(executor=structured)]), id="structured"
     )
-    assert (await agent.run("list", user="u")).status is RunStatus.SUCCESS
-    assert shell_said(model) == ["a.txt"]  # as the SDK renders its own result
+    with isolating():
+        assert (await agent.run("list", user="u")).status is RunStatus.SUCCESS
+    assert shell_said(model) == ["a.txt\n"]  # as the SDK renders a ShellResult
     await memory_harness.writes.drain()
     [record] = memory_service.named("record_tool")
     assert record.body["status"] == "ok" and "a.txt" in str(record.body["output"])

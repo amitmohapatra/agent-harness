@@ -117,7 +117,9 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert record["permissions"] == [{"title": "mcp__trellis__lookup", "answer": "approve_once"}]
     # what Kimi is told of its folder's outputs/ (the user's), then the user's message
     assert record["prompts"] == [f"{DELIVERS_HERE}\ntell me about tea"]
-    assert record["initialize"][0]["terminal"] is False  # no sandbox: no terminal of ours
+    # no sandbox: its commands come to this machine's isolation layer, through our terminal
+    # (refused here: the tests' layer cannot isolate), its writes are its own
+    assert record["initialize"][0]["terminal"] is True
 
 
 async def test_the_turns_tool_calls_and_results_are_in_its_transcript(

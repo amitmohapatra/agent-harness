@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import copy
 import json
 import logging
@@ -137,6 +138,14 @@ def current() -> Runtime | None:
     return _current.get()
 
 
+def within(runtime: Runtime) -> contextvars.Context:
+    """A copy of this context with ``runtime`` the run its code executes in: for work a
+    framework hands the harness outside the run's own task (a terminal Kimi Code asks for)."""
+    context = contextvars.copy_context()
+    context.run(_current.set, runtime)
+    return context
+
+
 class Paused(AgentPaused):
     """Raised by :meth:`Runtime.ask` to stop the run until a person answers. Frameworks that
     swallow it do not keep the run going: the harness checks the runtime, not the exception."""
@@ -202,6 +211,10 @@ class Runtime:
     offered: set[str] | None = None
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
+    #: governance's action (``run``, ``announce``, ``ask``) on each call its framework runs
+    #: itself, by the call's key (``journal.call_key``), as decided before it ran
+    #: (``bridge.permitted``): what its ``execute_tool`` span says once it ran (``observed``)
+    governed: dict[str, str] = field(default_factory=dict)
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
@@ -277,6 +290,12 @@ class Runtime:
     #: what the attempt keeps of the calls its framework carries out on this machine, made on
     #: first use by the code that governs them (``tools.convert.openai_local.Local``)
     local_calls: Any = field(default=None, repr=False)
+    #: what the model is told of the working files its conversation's earlier turns left, given
+    #: back into the run's workspace (``sandbox.carry``), until a result says it
+    restored: str | None = None
+    #: the audit records of commands a framework's own shell call ran (in the run's workspace),
+    #: until that call is reported and its span takes its own (``sandbox.base.record_command``)
+    commands: list[dict[str, Any]] = field(default_factory=list)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None

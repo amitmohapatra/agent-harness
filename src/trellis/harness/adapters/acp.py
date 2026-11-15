@@ -138,9 +138,12 @@ from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
+from trellis.harness.host import cannot_isolate
 from trellis.harness.journal import Pending, call_key
 from trellis.harness.prompts import GatewayHeaders
-from trellis.harness.runtime import Paused, Runtime, reason_of
+from trellis.harness.runtime import Paused, Runtime, reason_of, within
+from trellis.harness.sandbox import carry, sandbox
+from trellis.harness.sandbox.isolation import host_layer
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
 from trellis.harness.tools.elicit import elicited
@@ -922,10 +925,14 @@ class ACPAdapter:
         _check_servers(options.get("mcp_servers") or ())
 
     def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
-        """Where the agent works on this machine (its ``cwd``, else this process's); ``None``
-        for a sandboxed run, whose writes go to the sandbox."""
+        """Where the agent writes on this machine: ``None`` when its writes go to the run's
+        sandbox (:class:`Sandboxed`: the one it is given, else this machine's isolation
+        layer), whose outputs are the run's; its ``cwd`` (else this process's) where it has no
+        sandbox and the layer cannot isolate here."""
         ran = given(target, options)
-        return None if ran.sandbox is not None else Path(ran.cwd or os.getcwd())
+        if ran.sandbox is not None or cannot_isolate() is None:
+            return None
+        return Path(ran.cwd or os.getcwd())
 
     async def native(self, target: Any) -> list[ToolSpec]:
         """The agent's built-in tools (its profile's) and the MCP tools it was seen calling
@@ -988,7 +995,14 @@ class ACPAdapter:
             target = dataclasses.replace(target, env={**target.env, profile.home: homed})
         own = target.sandbox is not None or target.skills is not None
         home = RunHome(target, runtime) if own else None
-        boxed = Sandboxed(target, runtime, home) if home is not None and target.sandbox else None
+        # its shell and its writes in the run's sandbox — the one given, else a workspace of this
+        # machine's isolation layer, at the folder it works in (every command isolated)
+        boxed = Sandboxed(
+            target,
+            runtime,
+            home.work if home is not None and target.sandbox else target.cwd or os.getcwd(),
+            target.sandbox or sandbox(host_layer()),
+        )
         env = home.env() if home is not None else {**os.environ, **target.env}
         if profile is not None and profile.routed is not None:
             profile.routed(env, runtime, target.model)
@@ -997,7 +1011,7 @@ class ACPAdapter:
         if profile is not None:
             _overridden(profile, target.env, runtime)
             env.update(profile.env)
-        cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
+        cwd = boxed.work
         attempt = Attempt(self, runtime, target, boxed)
         # where its shell works, the folders the target names, the run's own skills, where a
         # kept result is read (the name the model is told): what a command may read unasked
@@ -1007,7 +1021,7 @@ class ACPAdapter:
         # a form of the agent's for its user is answered (Kimi asks every question of an
         # ``AskUserQuestion`` call in one form; over a permission request, only the first)
         forms = ElicitationCapabilities(form=ElicitationFormCapabilities())
-        served = boxed.capabilities() if boxed is not None else {}
+        served = boxed.capabilities()
         capabilities = ClientCapabilities(elicitation=forms, **served)
         # a session another worker's kept process still holds (a background sub-agent of the
         # run at work there) is forked: the turn goes on here, in a process of its own
@@ -1568,7 +1582,7 @@ class Attempt:
         usage = getattr(answer, "usage", None)
         if usage is None or self.usage is not None:
             return
-        budget.account(
+        budget.reported(
             self.runtime,
             model=self.target.model or ACP_MODEL,
             input_tokens=usage.input_tokens,
@@ -1979,38 +1993,53 @@ class RunHome:
 
 
 class Sandboxed:
-    """A run's agent working with the run's sandbox (``ACPAgent(sandbox=sandbox())``): it is
-    given ACP's file and terminal capabilities, served here — ``fs/write_text_file`` and
-    ``fs/read_text_file`` the sandbox's files, ``terminal/*`` a command run in it (Kimi's
-    ``Bash``) — so its commands and writes happen in the sandbox (``SandboxSource.opened``: the
-    run's own, kept across attempts, deleted at the run's end).
+    """A run's agent working with the run's sandbox — the one it is given (``ACPAgent(
+    sandbox=sandbox())``), else a workspace of this machine's isolation layer
+    (``sandbox(host_layer())``: every ACP agent's shell runs isolated) — ``work`` the folder it
+    names its files by: it is given ACP's file and terminal capabilities, served here —
+    ``fs/write_text_file`` and ``fs/read_text_file`` the sandbox's files, ``terminal/*`` a
+    command run in it (Kimi's ``Bash``) — so its commands and writes happen in the sandbox
+    (``SandboxSource.opened``: the run's own, kept across attempts, deleted at the run's end;
+    a workspace of the layer's is that folder for its commands, ``Workspace.alias``). A command
+    still running when the attempt ends is stopped.
 
     Its reads are not isolated: Kimi Code reads and searches the host's files itself
     (``Read`` looks a file up on the host first; ``Glob`` and ``Grep`` never ask the client).
-    What the harness can do it does: the agent's process gets a home and a working directory of
-    the run's own, both empty, and an environment of :data:`SANDBOXED_ENV` and the agent's own
-    ``env`` only (:class:`RunHome`) — and each run says that its reads are not isolated
+    What the harness can do it does: a run given a sandbox gets a home and a working directory
+    of the run's own, both empty, and an environment of :data:`SANDBOXED_ENV` and the agent's
+    own ``env`` only (:class:`RunHome`) — and each run says that its reads are not isolated
     (:data:`READS_NOT_ISOLATED`)."""
 
-    def __init__(self, target: ACPAgent, runtime: Runtime, home: RunHome) -> None:
+    def __init__(self, target: ACPAgent, runtime: Runtime, work: str, source: Any) -> None:
         self.target = target
         self.runtime = runtime
-        self.source = target.sandbox
-        self.work = home.work
+        self.source = source
+        self.work = work
+        #: its writes go to the sandbox too: one it is given, or this machine's layer where it
+        #: can isolate (else they are its own, in its folder)
+        self.files = target.sandbox is not None or cannot_isolate() is None
         self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
         #: what the latest terminals the agent released said (:data:`TERMINALS_KEPT`): a
         #: call's record reads it once the call ends, after its terminal went
         self.released: LRU[str, str] = LRU(TERMINALS_KEPT)
+        #: what a terminal's output starts with: what came back of the conversation's working
+        #: files, told with the run's first command (``sandbox.carry``)
+        self.told: dict[str, str] = {}
         self._made = False
         runtime.added.append(self.source)  # its end (and its pause) find it
-        _said_reads(runtime.agent_id)
-        runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
+        if self.files:  # its writes go to the sandbox, its reads do not
+            _said_reads(runtime.agent_id)
+            runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
 
     def capabilities(self) -> dict[str, Any]:
-        """What the client serves the agent for a sandboxed run (``ClientCapabilities``'
-        fields): its files and its terminals."""
+        """What the client serves the agent (``ClientCapabilities``' fields): its terminals —
+        every command goes to the run's sandbox — and its files, unless it was given no
+        sandbox and this machine's layer cannot isolate (then each command is refused, saying
+        why, and its file writes are its own, in its folder: :meth:`ACPAdapter.workdir`)."""
         from acp.schema import FileSystemCapabilities
 
+        if not self.files:
+            return {"terminal": True}
         files = FileSystemCapabilities(read_text_file=True, write_text_file=True)
         return {"fs": files, "terminal": True}
 
@@ -2052,9 +2081,17 @@ class Sandboxed:
     ) -> Any:
         from acp.schema import CreateTerminalResponse
 
-        box = await self.box(changes=True)
         line = shlex.join([command, *args]) if args else command
-        task = asyncio.ensure_future(box.exec(line, timeout=self.runtime.remaining(), env=env))
+
+        async def ran() -> Any:  # in the run (its audit, its stream); a refusal its output
+            box = await self.box(changes=True)
+            told = carry.told(self.runtime)  # what came back of the conversation's files, once
+            if told is not None:
+                self.told[ident] = told
+            return await box.exec(line, timeout=self.runtime.remaining(), env=env)
+
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(ran(), context=within(self.runtime))
         ident = f"terminal-{len(self.terminals) + 1}"
         self.terminals[ident] = (task, limit)
         return CreateTerminalResponse(terminal_id=ident)
@@ -2066,6 +2103,8 @@ class Sandboxed:
         if not task.done():
             return TerminalOutputResponse(output="", truncated=False)
         text, code, signal = _ran(task)
+        told = self.told.get(ident)
+        text = f"{told}\n{text}" if told else text
         cut = False
         if limit is not None and len(text.encode()) > limit:
             cut, text = True, text.encode()[-limit:].decode("utf-8", errors="ignore")

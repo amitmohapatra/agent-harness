@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,7 @@ import pytest
 from tests.integration.test_mcp_servers import http_server  # noqa: F401 - a fixture
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
-from tests.support.invariants import descendants
+from tests.support.isolation import isolating, processes_of
 from tests.support.kimi import (
     KIMI_BIN,
     PlannedEndpoint,
@@ -29,20 +28,16 @@ from tests.support.kimi import (
     needs_kimi,
     result_text,
     text_of,
-    unreminded,
 )
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness import compat
-from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAdapter
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
 from trellis.harness.adapters.claude import RESUMED_CALL
-from trellis.harness.bridges import live
-from trellis.harness.bridges.acp_live import ACPSession
 from trellis.harness.budget import Budget
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.identity import conversation_key
 from trellis.harness.sandbox import sandbox
 from trellis.harness.tools import bridge
 from trellis.harness.tools.bridge import TURN_STALLED
@@ -65,6 +60,13 @@ def lookup(topic: str) -> str:
     """Look a topic up in the team's notes."""
     lookups.append(topic)
     return f"facts about {topic}"
+
+
+@pytest.fixture
+def isolated() -> Iterator[Any]:
+    """This machine's isolation layer, where Kimi's ``Bash`` runs (``adapters.acp.Sandboxed``)."""
+    with isolating() as layer:
+        yield layer
 
 
 @pytest.fixture
@@ -225,13 +227,17 @@ async def test_a_command_on_a_host_the_deployment_allows_runs_unasked_and_announ
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
     """Kimi's ``Bash`` on this machine, where the administrator allows commands here: the
-    command is the deployment's, never the user's question — it runs, announced."""
+    command is the deployment's, never the user's question — announced, and run through the
+    isolation layer; here the test's layer cannot isolate (``tests/conftest.py``), so it is
+    refused, saying why, never run as the service's user (``test_kimi_isolated_shell``: where
+    it can)."""
     endpoint.plan = [("Bash", {"command": WRITES})]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash")
     events = [e async for e in agent.stream("say it", user="u1")]
     assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
     assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["Bash"]
-    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert "cannot be isolated" in str(events[-1].data["result"])
 
 
 async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_call(
@@ -274,7 +280,7 @@ async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_ca
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
 async def test_a_command_that_only_reads_runs_without_asking_a_person(
-    harness: Harness, tmp_path: Path, streamed: bool
+    harness: Harness, tmp_path: Path, streamed: bool, isolated: Any
 ) -> None:
     """Kimi asks before every ``Bash`` command; the harness lets each run, one that only reads
     as any: the shell is the deployment's, as Kimi's own read tools run: no pause."""
@@ -643,7 +649,7 @@ async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_cat
 
 
 async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
-    endpoint: PlannedEndpoint, tmp_path: Path
+    endpoint: PlannedEndpoint, tmp_path: Path, isolated: Any
 ) -> None:
     """Kimi is told that ``outputs/`` of its working folder is the user's; a file it writes
     there (its own ``Bash``, unasked where the deployment allows commands on this machine)
@@ -1144,144 +1150,30 @@ async def test_a_background_sub_agents_harness_tool_call_is_made_in_its_own_run(
     assert lookups == ["tea"]
 
 
-async def test_a_command_kimi_runs_in_the_background_finishes_after_its_turn(
-    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+async def test_a_command_kimi_runs_in_the_background_ends_with_its_run(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, isolated: Any
 ) -> None:
-    """Kimi's ``Bash(run_in_background=true)`` answers at once with its task; the process is
-    kept while the command works, so the command finishes after the turn ended."""
+    """Kimi's ``Bash(run_in_background=true)`` answers at once with its task; the command runs
+    in the run's workspace, which goes with the run — so it is stopped when the turn ends
+    (killed with everything it started: its audit record has no exit of its own), never left
+    running on this machine (``adapters.acp.Sandboxed``)."""
     command = {
-        "command": "sleep 2 && echo done > done.txt",
+        "command": "sleep 30 && echo done > done.txt",
         "run_in_background": True,
         "description": "wait",
     }
     endpoint.plan = [("Bash", command)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background-bash")
-    # Kimi asks about a command that writes; the deployment's to allow, never the user's
-    done = await agent.run("wait a bit", user="u1", thread="t1")
-    assert done.interrupt is None
-    assert done.status is RunStatus.SUCCESS and "task_id:" in str(done.answer), done.error
-    made = tmp_path / "kimi-work" / "done.txt"
-    assert not made.exists()  # still at work when the turn ended
-    async with asyncio.timeout(20):
-        while not made.exists():  # noqa: ASYNC110 - a file the command writes
-            await asyncio.sleep(0.1)
-
-
-#: What the scripted model says in the turn Kimi runs for a background command's end.
-NOTIFIED = "The background command said BG-77."
-
-
-def _waits_for_its_command(gate: Path) -> Any:
-    """Turn one starts a command in the background that ends once ``gate`` is there; turn two
-    waits for it (``WaitFor``), the gate made as the model asks to wait — so the command ends
-    while that turn is under way; the turn Kimi runs for the command's end (its notification)
-    reads what the command wrote and answers :data:`NOTIFIED`; any other turn answers
-    ``noted``. Each answers the latest of
-    those prompts, by the results that came after it."""
-
-    def turn(body: dict[str, Any]) -> Any:
-        messages = body["messages"]
-        said = [unreminded(text_of(m.get("content"))) for m in messages]
-        asked = [
-            i for i, m in enumerate(messages) if m["role"] == "user" and _PROMPT.search(said[i])
-        ]
-        prompt = _PROMPT.search(said[asked[-1]])[0]  # type: ignore[index]
-        ran = [
-            said[i] for i in range(asked[-1] + 1, len(messages)) if messages[i]["role"] == "tool"
-        ]
-        if prompt == "<notification":  # it reads what the command wrote, then answers
-            return NOTIFIED if ran else ("Read", {"path": str(gate.parent / "out.txt")})
-        if prompt == "start the command" and not any("task_id:" in r for r in ran):
-            command = {
-                "command": f"while [ ! -f {gate.name} ]; do sleep 0.1; done; echo BG-77 > out.txt",
-                "run_in_background": True,
-                "description": "wait for the gate",
-            }
-            return ("Bash", command)
-        if prompt == "wait for the command" and not ran:
-            [task] = re.findall(r"task_id: (\S+)", " ".join(said))[-1:]
-            gate.touch()
-            return ("WaitFor", {"task_id": task, "timeout": 30})
-        return "noted"
-
-    return turn
-
-
-#: The prompts :func:`_waits_for_its_command` answers.
-_PROMPT = re.compile(r"start the command|wait for the command|<notification|thanks")
-
-
-async def test_a_background_commands_end_read_in_a_later_turn_is_that_turns_answer(
-    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """KIMI-BG-ANSWER, real Kimi: a turn that waits for a command it ran in the background
-    (``WaitFor``) while the command ends — Kimi steers the command's notification into that
-    turn, ends the turn right after the wait, and answers in a turn of its own that ACP does
-    not forward — answers with what that turn said, as ``kimi -p`` does; its model request is
-    counted once, on that turn's run, and the next turn counts only its own."""
-    from trellis.harness import budget
-
-    counted: dict[str, int] = {}
-    account = budget.account
-
-    def counting(runtime: Any, **usage: Any) -> None:
-        tokens = usage["input_tokens"] + usage["output_tokens"]
-        counted[runtime.run_id] = counted.get(runtime.run_id, 0) + tokens
-        account(runtime, **usage)
-
-    monkeypatch.setattr(budget, "account", counting)
-    gate = tmp_path / "kimi-work" / "go"
-    async with PlannedEndpoint(turns=_waits_for_its_command(gate)).serving() as endpoint:
-        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-waits")
-        # Kimi asks before a command; the command is the deployment's: it runs, unasked
-        started = await agent.run("start the command", user="u1", thread="t1")
-        assert started.status is RunStatus.SUCCESS and started.interrupt is None, started.error
-        before = len(endpoint.requests)
-        waited = await agent.run(
-            "wait for the command and say what it printed", user="u1", thread="t1"
-        )
-        assert waited.status is RunStatus.SUCCESS, waited.error
-        assert waited.answer == NOTIFIED
-        # the wait, then the notification's turn: its read, its answer
-        assert len(endpoint.requests) - before == 3
-        after = len(endpoint.requests)
-        thanked = await agent.run("thanks", user="u1", thread="t1")
-        assert thanked.status is RunStatus.SUCCESS and thanked.answer == "noted"
-    assert counted[waited.run_id] == 15 * 3
-    assert counted[thanked.run_id] == 15 * (len(endpoint.requests) - after)
-    assert sum(counted.values()) == 15 * len(endpoint.requests)
-
-
-async def test_a_kept_kimi_whose_hold_lapses_ends_with_its_command_and_its_sessions_files(
-    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """KIMI-LIVE-1, real Kimi: the process kept for a command it runs in the background ends
-    when the conversation's hold of it lapses (kept as long as a session is) — and the command
-    with it, no process of the test's left — no run is left ``RUNNING``, and the session's own
-    folder leaves its user's Kimi home, whose config stays."""
-    monkeypatch.setattr(live, "WORKING_SECONDS", 1.0)
-    command = {
-        "command": "sleep 60 && touch late.txt",
-        "run_in_background": True,
-        "description": "wait",
-    }
-    endpoint.plan = [("Bash", command)]
-    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-lapse")
-    before = set(descendants(os.getpid()))
-    done = await agent.run("wait a minute", user="u1", thread="t1")  # the command: unasked
-    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
-    adapter = agent.adapter
-    assert isinstance(adapter, ACPAdapter)
-    session = adapter.live.get(conversation_key("default", "u1", "t1"))
-    assert isinstance(session, ACPSession) and session.working  # kept: the command works
-    home = kimi_home_of("u1")
-    [folder] = home.glob(f"sessions/*/{session.session_id}")
-    async with asyncio.timeout(30):
-        while not session.closed or folder.exists() or set(descendants(os.getpid())) - before:  # noqa: ASYNC110 - processes and files
-            await asyncio.sleep(0.1)
-    assert not [s async for s in harness.runs.iterate() if s.status is RunStatus.RUNNING]
-    assert (home / "config.toml").is_file() and (home / "sessions").is_dir()
-    assert not (tmp_path / "kimi-work" / "late.txt").exists()
+    events = [e async for e in agent.stream("wait a bit", user="u1", thread="t1")]
+    finished = events[-1]
+    assert finished.error is None and "task_id:" in str(finished.data["result"])
+    [ran] = [
+        e.data
+        for e in events
+        if e.type is RunEventType.CUSTOM and e.data.get("name") == "sandbox_command"
+    ]
+    assert "echo done > done.txt" in ran["command"] and ran["exit_code"] is None
+    assert processes_of(ran["uid"]) == []
 
 
 async def test_kimis_answer_streams(

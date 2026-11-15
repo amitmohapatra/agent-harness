@@ -27,7 +27,7 @@ import posixpath
 import tarfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Final
@@ -332,12 +332,16 @@ async def _output(client: httpx.AsyncClient, exec_id: str, ref: SandboxRef) -> t
 
 
 async def _streams(
-    client: httpx.AsyncClient, exec_id: str, ref: SandboxRef, keep: int | None = OUTPUT_BYTES
+    client: httpx.AsyncClient,
+    exec_id: str,
+    ref: SandboxRef,
+    keep: int | None = OUTPUT_BYTES,
+    sink: Sink | None = None,
 ) -> tuple[_Tail, _Tail]:
     """Start the exec and read its output to the end: the multiplexed stream's frames (a
     header — the stream, 3 bytes, the length — then the bytes), each stream's last ``keep``
-    bytes kept (``None``: all)."""
-    streams = {1: _Tail(keep), 2: _Tail(keep)}
+    bytes kept (``None``: all), and each part handed to ``sink`` as it comes."""
+    streams = {1: _Tail(keep, sink, 1), 2: _Tail(keep, sink, 2)}
     pending = bytearray()
     start = {"Detach": False, "Tty": False}
     async with client.stream("POST", f"/exec/{exec_id}/start", json=start, timeout=None) as got:
@@ -356,16 +360,28 @@ async def _streams(
     return streams[1], streams[2]
 
 
+#: What is handed a command's output as it comes: the stream (1, its stdout; 2, its stderr)
+#: and the bytes.
+type Sink = Callable[[int, bytes], None]
+
+
 class _Tail:
     """The last ``limit`` bytes of a stream (:data:`OUTPUT_BYTES` unless given; ``None``: all
-    of it), and how much was cut before them."""
+    of it), and how much was cut before them; each part handed to ``sink`` as stream
+    ``fd``, when given, as it comes."""
 
-    def __init__(self, limit: int | None = OUTPUT_BYTES) -> None:
+    def __init__(
+        self, limit: int | None = OUTPUT_BYTES, sink: Sink | None = None, fd: int = 1
+    ) -> None:
         self.limit = limit
         self.kept = bytearray()
         self.cut = 0
+        self.sink = sink
+        self.fd = fd
 
     def add(self, data: bytes) -> None:
+        if self.sink is not None:
+            self.sink(self.fd, data)
         self.kept += data
         over = len(self.kept) - self.limit if self.limit is not None else 0
         if over > 0:

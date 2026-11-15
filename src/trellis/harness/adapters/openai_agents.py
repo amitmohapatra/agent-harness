@@ -926,8 +926,9 @@ def reachable(target: Any) -> list[Any]:
 
 def _specs(agent: Any) -> list[ToolSpec]:
     """One agent's own tools, as specs: its function tools (the harness's left out), its
-    hosted tools (a hosted MCP server's allowed tools by name, from it), its handoffs."""
-    from agents import Agent, FunctionTool, Handoff, HostedMCPTool
+    shells run here (they write: each command isolated), its hosted tools (a hosted MCP
+    server's allowed tools by name, from it), its handoffs."""
+    from agents import Agent, FunctionTool, Handoff, HostedMCPTool, LocalShellTool, ShellTool
 
     from trellis.harness.tools.convert.openai_agents import AGENT_TOOL, MADE
 
@@ -948,7 +949,12 @@ def _specs(agent: Any) -> list[ToolSpec]:
             names = allowed if isinstance(allowed, list) else []
             server = str(config.get("server_label") or tool.name)
             found.extend(ToolSpec(name=str(n), source="mcp", server=server) for n in names)
-        else:  # a hosted tool, a computer, a shell: by its name
+        elif isinstance(tool, LocalShellTool | ShellTool) and getattr(tool, "executor", None):
+            # a shell run here: its commands run isolated (``openai_local.isolated``), the
+            # deployment's — announced, never a person's question unless the catalog says more
+            said = type(tool).__name__
+            found.append(ToolSpec(name=str(tool.name), description=said, side_effects="write"))
+        else:  # a hosted tool, a computer, a hosted shell: by its name
             found.append(ToolSpec(name=str(tool.name), description=type(tool).__name__))
     for handoff in agent.handoffs:
         if isinstance(handoff, Agent):

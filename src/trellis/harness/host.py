@@ -7,15 +7,17 @@ on is the deployment's, so a command there runs only where it is confined to the
 as the service's own user, never on a run user's approval. What runs a command here
 (:func:`found`), by each framework's own word for it, and what the harness does:
 
-* **Claude Code's and Kimi Code's own shell** (Claude's ``Bash``, ``PowerShell``, ``REPL``,
-  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``): run as they do, in their working folder
-  as the service's user — not through the harness's isolation layer, which cannot carry a
-  framework's own process — announced and recorded at each call. A team's own Claude
-  ``SandboxSettings`` is honoured as given; ``kimi(sandbox=sandbox())`` isolates Kimi's.
-* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``** (its executor: code of yours
-  on this machine), **the SDK's ``UnixLocalSandboxClient``**, **LangChain's
-  ``ShellToolMiddleware`` on the host**: a framework's own shell, run as it is, governed at each
-  call as the framework's tools are.
+* **Claude Code's and Kimi Code's own shell** (Claude's ``Bash``, ``PowerShell``,
+  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``) **and an OpenAI agent's ``LocalShellTool``
+  or local ``ShellTool``**: each command runs through this machine's isolation layer, in the
+  run's workspace as its uid (``sandbox.relay``, ``adapters.acp.Sandboxed``,
+  ``tools.convert.openai_local.isolated``), announced and audited; where the layer cannot
+  isolate (:func:`cannot_isolate`, said once at the start), refused — Claude's left out —
+  never run as the service's own user.
+* **The SDK's ``UnixLocalSandboxClient``** and **LangChain's ``ShellToolMiddleware`` on the
+  host**: a framework's own shell whose processes the framework starts itself (behind the
+  SDK's session API, the middleware's execution policy), which the isolation layer cannot
+  carry: run as it is, governed at each call as the framework's tools are.
 * **Deep Agents' ``execute`` on a ``LocalShellBackend``** (alone, a ``CompositeBackend``'s
   default, a sub-agent's; ``ReAct(backend=)`` too): no isolation, and ``sandbox()`` is the same
   library's isolated backend — refused at ``h.wrap`` whatever the setting, naming ``sandbox()``
@@ -30,6 +32,8 @@ The deployment may install the isolation layer it configured (:func:`install`: a
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -39,6 +43,8 @@ from trellis.contracts import ConfigurationError
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.sandbox.isolation import HostSandbox
+
+log = logging.getLogger("trellis.harness")
 
 #: The variable an administrator switches shell commands on this machine off with.
 HOST_EXECUTION_ENV: Final = "TRELLIS_HOST_EXECUTION"
@@ -102,6 +108,23 @@ def install(layer: HostSandbox | None) -> HostSandbox | None:
     return replaced
 
 
+def cannot_isolate() -> str | None:
+    """Why this machine's isolation layer cannot isolate a command here (``HostSandbox.
+    cannot_isolate``: said once in the log, the first time), else ``None``: a framework's own
+    shell is then off, never run as the service's own user."""
+    from trellis.harness.sandbox.isolation import host_layer
+
+    why = host_layer().cannot_isolate()
+    if why is not None:
+        _unisolated(why)
+    return why
+
+
+@functools.lru_cache(maxsize=1)
+def _unisolated(why: str) -> None:
+    log.warning("shell commands are off on this machine: they cannot be isolated here: %s", why)
+
+
 def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
     """Refuse ``agent`` run with framework ``options`` (its own, or a run's over them) when it
     would run commands here with no isolation the harness could give (:data:`UNISOLATED_SHELL`),
@@ -114,6 +137,7 @@ def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
         raise ConfigurationError(UNISOLATED_SHELL.format(agent=agent.id, **_said(held)))
     if agent.harness.settings.host_execution == "deny":
         raise ConfigurationError(REFUSED.format(agent=agent.id, **_said(shells)))
+    cannot_isolate()  # said at the start, once, when its shell will be off
 
 
 def _said(shells: list[HostShell]) -> dict[str, str]:
@@ -236,7 +260,7 @@ def _field(given: Any, name: str) -> Any:
 
 
 def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
-    """Claude Code's own shell: it runs as it does (its own ``SandboxSettings``, as given)."""
+    """Claude Code's own shell (its commands run through the isolation layer: ``sandbox.relay``)."""
 
     def given(name: str) -> Any:
         return options[name] if name in options else getattr(target, name, None)
@@ -255,7 +279,7 @@ def _claude(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
         + ", ".join(sorted(CLAUDE_SHELLS))
         + ")"
     )
-    return [HostShell("Claude Code's own shell, as the service's user", fix, "framework")]
+    return [HostShell("Claude Code's own shell", fix, "framework")]
 
 
 def _acp(target: Any, options: Mapping[str, Any]) -> list[HostShell]:

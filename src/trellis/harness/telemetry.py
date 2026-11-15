@@ -65,6 +65,7 @@ from opentelemetry import metrics as otel_metrics
 from opentelemetry import propagate, trace
 
 from trellis.contracts import ConfigurationError
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.redaction import redact_attributes
 from trellis.harness.settings import (
@@ -356,6 +357,70 @@ class RunTrace:
         }
 
 
+#: Langfuse's level and status message of an observation (its OTel attribute mapping:
+#: ``langfuse.observation.level``, ``langfuse.observation.status_message``).
+LEVEL: Final = "langfuse.observation.level"
+STATUS_MESSAGE: Final = "langfuse.observation.status_message"
+
+
+@contextmanager
+def _span(name: str, **given: Any) -> Iterator[trace.Span]:
+    """A span current inside; what raised out of it is said redacted (the SDK's own
+    ``record_exception`` keeps the message as it is): a pause (a person is asked) is no
+    error, a cancellation a warning, anything else an error with its type and message."""
+    with _tracer.start_as_current_span(
+        name, record_exception=False, set_status_on_exception=False, **given
+    ) as current:
+        try:
+            yield current
+        except BaseException as exc:
+            _raised(current, exc)
+            raise
+
+
+def _raised(span: trace.Span, exc: BaseException) -> None:
+    if not span.is_recording():
+        return
+    kind = type(exc).__name__
+    if is_pause_signal(exc):
+        span.set_attributes({LEVEL: "DEFAULT", "trellis.paused": True})
+        span.add_event("paused")
+        return
+    message = redacted_text(str(exc) or kind)
+    if isinstance(exc, asyncio.CancelledError) or kind == "RunCancelled":
+        span.set_attributes({LEVEL: "WARNING", STATUS_MESSAGE: message or "cancelled"})
+        span.add_event("cancelled", {"reason": message})
+        return
+    span.add_event("exception", {"exception.type": kind, "exception.message": message})
+    span.set_attributes({"error.type": kind, LEVEL: "ERROR", STATUS_MESSAGE: message})
+    span.set_status(trace.Status(trace.StatusCode.ERROR, message))
+
+
+def redacted_text(value: Any) -> str:
+    """``value`` as text a span may carry: credentials masked, at most
+    :data:`PROPAGATED_MAX_CHARS` characters (a status message)."""
+    text = redact_attributes({"message": _text(value)})["message"]
+    return str(text)[:PROPAGATED_MAX_CHARS]
+
+
+def failed(span: trace.Span, outcome: Any) -> None:
+    """A tool call that did not end well (``outcome``, a ``ToolOutcome``): rejected (a person,
+    a hook, a rule) is a warning; an error or a timeout the span's error status, with what the
+    model read of it (redacted) as its message and ``error.type``."""
+    status = outcome.status.value
+    if status == "ok" or not span.is_recording():
+        return
+    message = redacted_text(outcome.output if outcome.output is not None else status)
+    span.set_attribute("trellis.tool.status", status)
+    if status in ("rejected", "cancelled"):
+        span.set_attributes({LEVEL: "WARNING", STATUS_MESSAGE: message})
+        return
+    span.set_attributes(
+        {"error.type": outcome.error_class or status, LEVEL: "ERROR", STATUS_MESSAGE: message}
+    )
+    span.set_status(trace.Status(trace.StatusCode.ERROR, message))
+
+
 @contextmanager
 def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
     """The attempt's span, in the run's trace — a sub-agent's run's under its parent's tool
@@ -365,11 +430,67 @@ def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
         with _root_span(run.run_id, run.agent_id, attributes) as current:
             yield current
         return
-    with _tracer.start_as_current_span(f"invoke_agent {run.agent_id}") as current:
+    with _span(f"invoke_agent {run.agent_id}") as current:
         if current.is_recording():
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)
         yield current
+
+
+def helper_span(
+    name: str, run_id: str, parent_run_id: str, task: str, *, framework: str, kind: str
+) -> trace.Span:
+    """The span of a helper its framework spawned inside a run (a Deep Agent's ``task``
+    sub-agent, Claude's subagent, Kimi's ``Agent``, an OpenAI agent called as a tool: a child
+    run, ``bridges.helpers``), under the span current now (the call that spawned it); started
+    now, ended by :func:`helper_ended`; :func:`within` makes it current for the helper's
+    work, so its calls and replies nest under it."""
+    span = _tracer.start_span(f"invoke_agent {name}")
+    if span.is_recording():
+        attributes = {
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.id": name,
+            "gen_ai.agent.name": name,
+            "langfuse.observation.type": "agent",
+            "langfuse.observation.input": _text(task),
+            "trellis.run_id": run_id,
+            "trellis.parent_run_id": parent_run_id,
+            "trellis.helper.framework": framework,
+            "trellis.helper.kind": kind,
+        }
+        span.set_attributes(redact_attributes(attributes))
+        _experimented(span)
+    return span
+
+
+def helper_ended(
+    span: trace.Span, status: str, *, answer: Any = None, error: str | None = None
+) -> None:
+    """A helper's span ended: its status (``trellis.run.status``), its answer, or why it failed
+    or was cut short (``PAUSED``: it waits with its run)."""
+    if span.is_recording():
+        span.set_attribute("trellis.run.status", status)
+        output(span, answer)
+        if error is not None:
+            message = redacted_text(error)
+            failing = status == "ERROR"
+            span.set_attributes({LEVEL: "ERROR" if failing else "WARNING", STATUS_MESSAGE: message})
+            if failing:
+                span.set_status(trace.Status(trace.StatusCode.ERROR, message))
+    span.end()
+
+
+@contextmanager
+def within(span: trace.Span | None) -> Iterator[None]:
+    """``span`` current inside (none: as it is)."""
+    if span is None:
+        yield
+        return
+    token = otel_context.attach(trace.set_span_in_context(span))
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
 
 
 @contextmanager
@@ -392,13 +513,117 @@ def item_span(run_id: str, name: str, input: Any, *, user: str) -> Iterator[trac
 
 @contextmanager
 def _root_span(run_id: str, name: str, attributes: dict[str, Any]) -> Iterator[trace.Span]:
-    with _tracer.start_as_current_span(
-        f"invoke_agent {name}", context=_run_context(run_id)
-    ) as current:
+    with _span(f"invoke_agent {name}", context=_run_context(run_id)) as current:
         if current.is_recording():
             current.set_attributes(redact_attributes(attributes))
             _experimented(current, root=True)
         yield current
+
+
+#: The tools that run a shell command, and where it runs unless its audit record says
+#: otherwise (:func:`command`): the harness's sandbox, or the framework's own machine (Deep
+#: Agents' ``execute`` on a backend of its own, Claude Code's ``Bash`` and ``Monitor``, Kimi
+#: Code's shell, OpenAI Agents' shell tools).
+SHELLS: Final = {
+    "sandbox_exec": "sandbox",
+    "execute": "framework",
+    "Bash": "framework",
+    "Monitor": "framework",
+    "Shell": "framework",
+    "shell": "framework",
+    "local_shell": "framework",
+}
+#: The keys a shell's result names its exit code by (the harness's sandbox, a framework's).
+EXIT_KEYS: Final = ("exit_code", "exitCode", "returncode")
+#: The open shell spans, by span id: whether an audit record said how the command ran.
+_shells: dict[int, bool] = {}
+#: The open tool call spans (:func:`tool_span`), by span id: the command a shell's runs.
+_tool_spans: dict[int, str | None] = {}
+
+
+def command_text(args: Any) -> str | None:
+    """The command a shell call runs, from its arguments (``command``, or an OpenAI shell's
+    ``action``: a list of words, or of commands)."""
+    if not isinstance(args, Mapping):
+        return None
+    action = args.get("action")
+    given = args.get("command") or (
+        (action.get("command") or action.get("commands")) if isinstance(action, Mapping) else None
+    )
+    if isinstance(given, list):
+        return " ".join(str(w) for w in given)
+    return None if given is None else str(given)
+
+
+def command(record: Mapping[str, Any], *, where: str | None = None) -> None:
+    """A shell command's audit record — ``command``, ``exit_code``, ``duration_ms``, ``limit``
+    (the limit that stopped it: ``time``, ``cpu``, ``memory``...), ``sandbox``, and ``where``
+    it ran (else ``where``; else ``host``: the isolation layer's record) — on the span current
+    now, the tool call that ran it: the one record the audit log, the run's stream and the
+    trace all say (``sandbox.isolation``'s ``sandbox_command``, ``sandbox.audited``)."""
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    found = {
+        "trellis.command.text": record.get("command"),
+        "trellis.command.exit_code": record.get("exit_code"),
+        "trellis.command.duration_ms": record.get("duration_ms"),
+        "trellis.command.limit": record.get("limit"),
+        "trellis.command.sandbox": record.get("sandbox"),
+        "trellis.command.where": record.get("where") or where or "host",
+    }
+    span.set_attributes(redact_attributes(found))
+    limit = record.get("limit")
+    if limit:
+        span.set_attributes({LEVEL: "WARNING", STATUS_MESSAGE: f"stopped by its {limit} limit"})
+    _shells[span.get_span_context().span_id] = True
+
+
+def takes_command(text: str) -> bool:
+    """Whether the span current now is a tool call's (:func:`tool_span`) whose command the
+    command ``text`` is — a shell call's of that command, or a call of no shell (a tool of
+    yours that runs one): an audit record made now is that call's (:func:`command`), not a
+    command the harness ran around it (what a sandbox holds, the outputs it lists)."""
+    span = trace.get_current_span()
+    ident = span.get_span_context().span_id
+    return span.is_recording() and ident in _tool_spans and _tool_spans[ident] in (None, text)
+
+
+def in_tool_span() -> bool:
+    """Whether a tool call's span (:func:`tool_span`) is current now."""
+    return trace.get_current_span().get_span_context().span_id in _tool_spans
+
+
+def held_command(span: trace.Span, records: list[dict[str, Any]], args: Any) -> None:
+    """A framework's own shell call reported (``span``: its call's, ``args``: its arguments):
+    the audit record of the command it ran (``records``: those its run holds for such calls,
+    the oldest first — one whose command holds the call's) written on it (:func:`command`),
+    and no longer held."""
+    text = command_text(args)
+    found = next((r for r in records if text and text in str(r.get("command"))), None)
+    if found is None:
+        return
+    records.remove(found)
+    with trace.use_span(span, end_on_exit=False):
+        command(found)
+
+
+def shell_ended(span: trace.Span, outcome: Any, latency_ms: float | None) -> None:
+    """A shell call ended (``outcome``, a ``ToolOutcome``) with no audit record of the command
+    (:func:`command`: a framework ran it): its duration, its exit code where its result names
+    one, and the time limit when it timed out."""
+    ident = span.get_span_context().span_id
+    if _shells.pop(ident, True):
+        return
+    output = outcome.output
+    code = next((output[k] for k in EXIT_KEYS if isinstance(output, Mapping) and k in output), None)
+    timed_out = outcome.status.value == "timeout"
+    found = {
+        "trellis.command.duration_ms": latency_ms,
+        "trellis.command.exit_code": code if isinstance(code, int) else None,
+        "trellis.command.limit": "time" if timed_out else None,
+    }
+    span.set_attributes(redact_attributes(found))
 
 
 @contextmanager
@@ -412,8 +637,10 @@ def tool_span(
     start_time: int | None = None,
 ) -> Iterator[trace.Span]:
     """A tool call's ``execute_tool`` span; ``start_time`` (ns since the epoch) for a call its
-    framework ran itself and reported after it ran (it ends now)."""
-    with _tracer.start_as_current_span(f"execute_tool {name}", start_time=start_time) as current:
+    framework ran itself and reported after it ran (it ends now). A shell's (:data:`SHELLS`)
+    also says its command and where it runs (``trellis.command.*``)."""
+    with _span(f"execute_tool {name}", start_time=start_time) as current:
+        ident = current.get_span_context().span_id
         if current.is_recording():
             attributes = {
                 "gen_ai.operation.name": "execute_tool",
@@ -425,9 +652,19 @@ def tool_span(
                 "trellis.tool.source": source,
                 "trellis.governance.action": action,
             }
+            text = command_text(args) if name in SHELLS else None
+            _tool_spans[ident] = text
+            if text is not None:
+                attributes["trellis.command.text"] = text
+                attributes["trellis.command.where"] = SHELLS[name]
+                _shells[ident] = False
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)
-        yield current
+        try:
+            yield current
+        finally:
+            _shells.pop(ident, None)
+            _tool_spans.pop(ident, None)
 
 
 @contextmanager
@@ -437,7 +674,7 @@ def model_span(
     """A model call's ``chat`` span; ``extra`` attributes say more about the request (the
     stored prompt it selects). ``messages`` may be a function making them: called only when
     the span records."""
-    with _tracer.start_as_current_span(f"chat {model}", kind=trace.SpanKind.CLIENT) as current:
+    with _span(f"chat {model}", kind=trace.SpanKind.CLIENT) as current:
         if current.is_recording():
             attributes = {
                 "gen_ai.operation.name": "chat",
@@ -454,7 +691,7 @@ def model_span(
 
 @contextmanager
 def retrieval_span(query: str) -> Iterator[trace.Span]:
-    with _tracer.start_as_current_span("retrieve memory") as current:
+    with _span("retrieve memory") as current:
         if current.is_recording():
             attributes = {
                 "gen_ai.operation.name": "retrieve",
@@ -466,14 +703,143 @@ def retrieval_span(query: str) -> Iterator[trace.Span]:
         yield current
 
 
+#: What a person chose, by their answer's ``remember`` (``InterruptResolution``).
+CHOICES: Final = {None: "once", "run": "conversation", "always": "always"}
+
+
+def choice(decision: str, remember: str | None) -> str:
+    """The choice a person made: ``deny`` (rejected, or cancelled), else how far their approval
+    reaches — ``once``, ``conversation`` or ``always``."""
+    if decision in ("REJECT", "CANCEL"):
+        return "deny"
+    return CHOICES.get(remember, str(remember))
+
+
 def decided(span: trace.Span, decision: Mapping[str, Any]) -> None:
-    """A person's decision the attempt goes on with (its kind, reviewer, comment and reach),
-    as the attempt span's ``decision`` event and ``trellis.decision.*`` attributes."""
+    """A person's decision the attempt goes on with (its kind, reviewer, comment, reach and
+    the interrupt it answers: this attempt resumes the run), as the attempt span's
+    ``decision`` event and ``trellis.decision.*`` attributes (``choice``: once, conversation,
+    always, deny), and a ``decision`` event observation under it."""
     if span.is_recording():
         found = {f"trellis.decision.{k}": v for k, v in decision.items() if v is not None}
+        found["trellis.decision.choice"] = choice(
+            str(decision.get("decision")), decision.get("remember")
+        )
         attributes = redact_attributes(found)
-        span.set_attributes(attributes)
+        span.set_attributes({**attributes, "trellis.resumed": True})
         span.add_event("decision", attributes)
+        event("decision", attributes, output=found["trellis.decision.choice"])
+
+
+def event(
+    name: str,
+    attributes: Mapping[str, Any],
+    *,
+    input: Any = None,
+    output: Any = None,
+    level: str | None = None,
+    message: str | None = None,
+) -> None:
+    """Something that happened at one moment of the span current now, as a Langfuse
+    ``event`` observation under it (a span with no duration): an approval asked, a
+    decision, the run's step limit, its time limit, a cancellation. Redacted."""
+    given: dict[str, Any] = {**attributes, "langfuse.observation.type": "event"}
+    if input is not None:
+        given["langfuse.observation.input"] = _text(input)
+    if output is not None:
+        given["langfuse.observation.output"] = _text(output)
+    if level is not None:
+        given[LEVEL] = level
+    if message is not None:
+        given[STATUS_MESSAGE] = message[:PROPAGATED_MAX_CHARS]
+    with _tracer.start_as_current_span(name) as current:  # the attempt's records: so does this
+        current.set_attributes(redact_attributes(given))
+        if level == "ERROR":
+            current.set_status(trace.Status(trace.StatusCode.ERROR, message))
+        _experimented(current)
+
+
+def generation(
+    model: str | None,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached: int = 0,
+    written: int = 0,
+    cost: float | None = None,
+    calls: int = 1,
+) -> None:
+    """A model reply its framework made and reported (Claude Code's, Kimi Code's, an OpenAI
+    agent's: the harness does not make the call), as a ``chat`` generation under the span
+    current now, with its usage and cost — what Langfuse prices and sums. ``calls``: the model
+    calls the report counts (a Claude query's result covers its turn)."""
+    name = model or "model"
+    with _tracer.start_as_current_span(f"chat {name}", kind=trace.SpanKind.CLIENT) as current:
+        if not current.is_recording():
+            return
+        attributes: dict[str, Any] = {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": name,
+            "langfuse.observation.type": "generation",
+            "trellis.model_calls": calls,
+        }
+        current.set_attributes(redact_attributes(attributes))
+        _experimented(current)
+        usage(
+            current,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            finish_reasons=[],
+            cached_tokens=cached,
+            written_tokens=written,
+            cost=cost,
+        )
+
+
+#: The statuses a run ends with that are its failure (an error status on its span), and those
+#: that are a warning (it ended short of an answer: a limit, a cancellation, a rejection).
+FAILED: Final = frozenset({"ERROR", "TIMEOUT"})
+SHORT: Final = frozenset({"PARTIAL", "CANCELLED", "REJECTED"})
+
+
+def concluded(
+    span: trace.Span,
+    status: str,
+    spent: Mapping[str, float],
+    *,
+    root: bool,
+    error: tuple[str, str] | None = None,
+    interrupt: Mapping[str, Any] | None = None,
+) -> None:
+    """How the attempt ended, on its span: ``trellis.run.status``, what the run spent so far
+    (``trellis.spent.*``: tokens, cached and cache-written tokens, cost, model and tool calls),
+    on a run's own trace also as Langfuse trace metadata (``status``, ``spent_*``: filterable);
+    ``error`` (code, message): a failure (``ERROR``, ``TIMEOUT``: the span's error status) or
+    why it ended short (the step limit, a budget, a cancellation: a warning), with an event
+    observation for a limit, a time-out or a cancellation; ``interrupt``: the person it waits
+    on, the question and the call — an ``interrupt`` event observation."""
+    if not span.is_recording():
+        return
+    found: dict[str, Any] = {"trellis.run.status": status}
+    found.update({f"trellis.spent.{k}": v for k, v in spent.items()})
+    if root:
+        found["langfuse.trace.metadata.status"] = status
+        found.update({f"langfuse.trace.metadata.spent_{k}": v for k, v in spent.items()})
+    span.set_attributes(redact_attributes(found))
+    if interrupt is not None:
+        asked = {f"trellis.interrupt.{k}": v for k, v in interrupt.items() if v is not None}
+        span.set_attributes(redact_attributes(asked))
+        event("interrupt", asked, input=interrupt.get("question"))
+    if error is None:
+        return
+    code, said = error
+    message = redacted_text(said)
+    level = "ERROR" if status in FAILED else "WARNING"
+    span.set_attributes({"error.type": code, LEVEL: level, STATUS_MESSAGE: message})
+    if status in FAILED:
+        span.set_status(trace.Status(trace.StatusCode.ERROR, message))
+    event(status.lower(), {"error.type": code}, level=level, message=message)
 
 
 def attribute(name: str, value: str) -> None:
@@ -505,9 +871,11 @@ def usage(
     finish_reasons: list[str],
     cached_tokens: int | None = None,
     written_tokens: int | None = None,
+    cost: float | None = None,
 ) -> None:
     """A model reply's model, usage (the input tokens read from and written to the prompt
-    cache among them) and finish reasons, as GenAI attributes."""
+    cache among them), cost (US dollars, when the gateway or the framework said:
+    ``gen_ai.usage.cost``, Langfuse's total cost) and finish reasons, as GenAI attributes."""
     if not span.is_recording():
         return
     found: dict[str, Any] = {
@@ -516,6 +884,7 @@ def usage(
         "gen_ai.usage.output_tokens": output_tokens,
         "gen_ai.usage.cache_read.input_tokens": cached_tokens or None,
         "gen_ai.usage.cache_creation.input_tokens": written_tokens or None,
+        "gen_ai.usage.cost": cost,
         "gen_ai.response.finish_reasons": finish_reasons,
     }
     span.set_attributes(redact_attributes({k: v for k, v in found.items() if v not in (None, [])}))

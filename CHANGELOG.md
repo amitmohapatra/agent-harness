@@ -5,6 +5,53 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: every framework's own shell runs through the isolation layer — Claude Code's, Kimi Code's, an OpenAI local shell's
+
+The user's rule: every adapter can run shell commands when it has a shell tool, and every one
+runs under the harness's isolation. No setting more than `TRELLIS_HOST_EXECUTION`
+([governance.md](docs/governance.md#commands-on-the-host)).
+
+* **Claude Code** (breaking): each command its `Bash` (a background one too), `Monitor` or
+  `PowerShell` would run itself, as the service's user, runs in the run's workspace as the
+  run's uid (`sandbox.relay`): Claude Code's own rules see the command the model made, its
+  permission check hands the CLI a client with a one-time token on a socket only the service
+  reaches, and the harness streams the command's stdout, stderr and exit code back — what
+  Claude reads is what Claude Code makes of a command run itself; a `cd` holds for the next.
+  Claude Code works in that workspace (its `cwd`; the options' own `cwd` joins `add_dirs`),
+  with no settings of the folder's own and no `REPL`; a file it writes there is the run's.
+  Its file tools stay the CLI's, as the service's user. With its shell, a conversation's turn
+  runs in a process of its own (the workspace, and what runs in it, end with the run). Where
+  the service is not root, or the layer cannot isolate, its shell is left out, saying why.
+* **Kimi Code with no `sandbox=`**: its terminal and file capabilities are served by a
+  workspace of this machine's layer at its folder — its `Bash` runs there, its writes go there;
+  its home, login and live session stay. Where the layer cannot isolate, each command is
+  refused with the reason (and Kimi writes in its folder itself).
+* **OpenAI Agents' `LocalShellTool` and local `ShellTool`** (breaking): each command runs in
+  the run's workspace, the result the SDK's own (`ShellResult`, the text); the tool's own
+  executor is no longer called. Declared `write`, isolated: announced, not asked.
+* **The isolation layer keeps secrets out**: the cloud metadata server is out of every
+  command's reach, the network open or not (an iptables owner rule on the host — an open
+  network needs iptables — a blackhole route in the shared container); a pod's secret folders
+  (`/var/run/secrets`, `/run/secrets`) are hidden; the folders above the workspaces' root are
+  made for any uid to go through (a command reached its workspace by its whole path only from
+  inside it); `trellis doctor` fails when the Docker socket is reachable from where commands
+  run, and warns of secret files any user can read there. Where it cannot isolate, a command
+  is refused with a `ToolError` (was `ConfigurationError`).
+* **A shell command's one audit record**, made in one place (`sandbox.base.record_command`):
+  the audit log, the run's `sandbox_command` and the call's span — the isolation layer's for
+  its commands, `audited`'s for a provider that does not audit its own; a framework's call
+  that the harness ran isolated says where it really ran.
+
+### Added: a conversation's working files carry to its next turn
+
+When a run succeeds or pauses, what it wrote in its workspace besides `outputs/` is kept in the
+file store under the conversation (`.carried/<tenant>/<user>/<conversation>/<agent>/
+workspace.tar`), and the conversation's next run — on any worker, never another user's,
+tenant's or conversation's — gets it back in its fresh workspace before its first command, told
+in one line. Caches are skipped; past 50 MiB a file, 60 MiB all told, the oldest go first and
+the run is told which; a failed run keeps nothing new. The workspace on this machine is still
+deleted at the run's end ([sandbox.md](docs/sandbox.md#a-conversations-working-files-carry-to-its-next-turn)).
+
 ### Changed: shell commands on the host — isolated where the harness runs them, one switch to turn them off (`TRELLIS_HOST_EXECUTION`)
 
 Shell commands stay allowed by default (`TRELLIS_HOST_EXECUTION=allow`), with isolation as the
@@ -20,12 +67,10 @@ guard where the harness runs them:
 * **Breaking: Deep Agents' `execute` on a `LocalShellBackend` is refused at `h.wrap`**
   (alone, a `CompositeBackend`'s default, a sub-agent's; `ReAct(backend=)` too), whatever the
   setting, naming `sandbox()`. Before, it ran on the host as the service's user.
-* **The frameworks' own shells run as before** — Claude Code's and Kimi Code's, an OpenAI local
-  shell tool or Unix-local sandbox, LangChain's host `ShellToolMiddleware` — as the service's
-  user, without
-  the harness's isolation; a team's own Claude `SandboxSettings` is honoured as given (on Linux
-  it needs bubblewrap and socat: without them the CLI runs the command unsandboxed, warning on
-  its stderr). `kimi(sandbox=sandbox())` and Claude's own sandbox are the ways to isolate them.
+* **Every framework's own shell runs through the isolation layer** — Claude Code's, Kimi
+  Code's, an OpenAI local shell tool's (below); the OpenAI SDK's Unix-local sandbox and
+  LangChain's host `ShellToolMiddleware`, whose processes the framework starts itself, run as
+  before, unisolated.
 * **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
   sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
   host, an OpenAI local shell tool or Unix-local sandbox and LangChain's host shell are refused at `h.wrap` (and for a run whose own
@@ -69,6 +114,33 @@ layer runs commands on the host (allowed by default; `TRELLIS_HOST_EXECUTION=den
 `isolated_run(tenant, user, run, command, limits)`), and refuses to when the service cannot
 switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
 `duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).
+
+### Added: every step of every run in Langfuse
+
+* **A framework's own tool calls are `execute_tool` spans,** with a harness tool's attributes
+  and governance's action (`ask` for a call a person approved): Claude Code's built-ins and MCP
+  tools, Kimi Code's tools, Deep Agents' file tools (on its state backend too), `execute` and
+  `task`, OpenAI Agents' function and hosted tools, a LangChain tool in a graph of your own.
+* **Every shell command is a span** — the harness's `sandbox_exec`, Deep Agents' `execute`,
+  Claude Code's `Bash`/`Monitor`, Kimi's `Bash`, OpenAI Agents' shell tools: the command
+  (redacted), where it ran (sandbox, host isolation, the framework's own), its exit code,
+  duration and the limit that stopped it, from the command's audit record where the harness
+  ran it (the isolation layer's `sandbox_command` record is the span's).
+* **A sub-agent its framework spawns is an agent span** (`invoke_agent <helper>`) its calls
+  and replies nest under; **a framework's own model replies are `chat` generations** with
+  their usage, cache tokens and cost (Claude, Kimi, OpenAI Agents); a `ReAct` generation
+  carries the cost the gateway reported (`gen_ai.usage.cost`).
+* **An approval is an `interrupt` event** (who is asked, the question, the call) **and its
+  answer a `decision` event** (the choice: once, conversation, always, deny); a resumed
+  attempt says so (`trellis.resumed`).
+* **The attempt's span says how it ended** — `trellis.run.status`, the spend (and, on the
+  run's trace, `langfuse.trace.metadata.status` and `spent_*`), a failure's status and
+  message, the step limit, a budget, a time-out or a cancellation with its reason (a level, a
+  status message and an event) — and **a pause is no longer an error span**.
+* **Redaction:** an error raised out of a span was recorded with its message as it was (the
+  OTel SDK's `record_exception`), and a credential inside longer text (a command line, an
+  error message) was kept; both are masked now. [observability.md](docs/observability.md#what-reaches-langfuse-by-adapter)
+  lists what reaches Langfuse by adapter, and what goes elsewhere.
 
 ### Fixed: what the framework comparison of 2026-11-15 found
 

@@ -94,10 +94,33 @@ the user Claude Code would ask:
   files: your allowlist, passed through as it is) and its own read-only checks. What it lets
   run, runs; nothing more is asked.
 * **When Claude Code would ask** its user, it asks the harness (its `can_use_tool`): a call
-  that only reads runs. Its shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs too,
-  announced and recorded — in Claude Code's sandbox when the team gave one, else on this
-  machine as the service's user, without the harness's isolation — the deployment's, never the
-  user's ([below](#who-decides-what)); `TRELLIS_HOST_EXECUTION=deny` switches it off. `WebFetch` and `WebSearch` are the tool catalog's
+  that only reads runs. Its shell runs too, announced and audited, the deployment's, never the
+  user's ([below](#who-decides-what)) — through the harness's isolation layer (next);
+  `TRELLIS_HOST_EXECUTION=deny` switches it off.
+* **Its shell runs through the isolation layer.** Every command Claude Code's `Bash` (a
+  background one too), `Monitor` or `PowerShell` would run itself, as the service's user,
+  runs in the run's workspace as the run's uid instead (`sandbox.relay`): the `PreToolUse`
+  hook has Claude Code's own rules see the command as the model made it, then `can_use_tool`
+  lets it through with its command replaced by a client that hands the harness a one-time
+  token on a socket only the service reaches; the harness runs the command (its namespaces,
+  limits, an environment of its own, the network policy, audit) and streams its stdout, its
+  stderr and its exit code back, so Claude reads `Exit code 3`, a background task's output,
+  a monitor's lines as Claude Code makes them of a command run itself. A `cd` holds for the
+  next command, inside the workspace. Claude Code works in that workspace (its `cwd`, 0700,
+  the run's uid's, removed at the run's end — its `outputs/` delivered from it, its other
+  files carried to the conversation's next turn: [sandbox.md](../sandbox.md#a-conversations-working-files-carry-to-its-next-turn));
+  the options' own `cwd` stays one its file tools reach (`add_dirs`); the folder's own
+  settings are not read (`setting_sources` keeps `user` only: a command writes there), and
+  `REPL` — code run inside the CLI, which no isolation reaches — is left out. A file Claude
+  writes itself there is made the run's, so its commands may change it.
+  * **What is not isolated:** its file tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`) run in
+    the CLI, as the service's user, and reach what that user can (governed as above); a
+    command's background work ends with the run (its workspace goes), so a conversation whose
+    Claude Code has its shell runs each turn in a process of its own — no live session: a
+    background subagent does not outlive its turn either. Claude Code works in a run's
+    workspace only where the service is root: through a root helper, or where the layer
+    cannot isolate (said once in the log at start), its shell is left out and the run says
+    why (`claude_shell`). `WebFetch` and `WebSearch` are the tool catalog's
   (below). Any other asks a person, who picks as for a harness tool: allow once, for this
   conversation, always (with a memory service), deny — allow once or deny for an irreversible
   tool. What Claude Code would keep for its session ("don't ask again"), the run keeps: a tool
@@ -224,7 +247,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 | `Read`, `Grep`, `Glob` in the workspace | nobody | they run, recorded |
 | `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny |
 | its shell in its sandbox | the deployment | runs unasked, announced (`tool_notice`) and recorded |
-| its shell on the host (no sandbox, or one that lets a command out) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it, give Claude Code its own sandbox (below) |
+| its shell on the host (no sandbox, or one that lets a command out) | the deployment | runs in the run's workspace through the harness's isolation layer, unasked, announced and audited; left out where the layer cannot isolate; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap` |
 | `WebFetch`, `WebSearch` | the administrator, in the tool catalog | refused until the catalog gives the tool a risk or an `approve_when` |
 | MCP servers, `allowed_tools`, a `permission_mode` that lets calls through (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`), the CLI's own flags (`extra_args`), its `settings` | the deployment | on the options you wrap or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused (`default` and `plan` it may choose) |
 
@@ -232,7 +255,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 
 | | Where |
 |---|---|
-| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`, honoured as given ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)): on Linux it needs bubblewrap and socat — without them the CLI runs commands unsandboxed, warning only on its stderr. Without one — or with a command let out of it (`allowUnsandboxedCommands`, which Claude Code takes as true unless set false; `excludedCommands`) — Claude Code's shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs on this machine as the service's user, not through the harness's isolation layer; `TRELLIS_HOST_EXECUTION=deny` refuses such options at `h.wrap`, and a run whose `framework_options` turn the sandbox off ([governance.md](../governance.md#commands-on-the-host)) |
+| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`, honoured as given ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)): on Linux it needs bubblewrap and socat — without them the CLI runs commands unsandboxed, warning only on its stderr. Under the harness every command runs through its isolation layer, in the run's workspace (above); `TRELLIS_HOST_EXECUTION=deny` refuses options that leave Claude Code a shell outside its own sandbox at `h.wrap`, and a run whose `framework_options` turn the sandbox off ([governance.md](../governance.md#commands-on-the-host)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far, no query more (a `step_limit` warning) |
@@ -245,7 +268,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
   ([skills.md](../skills.md#native-or-ours)).
 * **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
   `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`
-  — unconfined, they run as the service's user (`TRELLIS_HOST_EXECUTION=deny` refuses them); the harness answers each
+  — every command runs in the run's workspace of the isolation layer either way (`TRELLIS_HOST_EXECUTION=deny` refuses an unconfined one); the harness answers each
   call the CLI asks about (above); a `Bash` call in the sandbox runs unasked, announced,
   whatever `autoAllowBashIfSandboxed` says ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 * **Prompts:** the options take text: `system_prompt=(await h.prompt("triage")).text` for a

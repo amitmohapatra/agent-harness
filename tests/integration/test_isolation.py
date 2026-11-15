@@ -298,12 +298,14 @@ async def test_host_execution_refuses_to_start_when_it_cannot_switch_uid(
     plain = HostSandbox(root)
     why = plain.cannot_isolate()
     assert why is not None and "runs as uid 1000, not root" in why
-    with pytest.raises(ConfigurationError, match="commands cannot be isolated on this machine"):
+    with pytest.raises(ToolError, match="commands cannot be isolated on this machine"):
         await isolated_run("acme", "ada", "r1", "id", layer=plain)
     broken = HostSandbox(root, helper=("false",))
     assert "the helper false cannot run a command as root" in (broken.cannot_isolate() or "")
     monkeypatch.setattr(isolation.shutil, "which", lambda name: None)
-    assert "unshare, setpriv, prlimit" in (HostSandbox(root).cannot_isolate() or "")
+    assert "unshare, setpriv, prlimit are missing" in (HostSandbox(root).cannot_isolate() or "")
+    opened = HostSandbox(root, network="open").cannot_isolate() or ""
+    assert "iptables, ip6tables" in opened  # an open network needs the metadata server kept out
     monkeypatch.setattr(isolation.sys, "platform", "darwin")
     assert "Linux" in (HostSandbox(root).cannot_isolate() or "")
 
@@ -437,3 +439,71 @@ async def test_names_and_paths_a_shell_would_split_are_refused(layer: HostSandbo
     ws = await layer.workspace("acme", "ada", "r1")
     with pytest.raises(ConfigurationError, match="characters a shell would split"):
         ws.alias("/a folder")
+
+
+#: A command that tries the cloud metadata server: what it got, or why it could not.
+METADATA_TRY: Final = (
+    "python3 -I -c 'import socket, sys\n"
+    'for host in ("169.254.169.254", "metadata.google.internal"):\n'
+    "    s = socket.socket(); s.settimeout(3)\n"
+    "    try:\n"
+    '        s.connect((host, 80)); print(host, "REACHED")\n'
+    "    except OSError as exc:\n"
+    '        print(host, "refused", type(exc).__name__)\n\''
+)
+
+
+@pytest.mark.parametrize("network", ["none", "open"])
+async def test_the_cloud_metadata_server_is_out_of_every_commands_reach(
+    helper: tuple[str, ...], root: str, network: Any
+) -> None:
+    """Open or not, a command never reaches 169.254.169.254 (nor its names): open, the
+    layer's uids are refused it on the host's network, the service's own reach kept."""
+    layer = HostSandbox(root, helper=helper, network=network)
+    try:
+        said = await run(layer, "r1", METADATA_TRY)
+    finally:
+        if network == "open":  # the rules stay for the layer's uids: removed after the test
+            for wall, address in (("iptables", "169.254.169.254"), ("ip6tables", "fd00:ec2::254")):
+                top = (
+                    layer.isolation.uid_base + layer.isolation.tenants * layer.isolation.tenant_uids
+                )
+                as_root(
+                    helper,
+                    wall,
+                    "-w",
+                    "-D",
+                    "OUTPUT",
+                    "-m",
+                    "owner",
+                    "--uid-owner",
+                    f"{layer.isolation.uid_base}-{top - 1}",
+                    "-d",
+                    address,
+                    "-j",
+                    "REJECT",
+                )
+    assert "REACHED" not in said.stdout
+    assert said.stdout.count("refused") == 2, said
+
+
+async def test_kubernetes_secret_folders_are_hidden_from_commands(
+    helper: tuple[str, ...], root: str
+) -> None:
+    folder = "/run/secrets/trellis-test"
+    as_root(helper, "mkdir", "-p", folder)
+    as_root(helper, "sh", "-c", f"echo {SECRET} > {folder}/token && chmod 644 {folder}/token")
+    try:
+        layer = HostSandbox(root, helper=helper)
+        said = await run(layer, "r1", f"cat {folder}/token; ls -A /run/secrets /var/run/secrets")
+    finally:
+        as_root(helper, "rm", "-rf", folder)
+        as_root(helper, "rmdir", "/run/secrets")
+    assert SECRET not in said.stdout and said.exit_code != 0
+
+
+async def test_a_command_reaches_its_workspace_by_its_whole_path(layer: HostSandbox) -> None:
+    """The folders above the workspaces' root are made for any uid to go through: ``$HOME``
+    (the workspace's whole path) is the run's from any folder."""
+    said = await run(layer, "r1", 'cd /; echo kept > "$HOME/a" && cat "$HOME/a"')
+    assert said.stdout == "kept\n", said

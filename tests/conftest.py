@@ -53,6 +53,20 @@ def files_of_this_test(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: Any) -
 
 
 @pytest.fixture(autouse=True)
+def commands_refused_unless_a_test_isolates_them() -> Iterator[None]:
+    """A shell command on this machine is refused in a test that gives no isolation layer of
+    its own (``use_host``, ``host.install``, a ``layer=``): the default layer cannot isolate
+    (its helper is ``false``), wherever the tests run — root or not — so a framework's own
+    shell is off the same way on every machine (Claude Code's left out, Kimi Code's and an
+    OpenAI shell's refused, saying why). The isolation tests make one that can."""
+    from trellis.harness.sandbox.isolation import HostSandbox, use_host
+
+    replaced = use_host(HostSandbox("/var/lib/trellis-test-none", helper=("false",)))
+    yield
+    use_host(replaced)
+
+
+@pytest.fixture(autouse=True)
 def no_real_claude(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """A Claude Agent SDK client a test starts without the scripted CLI (``cli_path``) must
     reach no model: looking for the real CLI fails the test. Live tests run the real CLI."""

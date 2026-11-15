@@ -50,6 +50,7 @@ from trellis.harness.adapters.claude import (
 from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.host import CLAUDE_SHELLS
 from trellis.harness.sandbox import DELIVERS_HERE
 
 #: Claude Code and Kimi Code run their shells in a folder of this machine: the tests' deployment
@@ -193,9 +194,10 @@ async def test_the_options_reach_the_cli_as_the_sdk_sends_them(
     switches = ("--debug-to-stderr", "--include-partial-messages", "--include-hook-events")
     assert all(name in argv for name in (*switches, "--strict-mcp-config"))
     assert "--system-prompt" not in argv  # the preset stays Claude Code's own prompt
-    # the team's, then the tools whose work outlives a query
+    # the team's, its shell (off: the tests' layer cannot isolate a command, conftest), then
+    # the tools whose work outlives a query
     assert flag(argv, "--disallowedTools") == ",".join(
-        ["WebFetch", *OUTLIVES_THE_QUERY, *UNHELD_AGENTS]
+        ["WebFetch", *sorted(CLAUDE_SHELLS), *OUTLIVES_THE_QUERY, *UNHELD_AGENTS]
     )
     servers = json.loads(cli["mcp_config"])["mcpServers"]
     assert servers["erp"] == {"type": "http", "url": "http://127.0.0.1:9/mcp"}

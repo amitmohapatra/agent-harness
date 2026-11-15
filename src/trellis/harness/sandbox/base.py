@@ -25,7 +25,10 @@ The contract a provider keeps:
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+import time
 from collections.abc import Mapping
 from typing import Any, Final, Literal, Protocol, runtime_checkable
 
@@ -38,6 +41,7 @@ from pydantic import (
 )
 
 from trellis.contracts import ToolError
+from trellis.harness import telemetry
 
 #: What every label the harness gives a sandbox begins with (the ones a provider lists).
 PREFIX: Final = "trellis."
@@ -233,3 +237,73 @@ class SupportsSnapshot(Protocol):
     makes the sandbox again from (``SandboxRef.snapshot``) and ``delete`` removes."""
 
     async def snapshot(self, ref: SandboxRef) -> str: ...
+
+
+#: The logger every command is recorded on, one JSON object a line, and the ``CUSTOM`` event a
+#: run's command is recorded with on its stream.
+AUDIT: Final = "trellis.sandbox.audit"
+COMMAND_EVENT: Final = "sandbox_command"
+#: The longest command an audit record keeps.
+AUDIT_CHARS: Final = 8_192
+
+
+def record_command(record: dict[str, Any]) -> None:
+    """A shell command's one audit record — who, tenant, run, sandbox, the command, its exit
+    code, how long it took, the limit it hit, ``where`` it ran (``host``: this machine's
+    isolation layer; ``sandbox``) — said once, from here: in the audit log (:data:`AUDIT`), on
+    the run's stream (:data:`COMMAND_EVENT`), and on the tool call's span — the span current
+    now when it is the call of this command (a harness tool's: ``telemetry.takes_command``),
+    else, with no call's span current, the span of the framework's own call that ran it
+    (Claude Code's ``Bash``, Kimi Code's), kept for it until that call is reported
+    (``Runtime.commands``, ``tools.bridge.observed``). A command the harness ran around a call
+    (what a sandbox holds, the outputs it lists) is on no span."""
+    from trellis.harness.runtime import current  # noqa: PLC0415 - the runtime imports this
+
+    runtime = current()
+    if runtime is not None:
+        record.setdefault("user", runtime.user)
+        record.setdefault("tenant", runtime.tenant)
+        record.setdefault("run", runtime.run_id)
+    logging.getLogger(AUDIT).info(json.dumps(record))
+    if runtime is not None:
+        runtime.events.custom(COMMAND_EVENT, **record)
+    if telemetry.takes_command(str(record.get("command"))):
+        telemetry.command(record)
+    elif runtime is not None and not telemetry.in_tool_span():
+        runtime.commands.append(record)  # a framework's own call's, reported once it ran
+
+
+async def audited(
+    box: Sandbox,
+    command: str,
+    *,
+    timeout: float | None,  # noqa: ASYNC109 - the command's
+) -> ExecResult:
+    """``box.exec`` of a model's command, audited once (:func:`record_command`): by the box
+    itself when it audits its commands (``audits``: the isolation layer's workspaces), else
+    here (``where="sandbox"``)."""
+    if getattr(box, "audits", False):
+        return await box.exec(command, timeout=timeout)
+    started = time.monotonic()
+    try:
+        result = await box.exec(command, timeout=timeout)
+    except TimeoutError:
+        _recorded(box, command, None, started, "time")
+        raise
+    _recorded(box, command, result.exit_code, started, None)
+    return result
+
+
+def _recorded(
+    box: Sandbox, command: str, code: int | None, started: float, limit: str | None
+) -> None:
+    record_command(
+        {
+            "sandbox": box.ref.id,
+            "command": command[:AUDIT_CHARS],
+            "exit_code": code,
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+            "limit": limit,
+            "where": "sandbox",
+        }
+    )
