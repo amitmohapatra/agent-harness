@@ -684,7 +684,9 @@ class Agent:
         )
         return self.hooks.answer(await self._continue(record, resolution))
 
-    async def checkpoints(self, run_id: str, *, tenant: str | None = None) -> AsyncIterator[Any]:
+    async def checkpoints(
+        self, run_id: str, *, reader: str, tenant: str | None = None
+    ) -> AsyncIterator[Any]:
         """The checkpoint history of a run of this agent, the newest first, as LangGraph's
         ``StateSnapshot``s (its ``get_state_history``: each with its ``values``, what runs
         ``next``, and its ``config``, whose ``checkpoint_id`` :meth:`rewind` takes) — read from
@@ -693,10 +695,12 @@ class Agent:
 
         The run store keeps a run's checkpoint until the run ends: an ended run has no
         history left, and says so. For an agent whose runs keep their graph's checkpoints
-        (``ReAct``, a ``middleware()`` graph); any other answers that it has none. ``tenant``
-        is the run's, named by a platform key only; a run that is not this agent's in that
-        tenant is refused as every read of a run is."""
-        _, journal = await self._kept(run_id, tenant)
+        (``ReAct``, a ``middleware()`` graph); any other answers that it has none. ``reader``
+        is who reads it: only the run's own user does (its states hold the conversation), as
+        only they rewind it. ``tenant`` is the run's, named by a platform key only; a run that
+        is not this agent's in that tenant is refused as every read of a run is."""
+        record, journal = await self._kept(run_id, tenant)
+        _own_user(record, reader, "reads its checkpoints")
         from trellis.harness.bridges import rewind  # noqa: PLC0415 - the react extra
 
         async for state in rewind.checkpoints(self.target, run_id, journal):
@@ -735,11 +739,7 @@ class Agent:
                 f"run {run_id} is {record.status.value.lower()}: a run is rewound while it is "
                 "paused"
             )
-        user = record.user_id
-        if user is None or principal(reviewer) != principal(user):
-            raise ConfigurationError(
-                f"run {run_id} is {user}'s: only its user rewinds it, not {reviewer}"
-            )
+        user = _own_user(record, reviewer, "rewinds it")
         start = await self._start(
             record.input,
             user=user,
@@ -1917,3 +1917,14 @@ async def _sandbox_of(runs: RunStore, record: RunRecord) -> dict[str, Any] | Non
         log.warning("run %s: its sandbox is left to the reaper: %s", record.run_id, exc)
         return None
     return journal.sandbox
+
+
+def _own_user(record: RunRecord, who: str, does: str) -> str:
+    """The run's user, who alone ``does`` what is asked of the run (its checkpoints hold its
+    conversation); anyone else (``who``) is refused."""
+    user = record.user_id
+    if user is None or principal(who) != principal(user):
+        raise ConfigurationError(
+            f"run {record.run_id} is {user}'s: only its user {does}, not {who}"
+        )
+    return user

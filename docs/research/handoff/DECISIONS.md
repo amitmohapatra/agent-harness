@@ -104,3 +104,30 @@ Legend: **Rec** = my recommendation.
 - **Cleanup phase only (no behaviour change):** the two code paths that build and resume an
   SDK approval pause share one function, parameterised by who asks (governance's choices, or
   the five decisions for the user's own gate). Tests and the docs table stay as they are.
+
+## The five owner decisions (2026-11-15, owner: "you decide what is best as we are doing it for an enterprise company; a sandbox may or may not be available")
+- **Rewinding an ended run: yes, opt-in per agent.** agent-runs keeps an ended run's checkpoint
+  only when asked (an additive flag on `finish`; a cancel takes the same final save), kept for
+  the run-artifact retention like any artifact. Default off: keeping every ended run's state
+  would multiply storage and the conversation data held. **Status: to build** (agent-runs, then
+  `Agent.rewind` / `Agent.checkpoints` on ended runs).
+- **Who rewinds, and who reads checkpoints: the run's own user only.** `Agent.checkpoints` now
+  takes `reader=` and refuses anyone but the run's user, as `Agent.rewind` refuses any
+  `reviewer` but them: a run's checkpoints hold its conversation, which a colleague of the same
+  tenant must not read. Every rewind is on record (`metadata["rewound"]`: who, what, when). An
+  admin path waits for a role model in the harness. **Status: done.**
+- **An approval at a library's own gate after a rewind: it counts.** A rewound run's journal
+  starts without the earlier run's approvals (`Journal.rewound`), so the only gate approval
+  that can count is one a person gives in the rewound run itself — a fresh, explicit approval
+  of the repeat; asking again through governance would ask the person the same question twice.
+  Nothing allowed before the rewind carries over (`Journal.repeats` still asks). **Status: as is.**
+- **Rolling upgrades: unknown journal fields are kept, never refused or dropped.** `Journal`,
+  `Pending` and `Made` take `extra="allow"`: a server reads a journal a newer one wrote and saves
+  its fields back as they were, so two versions share one run store. Ignoring them instead would
+  let an older server drop them on its next save. This upgrade itself (from code that forbids
+  unknown fields) needs a full stop or a drain of the old servers. **Status: done.**
+- **Sandbox for Claude and Kimi: no default.** A sandbox is not always available. Configured,
+  Claude and Kimi use it; not configured, they run in the run's own folder with governance
+  asking before writes and shell commands. A `require_sandbox` setting (opt-in) refuses to start
+  them without one, for regulated tenants: fail closed where the tenant asks for it.
+  **Status: `require_sandbox` to build.**

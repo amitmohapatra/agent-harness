@@ -87,7 +87,7 @@ def id_of(state: Any) -> str:
 
 
 async def history(agent: Any, run_id: str) -> list[Any]:
-    return [state async for state in agent.checkpoints(run_id)]
+    return [state async for state in agent.checkpoints(run_id, reader="u")]
 
 
 async def before_the_refund(agent: Any, run_id: str) -> str:
@@ -326,7 +326,9 @@ async def test_a_run_of_another_agent_or_tenant_is_refused_as_any_read_of_it_is(
     with pytest.raises(ConfigurationError, match=refusal):
         await stranger.rewind(run_id, "any", reviewer="u")
     with pytest.raises(ConfigurationError, match="speaks for"):
-        [s async for s in agent.checkpoints(run_id, tenant="another-tenant")]
+        [s async for s in agent.checkpoints(run_id, reader="u", tenant="another-tenant")]
+    with pytest.raises(ConfigurationError, match="only its user reads its checkpoints"):
+        [s async for s in agent.checkpoints(run_id, reader="mallory")]  # its states: u's chat
 
 
 async def answers(question: str, agent: Any) -> str:

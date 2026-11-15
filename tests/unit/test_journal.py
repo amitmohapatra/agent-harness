@@ -675,3 +675,13 @@ async def test_progress_after_reads_is_saved_at_most_every_20_s(
         await Runtime._saved(run, now=False)
     await Runtime._saved(run, now=True)  # after a write: at once
     assert saves == [1000.0, 1020.0, 1025.0]
+
+
+def test_a_field_a_newer_server_wrote_is_kept_and_saved_again() -> None:
+    """A rolling upgrade: a journal a newer server wrote, with a field this one does not know,
+    is read, and its dump — what this server saves — still holds it as it was."""
+    journal = Journal.model_validate({"used": ["refund"], "from_the_future": {"kept": [1, 2]}})
+    journal.used.append("lookup")  # this server's own work, saved with it
+    dumped = journal.dump()
+    assert dumped["from_the_future"] == {"kept": [1, 2]}
+    assert dumped["used"] == ["refund", "lookup"]

@@ -800,13 +800,13 @@ written whole every 16th.
 #### Rewinding a paused run
 
 ```python
-states = [s async for s in agent.checkpoints(run_id)]  # LangGraph's StateSnapshots, newest first
+states = [s async for s in agent.checkpoints(run_id, reader="ada")]  # newest first: the run's user only
 result = await agent.rewind(
     run_id, states[5].config["configurable"]["checkpoint_id"], reviewer="ada"
 )
 ```
 
-`agent.checkpoints(run_id)` reads the history the run store keeps of a paused run (or of one a
+`agent.checkpoints(run_id, reader=...)` reads, for the run's own user only, the history the run store keeps of a paused run (or of one a
 worker is running: what it last saved), read-only, a page of 20 at a time. `agent.rewind`
 continues the run's conversation from one of those checkpoints, as LangGraph's time travel
 does — `values=` applied to that state first, as LangGraph's `update_state` applies them — in

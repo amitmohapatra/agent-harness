@@ -228,7 +228,7 @@ events until it ends, from any replica with `RUNS_URL`
 ### agent.checkpoints, agent.rewind
 
 ```text
-agent.checkpoints(run_id, *, tenant=None) -> AsyncIterator[StateSnapshot]
+agent.checkpoints(run_id, *, reader, tenant=None) -> AsyncIterator[StateSnapshot]
 await agent.rewind(run_id, checkpoint_id, *, values=None, reviewer, tenant=None) -> Result
 ```
 

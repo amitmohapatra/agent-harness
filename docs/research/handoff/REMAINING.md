@@ -35,6 +35,9 @@ coverage gate of `trellis.harness`, and the tests in section 4 that were never r
 5. The cleanup refactor, last (section 8).
 6. The Haiku phase (section 10), when credit is added.
 
+**Owner decisions taken 2026-11-15** (rewind, who rewinds, framework approvals after a
+rewind, rolling upgrades, sandbox default): `DECISIONS.md`, last section.
+
 **Two things only the owner can settle**
 
 1. **The security review is now in this repository** (`REVIEW_security.md`, added at the

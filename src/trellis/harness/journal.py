@@ -207,7 +207,7 @@ class Made(BaseModel):
     """A tool call as the model made it: its arguments, and its place among the run's tool
     calls, as a run from its input counts them (0: the first)."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="allow")
 
     tool: str
     args: dict[str, Any]
@@ -217,7 +217,7 @@ class Made(BaseModel):
 class Pending(BaseModel):
     """The interrupt the run is waiting on, and the key its answer is filed under."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="allow")
 
     key: str
     interrupt: Interrupt
@@ -256,9 +256,13 @@ def governance_held(pending: Pending) -> bool:
 
 
 class Journal(BaseModel):
-    """Answers and tool outputs recorded so far, plus the pause currently open."""
+    """Answers and tool outputs recorded so far, plus the pause currently open.
 
-    model_config = ConfigDict(extra="forbid")
+    A field it does not know — written by a newer server of a rolling upgrade — is kept and
+    saved again as it was (``extra="allow"``, here and in :class:`Pending` and :class:`Made`),
+    never refused and never dropped: servers on two versions share one run store."""
+
+    model_config = ConfigDict(extra="allow")
 
     answers: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     calls: dict[str, list[Any]] = Field(default_factory=dict)
