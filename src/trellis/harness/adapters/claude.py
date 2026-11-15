@@ -1439,7 +1439,7 @@ def _options(
         "hooks": with_context(hooks, context or "") if context or kept else hooks,
         "system_prompt": prompt,
         # what Claude Code asks its user about, the harness answers (the team's own first)
-        "can_use_tool": _asked(options.can_use_tool, steps, shell),
+        "can_use_tool": _asked(options.can_use_tool, steps, shell, _deployed(runtime, options)),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
         "env": env,
         "settings": _settings(options),
@@ -1689,10 +1689,20 @@ def _shell(options: Any, env: Mapping[str, str]) -> Shell:
     return Shell(options.cwd or os.getcwd(), reads, {**os.environ, **env})
 
 
-def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
+def _deployed(runtime: Runtime, options: Any) -> bool:
+    """Whether the options' ``can_use_tool`` is the deployment's (the wrapped options', or
+    ``h.wrap(framework_options=)``'s), not a run's own."""
+    agent = runtime.agent
+    deployed = agent.framework_options.get("can_use_tool", agent.target.can_use_tool)
+    return options.can_use_tool is deployed
+
+
+def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
     """The ``can_use_tool`` the CLI calls when Claude Code would ask its user about a call (its
     permission mode and rules let it through without asking otherwise): the team's own
-    callback, when it has one; else a call that only reads runs — a read tool, or a shell
+    callback, when it has one (a run's own, not ``deployed``, may refuse a call, never let one
+    through for the person: what it lets through is answered as with none); else a call that
+    only reads runs — a read tool, or a shell
     command the CLI's ``shell`` reads as read-only (``Shell.read_only``: from every folder it
     may be in, none known while another call that may move it is under way) —, so does the
     shell (:data:`CLAUDE_SHELLS`: in its sandbox, or on a host the deployment allows it on —
@@ -1713,8 +1723,11 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         spec = _spec(runtime, name)
-        if own is not None:
-            verdict = await own(name, args, context)
+        verdict = await own(name, args, context) if own is not None else None
+        if not deployed and isinstance(verdict, PermissionResultAllow):
+            verdict = None  # a run's own check refuses; the person answers what it lets by
+        if verdict is not None:
+            pass
         elif name == QUESTION_TOOL:
             try:
                 verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))

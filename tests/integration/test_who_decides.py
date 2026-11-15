@@ -191,23 +191,38 @@ async def allow_everything(*_: Any) -> PermissionResultAllow:
         {"extra_args": {"permission-mode": "bypassPermissions"}},
         {"extra_args": {"allowedTools": "Write"}},
         {"settings": json.dumps({"permissions": {"allow": ["Write"]}})},
-        {"can_use_tool": allow_everything},
     ],
-    ids=["flag-mode", "flag-allowed", "settings", "can_use_tool"],
+    ids=["flag-mode", "flag-allowed", "settings"],
 )
 async def test_claudes_permissions_are_loosened_by_no_other_run_option(
     memory_harness: Harness, tmp_path: Path, given: dict[str, Any]
 ) -> None:
-    """What lets Claude Code run a call without its user — the CLI's own flags, its settings'
-    permission rules, an answer to its question — is the deployment's as its permission mode
-    is: a run's own ``framework_options`` saying it is refused, and the user decides the write
-    under the one rule."""
+    """What lets Claude Code run a call without asking — the CLI's own flags, its settings'
+    permission rules — is the deployment's as its permission mode is: a run's own
+    ``framework_options`` saying it is refused, and the user decides the write under the one
+    rule."""
     step = {"builtin": "Write", "args": {"file_path": "notes.md"}}
     agent = memory_harness.wrap(claude(tmp_path, step), id="loosened")
     with pytest.raises(ConfigurationError, match=r"h\.wrap"):
         await agent.run("w", user="ada", framework_options=given)
     paused = await agent.run("w", user="ada")
     assert paused.interrupt is not None and ran(tmp_path) == [], paused
+
+
+async def test_a_runs_own_permission_check_never_approves_for_the_user(
+    memory_harness: Harness, tmp_path: Path
+) -> None:
+    """A run's own ``can_use_tool`` is asked when Claude Code would ask its user, and may
+    refuse the call; one that lets it through does not answer for the user, who is asked as
+    without it. (The deployment's own, on the options it wraps, answers as it is.)"""
+    step = {"builtin": "Write", "args": {"file_path": "notes.md"}}
+    agent = memory_harness.wrap(claude(tmp_path, step), id="checked")
+    given = {"can_use_tool": allow_everything}
+    paused = await agent.run("w", user="ada", framework_options=given)
+    assert paused.interrupt is not None and ran(tmp_path) == [], paused
+    deployed = memory_harness.wrap(claude(tmp_path, step, can_use_tool=allow_everything), id="d")
+    allowed = await deployed.run("w", user="ada")
+    assert allowed.status is RunStatus.SUCCESS and ran(tmp_path) == ["Write"], allowed
 
 
 # --------------------------------------------------------------------------- Kimi Code
