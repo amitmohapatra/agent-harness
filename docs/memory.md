@@ -129,7 +129,10 @@ said:
   the run store's record of it — its question and answer — after the window (a framework that
   replays messages: LangGraph's graphs, `ReAct`), matched by message id so that a turn memory
   holds is never given twice — with nothing in the window, the run store's newest turns (at
-  most 10), within the conversation's budget;
+  most 10), within the conversation's budget. A framework that takes the window as text (a
+  function, OpenAI Agents, Claude with no session of its own, an ACP agent) gets no message
+  ids to match by: the turns its process wrote whose writes are still on their way are said
+  after the window ("The latest turns of this conversation"), once each, until memory has them;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
   Mode's nested calls from Bifrost's log — their arguments and outputs as they are
   ([observability.md](observability.md#redaction)), in the order the log has them, each at
@@ -155,9 +158,12 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
   stopping with it queued (shutdown drains for at most 10 s) — is logged and counted
   (`trellis.writes.undelivered`). With `TRELLIS_SPOOL_DIR` set, a write that is data (a
   transcript, a tool record, the run's outcome, a decision, catalog entries) is appended to
-  `<dir>/trellis-writes.jsonl` and replayed — the file claimed by renaming it, then removed —
-  the next time a harness with the same directory starts writing (a worker at its start, any
-  other process at its first write). The service stores a replayed write that had in fact
+  `<dir>/<deployment>/trellis-writes.jsonl` and replayed — the file claimed by renaming it,
+  then removed — the next time a harness of the same deployment starts writing (a worker at
+  its start, any other process at its first write). `<deployment>` names the memory service
+  and the key the writes are made with (`MEMORY_URL`, `TRELLIS_API_KEY`; a digest, never the
+  key), so processes of other deployments sharing the directory leave each other's writes,
+  which their own key could not make. The service stores a replayed write that had in fact
   landed once (every write carries its idempotency key or message id). Without the directory,
   or for a write that is not data (the sampled grounding check, the model key, Code Mode
   calls read back from the gateway), it is lost.

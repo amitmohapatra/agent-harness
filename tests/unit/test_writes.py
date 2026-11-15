@@ -18,6 +18,7 @@ from trellis.harness.events import RunEvents
 from trellis.harness.writes import SPOOL_FILE, Writes
 from trellis.memory.breaker import CircuitBreaker
 from trellis.memory.errors import CircuitOpenError, DependencyUnavailableError, ValidationError
+from trellis.memory.errors import TimeoutError as MemoryTimeoutError
 
 
 @pytest.fixture(autouse=True)
@@ -144,6 +145,37 @@ async def test_the_first_write_of_an_outage_outlasts_the_failures_that_open_the_
     await writes.aclose()
 
 
+async def test_a_write_whose_own_calls_time_out_gives_up_though_the_circuit_reopens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service is up, and answers this write's every call with its own timeout (a 504:
+    ``/v1/verify`` past its 15 s budget on a busy machine). Those timeouts open the client's
+    circuit, and its cool-downs spend no attempt — but the timed-out calls do, across them: the
+    write is given up after its attempts, not tried again forever. It was: its attempts whole
+    after each cool-down, every probe timing out and opening the circuit again, a drain never
+    ended (the scenario suite's 55-turn Claude chat, out of time at 1800 s, its grounding
+    checks still queued). An outage — the service not answering at all — still spends none."""
+    sleep = asyncio.sleep
+
+    async def at_once(seconds: float) -> None:  # the cool-downs and backoffs, not waited
+        await sleep(0)
+
+    monkeypatch.setattr(module.asyncio, "sleep", at_once)
+    writes, tries = Writes(), []
+
+    async def verify() -> None:
+        tries.append(1)
+        if len(tries) % 2:
+            raise MemoryTimeoutError("past its time", code="TIMEOUT", status=504, retryable=True)
+        raise circuit_open(30.0)
+
+    await writes.submit("memory.verify", verify)
+    async with asyncio.timeout(5):
+        await writes.drain()
+    assert writes.failed == 1 and len(tries) == 2 * module.WRITE_ATTEMPTS - 1, len(tries)
+    await writes.aclose()
+
+
 async def test_writes_held_by_an_open_circuit_fill_the_queue_and_overflow_as_ever(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -249,6 +281,33 @@ async def test_a_refusal_is_not_tried_again_nor_spooled(tmp_path: Path) -> None:
     await writes.drain()
     assert tries == [1] and writes.failed == 1 and writes.spooled == 0
     assert not (tmp_path / SPOOL_FILE).exists()
+    await writes.aclose()
+
+
+async def test_a_refusal_says_what_the_service_refused(caplog: pytest.LogCaptureFixture) -> None:
+    """MEM-: four Claude transcripts were refused with a 422 on the comparison of 2026-11-15,
+    and the log said only "Request validation failed". The memory service's answer names each
+    field it refused and why (its problem's ``details``): the warning event and the log say so,
+    so the next refusal is diagnosed from the log alone."""
+    from trellis.memory.errors import error_from_problem
+
+    field = {"loc": ["body", "messages"], "msg": "List should have at most 100 items after "
+             "validation, not 116", "type": "too_long"}  # fmt: skip
+    answer = {"code": "VALIDATION", "detail": "Request validation failed", "retryable": False}
+    refusal = error_from_problem(422, answer | {"details": {"errors": [field]}})
+    writes = Writes()
+    events, seen = run_events()
+
+    async def refused() -> None:
+        raise refusal
+
+    with caplog.at_level(logging.WARNING, logger="trellis.writes"):
+        await writes.submit("memory.transcript", refused, events=events)
+        await writes.drain()
+    for said in (seen[0].data["message"], caplog.text):
+        assert "Request validation failed" in said
+        assert "List should have at most 100 items after validation, not 116" in said
+        assert '"loc": ["body", "messages"]' in said
     await writes.aclose()
 
 
@@ -457,6 +516,45 @@ async def test_a_harness_replays_memory_writes_only_with_memory_on(tmp_path: Pat
 
     async with Harness(config=Settings(spool_dir=str(tmp_path))) as h:
         assert h._replay({"op": "record_messages", "scope": {}, "args": {}}) is None
+
+
+async def test_a_process_replays_only_its_own_deployments_spooled_writes(tmp_path: Path) -> None:
+    """MEM-: the spool was one folder per machine user, so a process replayed every other
+    process's undelivered writes — on the comparison of 2026-11-15, 33 transcript writes of a
+    stopped run were replayed by another arm, made with another key, and refused (403). Each
+    deployment (the memory service and the key its writes are made with) keeps its own: another
+    deployment's process sharing the directory leaves them, and the writes a stopped process
+    left are replayed once by its deployment's next processes, however many start."""
+    from tests.support.memory import FakeMemoryService
+    from trellis import Harness, Settings
+
+    service = FakeMemoryService()
+
+    def deployment(key: str) -> Harness:
+        settings = Settings(memory_url="http://memory", api_key=key, spool_dir=str(tmp_path))
+        return Harness(config=settings, memory=service.client())
+
+    async def answer(input: str, agent: Any) -> str:
+        return "ok"
+
+    service.fail.add("messages")  # the transcript cannot be written: it is spooled
+    stopped = deployment("key-a")
+    await stopped.wrap(answer, id="echo").run("hi", user="u1", thread="t1")
+    await stopped.writes.drain()
+    assert stopped.writes.spooled == 1  # left in the spool (the process is never closed)
+    service.fail.clear()
+    async with deployment("key-b") as other:  # another deployment on the same machine
+        other.writes.start()
+        await other.writes.drain()
+    assert service.named("messages") == []
+    async with deployment("key-a") as one, deployment("key-a") as two:
+        for later in (one, two):
+            later.writes.start()
+        for later in (one, two):
+            await later.writes.drain()
+    [replayed] = service.named("messages")
+    assert [m["content"] for m in replayed.body["messages"]] == ["hi", "ok"]
+    await stopped.aclose()
 
 
 async def test_background_writes_belong_to_no_run() -> None:

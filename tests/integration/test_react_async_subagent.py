@@ -142,6 +142,9 @@ class StandIn:
         self.seconds = seconds
         #: every task runs until :meth:`release`, whatever the clock says (:meth:`hold`)
         self.held = False
+        #: a task's time over, it ends only once this says so too, and stays ended (``None``:
+        #: at once) — what a test's order of events, not the clock, says it waits for
+        self.ends_after: Callable[[], bool] | None = None
         #: why every task fails once its time is over (``None``: it succeeds)
         self.fails: str | None = None
         #: the server refuses to cancel a run
@@ -212,6 +215,10 @@ class StandIn:
         run = self.runs[task_id]
         over = not self.held and time.monotonic() - run["started"] >= self.seconds
         ended = "success" if self.fails is None else "error"
+        if run["status"] == "running" and over and self.ends_after is not None:
+            if not self.ends_after():
+                return "running"
+            run["status"] = ended  # ended for good: whatever the test's condition says later
         return ended if run["status"] == "running" and over else run["status"]
 
     def hold(self) -> None:
@@ -1539,6 +1546,27 @@ async def test_g_past_the_bound_the_largest_files_give_way_never_the_task_list(
         assert kept == state and turn.events.said == []
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
+async def test_g_a_turn_says_the_files_it_left_out_and_keeps_its_state_before_it_ends(
+    harness: Harness,
+) -> None:
+    """The warning naming the files left out of what the conversation carries is one of the
+    turn's events, before its ``RUN_FINISHED`` — where a stream ends and a client stops
+    reading — and the state is in the file store by then: a next turn the client sends as
+    the turn ends, on any server, starts with it."""
+    big = ("write_file", {"file_path": "/big.txt", "content": "b" * 300_000})
+    agent = harness.wrap(create_deep_agent(model=Model(turns=[big, "Written."])), id="desk")
+    events, kept_at_the_end = [], []
+    async for event in agent.stream("write it", user=USER, thread=THREAD):
+        if event.type is RunEventType.RUN_FINISHED:
+            kept_at_the_end = kept_files(harness)
+        events.append(event)
+    assert events[-1].type is RunEventType.RUN_FINISHED, events[-3:]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "carried_files_dropped"]
+    assert len(warned) == 1 and warned[0].endswith(": /big.txt"), warned
+    assert [f for f in kept_at_the_end if f.startswith(pipeline.CARRIED_FOLDER)], kept_at_the_end
+
+
 async def test_g_a_task_list_alone_past_the_bound_is_not_kept_and_said(
     harness: Harness, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1933,6 +1961,9 @@ async def test_i_remote_task_outcomes_start_three_tasks_in_a_row_and_the_fourth_
         turns += [START, f"Started task {n + 1}."]
     model = Model(turns=[*turns, START, says_what_the_tool_said])
     agent = chat(harness, server, model)
+    # each task ends once no turn works — after the turn that started it ended: one that ended
+    # first (a loaded machine) is read by that turn itself, which the script does not plan
+    server.ends_after = lambda: not agent.running
     await say(agent, "run the optimization")
 
     async def chained() -> list[RunRecord]:

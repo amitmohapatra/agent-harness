@@ -43,7 +43,9 @@ from starlette.routing import Route
 from tests.support.planned import CUT, CUT_REPLY, FINAL, Call, worded
 from trellis.contracts import stable_id
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
+from trellis.harness.adapters.claude import RESUMED
 from trellis.harness.tools.bridge import STALLED, TURN_STALLED
+from trellis.harness.tools.convert.mcp import STOPPED
 
 #: The ``kimi`` program, when it is installed.
 KIMI_BIN: Final = shutil.which("kimi")
@@ -143,11 +145,12 @@ class PlannedEndpoint:
         results: list[str] = []
         edited: Call | None = None
         users = 0
+        remade = _remade(body["messages"])
         for message in body["messages"]:
             role, text = message.get("role"), text_of(message.get("content"))
             if role == "tool":
                 found = result_text(message.get("content"))
-                if not any(mark in found for mark in NOT_RUN):
+                if not _not_run(found, remade):
                     results.append(found)
             elif role == "user":
                 users += 1
@@ -395,6 +398,20 @@ _STALLED: Final = re.compile(
 )
 
 
+def _remade(messages: list[dict[str, Any]]) -> bool:
+    """Whether the harness's resumed prompt (``adapters.claude.RESUMED``) is among
+    ``messages``: told to make again a call whose result says the run ended before it
+    finished (``tools.convert.mcp.STOPPED``), the model makes it again."""
+    return any(m.get("role") == "user" and RESUMED in text_of(m.get("content")) for m in messages)
+
+
+def _not_run(result: str, remade: bool) -> bool:
+    """Whether a call whose result is ``result`` did not run, to the model: its result says so
+    (:data:`NOT_RUN`), or the run's end cut it short and the model is told to make it again
+    (``remade``: :func:`_remade`)."""
+    return any(mark in result for mark in NOT_RUN) or (remade and STOPPED in result)
+
+
 def _ran(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """``messages`` less the calls Kimi did not run (their result says so, :data:`NOT_RUN`, or
     there is none) and those results."""
@@ -403,7 +420,8 @@ def _ran(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for m in messages
         if m.get("role") == "tool"
     }
-    unrun = {i for i, said in results.items() if any(mark in said for mark in NOT_RUN)}
+    remade = _remade(messages)
+    unrun = {i for i, said in results.items() if _not_run(said, remade)}
     kept = []
     for m in messages:
         if m.get("role") == "tool" and m.get("tool_call_id") in unrun:

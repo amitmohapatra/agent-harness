@@ -230,6 +230,10 @@ class Runtime:
     suspend: Suspend | None = None
     #: the pause this attempt ended on
     pending: Pending | None = None
+    #: what stopped a tool call a framework runs in a task of its own (a ``BaseException``
+    #: that is no cancellation: the process ending), raised out of the attempt by its adapter
+    #: (:meth:`raise_stopped`)
+    stopped_by: BaseException | None = None
     #: the Code Mode scripts this attempt ran, each as (when it started, its step): their
     #: nested calls are read back from the gateway's log and recorded at their script's step
     code_mode_scripts: list[tuple[datetime, int | None]] = field(default_factory=list)
@@ -571,7 +575,15 @@ class Runtime:
                 yield made
         self.replay.ended(made)
 
+    def raise_stopped(self) -> None:
+        """Raise what stopped one of this attempt's tool calls in a framework's own task
+        (:attr:`stopped_by`), once one did: the attempt ends with it, as a framework that runs
+        the call in the attempt's own task ends it."""
+        if self.stopped_by is not None:
+            raise self.stopped_by
+
     # ------------------------------------------------------------------ stalls
+
     def model_started(self, key: str, seconds: float | None = None) -> None:
         """A model call (``key``: the framework's id of it) began: its watchdog ends the
         attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within

@@ -224,10 +224,15 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
         # make a forced call twice in one step)
         calls = started(events)
         assert set(calls) == {"list_tool_files", "execute_tool_code"}
-        for request in sent.requests:  # no gateway name is ever declared to the model
-            offered = {t["function"]["name"] for t in request["tools"]}
+        # every request as the harness built it offers every meta-tool, and no gateway name
+        # (before the test's own narrowing to a forced tool: ``Forcing.offered``)...
+        assert len(forcing.offered) == len(sent.requests)
+        for offered in forcing.offered:
             assert {s.name for s in CODE_MODE_TOOLS} <= offered
             assert not offered & set(GATEWAY_NAMES.values())
+        for request in sent.requests:  # ...and no gateway name is ever declared to the model
+            declared = {t["function"]["name"] for t in request.get("tools") or []}
+            assert not declared & set(GATEWAY_NAMES.values())
         results = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
         # a model may make both calls in one step, so their results arrive in either order
         tool_of = {

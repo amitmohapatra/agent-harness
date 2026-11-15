@@ -138,7 +138,9 @@ async def test_a_sub_agents_tokens_count_toward_its_parents_and_its_own_limit_is
     assert record.status is RunStatus.PARTIAL
 
 
-def test_a_replys_cached_tokens_and_cost_are_read_from_its_usage() -> None:
+def test_a_replys_cache_reads_cache_writes_and_cost_are_read_from_its_usage() -> None:
+    """A reply's input tokens read from the prompt cache and written to it are counted apart
+    (a cache write is priced above plain input, a read below it), with the gateway's cost."""
     from types import SimpleNamespace
 
     from langchain_core.messages import AIMessage
@@ -152,14 +154,15 @@ def test_a_replys_cached_tokens_and_cost_are_read_from_its_usage() -> None:
             "input_tokens": 100,
             "output_tokens": 10,
             "total_tokens": 110,
-            "input_token_details": {"cache_read": 80},
+            "input_token_details": {"cache_read": 70, "cache_creation": 20},
         },
         response_metadata={"model_name": "m", "token_usage": {"cost": {"total_cost": 0.02}}},
     )
     budget.account_reply(runtime, SimpleNamespace(result=[reply]))
     assert budget.spent(runtime) == {
         "tokens": 110,
-        "cached_tokens": 80,
+        "cached_tokens": 70,
+        "cache_written_tokens": 20,
         "cost": 0.02,
         "model_calls": 1,
         "tool_calls": 0,
@@ -314,7 +317,9 @@ async def test_a_finished_run_says_what_it_spent_on_its_end(harness: Harness) ->
     shop = Shop()
 
     async def spender(input: str, agent: Runtime) -> Any:
-        budget.account(agent, model="m", input_tokens=100, output_tokens=20, cached=40, cost=0.25)
+        budget.account(
+            agent, model="m", input_tokens=100, output_tokens=20, cached=40, written=30, cost=0.25
+        )
         budget.account(agent, model="m", input_tokens=50, output_tokens=5, cost=0.5)
         await agent.tools.call("stock", sku="a")
         if input == "fail":
@@ -322,7 +327,8 @@ async def test_a_finished_run_says_what_it_spent_on_its_end(harness: Harness) ->
         return "done"
 
     agent = arm(harness.wrap(spender, id="spender"), shop.tools())
-    spent = {"tokens": 175, "cached_tokens": 40, "cost": 0.75, "model_calls": 2, "tool_calls": 1}
+    spent = {"tokens": 175, "cached_tokens": 40, "cache_written_tokens": 30, "cost": 0.75}
+    spent |= {"model_calls": 2, "tool_calls": 1}
     for asked in ("ok", "fail"):
         events = [e async for e in agent.stream(asked, user="u")]
         finished = events[-1]

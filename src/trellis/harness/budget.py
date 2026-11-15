@@ -110,12 +110,20 @@ class Budget:
 
 
 #: What a run's end says it spent (``spent``), each counted from 0.
-SPENT_KEYS: Final = ("tokens", "cached_tokens", "cost", "model_calls", "tool_calls")
+SPENT_KEYS: Final = (
+    "tokens",
+    "cached_tokens",
+    "cache_written_tokens",
+    "cost",
+    "model_calls",
+    "tool_calls",
+)
 
 
 def spent(runtime: Runtime) -> dict[str, float]:
     """What the run has spent, its sub-agents' runs and its earlier attempts included: its
-    tokens (input and output), cached tokens, dollars (as the gateway said them), model calls
+    tokens (input and output), the input tokens read from and written to the prompt cache,
+    dollars (as the gateway said them), model calls
     and harness tool calls — what its ``RUN_FINISHED`` event carries (``spent``)."""
     kept = runtime.replay.journal.spent
     return {name: kept.get(name, 0.0 if name == "cost" else 0) for name in SPENT_KEYS}
@@ -136,11 +144,14 @@ def account(
     input_tokens: int,
     output_tokens: int,
     cached: int = 0,
+    written: int = 0,
     cost: float | None = None,
     calls: int = 1,
 ) -> None:
-    """One model reply's spending, on the run and every run it works inside (``calls``: 0 for
-    a cost that came apart from its replies)."""
+    """One model reply's spending, on the run and every run it works inside: ``input_tokens``
+    counts every prompt token, of which ``cached`` were read from the provider's prompt cache
+    and ``written`` written to it (priced apart: a cache write costs more than plain input);
+    ``calls``: 0 for a cost that came apart from its replies."""
     capped = any(r.budget is not None and r.budget.max_cost for r in _runs(runtime))
     if cost is None and capped:
         _no_cost(model or "a model")
@@ -148,6 +159,7 @@ def account(
         spent = run.replay.journal.spent
         spent["tokens"] = spent.get("tokens", 0) + input_tokens + output_tokens
         spent["cached_tokens"] = spent.get("cached_tokens", 0) + cached
+        spent["cache_written_tokens"] = spent.get("cache_written_tokens", 0) + written
         spent["cost"] = spent.get("cost", 0.0) + (cost or 0.0)
         spent["model_calls"] = spent.get("model_calls", 0) + calls
 
@@ -162,6 +174,7 @@ def account_reply(runtime: Runtime, reply: Any) -> None:
     if message is None:
         return
     usage: dict[str, Any] = dict(message.usage_metadata or {})
+    details = usage.get("input_token_details") or {}
     metadata = message.response_metadata or {}
     account(
         runtime,
@@ -169,7 +182,8 @@ def account_reply(runtime: Runtime, reply: Any) -> None:
         cost=gateway_cost(metadata),
         input_tokens=int(usage.get("input_tokens") or 0),
         output_tokens=int(usage.get("output_tokens") or 0),
-        cached=int((usage.get("input_token_details") or {}).get("cache_read") or 0),
+        cached=int(details.get("cache_read") or 0),
+        written=int(details.get("cache_creation") or 0),
     )
 
 

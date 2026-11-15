@@ -98,7 +98,8 @@ async def test_one_chat_on_two_servers_is_one_turn_at_a_time(uid: str, tmp_path:
 
 
 @pytest.mark.plan("CONV-06")
-@pytest.mark.parametrize("adapter", sorted(STEERS))
+# and one that takes no steer (a Deep Agent without the harness's middleware): its own turn too
+@pytest.mark.parametrize("adapter", sorted(STEERS | {"deepagents"}))
 async def test_a_steer_after_the_last_step_is_its_own_turn(
     h: Harness, adapter: str, uid: str, tmp_path: Path
 ) -> None:

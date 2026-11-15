@@ -113,8 +113,10 @@ async def test_a_schedule_made_in_chat_fires_into_its_thread(
                 chat["result"]
             ).mine == token(uid, 2)
 
+            # the fired run's own reply (its answer's token the report's): the turn that made
+            # the schedule names the report's token too, among the tokens it saw
             async def delivered() -> bool:
-                return report.upper() in "\n".join(heard)
+                return f"ANS {report.upper()}" in "\n".join(heard)
 
             assert await eventually(delivered, within=200 if how == "ticker" else 90, every=1), (
                 heard[-5:]
@@ -125,19 +127,25 @@ async def test_a_schedule_made_in_chat_fires_into_its_thread(
         async def kept() -> bool:
             said = await history(h, user=user, agent_id=agent_id, thread=closed_thread)
             return any(
-                token(f"q{uid[:5]}", 9).upper() in content
+                parse(content).mine == token(f"q{uid[:5]}", 9)  # the fired run's reply
                 for role, content in said
                 if role.upper() == "ASSISTANT"
             )
 
         assert await eventually(kept, within=120, every=2)
-        fired = [r async for r in h.runs.iterate(agent_id=agent_id)]
-        scheduled = [
-            r
-            for r in fired
-            if r.thread_id in (open_thread, closed_thread) and r.status is RunStatus.SUCCESS
-        ]
-        assert len(scheduled) >= 4  # two chat turns making them, the chat turn, the fired runs
+        scheduled: list = []
+
+        async def ended() -> bool:  # a run's reply is out a moment before its record says so
+            fired = [r async for r in h.runs.iterate(agent_id=agent_id)]
+            scheduled[:] = [
+                r
+                for r in fired
+                if r.thread_id in (open_thread, closed_thread) and r.status is RunStatus.SUCCESS
+            ]
+            return len(scheduled) >= 5
+
+        # two chat turns making them, the chat turn, the two fired runs
+        assert await eventually(ended, within=60, every=1), scheduled
     finally:
         served.stop()
         for s in await _schedules(h, user, agent_id):

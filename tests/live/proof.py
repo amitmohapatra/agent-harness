@@ -107,19 +107,39 @@ class Wire:
         return json.dumps([r.get("messages") for r in self.requests])
 
 
+class Filed(dict[str, list[Any]]):
+    """A journal's records of calls, remembering the key of every record filed in it: a
+    checkpointed graph's run drops a step's records once its graph has moved past the step
+    (``Replay.passed``: the checkpoint has its calls then, and the graph does not make them
+    again), so what the journal holds as the run ends is not every call it journaled."""
+
+    def __init__(self, records: dict[str, list[Any]], filed: set[str]) -> None:
+        super().__init__(records)
+        self.filed = filed
+        filed.update(records)
+
+    def setdefault(self, key: str, default: Any = None) -> list[Any]:  # type: ignore[override]
+        self.filed.add(key)
+        return super().setdefault(key, default)
+
+
 class Proof(Hooks):
     """The run as the harness ran it, read from its own hooks: the context it pushed, the
-    calls it ran and their outcomes, and its journal as the run ended."""
+    calls it ran and their outcomes, every call its journal filed a record of while it ran
+    (``filed``), and its journal as the run ended."""
 
     def __init__(self) -> None:
         self.context: str | None = None
         self.calls: list[tuple[ToolCall, ToolOutcome]] = []
         self.trajectory: list[tuple[ToolCall, ToolOutcome]] = []
         self.journaled: dict[str, list[Any]] = {}
+        self.filed: set[str] = set()
         self.result: Result | None = None
 
     async def on_run_start(self, run: Runtime) -> None:
         self.context = run.context
+        journal = run.replay.journal
+        journal.calls = Filed(journal.calls, self.filed)
 
     async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
         self.calls.append((call, outcome))
@@ -246,8 +266,10 @@ def recorded(run: Run, proof: Proof, decisions: list[tuple[str, Decision]]) -> N
     assert sorted(on_stream) == sorted(ran), (on_stream, ran)
     assert [c.tool for c, _ in proof.trajectory] == [c.tool for c, _ in proof.calls]
     for call, outcome in proof.calls:
-        if outcome.ok:  # a re-run of the run gets this output, and runs nothing
-            assert content_key("call", call.tool, call.args) in proof.journaled, call
+        if outcome.ok:  # a re-run of the run gets this output, and runs nothing: journaled
+            # (still held as the run ends, or dropped once a checkpoint holds its step)
+            key = content_key("call", call.tool, call.args)
+            assert key in proof.journaled or key in proof.filed, call
     decided = [tool for tool, _ in decisions]
     for call, _ in proof.calls:
         assert call.tool in decided, (call.tool, decided)

@@ -273,7 +273,10 @@ make test-features # every feature's purpose, end to end against the real memory
 ```
 
 `make test-live` reads the deployment environment and skips whatever is unset or unreachable;
-`tests/live/conftest.py` says what it registers in the gateway for the session. The memory
+a test that needs only a real model runs through Bifrost or, with no gateway, directly at the
+model's endpoint (`LLM_BASE_URL`, `LLM_API_KEY`), and only the tests of Bifrost's own features
+need the gateway. `tests/live/conftest.py` says what it registers in the gateway for the
+session. The memory
 service in the tests is an in-process fake behind the real SDK, and every request and answer
 is checked against the service's committed `docs/openapi.json`; `tests/contract` does the same
 for agent-runs. The documents are read from the sibling checkouts, or from

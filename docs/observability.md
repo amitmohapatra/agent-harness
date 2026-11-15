@@ -162,7 +162,9 @@ memory search and recall see the real data. Masking of your own is a hook:
 conversation, always, or by the schedule that fired the run: `remembered: true` —; `custom`,
 what a LangGraph graph's node wrote to its `custom` stream mode, in `value`),
 `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. Every `RUN_FINISHED` (whatever its outcome) says
-what the run spent in `data.spent`: `tokens` (input and output), `cached_tokens`, `cost` (US
+what the run spent in `data.spent`: `tokens` (input and output), `cached_tokens` and
+`cache_written_tokens` (the input tokens read from and written to the provider's prompt cache,
+each priced apart from plain input), `cost` (US
 dollars, as the gateway reported them), `model_calls` and `tool_calls`, its sub-agents' runs
 and earlier attempts included — the counts its budget reads ([runs.md](runs.md#spending-a-budget-per-run)). The decision is also on the attempt's
 `invoke_agent` span (`trellis.decision.*` attributes and a `decision` span event). With

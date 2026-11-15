@@ -234,8 +234,8 @@ that ends with nothing at work ends it, as ever.
   on): a background run that ends first — cancelled (with the turn that started it, or on its
   own), out of time, its budget spent — leaves its task at work, refused whatever it asks, until
   it ends or the process does.
-* **Its life**, as Claude's: one process per conversation, in one server process, at most 16 per
-  agent; it closes 5 minutes after its last activity when nothing works in it, 6 hours after its
+* **Its life**, as Claude's: one process per conversation, in one server process, at most 8 over
+  all its agents; it closes 5 minutes after its last activity when nothing works in it, 6 hours after its
   last turn whatever does, when a turn brings other settings (`framework_options`, other harness
   tools) or does not continue its session, and with the harness (`Harness.aclose`). Work that
   ends with it is said in the conversation's next run (`acp_session`); a restart loses it.
@@ -276,9 +276,10 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 * **Framework options.** `framework_options=` takes `ACPAgent` fields: `env` and `mcp_servers`
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
   `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer
-  (over ACP a finished turn; its own log says `loop.max_steps_exceeded`), and the run asks it
-  once more in the same session, told the limit is reached, as `ReAct` does at `max_steps` (a
-  `step_limit` warning).
+  (over ACP a finished turn; its own log says `loop.max_steps_exceeded`), and the run ends
+  `PARTIAL` with what Kimi said before the limit (none: `None`), as Claude's turn limit does —
+  no model call more (decision D1): a `step_limit` warning and the budget's say so, its
+  error `BUDGET_EXCEEDED` naming the limit, so an app can offer "continue".
   A loop on one call ends the same way: Kimi's own repeat breaker (`KIMI_CODE_REPEAT_BREAKER`,
   on by default: reminders to answer, then the turn ended at the twelfth identical call; its log
   says `repeat_breaker`) and the harness's refusal of a harness call repeated three times

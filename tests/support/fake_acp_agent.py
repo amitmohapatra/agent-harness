@@ -136,6 +136,11 @@ MODES = {
     "auto": (False, "auto"),
     "yolo": (False, "yolo"),
 }
+#: What a harness call the run's end cut short returns (``tools.convert.mcp.STOPPED``), and
+#: the words of a resumed prompt that tell the model to make such a call again
+#: (``adapters.claude.RESUMED``): told so, the step runs again, as a paused one does.
+CUT_SHORT = "The run ended before this tool finished."
+REMAKE_CUT = "its result says the run ended before it finished"
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
 
 #: This process, in its calls' ids.
@@ -389,6 +394,9 @@ class FakeAgent:
         if data.get("stopped") and not edited and data["done"] < len(SCRIPT) and told:
             data["done"] += 1  # the step was rejected: what the prompt says is its result
             data["last"] = text
+        elif data.get("stopped") == CUT_SHORT and REMAKE_CUT not in text:
+            data["done"] += 1  # not told to make it again: its error is its result
+            data["last"] = CUT_SHORT
         data["stopped"] = None
         override = json.loads(edited["args"]) if edited else None
         usage = None
@@ -801,6 +809,8 @@ class FakeAgent:
         await self.progress(session_id, call_id, status=status, raw_output=text)
         if text == "Waiting for a person's approval.":
             raise Stopped("paused")
+        if text == CUT_SHORT:  # the run ended while it ran: the turn ends with it
+            raise Stopped(text)
         return text
 
     async def called(

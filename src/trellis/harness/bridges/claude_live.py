@@ -260,6 +260,7 @@ class Background(Kept):
             input_tokens=_tokens(used) - output,
             output_tokens=output,
             cached=cached,
+            written=int(used.get("cache_creation_input_tokens") or 0),
             cost=cost,
             calls=1 if usage else 0,
         )

@@ -136,6 +136,7 @@ def accounted(runtime: Runtime, record: Mapping[str, Any], model: str | None) ->
         input_tokens=int(usage.get("inputOther") or 0) + cached + written,
         output_tokens=int(usage.get("output") or 0),
         cached=cached,
+        written=written,
     )
 
 

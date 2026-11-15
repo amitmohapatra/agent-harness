@@ -367,11 +367,16 @@ OWN_PROCESS: Final = "this query runs in a process of its own"
 #: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
 #: would let a call whose hook failed through to its own permission check.
 UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
-#: What a resumed session is told: the run goes on, and the call it paused on is made again.
+#: What a resumed session is told: the run goes on, and the call it paused on is made again —
+#: or the call its process stopped in, which the session may hold with the harness's
+#: ``tools.convert.mcp.STOPPED`` as its result (the worker died while it ran, and the session
+#: was resumed on the same machine): a model told only "no result yet" read that error as the
+#: call's result and never made it.
 RESUMED: Final = (
     "This task was paused (a person was asked, or the process stopped) and goes on now. If "
-    "your last tool call has no result yet, call that tool again with the same arguments: "
-    "it runs once. Then carry on with the task."
+    "your last tool call has no result yet, or its result says the run ended before it "
+    "finished, call that tool again with the same arguments: it runs once. Then carry on "
+    "with the task."
 )
 #: What a session resumed after a person answered about one tool call — its approval, or a
 #: question it asked while it ran — is told: that call, by the name Claude knows it by. The
@@ -750,6 +755,7 @@ class ClaudeAdapter:
             source = _queried(prompt, options) if live is None else live.served(turn, prompt)
             async with contextlib.aclosing(source) as messages:
                 async for message in messages:
+                    runtime.raise_stopped()  # a call the process's end stopped ends it here
                     steps.waiting()  # the next message is the next step's
                     found = getattr(message, "session_id", None)
                     if isinstance(found, str):
@@ -1196,7 +1202,8 @@ class Spending:
             self.journal.session_cost = self.cost.total
 
     def replied(self, message: Any) -> None:
-        """An assistant message: its reply's usage (one reply comes as a message a block)."""
+        """An assistant message: its reply's usage (one reply — one model call — comes as a
+        message a block, each with the reply's id)."""
         if message.message_id and message.usage:
             whose = self.own if message.parent_tool_use_id is None else self.helped
             whose[message.message_id] = message.usage
@@ -1211,18 +1218,12 @@ class Spending:
         self.results += 1
         if result.session_id:
             self.costs[result.session_id] = self.cost
-        # a turn no reply of the model's is in — one the CLI answered itself, a slash
-        # command (``/compact``: ``num_turns`` 0) — is no model call: the run, its answer
-        # empty, is one no model replied in (``pipeline._unanswered``)
-        replied = bool(self.own or self.helped or result.num_turns)
-        _spent(
-            self.runtime,
-            self.options,
-            result,
-            self.helped.values(),
-            cost=cost,
-            calls=int(replied),
-        )
+        # one model call for each reply the CLI reported, its own and its subagents' (what
+        # the provider serves); a turn no reply of the model's is in — one the CLI answered
+        # itself, a slash command (``/compact``: ``num_turns`` 0) — is no model call: the
+        # run, its answer empty, is one no model replied in (``pipeline._unanswered``)
+        calls = len(self.own) + len(self.helped) or int(bool(result.num_turns))
+        _spent(self.runtime, self.options, result, self.helped.values(), cost=cost, calls=calls)
         self.own.clear()
         self.helped.clear()
 
@@ -1238,19 +1239,20 @@ class Spending:
             self.left()
 
     def left(self) -> None:
-        """What the replies no result counted said."""
-        if self.own or self.helped:
-            _spent(self.runtime, self.options, None, [*self.own.values(), *self.helped.values()])
+        """What the replies no result counted said: a model call each."""
+        replies = [*self.own.values(), *self.helped.values()]
+        if replies:
+            _spent(self.runtime, self.options, None, replies, calls=len(replies))
 
 
 def _spent(
     runtime: Runtime,
     options: Any,
     result: Any,
-    replies: Iterable[dict[str, Any]] = (),
+    replies: Iterable[dict[str, Any]],
     *,
+    calls: int,
     cost: float | None = None,
-    calls: int = 1,
 ) -> None:
     """What a query spent, on the run's budget (``calls``: the model calls it counts as):
     its result's usage (the main agent's), the
@@ -1270,6 +1272,7 @@ def _spent(
         input_tokens=total("input_tokens") + cached + written,
         output_tokens=total("output_tokens"),
         cached=cached,
+        written=written,
         cost=cost,
         **({} if calls == 1 else {"calls": calls}),
     )
