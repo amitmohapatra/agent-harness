@@ -1,0 +1,220 @@
+State notes for the assistant-words work (worktree /var/tmp/cons/aw, branch claude/cool-maxwell-w5avo8-assistant-words, pushed head 8dddcf1 + uncommitted CHANGELOG.md draft with a MEASURED_HERE placeholder).
+- Private Postgres: rm -f /var/tmp/mx/stack/pg/data/postmaster.pid; su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D /var/tmp/mx/stack/pg/data -o '-p 55991' -l /var/tmp/mx/stack/pg/log.txt start"
+- Gate rows of the rule alone against main (126 questions, two ingests each): /var/tmp/cons/a/ag_[0-3].json; scorer ag_score.py; ids gate_ids.json; driver ag_exp.py + ag.sh <worker> <workers>.
+- Step D (64 questions, main = branch 0.865/0.917): /var/tmp/cons/g/gd_[0-3].json, gd_score.py, gd_report.txt. The 8 questions of the earlier 63-question run that the 64 did not hold: gd8.sh <w> 4 (4 of 8 rows saved in gd8_[0-3].json; resumable).
+- Model spend $4.498 (g_spend.sh in /var/tmp/cons/g). Nothing else is running after a container restart; drop any p7_mx_ag*/p7_mx_gd* databases that remain.
+- 21:26 Section changes built on the branch (pushed aa69d85): matching passage, further answers, deeper read, all from spare room. Gate pass running: as.sh <w> 4 -> as_[0-3].json (one ingest per question under the rule; variants rule/p1/p13/final built in one process; part 2 measured by emulation in the row's "unasked"; off-topic on every third row). Compare with ag_[0-3].json main and rule arms. Offline study: off_study.py, off_diag.py.
+- Still to do: score (write as_score.py), LoCoMo byte-identity on one conversation (mp tree = main vs aw tree), changelog (replace MEASURED_HERE), suites, push, hand back; finish gd8 (4 of 8).
+- 21:45 FOLLOW-ON (after part 1's hand-back, not started): branch claude/cool-maxwell-w5avo8-questions-to-model from the assistant-words head. When the model may read a person's message (gapfill.wanted), a message the rules kept nothing from (question-only: native.py drops a piece whose sentences are all questions or acknowledgements near the verbatim_turn comprehension ~879-899; pipeline _gaps returns Gaps() with no verbatim_turn candidate; check worth_asking too) is still read by the model and its fills stored. Without a model byte-identical (prove). No contract/setting/wording rule/prompt change (say so with evidence if the prompt must change). Tests first with a fake model. Measurement with real Haiku, HARD CAP $0.90 for the task, never pass $5.40 total, report spend after each step: (1) the 7 question-only gold messages (57f827a0 answer_1bde8d3b:0, b6025781 answer_8414cc57:0, caf03d32 answer_2fc6aabb:2, 75f70248 answer_8ee04a2e:2 + 1 multi-session, 1 single-session-user, 1 temporal) through the real gap-fill call, verbatim returns; stop if no fact from most. (2) end to end on the 4 preference questions (no-model ingest + model on the gold session's user messages: a hybrid, say so). (3) one full preference haystack: model on every question-only user message (~43 calls): memories stored, real facts vs restated requests (show 10), other gold moves. (4) no drop: no-model 126 gate identical to part 1; LoCoMo question-only count ($0) and cost of a re-ingest; run one conversation only if it fits the cap. Hand back diff, tests, numbers, step 1 verbatim, spend, anything lower; no tuning.
+- 21:55 AMENDMENT to the follow-on: test only on the questions that are low or wrong; no full passes (they happen once at the end, cost asked first). Step 4: do NOT run LoCoMo with the model; only count its question-only turns ($0) and estimate a with-model re-ingest. No-drop: by test and on the 6 preference questions' stores. Part 1 hand-back must list the assistant-answer question ids still not found and why (clipped / not searched / not stored). Keep token use low: long waits, short hand-back.
+- 22:45 Part 1 pass done: as_report.txt (as built: assistant type gold sentences 328 -> 592, questions 52 -> 52, answer string 23 -> 27; multi-session 111 -> 110 from 81507db6: main's best memory 0.402 was assistant-made, under the rule the best is the user's at 0.388 < 0.40 so the five under-floor memories are not packed: ad.json). Part 2 (ungated search) measured and left out. Not handed back; coordinator replaced the follow-on:
+  A diagnose at $0: 81507db6 gold answer_da3c1266_1:0 and d6233ab6 gold answer_b0fac439:2 (rank, similarity, which rule of _packing_order/_below_floor leaves it out; main vs rule).
+  B write path: with a model configured the model reads EVERY message a person writes: REMOVE the shape gates before the model (no verbatim turn -> Gaps(); worth_asking's question-only and short-statement tests). No model: byte-identical stores (prove). No wording rule/setting/contract; prompt evidence first.
+  C read path only if A shows a rule of ours is the cause: one principle; with and without a model.
+  D answers with real Haiku, reader+judge as gm_answers.py/gm_score.py, harness notes arm: D1 all 56 single-session-assistant, 1 run, main vs as built (estimate in NOTES first, ~$0.75; if it would pass $5.40 use the 30 most-different + 10 same). D2 the 6 incomplete preference questions + 81507db6 + d6233ab6, 3 runs, main vs final (hybrid: model on the gold sessions' user messages), evidence before/after. D3 verbatim model returns for the 7 question-only gold messages + 2 side-remark messages. D4 ~60 user messages sampled evenly from one preference haystack through B: memories stored, show 10, how many real facts.
+  Spend $4.498; hard stop $5.85; report spend here after each step. No full passes; LoCoMo count/estimate only. No drop vs main on the 126 no-model gate once C is in (re-run only questions whose contexts can change). Short hand-back: principle of each change, tests, D1/D2 tables, D3 verbatim, D4, spend, anything lower, branch heads.
+- 22:50 AMENDMENT ("no risk or noise"): (1) D.4 is pass/fail: every stored item must be a fact the person stated about themselves or their world; count the ones that are not, show them all, and if any: do not ship B, stop B, no prompt softening without evidence first. (2) Add to D: the 5 user-gold questions where the earlier-chats section fires, 3 runs, answers main vs as built; if lower, report (needs a principle, not a threshold). (3) For each change that adds text: fires on N, carries gold on M. Cap $5.85 unchanged; cut D.1 to the 40-question version first if needed.
+- 23:20 B built and pushed (branch claude/cool-maxwell-w5avo8-questions-to-model, worktree /var/tmp/cons/qw): gates removed in pipeline._gaps / gapfill.wanted, native.statement added; tests in tests/integration/test_gapfill_memory.py; unit suite 3,520 passed. C: replay (replay_c.py) shows every alternative condition adds memories to questions nothing answers -> not built. Next: D.3/D.4/D.2 with real Haiku via a hybrid ingest driver; spend still 4.498.
+
+== 23:50 new brief from the coordinator (replaces the order) ==
+Order now: A (done), B (built, qw 79f6866, clean diff), C, E, then D ONCE on the final build. Spend still 4.498; cap 5.85.
+E = earlier-conversations section without a wording trigger: a reply is shown when the encoders + the memory relevance floor (0.2) say it is
+relevant. Emulate at $0 first (e_emb.py -> e_emb/*.npz, e_study.py -> e_report.txt). Build only if it finds more of the 5 missed
+(1568498a 71a3fd6b 8464fc84 ac031881 c4f10528) without adding lines to most user-gold questions; otherwise STOP on E, keep the gate, report.
+Merge bar (user, restated): 1 better with AND without a model (a change helping one path leaves the other identical); 2 no category lower than
+main (81507db6 must be 3 of 3 again without a model; C is for that); 3 nothing lower than the best earlier build (first ten 93 / 34, user's
+lines 98/298/2,012, assistant lines 0, assistant type 592 sentences, 27 answer strings); 4 no noise, no wording condition added.
+If a step cannot meet all four: stop on that step, report numbers, other steps continue.
+D driver ready: qd_exp.py / qd.sh <plan> <w> <W> (arms main, built, hybold, hybB), planA.json (12 + 56 questions), plan_sets.json, a_spend.sh.
+7 question-only gold user turns: 1faac195 answer_d01949bf:2, caf03d32 answer_2fc6aabb:2, 57f827a0 answer_1bde8d3b:0, 75f70248 answer_8ee04a2e:2,
+b6025781 answer_8414cc57:0, 157a136e answer_8de18468_1:2, gpt4_88806d6e answer_e60a93ff_1:0.
+Part 1 full suite (label part1) was still running at 23:50 (one F at 98%); read suite.out, then git -C aw checkout -- benchmark/results.
+
+== 23:35 (container clock) results so far ==
+Part 1 full suite on c611e0e: 4,694 passed, 2 failed (the two capability-eval env tests, as on main). aw benchmark/results restored.
+LoCoMo $0 count: 10 conversations, 5,882 turns; old gates kept 286 from the model (150 question-only/acknowledgement, 136 short); a with-model
+  re-ingest reads 5,882 messages ~ $0.0005 each = about $3 (not run).
+E (emulation, e_report.txt): whole-reply cosine >= floor 0.2: assistant-gold fires 51/51, gold in first 3: 47, in 9: 51, all 5 missed found
+  (ranks 6,1,1,1,6), the 2 low-ranked found (3, 1); BUT user-gold fires 74/75 (217 lines in first 3, 154 from the gold session; 601 with room),
+  off-topic fires 62/100 (148 lines). Does not separate -> STOP on E, gate kept (per the brief's rule 2).
+C: closest reply >= 0.40 as "the conversation is about it": whole reply 81507db6 0.292 (not restored), sentence forms 0.425 (restored) but then
+  off-topic 18/100 fire. No noise-free principle -> C not built; 81507db6 stays 2 of 3 without a model.
+D.4 (planB row 0, caf03d32 noise60): 60 messages, model asked 62, 36 stored. 15 of the 60 are newly read under B: 0 ops, 0 stored.
+  Not facts the person stated: S09/S10 (All2Trade spec from an "act as a software developer" request) - message was read before B too.
+Spend 4.528 after D.4 (a_spend.sh). Running: planB (D.3 extras + D.2, 2 workers), bi.sh aw/qw (no-model store digests). Next: planC (D.1) 4 workers.
+B without a model (bi.sh aw1/qw1 81507db6, bi_aw/bi_qw caf03d32+81507db6): every table's row count equal; memories rows identical in every
+  compared column except generated thread ids inside `subject` (26 rows). Stores identical. Contexts: caf03d32 same; 81507db6 17/18 (build noise).
+planC (D.1, 56 ssa, arms main/built, $0 ingest) started workers 0,1 of 4; start 2,3 when planB ends.
+
+== 00:05 (container clock) ==
+planB done (qd_planB_[01].json; qd_report.py -v prints D.2 evidence + D.3). Spend 4.577 after D.2/D.3/D.4 ingests (197 model calls).
+D.3/B gate: across all hybB runs 151 messages read, 37 newly read under B -> 9 items stored from 6 messages (31 messages: nothing):
+  planning a trip to Europe; is 32 years old (INFERRED from "do you think 32 is considered young or old"); owns an Apple Watch; has a cat that
+  sheds a lot; Emily is the sister and lives in Denver; thinking of visiting Emily; met Mark and Sarah on a beach trip; planning a trip to
+  visit them; looking for a new mid-century modern bedroom dresser. No greeting, no "the user asked". caf03d32 and b6025781 gold questions: [].
+D.2 evidence: 81507db6 main 3/3, built 2/3, with model 3/3 (old gates and B); d6233ab6 1/2, 1/2, 2/2; 57f827a0 model fact in context (B).
+D.1 COST ESTIMATE (before starting): 56 questions x 2 sides x 1 run = 112 answers + 112 judgements in batch ~ $0.06; the 5 user-gold
+  questions x 3 runs ~ $0.02; D.2 answers (84 requests, batch qD2, running) ~ $0.05. Projected total ~ $4.71, cap $5.85. Full 56 kept.
+qw: docs + changelog for B committed locally (not pushed yet); full suites on qw still to run after planC.
+D.2 ANSWERS (batch qD2, harness reader, 3 runs, 7 questions; spend now 4.627): main 11/21, built (rule+sections, no model) 5/21, hybold (model,
+  old gates) 12/21, hybB (model, B) 11/21. Per question main/built/hybold/hybB: caf03d32 2/1/1/0, 09d032c9 0/0/0/0, 75f70248 3/1/2/0,
+  d6233ab6 0/0/3/3, 81507db6 3/0/3/3, 57f827a0 1/0/0/3, b6025781 2/3/3/2.  => built LOWER than main without a model on these (report, no tuning);
+  B flat against the model with old gates. Do NOT start a preference pass (no full passes); propose it in the hand-back.
+
+== 00:55 FINAL STATE ==
+D.1 (batch qD1, 56 ssa, 1 run, harness reader): main 34/56 -> as built 48/56; 16 up, 2 down (1568498a section not fired; 1d4da289).
+  Where the section fires (51; gold sentences carried on 44): 31 -> 46. The 5 user-gold questions where it fires, 3 runs (qD5): 12/15 -> 12/15.
+D.2 see above (main 11/21, built 5/21, model old gates 12/21, model + B 11/21).
+B full suites (qw 854f5c2, pushed): 4,693 passed, 2 failed (the two capability-eval env tests, as on main).
+Spend total 4.712 (cap 5.85). Branch heads: assistant-words c611e0e, questions-to-model 854f5c2. Nothing merged, no PR.
+C and E: not built (numbers in e_report.txt, replay_c.py). Private qd/bi databases dropped; test databases memory_tests_aw/qw, aw_*, qw_* kept.
+
+== 01:00 LEG 2 (coordinator): E judged on answers. Step 1 $0 numbers (bars 0.2 / 0.40), step 2 answers main / part 1 / part 1 + E on 126 (1 run)
++ 7 low x3 for the E arm, step 3 build only if nothing lower than main. Part 1 contexts for 63 of the 70 non-assistant questions were never saved
+-> planD.json (arms main, built, tag Q4, $0) running on 4 workers (~65 min). Compose E contexts offline from e_emb cosines.
+Step 1 (e_step1.py, whole-reply cosine): bar 0.2: assistant-gold fires 51, gold in first 3 47, in 9 51; others fires 74, 217 lines (154 gold
+  session), 601 with room; off-topic fires 62/100. bar 0.40 (related_evidence_relevance): fires 50, gold 45 / 46; others fires 42, 78 lines
+  (68 gold session), 96 with room; off-topic 1/100. One-order-with-memories variant: not emulable from saved data (no memory scores saved) - skipped.
+  CHOSEN: 0.40 (the bar the service already uses for "related evidence"; fires least off-topic).
+Step 2 COST ESTIMATE (before sending): qE1 56 (E arm, ssa) + qE2 63 x 3 arms = 189 + qE3 7 low x 3 runs = 21 -> 266 answers + judges at the
+  measured $0.0006 = about $0.16; total about $4.87. A 3-run recheck of differing questions, if a type is lower: up to about $0.11. Cap $5.85.
+  e_compose.py writes ctxs/QE_<qid>_{main,built,e}; e_report2.py prints the table. 0 abstention questions in the 126 (no _abs ids).
+
+Coordinator pass bar for step 2 (01:40): assistant >= 48/56 (report 1568498a, 1d4da289), 7 low >= 11/21 with 81507db6 3/3, preference and
+multi-session not lower than main; if one variant fails and another could pass, test the other. -> chain4.sh also composes and answers the floor
+variant (bar 0.2, arm f; batches qF1 119 x1, qF3 7 x3; about $0.09). Reports: e_answers.txt, f_answers.txt (e_report2.py [f] -v).
+
+== 02:35 step 2 results (1 run, 126; e_answers.txt, f_answers.txt). Spend 4.979 ==
+type: main / part 1 / +replies>=0.40 (e) / +replies>=0.2 (f): multi-session 29/29/27/28; assistant 34/48/53/54; preference 18/20/19/18; all 81/97/99/100.
+7 low x3: main 11, part 1 5, e 5, f 5; 81507db6 0/3 in e and f -> both FAIL the pass bar on the low row.
+Step 1 exchange (e_step1x.py): 0.2: assistant gold 49/51 in 3, others 225 lines (169 gold session), low gold message shown 5 (in 3) / 7 (in 9),
+  off-topic 77 (replies 62); 0.40: 48, 135 lines (115), low 2/2, off-topic 3 (replies 1). Fires on MORE off-topic rows than replies alone at the
+  same bar, so not eligible by the coordinator's rule; run once anyway as arm g (exchange, 0.2) because the pass-bar message says to test a variant
+  that could pass before stopping. Estimate about $0.13 -> total about $5.11.
+
+== 02:50 LEG 2 FINAL. Spend 5.089 (cap 5.85). Step 2 FAILS for every variant on the 7-low row -> step 3 not built, no new branch. ==
+arm g (exchange, floor 0.2; g_answers.txt): multi-session 30, assistant 50, preference 20, all 100; 7 low 6/21, 81507db6 1/3.
+Low row x3 main/part1/e/f/g: 11/5/5/5/6. Multi-session lower than main in 1 run for e (27) and f (28): not rechecked with 3 runs (they fail anyway).
+Branch heads unchanged: assistant-words c611e0e, questions-to-model 854f5c2. planD databases dropped.
+
+== 03:35 LEG 3 (coordinator): branch claude/cool-maxwell-w5avo8-replies-by-relevance (in the aw worktree, from c611e0e) ==
+Commit 1 = 771893b: earlier answers shown by relevance (Searcher._relevance: encoder cosine of the <= 6 answers the question's words find; kept
+  when >= related_evidence_relevance, closest first); builder gate, router.continues + pattern deleted; points_to_earlier_chat kept (search kinds).
+  NOT the emulation's pure-encoder search: no reply index exists, so candidates still come from the word search. Unit suite green.
+Change 2 (native.py verbatim guard without is_question) is in the WORKING TREE, uncommitted. With it unit+integration: 20 failed / 4005 passed:
+  14 test_a_turn_that_only_asks_forms_no_memory (7 languages), 3 test_memory_native question tests, 2 test_a_question_relayed_from_every_run_
+  forms_no_memory, and test_the_question_itself_appended_first_is_not_its_own_previous (REAL side effect: the question appended before its
+  context is now its own closest memory, so the follow-up rewrite is skipped). Measure first, then decide; never push it red.
+Measurement A running: lo.sh 0..3 (lo_exp.py, LoCoMo conversations 0-3, main guard vs branch guard in one process) -> lo_<c>.json.
+Then B: qd-style re-ingest of the 126 on the branch (no model), C answers. Spend 5.089.
+A (LoCoMo 4 conversations, 755 questions): evidence main 931/1007, branch guard 932/1007 -> not lower; commit 2 stays for B. B started: rb.sh planR (126, arms c1 = commit 1 alone, c12 = both; tag Q6), 4 workers.
+A detail: LoCoMo main guard vs branch guard: evidence 931 -> 932 of 1007, complete 702 = 702 of 755, first ten 740 = 740, tokens 4,662 -> 4,735.
+D (d_step.py, raw encoder cosines over every message of the person, floor 0.2): gold under the floor: multi-session 10 (9 move above by the
+  closest sentence), preference 4 (3 move), assistant 0. 81507db6 answer_da3c1266_1:0 whole 0.193 -> sentence 0.341; d6233ab6 answer_b0fac439:2
+  0.140 -> 0.451. Other messages moving above the floor: 765 / 1,025 / 736 (19.1 / 18.3 / 24.5 a question), against 654 / 976 / 863 above it today.
+B running since 03:05 (planR, 4 workers, ~90 min). Then: e-style report from qd_planR_*.json, C batches from ctxs Q6_<qid>_{c1,c12}.
+C COST ESTIMATE (before sending): qH1 126 x 2 arms x 1 run = 252 + qH3 7 x 2 arms x 3 = 42 -> 294 answers + judges at about $0.00065 = about $0.19; total about $5.28. A 3-run recheck of differing questions if a type is lower: up to about $0.15. Cap $5.85.
+
+== 05:20 LEG 3 results. Spend 5.267. ==
+B evidence (rb_evidence.txt) and C answers (rb_answers.txt): type main / part 1 / c1 (commit 1) / c12 (both):
+ answers assistant 34/48/51/49, preference 18/20/20/19, multi-session 29/29/28/29, all 81/97/99/97; 7 low x3: 11/5/4/7; 81507db6 3/0/0/0.
+ evidence c12: preference gold 42/44 (38), complete 28/30 (24), first ten 37; assistant gold sentences 566 (c1) / 568 (c12) vs part 1 590, main 328;
+ off-topic section 1/100; profile assistant-made lines 0; user's lines 98 / 298 / 2,015-2,016.
+Change 2 saved as /var/tmp/cons/a/commit2.patch (NOT committed: 20 tests red incl. the follow-up echo); working tree back to commit 1 (771893b).
+Running: full suite on commit 1 (suite.sh c1full) and the 3-run recheck of c1's 5 differing multi-session questions (batch qJ1).
+Recheck estimate (coordinator, 05:30): multi-session questions where c1 differs from built + b6025781 + 75f70248, arms built and c1, 3 runs -> batch qK1, about $0.03-0.05; spend before 5.29 (incl. qJ1 main-vs-c1 recheck already sent). Change 2 diff: /var/tmp/cons/a/change2.diff; tree reverted.
+Recheck qK1 (built vs c1, x3): 73d42213 3/2, gpt4_7fce9456 2/2, 60036106 3/2, b6025781 3/3, 75f70248 1/0 -> built 12, c1 9 of 15 (multi-session three: 8 vs 6 of 9). qJ1 (old main vs c1 on 5): 14 vs 8. Spend 5.304. Branch rebased on 442ce8f: head 3abe406; ruff/format clean, docs-check 0 findings, pyright errors only in untouched files; full suite running (suite.sh c1full).
+
+================ LEG 4 (coordinator, user approved; cap raised to $19.50 total) ================
+All on main 442ce8f (worktree /var/tmp/cons/qw, detached). Haiku only, harness reader + judge in batch, 1 run, no tuning/code changes/reruns.
+05:35 `git diff c611e0e 442ce8f -- src` is EMPTY -> M1 reuses the 126 gate questions' "built" contexts and 1-run answers
+  (qD1 built: 56 assistant; qE2 built: 63; qD2 built sample 0: 7 low); 374 others ingested now.
+05:35 M1 ingest started: qd.sh planM1.json <w> 4 (qd_exp.py arm "built", no model calls), contexts ctxs/M1_<qid>_built.txt.gz, rows qd_planM1_<w>.json.
+  Expected ~2.3 h. Then answers batch qM1 (374 x 1) est. $0.25.
+M4 sample: seed 20261113, random.Random(seed).sample(sorted ids of the type, n) in the order ssu 14, ssa 11, pref 6, multi 27, temporal 27, ku 15
+  -> planM4.json (arm "model": the model reads every user message; pin policy contextual_extraction only). 7 abstention ids in it.
+M2/M3: LoCoMo 10 conversations re-ingested on private databases (lo4_exp.py, to write), answers via lo4_batch.py (adapted from g/gl_batch.py).
+Spend at start of leg 4: 5.304.
+05:35 M4 ingest started, workers 0-1 of 5 | spend 5.304
+05:36 ESTIMATES before paid steps: qM1 374 answers+judges 0.25-0.30; M2 answers (about 1,990 questions) 1.3-1.4; M3 ingest about 5,900 model calls at the measured 0.0004 = 2.4-3.0, answers 1.3-1.4; M4 ingest 100 questions x 175-250 calls = 7-10 (guard in leg4.sh: stop if the first 5 finished questions project past 9.50), answers 0.07-0.10. Sum 12.3-16.2 on top of 5.30; leg4.sh refuses any batch whose estimate would pass 19.50.
+  leg4.sh (started 05:35) runs everything unattended and logs here; M1 qd.sh planM1 x4 and M2 lo4.sh M2 0..9 started 05:34-05:36.
+  PICKUP if this session dies: tail NOTES.txt and qd.out; all workers are resumable (rows saved per question); leg4.sh's steps can be rerun by hand.
+  Report script: leg4_report.py (M1 = qM1 + reused qD1/qE2 built + qD2 built sample 0; M2 qM2; M3 qM3 vs M2 paired; M4 qM4 vs M1 paired).
+05:38 lo4 M2 0: M2 0 turns 419 ingest 117 questions 199 memories llm|all 0|594
+05:38 c1 branch claude/cool-maxwell-w5avo8-replies-by-relevance rebased on 442ce8f, head 3abe406, pushed; full suite 4,689 passed, 2 failed (the two capability-eval env tests that fail on main here); ruff/format clean; docs-check 0 findings. Not merging (recheck lower on multi-session).
+05:40 lo4 M2 1: M2 1 turns 369 ingest 94 questions 105 memories llm|all 0|493
+05:46 lo4 M2 2: M2 2 turns 663 ingest 188 questions 193 memories llm|all 0|907
+05:50 rates: M1 80 questions/h with 7 loaders on 4 cores -> M1 contexts about 10:15; M2 about 06:20; M3 (2 workers) about 10:00; M4 about 13 min a question a worker, 2 workers until M1 ends then 5 -> about 12:30. EXPECTED FINISH of leg 4: about 12:30-13:00 container time.
+05:52 lo4 M2 3: M2 3 turns 629 ingest 160 questions 260 memories llm|all 0|830
+05:58 lo4 M2 4: M2 4 turns 680 ingest 190 questions 242 memories llm|all 0|951
+06:03 lo4 M2 5: M2 5 turns 675 ingest 189 questions 158 memories llm|all 0|893
+06:08 lo4 M2 6: M2 6 turns 689 ingest 178 questions 190 memories llm|all 0|888
+06:08 M4 measured 0.088 USD a question after 4 (projects 8.8 for 100). Whole leg projects 18.8-20.0, so guard.sh now watches the cap: it stops the M4 ingest (last, largest item) when spend + steps still to come reach 19.40, and M4 is then answered on the questions ingested so far (file M4_PARTIAL marks it).
+06:10 M4 cost check after 5 questions: at most 0.0859 USD a question, so at most 100 times that for the sample: continue | spend 5.822
+06:14 lo4 M2 7: M2 7 turns 681 ingest 159 questions 239 memories llm|all 0|817
+06:18 lo4 M2 8: M2 8 turns 509 ingest 137 questions 196 memories llm|all 0|675
+06:23 lo4 M2 9: M2 9 turns 568 ingest 166 questions 204 memories llm|all 0|813
+06:24 M2 contexts done | spend 6.023
+06:24 M3 ingest started (2 workers; estimate 2.4-3.0 USD) | spend 6.023
+06:41 lo4 M3 1: M3 1 turns 369 ingest 965 questions 105 memories llm|all 211|698
+06:47 lo4 M3 0: M3 0 turns 419 ingest 1218 questions 199 memories llm|all 366|934
+06:48 sending qM2 (estimate 1.40 USD) | spend 6.728
+06:48 OOM kill at about 06:35 (8 loaders, the M1 loaders had grown to 2.3 GB). leg4.sh replaced by leg4b.sh: LongMemEval workers now run under sup.sh (MAXQ=6: fresh memory every 6 questions, restarts until complete), completeness is checked before each batch, M2 answers sent now. guard.sh restarted. handover.sh moves the two M4 workers after their current question.
+06:54 qM2 scored | spend 8.258
+06:56 M4 worker 1 moved to sup.sh
+06:58 M4 worker 0 moved to sup.sh
+07:16 lo4 M3 3: M3 3 turns 629 ingest 1693 questions 260 memories llm|all 431|1241
+07:23 lo4 M3 2: M3 2 turns 663 ingest 1905 questions 193 memories llm|all 501|1391
+07:51 lo4 M3 5: M3 5 turns 675 ingest 1891 questions 158 memories llm|all 460|1324
+08:00 lo4 M3 4: M3 4 turns 680 ingest 1855 questions 242 memories llm|all 511|1440
+08:25 lo4 M3 7: M3 7 turns 681 ingest 1725 questions 239 memories llm|all 460|1252
+08:35 lo4 M3 6: M3 6 turns 689 ingest 1815 questions 190 memories llm|all 507|1375
+08:46 Earlier full LoCoMo runs (files /var/tmp/cons/ans_<arm>_<conv>.json + adv_ans_<arm>.json, keyed by question text so 1,974 of 1,986 survive): OBn1 (no-model corpus) 1709/1974 = 86.6%: adversarial 368/446, multi_hop 236/282, open_domain 57/96, single_hop 778/829, temporal 270/321. OBm1 (Haiku corpus) 1697/1974 = 86.0%: adversarial 371/446, multi_hop 233/282, open_domain 56/96, single_hop 768/829, temporal 269/321. (Other arms: OBPn1 87.2, OBRn1 86.6, OBQn1 86.3, PBn1 86.2, PBm1 86.1.) Which arm was quoted as 86.9% is not recorded in the files; OB is the closest.
+08:57 lo4 M3 9: M3 9 turns 568 ingest 1641 questions 204 memories llm|all 410|1202
+09:01 lo4 M3 8: M3 8 turns 509 ingest 1409 questions 196 memories llm|all 328|983
+09:01 M3 contexts done (10 of 10 conversations) | spend 11.540
+09:06 coordinator: sending qM3 by hand now (estimate 1.40 USD); the later lo_answers qM3 call in leg4b.sh will find the saved batch state and resend nothing
+09:22 coordinator: USER LIFTED THE CAP ("use whatever budget require"). guard.sh stopped by the coordinator so M4 ingests all 100. New working ceiling 24.00 USD total. leg4b.sh's fits() still holds 19.5 in memory: if it writes 'NOT sending qM4', send qM4 by hand (same lme_answers steps). M5 (LoCoMo with beliefs) is approved inside this ceiling.
+09:25 M5 started (2 workers). ESTIMATE: answers about 1.35 USD + consolidation model calls (cents to about 1 USD); ceiling 24.00 | spend 13.202
+09:26 M3 vs M2 check: memories a context 104.4 / 105.2 (max 107 / 108; 89% / 93% of contexts within 5 of the max); tokens 4,721 / 4,256, none over 7,500 of 8,000 -> the COUNT limit binds (ContextSettings.memories_max = RETRIEVAL.memory_recall_k = 100), not the token budget. Multi-hop with all evidence in M2 and not in M3: 46 questions, 44 gold turns pushed out (see the model-written-line count in the hand-back).
+09:35 lo4 M5 1: M5 1 turns 369 ingest 548 questions 105 memories llm|all 0|493 beliefs 61 people 2
+09:39 lo4 M5 0: M5 0 turns 419 ingest 675 questions 199 memories llm|all 0|594 beliefs 86 people 2
+09:49 lo4 M5 2: M5 2 turns 663 ingest 450 questions 193 memories llm|all 0|907 beliefs 58 people 2
+09:50 lo4 M5 3: M5 3 turns 629 ingest 679 questions 260 memories llm|all 0|830 beliefs 72 people 2
+10:03 lo4 M5 4: M5 4 turns 680 ingest 589 questions 242 memories llm|all 0|951 beliefs 71 people 2
+10:04 M1 contexts done (374 of 374 rows) | spend 13.847
+10:04 M4 workers 2-4 started | spend 13.847
+10:04 sending qM1 (estimate 0.30 USD) | spend 13.847
+10:08 lo4 M5 5: M5 5 turns 675 ingest 920 questions 158 memories llm|all 0|893 beliefs 142 people 2
+10:09 qM1 scored | spend 14.184
+10:09 sending qM3 (estimate 1.40 USD) | spend 14.185
+10:09 qM3 scored | spend 14.199
+10:18 lo4 M5 7: M5 7 turns 681 ingest 403 questions 239 memories llm|all 0|817 beliefs 55 people 2
+10:18 lo4 M5 6: M5 6 turns 689 ingest 760 questions 190 memories llm|all 0|888 beliefs 119 people 2
+10:28 coordinator: machine REBOOTED about 10:26 (all workers and leg4b.sh killed, postgres down). Postgres restarted (pg_ctl, log in data/startup.log). Restarted: lo4.sh M5 8 and M5 9; sup.sh planM4 workers 2,3,4 (46 of 100 M4 rows were saved). qM5 and qM4 answers will be sent by the coordinator by hand.
+10:37 coordinator: M6 REDEFINED before start (user: with a key everything is on by default): M6 = LoCoMo under the PRODUCT DEFAULT policy, no pin (all uses except memory_restatement, read assist on), beliefs consolidated to completion. Cost unknown: check spend after the first conversation.
+10:42 lo4 M5 8: M5 8 turns 509 ingest 693 questions 196 memories llm|all 0|675 beliefs 111 people 2
+10:42 coordinator: M7 started (LoCoMo, product default PLUS memory_restatement: all uses, read assist on, beliefs consolidated; 2 workers). Purpose: user wants restatement on by default; M7 vs M6 paired isolates it. Cost unknown; check spend 15 min in.
+10:43 lo4 M5 9: M5 9 turns 568 ingest 784 questions 204 memories llm|all 0|813 beliefs 126 people 2
+10:43 coordinator: M5 contexts done (10 of 10); sending qM5 (estimate 1.35 USD)
+10:43 coordinator: M6 started (LoCoMo, Haiku writes facts at ingest AND beliefs; policy grounding_judge + reflection + contextual_extraction; 2 workers). ESTIMATE: ingest about 3.3 USD, answers 1.35 USD; projected total about 25.5 USD (user: use whatever budget is required).
+10:56 coordinator: qM5 scored
+10:59 coordinator: rates: M6 26 msg/min/worker -> contexts about 13:30; M7 12.5 msg/min/worker -> about 15:00; M4 53 of 100, about 12:50. Projected total spend about 31 USD (user: use whatever budget is required). PR #113 draft open for the default change; merges only if qM7 is not lower than qM6 in any category.
+11:23 coordinator: M8 started: LongMemEval, the 22 questions M1 marked 'wrong with gold missing', arm 'all' (qd_all.py: every model use incl. restatement, read assist on, beliefs consolidated and indexed), workers 0-1 of 3 (worker 2 starts when M4 ends). Purpose: which of the 22 memory misses remain with everything on. Estimate about 0.15 USD a question.
+11:24 coordinator: memory kill at 11:25 took one M8 loader (3 GB at start; sup restarted it; no M4/M6/M7 worker lost). M8 cut to worker 0 only until M4 ends; workers 1-2 start then.
+11:24 lo4 M6 1: M6 1 turns 369 ingest 2386 questions 105 memories llm|all 198|686 beliefs 99 people 2
+11:35 lo4 M6 0: M6 0 turns 419 ingest 2866 questions 199 memories llm|all 356|925 beliefs 209 people 2
+11:39 lo4 M7 1: M7 1 turns 369 ingest 3366 questions 105 memories llm|all 222|705 beliefs 120 people 2
+11:51 lo4 M7 0: M7 0 turns 419 ingest 3941 questions 199 memories llm|all 364|930 beliefs 145 people 2
+12:01 lo4 M6 2: M6 2 turns 663 ingest 1323 questions 193 memories llm|all 207|1109 beliefs 0 people 0
+12:02 lo4 M6 3: M6 3 turns 629 ingest 1754 questions 260 memories llm|all 409|1216 beliefs 0 people 0
+12:03 lo4 M7 3: M7 3 turns 629 ingest 1143 questions 260 memories llm|all 68|894 beliefs 0 people 0
+12:07 lo4 M7 2: M7 2 turns 663 ingest 756 questions 193 memories llm|all 0|907 beliefs 0 people 0
+12:15 lo4 M6 4: M6 4 turns 680 ingest 639 questions 242 memories llm|all 0|951 beliefs 0 people 0
+12:15 lo4 M6 5: M6 5 turns 675 ingest 654 questions 158 memories llm|all 0|893 beliefs 0 people 0
+12:18 lo4 M7 5: M7 5 turns 675 ingest 751 questions 158 memories llm|all 0|893 beliefs 0 people 0
+12:24 lo4 M7 4: M7 4 turns 680 ingest 755 questions 242 memories llm|all 0|951 beliefs 0 people 0
+12:28 lo4 M6 6: M6 6 turns 689 ingest 603 questions 190 memories llm|all 0|888 beliefs 0 people 0
+12:28 lo4 M6 7: M6 7 turns 681 ingest 561 questions 239 memories llm|all 0|817 beliefs 0 people 0
+12:30 coordinator: STOPPED M4, M6, M7, M8 workers. The API key's credit balance ran out at 11:47:52 UTC ('Your credit balance is too low'); every model call since then failed and the ingest silently fell back to no model (llm.assist.fallback error=LLMCallFailed). Anything ingested after 11:47:52 is NOT a with-model result. Valid: M6 and M7 conversations 0-1 (check M7_0's last minutes), M4 rows finished before 11:47:52. Contaminated outputs are moved to /var/tmp/cons/a/contaminated, not deleted.
+12:35 coordinator: gzipped no-model logs (ag_*, planM1, planR, lo4 M2) to free disk; spend counter unchanged at 20.299 (undercounts failed calls).
