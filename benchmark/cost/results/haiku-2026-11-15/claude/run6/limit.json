@@ -1,0 +1,34 @@
+{
+  "status": "PARTIAL",
+  "error": "BUDGET_EXCEEDED",
+  "error_message": "the run's budget is spent: the turn limit (3) was reached",
+  "answer": "I'll read the pages one at a time, starting with page 1.",
+  "pages_read": [
+    1,
+    2,
+    3
+  ],
+  "prompts_sent": 1,
+  "stops": 0,
+  "spent": {
+    "status": "PARTIAL",
+    "accounted": 1,
+    "input_tokens": 9967.0,
+    "output_tokens": 185.0,
+    "cached": 6530.0,
+    "cost": 0.000587,
+    "calls": 1.0
+  },
+  "next_turn": "PARTIAL",
+  "next_answer": "I've read 3 pages so far: pages 1, 2 and 3. Pages 4, 5 and 6 are still left, so I'll read page 4 next.",
+  "pages_read_in_next_turn": [
+    4,
+    5,
+    6
+  ],
+  "seconds": 6.0,
+  "wall": [
+    1794721063.287,
+    1794721069.247
+  ]
+}

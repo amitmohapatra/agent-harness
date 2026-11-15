@@ -99,6 +99,14 @@ chat's own on its thread stream when it is idle; its questions asked through the
   `[permission]` rules are written inline is asked over (a `[[permission.ask]]` rule after it)
   instead of refusing the run; only a `permission = { ... }` inline table is still refused.
 
+### Fixed: what the real-model (Haiku) acceptance found
+
+- Claude: the turn a live session runs by itself once a background task ended is charged in
+  full — its tokens and a model call as well as its cost — to that task's run, or, with no run
+  to charge (a background shell command's end), to the conversation's next turn. Before, only
+  its cost was charged: against Haiku through the real CLI, 6,388 input and 70 output tokens
+  of such a turn were on no run's budget.
+
 ### Fixed: each library's own skills, through the harness
 
 - `ReAct(skills=src)`: its general-purpose helper (Deep Agents' `task`) is told the run's skills

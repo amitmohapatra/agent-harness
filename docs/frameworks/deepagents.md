@@ -151,9 +151,10 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
   with `RunCheckpointer()` — keeps its state files and todos from one turn of a conversation
   to the next (with its background tasks), as a checkpointer of its own would: at most
   256 KiB of them are kept for other servers; past that a turn elsewhere starts without
-  them (said in the log). The conversation's messages are never carried this way. How this
-  changes multi-turn accuracy with a backend is to be confirmed in the Haiku measurement
-  phase.
+  them (said in the log). The conversation's messages are never carried this way. Measured
+  on Haiku (the complex suite's `carry` set, three runs each): `ReAct` with a backend and
+  `create_deep_agent` with and without a checkpointer of its own answered every later turn
+  that needs an earlier file or todo list, and no later turn's file tool lost a file.
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and
   the approval resumes the sub-agent where it stopped with a checkpointer, or re-runs the run
   from its journal without one — either way the call runs once.

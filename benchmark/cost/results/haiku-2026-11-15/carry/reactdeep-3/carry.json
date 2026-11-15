@@ -1,0 +1,102 @@
+{
+  "suite": "complex",
+  "model": "claude-haiku-5-5",
+  "history": "thread",
+  "adapter": "react",
+  "variant": "deep",
+  "window": null,
+  "date": "2026-11-15",
+  "usd": 0.011656,
+  "max_usd": 0.06,
+  "stopped": null,
+  "cases_total": 267,
+  "summary": {
+    "all": {
+      "cases": 6,
+      "scored_turns": 8,
+      "strict": {
+        "mean": 0.875,
+        "ci95": 0.295625,
+        "n": 8
+      },
+      "judge_only": 0,
+      "unverified": 0,
+      "not_success": 0,
+      "checks": 24,
+      "checks_failed": 0,
+      "not_applicable": 0
+    },
+    "by_category": {
+      "carry": {
+        "cases": 6,
+        "scored_turns": 8,
+        "strict": {
+          "mean": 0.875,
+          "ci95": 0.295625,
+          "n": 8
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 24,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "by_tier": {
+      "2": {
+        "cases": 5,
+        "scored_turns": 7,
+        "strict": {
+          "mean": 0.8571428571428571,
+          "ci95": 0.3495714285714286,
+          "n": 7
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 19,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "3": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 5,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "cost": {
+      "input_tokens": {
+        "mean": 75001.83333333333,
+        "ci95": 19519.801223806033,
+        "n": 6
+      },
+      "output_tokens": {
+        "mean": 1716.8333333333333,
+        "ci95": 882.5544158274039,
+        "n": 6
+      },
+      "model_calls": {
+        "mean": 7.166666666666667,
+        "ci95": 1.5449787215363195,
+        "n": 6
+      },
+      "seconds": {
+        "mean": 10.802166666666666,
+        "ci95": 3.0789609745928983,
+        "n": 6
+      }
+    },
+    "turns": 17
+  }
+}
