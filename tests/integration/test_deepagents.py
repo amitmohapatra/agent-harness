@@ -90,8 +90,9 @@ async def test_its_file_tools_on_a_disk_are_governed_as_any_tool(
 ) -> None:
     """On a backend outside the graph's state (a disk: the graph has no ``files`` channel), Deep
     Agents' file tools change real files: each call is governed, journaled and on the run's
-    events, its risk a read or a write — as ``ReAct(backend=)`` has them. On its default backend
-    they only change the graph's state, and stay out of the run's tool calls."""
+    events, its risk a read or a write — the write asks, as any write does, the read runs — as
+    ``ReAct(backend=)`` has them. On its default backend they only change the graph's state,
+    and stay out of the run's tool calls."""
     from deepagents.backends import FilesystemBackend
 
     disk = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
@@ -106,13 +107,16 @@ async def test_its_file_tools_on_a_disk_are_governed_as_any_tool(
             backend=backend,
             checkpointer=InMemorySaver(),
         )
-        events = [
-            e async for e in harness.wrap(graph, id=f"files-{governed}").stream("w", user="u")
-        ]
-        called = {
-            e.data["tool"]: e.data["status"]
-            for e in events
-            if e.type is RunEventType.TOOL_CALL_RESULT
-        }
-        assert called == ({"write_file": "ok", "read_file": "ok"} if governed else {}), called
+        agent = harness.wrap(graph, id=f"files-{governed}")
+        if governed:  # the write asks before it runs; approved once, it runs, the read runs
+            paused = await agent.run("w", user="u")
+            asked = paused.interrupt
+            assert asked is not None and asked.tool_call is not None, paused
+            assert asked.tool_call.tool == "write_file" and not (tmp_path / "a.txt").exists()
+            done = await agent.resume(asked.interrupt_id, "approve", reviewer="u")
+            assert done.status is RunStatus.SUCCESS and done.answer == "done", done
+            continue
+        events = [e async for e in agent.stream("w", user="u")]
+        called = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+        assert called == [] and events[-1].data["result"] == "done"
     assert (tmp_path / "a.txt").read_text() == "hi"

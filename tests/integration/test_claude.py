@@ -468,7 +468,10 @@ async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     asked = await agent.run("tidy up, then refund o3", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.args == {"command": "rm -rf build"}
-    assert asked.interrupt.question == "Approve Bash? Claude Code asks before it runs this call."
+    assert asked.interrupt.question == (
+        "Approve Bash? Claude Code asks before it runs this call. "
+        "Allow once, allow for this conversation, or deny."
+    )
     assert [b["tool"] for b in built_ins(tmp_path)] == ["Read", "Bash"]  # ls: not asked
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert started_with(tmp_path)["prompt"] == RESUMED_CALL.format(tool="Bash")  # a built-in
