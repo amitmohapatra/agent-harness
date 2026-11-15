@@ -106,6 +106,14 @@ chat's own on its thread stream when it is idle; its questions asked through the
   to charge (a background shell command's end), to the conversation's next turn. Before, only
   its cost was charged: against Haiku through the real CLI, 6,388 input and 70 output tokens
   of such a turn were on no run's budget.
+- Claude: a query that pauses in a process of its own is charged its turn as the provider
+  billed it. Claude Code sends the pause's placeholder to the model as the paused call's
+  result, and the model's reply to it is billed; the harness left the process at the pause,
+  so the run was charged its replies' tokens and no dollars, and never that reply (51-83% of
+  the paused attempt's dollars against Haiku). The process is now read to its turn's result
+  (30 seconds at most; a call made in that reply is refused, ending the turn), and the run is
+  charged it: against Haiku, an approved and a rejected call match the provider's bill in
+  tokens and dollars.
 
 ### Fixed: each library's own skills, through the harness
 
@@ -354,6 +362,10 @@ whichever replica each reaches.
   next hold renewal, within 20 s). `steer` to a run in another process waits its turn, said
   once.
 - A run cancelled while it waits its turn, from any process, never runs.
+- A run waiting its turn that the run store ended (its deadline: `TIMEOUT`) reports what the
+  store says: its result and its `RUN_FINISHED` are `TIMEOUT` with the store's error (AG-UI's
+  `RUN_ERROR`), and nothing is written. Its refused hold stopped it, and it said `CANCELLED`
+  and tried to write that over the store's ending.
 - A run waiting behind a turn in another process follows that turn's events (one shared
   stream a run ahead, at most 32 a process, on its own client) instead of polling.
 - A turn's earlier turns are read with one listing per ending, never paging past the messages

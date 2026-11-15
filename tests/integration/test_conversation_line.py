@@ -23,14 +23,17 @@ import pytest
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.runlog import LoggedRuns
-from trellis import Harness, Runtime, Settings, current, tool
+from trellis import Harness, Result, Runtime, Settings, current, tool
 from trellis.contracts import (
+    AgentError,
     ConfigurationError,
+    ErrorCategory,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
     RunEvent,
     RunEventType,
+    RunOutcome,
     RunStart,
     RunStatus,
 )
@@ -38,6 +41,8 @@ from trellis.contracts.ids import new_id
 from trellis.harness import holding
 from trellis.harness import runs as local_runs
 from trellis.harness.agent import Agent
+from trellis.harness.agui.events import AGUIEventType
+from trellis.harness.agui.translate import translate
 from trellis.harness.bounded import LRU
 from trellis.harness.conversation import EARLIER_RUNS, earlier
 from trellis.harness.identity import conversation_key
@@ -696,6 +701,57 @@ async def test_a_run_cancelled_while_it_waits_its_turn_never_runs(
     await (a if where == "here" else b).cancel(waiting, reason="not needed")
     ended = await asyncio.wait_for(second, 5)  # at once, not when the turn ahead ends
     assert ended.status is RunStatus.CANCELLED and ended.run_id == waiting
+    gates["one"].set()
+    assert (await first).status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+
+
+@pytest.mark.parametrize("how", ["run", "stream"])
+async def test_a_waiting_run_the_store_ended_reports_the_stores_status_and_writes_nothing(
+    servers: tuple[Harness, Harness], how: str
+) -> None:
+    """A run waiting its turn that the run store ended (its deadline: ``TIMEOUT``) has its next
+    hold refused and takes no turn: its result and its ``RUN_FINISHED`` say what the store
+    says — ``TIMEOUT`` with the store's error — not ``CANCELLED``, and nothing more is
+    written to the store."""
+    runs = servers[0].runs
+    finished: list[tuple[str, RunStatus]] = []
+    finish = runs.finish
+
+    async def counted(run_id: str, status: RunStatus, **kwargs: Any) -> Any:
+        finished.append((run_id, status))
+        return await finish(run_id, status, **kwargs)
+
+    runs.finish = counted  # type: ignore[method-assign]
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a = chat(servers[0], log, gates)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+
+    async def streamed() -> list[RunEvent]:
+        return [e async for e in a.stream("two", user="ada", thread=THREAD)]
+
+    second = asyncio.create_task(
+        a.run("two", user="ada", thread=THREAD) if how == "run" else streamed()
+    )
+    waiting = await thread_run(runs, "two")
+    late = AgentError(code="deadline", message="past its deadline", category=ErrorCategory.TIMEOUT)
+    await finish(waiting, RunStatus.TIMEOUT, error=late)  # the store's ticker
+    ended = await asyncio.wait_for(second, 5)
+    if isinstance(ended, Result):
+        assert ended.status is RunStatus.TIMEOUT and ended.run_id == waiting
+        assert ended.error is not None and ended.error.code == "deadline"
+    else:
+        last = ended[-1]
+        assert last.type is RunEventType.RUN_FINISHED and last.outcome is RunOutcome.TIMEOUT
+        assert last.error is not None and last.error.code == "deadline"
+        said = translate(last)  # the AG-UI stream: a failure, as a run that timed out working
+        assert said is not None and said.type is AGUIEventType.RUN_ERROR
+        assert said.code == "deadline"
+    record = await runs.get(waiting)
+    assert record is not None and record.status is RunStatus.TIMEOUT
+    assert [f for f in finished if f[0] == waiting] == []  # nothing written after the store
     gates["one"].set()
     assert (await first).status is RunStatus.SUCCESS
     assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
