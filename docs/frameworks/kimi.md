@@ -52,7 +52,7 @@ command="kimi", reads=())`:
 | `env` | over this process's environment, for the `kimi` process (`KIMI_MODEL_BASE_URL`, `KIMI_MODEL_API_KEY`, `KIMI_LOOP_MAX_STEPS_PER_TURN`...) |
 | `mcp_servers` | Kimi's own MCP servers, as ACP takes them: `{"name", "command", "args", "env"}` (stdio) or `{"type": "http", "name", "url", "headers"}`, beside the harness's — over HTTP for Kimi to offer their tools to its model ([below](#models-swarms-and-limits)) |
 | `mode` | Kimi's session mode for a session the run starts: `"default"` or `"plan"`. `"auto"` and `"yolo"` are refused: they approve on their own, and governance would see no call. Whatever is given, every session is set to ask ([below](#the-session-mode)) |
-| `sandbox` | `sandbox()`: Kimi's `Bash` and file writes go to the run's sandbox (below). Without one Kimi's shell runs on this machine as the service's user, **without the harness's isolation**; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap` ([governance.md](../governance.md#commands-on-the-host)) |
+| `sandbox` | `sandbox()`: Kimi's `Bash` and file writes go to the run's sandbox (below). Without one they go to a workspace of this machine's isolation layer at `cwd` (below); `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap` ([governance.md](../governance.md#commands-on-the-host)) |
 | `skills` | a skill set, `**src.kimi()`: the run's skills in Kimi's own skills folder (below) |
 | `reads` | folders besides `cwd` the run may read (its shell's commands run unasked either way: [who decides what](#who-decides-what)) |
 
@@ -112,7 +112,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 | `Read`, `Glob`, `Grep` in the workspace | nobody | they run, recorded |
 | `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny (Kimi's own approval inside a git working tree aside: below) |
 | `Bash` in the run's sandbox (`kimi(sandbox=sandbox())`) | the deployment | runs unasked, announced (`tool_notice`) and recorded |
-| `Bash` on the host (no sandbox) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it: `kimi(sandbox=sandbox())` |
+| `Bash` on the host (no sandbox) | the deployment | runs in the run's workspace of this machine's isolation layer, as the run's uid, unasked, announced and audited; refused, saying why, where the layer cannot isolate; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap` |
 | `FetchURL`, `WebSearch` | the administrator, in the tool catalog | Kimi's own policy runs them unasked, so a run's Kimi is configured to ask about them (an `ask` rule in its `config.toml`, as for `Skill`) and the catalog decides: refused (Kimi is told why) until it gives the tool a risk or an `approve_when`. A sandboxed run's Kimi has no config of the team's, so there they run on Kimi's own approval and are recorded after |
 | MCP servers, the session mode | the deployment | `kimi(mcp_servers=)` or `h.wrap(framework_options=)`; a run's own `mcp_servers` that change them are refused, and `auto` and `yolo` are refused everywhere |
 
@@ -121,9 +121,16 @@ The run's user decides only the actions taken in their name; the rest is the dep
 * **Sandbox:** `kimi(sandbox=sandbox())` gives Kimi ACP's file and terminal capabilities, served
   by the run's sandbox (made at its first use, kept across attempts, snapshotted while the run
   waits, deleted at its end — [sandbox.md](../sandbox.md)): Kimi's `Bash` runs there, its
-  `Write` and `Edit` write there. Without it, Kimi runs its commands in `cwd` on this machine,
-  as the service's user, not through the harness's isolation (`TRELLIS_HOST_EXECUTION=deny`
-  refuses that). **Its reads are not isolated:** Kimi Code reads and
+  `Write` and `Edit` write there. Without it, the same capabilities are served by a workspace
+  of this machine's isolation layer (`sandbox(host_layer())`), seen by its commands at `cwd`:
+  each command runs there as the run's uid, its writes go there, and its `outputs/` is
+  delivered and its other files carried to the conversation's next turn from it
+  ([sandbox.md](../sandbox.md#a-conversations-working-files-carry-to-its-next-turn)); its
+  home, its login and its live session stay as they are. A command still running when the
+  turn ends is stopped (the workspace goes with the run), and between turns — a background
+  sub-agent's command — none runs (refused: no run's workspace). Where the layer cannot isolate,
+  each command is refused with the reason and Kimi writes in `cwd` itself
+  (`TRELLIS_HOST_EXECUTION=deny` refuses it all at `h.wrap`). **Its reads are not isolated:** Kimi Code reads and
   searches the host's files itself (`Read` looks a file up on the host first; `Glob` and `Grep`
   never ask the client), and ACP cannot turn those tools off. What the harness can do it does: a
   sandboxed Kimi gets a home and a working directory of the run's own, both empty, and an

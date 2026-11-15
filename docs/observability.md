@@ -60,11 +60,17 @@ this machine's isolation layer; `framework`: the framework ran it on its own mac
 limit stopped it (`time`, `cpu`, `memory`, `processes`, `file`... — level `WARNING`, "stopped
 by its memory limit") and `trellis.command.sandbox`; its output is the call's result, as any
 tool's (redacted, cut at 2000 characters). A command the harness ran — in the run's sandbox,
-or through the isolation layer — is put there from its audit record (`telemetry.command`: the
-isolation layer's `sandbox_command` record, the one its audit log and the run's stream carry,
-is put on the span as it is emitted), so the span and the audit log say the same; one the
-framework ran is said as the framework reported it (its duration, an exit code its result
-names, the time limit when it timed out).
+or through the isolation layer — has one audit record, made in one place
+(`sandbox.base.record_command`): by the isolation layer for a command it ran (on this machine:
+`host`; in the shared container: `sandbox`), by `sandbox.base.audited` for a provider that does
+not audit its own (`sandbox`). That record is the audit log's line, the run's `sandbox_command`
+event and the span's attributes: on the span of the call that ran it — current while a harness
+tool runs; for a framework's own call that the harness ran isolated (Claude Code's `Bash`,
+Kimi Code's terminal, which the framework reports once it ran), kept until that call's span is
+made, so it says where the command really ran, not `framework`. What the harness runs around a
+call (the outputs it lists, the files it carries) is audited but on no span. One no harness
+layer ran (a framework's own sandbox) is said as the framework reported it (its duration, an
+exit code its result names, the time limit when it timed out).
 
 A built-in's `trellis.governance.action` is what governance decided before the call ran
 (`bridge.permitted`): `ask` when a person approved it, `announce` or `run` otherwise; a hosted

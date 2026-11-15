@@ -29,6 +29,7 @@ from opentelemetry.trace import StatusCode
 
 from tests.support.adapters import CLI
 from tests.support.arm import arm
+from tests.support.isolation import isolating
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import Items, ScriptedModel
 from tests.support.planned import PlannedChatModel
@@ -508,6 +509,7 @@ async def test_a_command_on_the_host_or_in_the_shared_sandbox_is_one_record_on_s
 
     helper = root_helper()
     caplog.set_level(logging.INFO, logger=AUDIT)
+    events: list[Any] = []
     for root in fresh_root(helper):
         with LocalEngine(helper).running():
             provider: Any = (
@@ -542,7 +544,6 @@ async def test_a_frameworks_own_shell_commands_are_spans(
     from agents import LocalShellTool
     from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
-    from tests.integration.test_openai_agents_features import twice
 
     script = [{"builtin": "Bash", "args": {"command": "ls -la"}}, {"text": "done"}]
     claude_agent = harness.wrap(claude(tmp_path, script), id="sh-claude")
@@ -557,14 +558,13 @@ async def test_a_frameworks_own_shell_commands_are_spans(
         type="local_shell_call",
         action=LocalShellCallAction(type="exec", command=["ls", "build"], env={}),
     )
-    model = ScriptedModel([*twice(call), "listed"])  # made again by the resumed attempt
+    model = ScriptedModel([Items(call), "listed"])
     shell = LocalShellTool(executor=lambda request: "a.txt")
     oa = harness.wrap(Agent(name="ops", model=model, tools=[shell]), id="sh-openai")
-    paused = await oa.run("list", user="u1")
-    assert paused.interrupt is not None
-    done = await oa.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    with isolating():  # its command runs in the run's workspace: where it ran, said
+        done = await oa.run("list", user="u1")
     assert done.status is RunStatus.SUCCESS, done
-    commanded(Tree(spans), "local_shell", "ls build", "framework")
+    commanded(Tree(spans), "local_shell", "ls build", "host")
 
 
 def test_a_shells_command_is_read_from_its_arguments() -> None:

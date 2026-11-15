@@ -76,7 +76,7 @@ async def test_a_shell_tools_commands_run_in_the_runs_workspace_and_the_sdk_read
     result = await agent.run("go", user="u1")
     assert result.status is RunStatus.SUCCESS and called == []
     [said] = outputs(model)
-    uid, home, *env = said["stdout"].splitlines()
+    uid, home, *_ = said["stdout"].splitlines()
     assert int(uid) >= layer.isolation.uid_base and home.startswith(layer.isolation.root)
     assert SECRET not in said["stdout"] and said["stderr"] == "err\n"
     assert said["outcome"] == {"type": "exit", "exit_code": 4}

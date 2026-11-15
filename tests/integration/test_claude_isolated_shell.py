@@ -256,8 +256,11 @@ async def test_a_file_claude_writes_itself_in_the_workspace_is_the_runs(
 
 
 async def test_where_commands_cannot_be_isolated_claude_codes_shell_is_off(
-    harness: Harness, root: str, model: ScriptedClaude, tmp_path: Path
+    harness: Harness, root: str, model: ScriptedClaude, tmp_path: Path, caplog: Any
 ) -> None:
+    from trellis.harness import host
+
+    host._unisolated.cache_clear()
     unable = HostSandbox(root, helper=("false",))
     replaced = use_host(unable)
     try:
@@ -266,8 +269,8 @@ async def test_where_commands_cannot_be_isolated_claude_codes_shell_is_off(
         use_host(replaced)
     [refused] = said(model)
     assert "id -u" not in refused and ("No such tool" in refused or "not" in refused)
-    [warned] = [w for w in customs(events, "warning") if w["code"] == "claude_shell"]
-    assert "cannot be isolated" in warned["message"] and "helper false" in warned["message"]
+    [warned] = [r.getMessage() for r in caplog.records if "shell commands are off" in r.getMessage()]
+    assert "cannot be isolated" in warned and "helper false" in warned
     assert succeeded(events)
 
 

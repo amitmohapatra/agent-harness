@@ -933,7 +933,8 @@ async def test_claudes_built_in_tools_do_not_count_toward_narrowing_the_runs_own
     target = options(tmp_path, [{"text": "done"}])
     await arm(memory_harness.wrap(target, id="n"), lookups(own)).run("x", user="u1")
     assert {f"t{i}" for i in range(own)} <= set(started_with(tmp_path)["tools"])
-    assert "Bash" not in (started_with(tmp_path)["disallowed_tools"] or "").split(",")
+    # (its shell is off only because the tests' layer cannot isolate a command: conftest)
+    assert "Read" not in (started_with(tmp_path)["disallowed_tools"] or "").split(",")
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:
@@ -976,7 +977,7 @@ async def test_tools_whose_work_needs_the_cli_after_the_query_are_not_offered(
     disallowed = started_with(tmp_path)["disallowed_tools"].split(",")
     assert disallowed[0] == "WebFetch"
     assert {"CronCreate", "CronDelete", "CronList", "ScheduleWakeup"} <= set(disallowed)
-    assert not {"Read", "Bash", "Task", "mcp__trellis__refund"} & set(disallowed)
+    assert not {"Read", "Task", "mcp__trellis__refund"} & set(disallowed)
 
 
 async def test_messages_to_other_agents_are_not_offered_and_workflows_are(

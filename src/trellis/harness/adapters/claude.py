@@ -383,8 +383,6 @@ HELPER_ONLY: Final = (
     "Claude Code works in the run's workspace as the service's own user, and only a service "
     "that runs as root can enter a run's workspace (this one reaches root through a helper)"
 )
-#: What a run whose Claude Code shell is off is told (its tools are left out).
-SHELL_OFF: Final = "Claude Code's shell is off: commands cannot be isolated here ({why})"
 #: What a shell call whose command the harness cannot run in the workspace is refused with.
 NO_COMMAND: Final = "{tool} was not run: it gave no command the harness can run in its workspace."
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
@@ -1870,16 +1868,15 @@ async def _placed(runtime: Runtime, options: Any) -> tuple[Any, Any]:
     removed at the run's end), its ``cwd`` — the folder the options name stays one its file
     tools reach (``add_dirs``) — with no settings of the folder's own (:data:`FOLDER_SOURCES`)
     and no tool that runs code in the CLI (:data:`IN_PROCESS`). Its shell where the layer
-    cannot isolate: off, its tools left out, said on the run's stream. No shell: as given."""
+    cannot isolate: off, its tools left out (the reason said once in the log). No shell: as
+    given."""
     from trellis.harness.sandbox.isolation import host_layer
 
     shells = _shells(options)
     if not shells:
         return options, None
     denied = list(options.disallowed_tools or ())
-    why = _unisolated()
-    if why is not None:
-        runtime.events.warning("claude_shell", SHELL_OFF.format(why=why))
+    if _unisolated() is not None:  # said once in the log, at the start (``host``)
         off = [*denied, *(t for t in sorted(CLAUDE_SHELLS) if t not in denied)]
         return dataclasses.replace(options, disallowed_tools=off), None
     box = await host_layer().workspace(runtime.tenant, runtime.user, runtime.run_id)

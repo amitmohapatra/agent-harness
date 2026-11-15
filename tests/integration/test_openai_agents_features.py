@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, Final
 
 import pytest
 from agents import (
@@ -43,6 +44,7 @@ from agents.agent import ToolsToFinalOutputResult
 from pydantic import BaseModel
 
 from tests.support.arm import declaring
+from tests.support.isolation import isolating
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import Items, ScriptedModel
 from trellis import Budget, Harness, Settings
@@ -1363,15 +1365,26 @@ def twice(*items: Any) -> list[Any]:
     return [Items(*items), Items(*items)]
 
 
-@pytest.mark.host_execution
+@pytest.fixture
+def isolated() -> Iterator[Any]:
+    """This machine's isolation layer, where a shell's commands run (``openai_local.isolated``)."""
+    with isolating() as layer:
+        yield layer
+
+
+#: A shell the catalog says may not run unasked (``irreversible``): each command asks a person.
+ASKS: Final = {"shell": {"side_effects": "irreversible"}}
+
+
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
-async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
-    memory_harness: Harness, memory_service: FakeMemoryService, streamed: bool
+async def test_a_shell_command_the_catalog_holds_asks_and_runs_once_isolated_recorded(
+    memory_harness: Harness, memory_service: FakeMemoryService, isolated: Any, streamed: bool
 ) -> None:
-    """A ``ShellTool`` with a local executor declares nothing: each command asks a person, who
-    sees the command; nothing runs before the approval; approved, it runs once — recorded,
-    counted, on the stream — and the model reads its output."""
-    model = ScriptedModel([*twice(shell_call("rm -rf build")), "cleaned"])
+    """A local ``ShellTool``'s command runs announced, isolated; one the catalog holds asks a
+    person, who sees the command; nothing runs before the approval; approved, it runs once in
+    the run's workspace — recorded, counted, on the stream — and the model reads its output."""
+    memory_service.catalog = ASKS
+    model = ScriptedModel([*twice(shell_call("echo cleaned up")), "cleaned"])
     target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
     agent = memory_harness.wrap(target, id=f"shell-{streamed}", without={"schedules"})
     if streamed:
@@ -1385,26 +1398,27 @@ async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
         assert paused.interrupt.tool_call is not None
         interrupt_id = paused.interrupt.interrupt_id
         tool_call = paused.interrupt.tool_call.model_dump()
-    assert ran == [] and tool_call["tool"] == "shell"
-    assert tool_call["args"] == {"action": {"commands": ["rm -rf build"]}}
+    assert tool_call["tool"] == "shell"
+    assert tool_call["args"] == {"action": {"commands": ["echo cleaned up"]}}
     done = await agent.resume(interrupt_id, "approve", reviewer="r")
     assert done.status is RunStatus.SUCCESS and done.answer == "cleaned"
-    assert ran == ["rm -rf build"] and shell_said(model) == ["ran rm -rf build"]
+    assert shell_said(model) == ["cleaned up\n"] and ran == []  # not its own executor
     await memory_harness.writes.drain()
     assert recorded(memory_service) == [("shell", "ok")]
 
 
-@pytest.mark.host_execution
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 async def test_a_decision_on_a_shell_command_reaches_memory_with_its_nested_arguments(
     memory_harness: Harness,
     memory_service: FakeMemoryService,
+    isolated: Any,
     decision: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A shell call's arguments nest (``{"action": {"commands": [...]}}``): the decision on it
     is feedback the memory service takes, its arguments unchanged, nothing failed or logged,
     as a flat call's is. Memory refused it (custom_metadata's two levels) and it was lost."""
+    memory_service.catalog = ASKS
     model = ScriptedModel([*twice(shell_call("rm -rf build")), "cleaned"])
     target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
     agent = memory_harness.wrap(target, id=f"shell-feedback-{decision}", without={"schedules"})
@@ -1422,14 +1436,14 @@ async def test_a_decision_on_a_shell_command_reaches_memory_with_its_nested_argu
     assert [r.getMessage() for r in caplog.records if r.name == "trellis.writes"] == []
 
 
-@pytest.mark.host_execution
 async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
-    harness: Harness,
+    memory_harness: Harness, memory_service: FakeMemoryService, isolated: Any
 ) -> None:
     """Rejected, the command does not run and the model reads why; edited, the edited command
     runs instead."""
-    model = ScriptedModel([*twice(shell_call("rm -rf /")), "stopped"])
-    agent = harness.wrap(
+    memory_service.catalog = ASKS
+    model = ScriptedModel([*twice(shell_call("echo the root")), "stopped"])
+    agent = memory_harness.wrap(
         Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-reject"
     )
     paused = await agent.run("clean up", user="u")
@@ -1437,74 +1451,72 @@ async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
     done = await agent.resume(
         paused.interrupt.interrupt_id, "reject", answer="never the root", reviewer="r"
     )
-    assert done.status is RunStatus.SUCCESS and ran == []
+    assert done.status is RunStatus.SUCCESS
     [said] = shell_said(model)
     assert "was not run" in said and "never the root" in said
-    model = ScriptedModel([*twice(shell_call("rm -rf /")), "cleaned"])
-    agent = harness.wrap(
+    model = ScriptedModel([*twice(shell_call("echo the root")), "cleaned"])
+    agent = memory_harness.wrap(
         Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-edit"
     )
     paused = await agent.run("clean up", user="u")
     assert paused.interrupt is not None
-    edited = {"action": {"commands": ["rm -rf build"]}}
+    edited = {"action": {"commands": ["echo build"]}}
     done = await agent.resume(paused.interrupt.interrupt_id, "edit", answer=edited, reviewer="r")
-    assert done.status is RunStatus.SUCCESS and ran == ["rm -rf build"]
+    assert done.status is RunStatus.SUCCESS and shell_said(model) == ["build\n"]
 
 
-@pytest.mark.host_execution
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 async def test_a_shell_tools_own_approval_is_the_one_question_for_its_call(
-    memory_harness: Harness, memory_service: FakeMemoryService, decision: str
+    memory_harness: Harness, memory_service: FakeMemoryService, isolated: Any, decision: str
 ) -> None:
     """The SDK's ``ShellTool(needs_approval=True)``: the run pauses on the SDK's approval, the
     person shown the command; that answer is the call's only question — approved, it runs once
     (recorded, the model not asked again); rejected, it does not run."""
-    model = ScriptedModel([Items(shell_call("rm -rf build")), "done"])
+    model = ScriptedModel([Items(shell_call("echo built")), "done"])
     target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell, needs_approval=True)])
     agent = memory_harness.wrap(target, id=f"shell-{decision}", without={"schedules"})
     paused = await agent.run("clean up", user="u")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and ran == []
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     asked = paused.interrupt.tool_call
     assert asked is not None and asked.tool == "shell"
-    assert asked.args == {"action": {"commands": ["rm -rf build"]}}
+    assert asked.args == {"action": {"commands": ["echo built"]}}
     done = await agent.resume(paused.interrupt.interrupt_id, decision, reviewer="r")
     assert done.status is RunStatus.SUCCESS and done.answer == "done"
     assert len(model.inputs) == 2  # continued from the SDK's state: no second question
     await memory_harness.writes.drain()
     if decision == "approve":
-        assert ran == ["rm -rf build"] and recorded(memory_service) == [("shell", "ok")]
+        assert shell_said(model) == ["built\n"] and recorded(memory_service) == [("shell", "ok")]
     else:
-        assert ran == [] and recorded(memory_service) == []
+        assert recorded(memory_service) == []
 
 
-@pytest.mark.host_execution
-async def test_a_command_the_catalog_says_reads_runs_unasked_and_a_failure_is_recorded(
+async def test_a_command_runs_announced_and_one_refused_is_recorded_as_failed(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    async def fails(request: Any) -> str:
-        ran.extend(request.data.action.commands)
-        raise RuntimeError("no such file")
-
-    memory_service.catalog = {"shell": {"side_effects": "read"}}
-    model = ScriptedModel([Items(shell_call("cat a.txt")), Items(shell_call("ls", "c2")), "done"])
-    agent = memory_harness.wrap(
-        Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-read"
-    )
-    assert (await agent.run("look", user="u")).status is RunStatus.SUCCESS
+    """Isolated, a shell's commands run unasked (announced); where this machine cannot isolate
+    a command (the tests' own layer, ``tests/conftest.py``), it is refused — the SDK tells the
+    model why — and recorded as failed."""
+    with isolating():
+        model = ScriptedModel(
+            [Items(shell_call("echo a")), Items(shell_call("echo b", "c2")), "done"]
+        )
+        agent = memory_harness.wrap(
+            Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-runs"
+        )
+        assert (await agent.run("look", user="u")).status is RunStatus.SUCCESS
     model = ScriptedModel([Items(shell_call("cat b.txt")), "it failed"])
     agent = memory_harness.wrap(
-        Agent(name="ops", model=model, tools=[ShellTool(executor=fails)]), id="shell-fails"
+        Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-refused"
     )
     assert (await agent.run("look", user="u")).status is RunStatus.SUCCESS
-    assert "no such file" in shell_said(model)[0]  # what the SDK makes of the failure
+    assert "cannot be isolated" in shell_said(model)[0]  # what the SDK makes of the failure
     await memory_harness.writes.drain()
-    assert ran == ["cat a.txt", "ls", "cat b.txt"]
+    assert ran == []
     assert recorded(memory_service) == [("shell", "ok"), ("shell", "ok"), ("shell", "error")]
 
 
-@pytest.mark.host_execution
-async def test_a_local_shell_call_asks_and_runs_once_recorded(
-    memory_harness: Harness, memory_service: FakeMemoryService
+async def test_a_local_shell_call_the_catalog_holds_asks_and_runs_once_recorded(
+    memory_harness: Harness, memory_service: FakeMemoryService, isolated: Any
 ) -> None:
     from agents import LocalShellTool
     from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
@@ -1513,6 +1525,7 @@ async def test_a_local_shell_call_asks_and_runs_once_recorded(
         ran.append(" ".join(request.data.action.command))
         return "done"
 
+    memory_service.catalog = {"local_shell": {"side_effects": "irreversible"}}
     call = LocalShellCall(
         id="ls_1",
         call_id="call_ls",
@@ -1525,10 +1538,10 @@ async def test_a_local_shell_call_asks_and_runs_once_recorded(
         Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)]), id="local"
     )
     paused = await agent.run("remove x", user="u")
-    assert paused.interrupt is not None and paused.interrupt.tool_call is not None and ran == []
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None
     assert paused.interrupt.tool_call.args["action"]["command"] == ["rm", "-rf", "x"]
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
-    assert done.status is RunStatus.SUCCESS and ran == ["rm -rf x"]
+    assert done.status is RunStatus.SUCCESS and ran == []
     await memory_harness.writes.drain()
     assert recorded(memory_service) == [("local_shell", "ok")]
 

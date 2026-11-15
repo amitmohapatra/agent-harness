@@ -6,11 +6,14 @@ tools the layer launches commands with, skips them."""
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import subprocess
 import sys
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
@@ -51,3 +54,21 @@ def processes_of(uid: int) -> list[str]:
         ["ps", "-o", "pid=,args=", "-u", str(uid)], check=False, capture_output=True, text=True
     )
     return [line.strip() for line in found.stdout.splitlines() if line.strip()]
+
+
+@contextmanager
+def isolating() -> Iterator[Any]:
+    """This machine's isolation layer for a test (``use_host``): a root of the test's own and
+    a uid range of its own (another test's layer may still be ending its runs), put back
+    afterwards; skips where it cannot isolate (:func:`root_helper`)."""
+    from trellis.harness.sandbox.isolation import HostSandbox, use_host
+
+    helper = root_helper()
+    for root in fresh_root(helper):
+        base = 1_800_000_000 + secrets.randbelow(100_000) * 1_000
+        made = HostSandbox(root, helper=helper, uid_base=base, tenants=1)
+        replaced = use_host(made)
+        try:
+            yield made
+        finally:
+            use_host(replaced)

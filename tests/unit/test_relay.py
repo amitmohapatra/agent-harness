@@ -71,7 +71,7 @@ async def test_a_token_the_relay_does_not_hold_runs_nothing(tmp_path: Path) -> N
     finally:
         await relay.aclose()
     assert data == HEADER.pack(2, len(UNKNOWN)) + UNKNOWN + HEADER.pack(0, 3) + b"126"
-    assert NOT_STARTED == 126 and not Path(relay.folder).exists()
+    assert NOT_STARTED == 126 and not await asyncio.to_thread(os.path.exists, relay.folder)
 
 
 async def test_only_a_file_in_the_workspace_is_adopted(tmp_path: Path) -> None:

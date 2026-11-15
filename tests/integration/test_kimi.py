@@ -225,13 +225,17 @@ async def test_a_command_on_a_host_the_deployment_allows_runs_unasked_and_announ
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
     """Kimi's ``Bash`` on this machine, where the administrator allows commands here: the
-    command is the deployment's, never the user's question — it runs, announced."""
+    command is the deployment's, never the user's question — announced, and run through the
+    isolation layer; here the test's layer cannot isolate (``tests/conftest.py``), so it is
+    refused, saying why, never run as the service's user (``test_kimi_isolated_shell``: where
+    it can)."""
     endpoint.plan = [("Bash", {"command": WRITES})]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash")
     events = [e async for e in agent.stream("say it", user="u1")]
     assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
     assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["Bash"]
-    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert "cannot be isolated" in str(events[-1].data["result"])
 
 
 async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_call(

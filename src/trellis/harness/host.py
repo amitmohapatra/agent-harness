@@ -7,13 +7,13 @@ on is the deployment's, so a command there runs only where it is confined to the
 as the service's own user, never on a run user's approval. What runs a command here
 (:func:`found`), by each framework's own word for it, and what the harness does:
 
-* **Claude Code's and Kimi Code's own shell** (Claude's ``Bash``, ``PowerShell``, ``REPL``,
-  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``): run as they do, in their working folder
-  as the service's user — not through the harness's isolation layer, which cannot carry a
-  framework's own process — announced and recorded at each call. A team's own Claude
-  ``SandboxSettings`` is honoured as given; ``kimi(sandbox=sandbox())`` isolates Kimi's.
-* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``**: its executor is code of
-  yours on this machine, governed at each call as any tool of yours.
+* **Claude Code's and Kimi Code's own shell** (Claude's ``Bash``, ``PowerShell``,
+  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``) **and an OpenAI agent's ``LocalShellTool``
+  or local ``ShellTool``**: each command runs through this machine's isolation layer, in the
+  run's workspace as its uid (``sandbox.relay``, ``adapters.acp.Sandboxed``,
+  ``tools.convert.openai_local.isolated``), announced and audited; where the layer cannot
+  isolate (:func:`cannot_isolate`, said once at the start), refused — Claude's left out —
+  never run as the service's own user.
 * **Unisolated shells — Deep Agents' ``execute`` on a ``LocalShellBackend`` (alone, a
   ``CompositeBackend``'s default, a sub-agent's; ``ReAct(backend=)`` too), LangChain's
   ``ShellToolMiddleware`` on the host, the OpenAI SDK's ``UnixLocalSandboxClient``**: no

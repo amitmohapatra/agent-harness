@@ -2015,6 +2015,9 @@ class Sandboxed:
         self.runtime = runtime
         self.source = source
         self.work = work
+        #: its writes go to the sandbox too: one it is given, or this machine's layer where it
+        #: can isolate (else they are its own, in its folder)
+        self.files = target.sandbox is not None or cannot_isolate() is None
         self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
         #: what the latest terminals the agent released said (:data:`TERMINALS_KEPT`): a
         #: call's record reads it once the call ends, after its terminal went
@@ -2024,8 +2027,9 @@ class Sandboxed:
         self.told: dict[str, str] = {}
         self._made = False
         runtime.added.append(self.source)  # its end (and its pause) find it
-        _said_reads(runtime.agent_id)
-        runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
+        if self.files:  # its writes go to the sandbox, its reads do not
+            _said_reads(runtime.agent_id)
+            runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
 
     def capabilities(self) -> dict[str, Any]:
         """What the client serves the agent (``ClientCapabilities``' fields): its terminals —
@@ -2034,7 +2038,7 @@ class Sandboxed:
         why, and its file writes are its own, in its folder: :meth:`ACPAdapter.workdir`)."""
         from acp.schema import FileSystemCapabilities
 
-        if self.target.sandbox is None and cannot_isolate() is not None:
+        if not self.files:
             return {"terminal": True}
         files = FileSystemCapabilities(read_text_file=True, write_text_file=True)
         return {"fs": files, "terminal": True}

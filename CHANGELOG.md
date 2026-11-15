@@ -5,6 +5,53 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: every framework's own shell runs through the isolation layer — Claude Code's, Kimi Code's, an OpenAI local shell's
+
+The user's rule: every adapter can run shell commands when it has a shell tool, and every one
+runs under the harness's isolation. No setting more than `TRELLIS_HOST_EXECUTION`
+([governance.md](docs/governance.md#commands-on-the-host)).
+
+* **Claude Code** (breaking): each command its `Bash` (a background one too), `Monitor` or
+  `PowerShell` would run itself, as the service's user, runs in the run's workspace as the
+  run's uid (`sandbox.relay`): Claude Code's own rules see the command the model made, its
+  permission check hands the CLI a client with a one-time token on a socket only the service
+  reaches, and the harness streams the command's stdout, stderr and exit code back — what
+  Claude reads is what Claude Code makes of a command run itself; a `cd` holds for the next.
+  Claude Code works in that workspace (its `cwd`; the options' own `cwd` joins `add_dirs`),
+  with no settings of the folder's own and no `REPL`; a file it writes there is the run's.
+  Its file tools stay the CLI's, as the service's user. With its shell, a conversation's turn
+  runs in a process of its own (the workspace, and what runs in it, end with the run). Where
+  the service is not root, or the layer cannot isolate, its shell is left out, saying why.
+* **Kimi Code with no `sandbox=`**: its terminal and file capabilities are served by a
+  workspace of this machine's layer at its folder — its `Bash` runs there, its writes go there;
+  its home, login and live session stay. Where the layer cannot isolate, each command is
+  refused with the reason (and Kimi writes in its folder itself).
+* **OpenAI Agents' `LocalShellTool` and local `ShellTool`** (breaking): each command runs in
+  the run's workspace, the result the SDK's own (`ShellResult`, the text); the tool's own
+  executor is no longer called. Declared `write`, isolated: announced, not asked.
+* **The isolation layer keeps secrets out**: the cloud metadata server is out of every
+  command's reach, the network open or not (an iptables owner rule on the host — an open
+  network needs iptables — a blackhole route in the shared container); a pod's secret folders
+  (`/var/run/secrets`, `/run/secrets`) are hidden; the folders above the workspaces' root are
+  made for any uid to go through (a command reached its workspace by its whole path only from
+  inside it); `trellis doctor` fails when the Docker socket is reachable from where commands
+  run, and warns of secret files any user can read there. Where it cannot isolate, a command
+  is refused with a `ToolError` (was `ConfigurationError`).
+* **A shell command's one audit record**, made in one place (`sandbox.base.record_command`):
+  the audit log, the run's `sandbox_command` and the call's span — the isolation layer's for
+  its commands, `audited`'s for a provider that does not audit its own; a framework's call
+  that the harness ran isolated says where it really ran.
+
+### Added: a conversation's working files carry to its next turn
+
+When a run succeeds or pauses, what it wrote in its workspace besides `outputs/` is kept in the
+file store under the conversation (`.carried/<tenant>/<user>/<conversation>/<agent>/
+workspace.tar`), and the conversation's next run — on any worker, never another user's,
+tenant's or conversation's — gets it back in its fresh workspace before its first command, told
+in one line. Caches are skipped; past 50 MiB a file, 60 MiB all told, the oldest go first and
+the run is told which; a failed run keeps nothing new. The workspace on this machine is still
+deleted at the run's end ([sandbox.md](docs/sandbox.md#a-conversations-working-files-carry-to-its-next-turn)).
+
 ### Changed: shell commands on the host — isolated where the harness runs them, one switch to turn them off (`TRELLIS_HOST_EXECUTION`)
 
 Shell commands stay allowed by default (`TRELLIS_HOST_EXECUTION=allow`), with isolation as the
@@ -22,10 +69,7 @@ guard where the harness runs them:
   (alone, a `CompositeBackend`'s default, a sub-agent's; `ReAct(backend=)` too), LangChain's
   `ShellToolMiddleware` on the host, the OpenAI SDK's `UnixLocalSandboxClient`. Before, they ran
   on the host as the service's user.
-* **Claude Code's and Kimi Code's own shells run as before**, as the service's user, without
-  the harness's isolation; a team's own Claude `SandboxSettings` is honoured as given (on Linux
-  it needs bubblewrap and socat: without them the CLI runs the command unsandboxed, warning on
-  its stderr). `kimi(sandbox=sandbox())` and Claude's own sandbox are the ways to isolate them.
+* **Every framework's own shell runs through the isolation layer** (below).
 * **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
   sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
   host and an OpenAI local shell tool are refused at `h.wrap` (and for a run whose own

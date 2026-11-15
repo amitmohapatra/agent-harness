@@ -157,9 +157,17 @@ long-term memory.
 A sandbox on this machine — the SDK's `UnixLocalSandboxClient` (no OS isolation on Linux), as
 below — and a `LocalShellTool` or a `ShellTool` in the SDK's local environment (on the agent,
 an agent it hands off to or runs as a tool) run commands on the host. The Unix-local client
-has no isolation: `h.wrap`, and a run given such a `run_config`, refuse it. A local shell tool
-runs its executor — code of yours — governed as your tool, unless the deployment says
-`TRELLIS_HOST_EXECUTION=deny` ([governance.md](../governance.md#commands-on-the-host)). A
+has no isolation the harness can give it (the SDK runs its sandbox's processes itself, behind
+its session API): `h.wrap`, and a run given such a `run_config`, refuse it. A local shell tool's
+commands run through this machine's isolation layer instead of its executor
+(`tools.convert.openai_local.isolated`): each in the run's workspace, as the run's uid, with an
+environment of its own (a `LocalShellTool` call's `env` added), its result what the SDK's own
+executors return — a `ShellTool`'s `ShellResult` (each command's stdout, stderr, its exit or a
+`timeout` outcome past its `timeout_ms`), a `LocalShellTool`'s text — announced and audited,
+never a person's question unless the catalog says more; the tool's own executor is not called.
+Where the layer cannot isolate, the command is refused and the SDK tells the model why; the
+deployment's `TRELLIS_HOST_EXECUTION=deny` refuses the agent at `h.wrap`
+([governance.md](../governance.md#commands-on-the-host)). A
 `DockerSandboxClient`, a hosted client (`agents.extensions.sandbox`) and a hosted `ShellTool`
 are never refused.
 
@@ -185,7 +193,7 @@ agent = h.wrap(
 | Repeated calls | a harness tool's call a model reply repeats (the same tool, the same arguments) runs once: each repeat reads that its result is the first one's ([reliability.md](../reliability.md#calls-made-at-once)). Your own `FunctionTool`s and MCP servers' tools run every call the reply makes, as the SDK runs them |
 | MCP servers | the agent's own `mcp_servers` (and its handed-off agents'): their tools are of the run's tool set as each server lists them (its own `tool_filter` applied), and each call goes through governance (the tool's annotations for its risk — none at all: it says nothing, so it asks with every choice — the catalog's word over them), the journal and the record, on a copy of the server; a call that pauses the run stops the SDK's run. A server that retries itself (`max_retry_attempts`) owns its tries: the harness's read retries apply only where it does not |
 | Hosted tools | file search, web search, the code interpreter, image generation, a hosted MCP server's tools: recorded as the run's tool calls with what they were asked, what they found and the step's duration; of the tool set and the catalog; run by the provider inside the model's step, so not approvable |
-| Tools the SDK runs here | a `ShellTool` with a local executor, a `LocalShellTool`, an `ApplyPatchTool`'s editor, a `ComputerTool`'s computer, a `CustomTool`: each call goes through governance where the SDK hands it to the tool's code — the catalog's risk (one that declares nothing asks), a person shown the call as the model made it (`{"action": {"commands": [...]}}`), reject and edit, the journal, the record and the run's count; a call the tool's own `needs_approval` held is asked about once |
+| Tools the SDK runs here | a `ShellTool` with a local executor, a `LocalShellTool`, an `ApplyPatchTool`'s editor, a `ComputerTool`'s computer, a `CustomTool`: each call goes through governance where the SDK hands it to the tool's code — the catalog's risk (one that declares nothing asks; a local shell writes, isolated: announced), a person shown the call as the model made it (`{"action": {"commands": [...]}}`), reject and edit, the journal, the record and the run's count; a call the tool's own `needs_approval` held is asked about once. A shell's commands run in the run's workspace of the isolation layer (above) |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 30 tools of the run's own, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used — your own function tools as the harness's (their own `is_enabled` asked first); handoffs and agent tools are never narrowed away |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)). Your own function tools' results are not rewritten, whatever their size |

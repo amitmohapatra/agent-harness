@@ -68,6 +68,7 @@ from tests.integration.test_openai_agents_mcp import results, stdio
 from tests.support.adapters import BUILDERS, SYSTEM
 from tests.support.arm import arm, declaring, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
+from tests.support.isolation import isolating
 from tests.support.kimi import detached
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import Items, ScriptedModel
@@ -743,14 +744,17 @@ async def test_a_local_shell_command_is_one_question(
     model = ScriptedModel([Items(call), Items(call), "done"])
     target = Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)])
     watch, asked = Watch(), Asked()
+    # a command runs announced, isolated: one the catalog holds is a person's question
+    memory_service.catalog = {"local_shell": {"side_effects": "irreversible"}}
     async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = h.wrap(target, id="ops", hooks=[watch], without={"schedules"})
-        first = await agent.run("remove x", user="ada", thread=THREAD)
-        done = await settled(agent, first, asked, lambda _: {"decision": decision})
+        with isolating():
+            first = await agent.run("remove x", user="ada", thread=THREAD)
+            done = await settled(agent, first, asked, lambda _: {"decision": decision})
         assert done.status is RunStatus.SUCCESS, done
         ran = 1 if decision == "approve" else 0
         await ledger(h, memory_service, watch, asked, "local_shell", questions=1, ran=ran)
-    assert [t for t, _ in RAN] == ["local_shell"] * ran, RAN
+    assert RAN == []  # in the run's workspace, never by its own executor
 
 
 @pytest.mark.parametrize("policy", ["always", "never"])
