@@ -26,12 +26,14 @@ The contract a provider keeps:
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping
 from typing import Final, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from trellis.contracts import ToolError
+from trellis.harness import telemetry
 
 #: What every label the harness gives a sandbox begins with (the ones a provider lists).
 PREFIX: Final = "trellis."
@@ -191,3 +193,39 @@ class SupportsSnapshot(Protocol):
     makes the sandbox again from (``SandboxRef.snapshot``) and ``delete`` removes."""
 
     async def snapshot(self, ref: SandboxRef) -> str: ...
+
+
+#: The longest command an audit record keeps (as the isolation layer's).
+AUDIT_CHARS: Final = 8_192
+
+
+async def audited(
+    box: Sandbox,
+    command: str,
+    *,
+    timeout: float | None,  # noqa: ASYNC109 - the command's
+) -> ExecResult:
+    """``box.exec`` of a model's command, its audit record — the command, its exit code, how
+    long it took, the time limit when it hit it, the sandbox — on the tool call's span
+    (``telemetry.command``, ``where="sandbox"``)."""
+    started = time.monotonic()
+    try:
+        result = await box.exec(command, timeout=timeout)
+    except TimeoutError:
+        _recorded(box, command, None, started, "time")
+        raise
+    _recorded(box, command, result.exit_code, started, None)
+    return result
+
+
+def _recorded(
+    box: Sandbox, command: str, code: int | None, started: float, limit: str | None
+) -> None:
+    record = {
+        "sandbox": box.ref.id,
+        "command": command[:AUDIT_CHARS],
+        "exit_code": code,
+        "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        "limit": limit,
+    }
+    telemetry.command(record, where="sandbox")

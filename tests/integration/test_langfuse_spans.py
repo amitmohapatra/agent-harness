@@ -28,7 +28,7 @@ from opentelemetry.trace import StatusCode
 from tests.support.adapters import CLI
 from tests.support.arm import arm
 from tests.support.models import ScriptedChat
-from tests.support.openai_model import ScriptedModel
+from tests.support.openai_model import Items, ScriptedModel
 from tests.support.planned import PlannedChatModel
 from trellis import Budget, Harness, ReAct, Runtime, tool
 from trellis.contracts import RunStatus
@@ -220,6 +220,7 @@ async def test_kimis_tools_and_its_sub_agent_are_spans(
     tree = Tree(spans)
     built_in(tree, "Read", "kimi", "run")
     built_in(tree, "Bash", "kimi", "ask")
+    commanded(tree, "Bash", "rm a.txt", "framework")
     failed_span(tree, "execute_tool Grep", "bad pattern")
     built_in(tree, "Agent", "kimi", "run")
     asked_and_decided(tree, "Bash", "conversation")
@@ -298,8 +299,6 @@ async def test_openai_agents_function_and_hosted_tools_are_spans(
 ) -> None:
     from openai.types.responses import ResponseFunctionWebSearch
     from openai.types.responses.response_function_web_search import ActionSearch
-
-    from tests.support.openai_model import Items
 
     @function_tool
     def stock(item: str) -> str:
@@ -419,3 +418,117 @@ def test_a_choice_is_named_as_a_person_made_it() -> None:
     assert telemetry.choice("APPROVE", "always") == "always"
     assert telemetry.choice("REJECT", None) == "deny"
     assert telemetry.choice("APPROVE", "later") == "later"
+
+
+# --------------------------------------------------------------------------- shell commands
+
+
+def commanded(tree: Tree, name: str, text: str, where: str) -> dict[str, Any]:
+    """A shell call's span: its command (redacted), where it ran, how long it took."""
+    [span] = [
+        s
+        for s in tree.named(f"execute_tool {name}")
+        if text in str(attrs(s).get("trellis.command.text"))
+    ]
+    found = attrs(span)
+    assert found["trellis.command.where"] == where, found
+    assert found["trellis.command.duration_ms"] >= 0
+    assert SECRET not in tree.everything()
+    return found
+
+
+async def test_a_command_in_the_runs_sandbox_is_its_audit_record_on_the_span(
+    harness: Harness, spans: InMemorySpanExporter
+) -> None:
+    """The harness's ``sandbox_exec`` and Deep Agents' ``execute`` on the run's sandbox."""
+    from tests.support.sandbox import FakeSandboxes
+    from trellis.harness.sandbox import sandbox
+
+    provider = FakeSandboxes()
+    model = ScriptedChat([("sandbox_exec", {"command": "echo hi"}), "done"])
+    agent = arm(harness.wrap(ReAct("s", model), id="box"), [sandbox(provider).tools()])
+    assert (await agent.run("go", user="u1")).status is RunStatus.SUCCESS
+    found = commanded(Tree(spans), "sandbox_exec", "echo hi", "sandbox")
+    assert found["trellis.command.exit_code"] == 0
+    assert str(found["trellis.command.sandbox"]).startswith("trellis-run_")
+    assert "trellis.command.limit" not in found
+
+    spans.clear()  # past the run's time: the time limit stopped it
+    model = ScriptedChat([("sandbox_exec", {"command": "sleep 30"}), "done"])
+    slow = arm(harness.wrap(ReAct("s", model), id="slow-box"), [sandbox(provider).tools()])
+    await slow.run("go", user="u1", run_timeout=1)
+    stopped = commanded(Tree(spans), "sandbox_exec", "sleep 30", "sandbox")
+    assert stopped["trellis.command.limit"] == "time"
+    assert "trellis.command.exit_code" not in stopped
+
+    spans.clear()
+    model = ScriptedChat([("execute", {"command": "echo hi"}), "done"])
+    deep = harness.wrap(ReAct("s", model, backend=sandbox(FakeSandboxes())), id="deep-box")
+    assert (await deep.run("go", user="u1")).status is RunStatus.SUCCESS
+    assert commanded(Tree(spans), "execute", "echo hi", "sandbox")["trellis.command.exit_code"] == 0
+
+
+async def test_the_isolation_layers_audit_record_is_the_spans(
+    harness: Harness, spans: InMemorySpanExporter
+) -> None:
+    """A command the isolation layer ran says so on the run's stream (``sandbox_command``):
+    the same record is on the span of the call that ran it, a limit that stopped it with it."""
+    from trellis import current
+
+    @tool(side_effects="read")
+    def isolated(command: str) -> str:
+        """Run a command on this machine, isolated."""
+        record = {"command": command, "exit_code": 137, "duration_ms": 12.5, "limit": "memory"}
+        running = current()
+        assert running is not None
+        running.events.custom("sandbox_command", sandbox="host-1", uid=1000000001, **record)
+        return "killed"
+
+    model = ScriptedChat([("isolated", {"command": f"make big --key {SECRET}"}), "done"])
+    agent = arm(harness.wrap(ReAct("s", model), id="host"), [isolated])
+    assert (await agent.run("go", user="u1")).status is RunStatus.SUCCESS
+    found = commanded(Tree(spans), "isolated", "make big", "host")
+    assert found["trellis.command.exit_code"] == 137
+    assert found["trellis.command.limit"] == "memory"
+    assert found["langfuse.observation.status_message"] == "stopped by its memory limit"
+
+
+async def test_a_frameworks_own_shell_commands_are_spans(
+    harness: Harness, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    """Claude Code's ``Bash``, OpenAI Agents' local shell: the command, where it ran (the
+    framework's own), how long it took."""
+    from agents import LocalShellTool
+    from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
+
+    from tests.integration.test_openai_agents_features import twice
+
+    script = [{"builtin": "Bash", "args": {"command": "ls -la"}}, {"text": "done"}]
+    claude_agent = harness.wrap(claude(tmp_path, script), id="sh-claude")
+    assert (await claude_agent.run("list", user="u1")).status is RunStatus.SUCCESS
+    commanded(Tree(spans), "Bash", "ls -la", "framework")
+
+    spans.clear()
+    call = LocalShellCall(
+        id="ls_1",
+        call_id="call_ls",
+        status="completed",
+        type="local_shell_call",
+        action=LocalShellCallAction(type="exec", command=["ls", "build"], env={}),
+    )
+    model = ScriptedModel([*twice(call), "listed"])  # made again by the resumed attempt
+    shell = LocalShellTool(executor=lambda request: "a.txt")
+    oa = harness.wrap(Agent(name="ops", model=model, tools=[shell]), id="sh-openai")
+    paused = await oa.run("list", user="u1")
+    assert paused.interrupt is not None
+    done = await oa.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done
+    commanded(Tree(spans), "local_shell", "ls build", "framework")
+
+
+def test_a_shells_command_is_read_from_its_arguments() -> None:
+    assert telemetry.command_text({"command": "ls"}) == "ls"
+    assert telemetry.command_text({"action": {"command": ["ls", "-a"]}}) == "ls -a"
+    assert telemetry.command_text({"action": {"commands": ["ls", "pwd"]}}) == "ls pwd"
+    assert telemetry.command_text({"action": "x"}) is None
+    assert telemetry.command_text("ls") is None

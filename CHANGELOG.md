@@ -11,6 +11,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   and governance's action (`ask` for a call a person approved): Claude Code's built-ins and MCP
   tools, Kimi Code's tools, Deep Agents' file tools (on its state backend too), `execute` and
   `task`, OpenAI Agents' function and hosted tools, a LangChain tool in a graph of your own.
+* **Every shell command is a span** — the harness's `sandbox_exec`, Deep Agents' `execute`,
+  Claude Code's `Bash`/`Monitor`, Kimi's `Bash`, OpenAI Agents' shell tools: the command
+  (redacted), where it ran (sandbox, host isolation, the framework's own), its exit code,
+  duration and the limit that stopped it, from the command's audit record where the harness
+  ran it (the isolation layer's `sandbox_command` record is the span's).
 * **A sub-agent its framework spawns is an agent span** (`invoke_agent <helper>`) its calls
   and replies nest under; **a framework's own model replies are `chat` generations** with
   their usage, cache tokens and cost (Claude, Kimi, OpenAI Agents); a `ReAct` generation

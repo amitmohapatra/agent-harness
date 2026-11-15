@@ -74,7 +74,7 @@ from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, RECORD, Made, call_key, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
-from trellis.harness.telemetry import failed, metrics, tool_span
+from trellis.harness.telemetry import failed, metrics, shell_ended, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
     OUTCOME_UNKNOWN,
@@ -397,6 +397,7 @@ async def observed(
     ) as span:
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
         failed(span, outcome)
+        shell_ended(span, outcome, outcome.latency_ms)
     runtime.used.add(spec.name)
     if spec.side_effects != "read":  # the reads before it are not answered across it
         runtime.replay.wrote()
@@ -530,6 +531,7 @@ async def _ran(
             raise error
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
         failed(span, outcome)
+        shell_ended(span, outcome, round((time.perf_counter() - started) * 1000, 3))
     hooks = runtime.agent.hooks
     # a framework's own tool's error it may be tried again after: its failure is the call's
     # only if no try follows (the ``on_error`` hooks are told then: ``_ended_or_owed``)

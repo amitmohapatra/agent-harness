@@ -51,6 +51,21 @@ spans under its call. Beyond those, each framework's own steps:
 | Kimi Code (ACP) | every tool it runs (its shell, file, search and `Agent` tools) | its `Agent` sub-agents and swarm members | `chat` per request its usage log records |
 | a function target | its `agent.tools.call(...)` calls | `h.wrap` sub-agents | its own instrumentation |
 
+**Every shell command is its call's span.** A shell call's `execute_tool` span (the harness's
+`sandbox_exec`, Deep Agents' `execute`, Claude Code's `Bash` and `Monitor`, Kimi Code's `Bash`,
+OpenAI Agents' `shell` and `local_shell`) also says `trellis.command.text` (the command,
+redacted as any tool input is), `trellis.command.where` (`sandbox`: the run's sandbox; `host`:
+this machine's isolation layer; `framework`: the framework ran it on its own machine),
+`trellis.command.exit_code`, `trellis.command.duration_ms`, `trellis.command.limit` when a
+limit stopped it (`time`, `cpu`, `memory`, `processes`, `file`... — level `WARNING`, "stopped
+by its memory limit") and `trellis.command.sandbox`; its output is the call's result, as any
+tool's (redacted, cut at 2000 characters). A command the harness ran — in the run's sandbox,
+or through the isolation layer — is put there from its audit record (`telemetry.command`: the
+isolation layer's `sandbox_command` record, the one its audit log and the run's stream carry,
+is put on the span as it is emitted), so the span and the audit log say the same; one the
+framework ran is said as the framework reported it (its duration, an exit code its result
+names, the time limit when it timed out).
+
 A built-in's `trellis.governance.action` is what governance decided before the call ran
 (`bridge.permitted`): `ask` when a person approved it, `announce` or `run` otherwise; a hosted
 tool the provider ran inside the model's step was decided by nothing, and is `run`.

@@ -520,6 +520,81 @@ def _root_span(run_id: str, name: str, attributes: dict[str, Any]) -> Iterator[t
         yield current
 
 
+#: The tools that run a shell command, and where it runs unless its audit record says
+#: otherwise (:func:`command`): the harness's sandbox, or the framework's own machine (Deep
+#: Agents' ``execute`` on a backend of its own, Claude Code's ``Bash`` and ``Monitor``, Kimi
+#: Code's shell, OpenAI Agents' shell tools).
+SHELLS: Final = {
+    "sandbox_exec": "sandbox",
+    "execute": "framework",
+    "Bash": "framework",
+    "Monitor": "framework",
+    "Shell": "framework",
+    "shell": "framework",
+    "local_shell": "framework",
+}
+#: The keys a shell's result names its exit code by (the harness's sandbox, a framework's).
+EXIT_KEYS: Final = ("exit_code", "exitCode", "returncode")
+#: The open shell spans, by span id: whether an audit record said how the command ran.
+_shells: dict[int, bool] = {}
+
+
+def command_text(args: Any) -> str | None:
+    """The command a shell call runs, from its arguments (``command``, or an OpenAI shell's
+    ``action``: a list of words, or of commands)."""
+    if not isinstance(args, Mapping):
+        return None
+    action = args.get("action")
+    given = args.get("command") or (
+        (action.get("command") or action.get("commands")) if isinstance(action, Mapping) else None
+    )
+    if isinstance(given, list):
+        return " ".join(str(w) for w in given)
+    return None if given is None else str(given)
+
+
+def command(record: Mapping[str, Any], *, where: str | None = None) -> None:
+    """A shell command's audit record — ``command``, ``exit_code``, ``duration_ms``, ``limit``
+    (the limit that stopped it: ``time``, ``cpu``, ``memory``...), ``sandbox``, and ``where``
+    it ran (else ``where``; else ``host``: the isolation layer's record) — on the span current
+    now, the tool call that ran it: the one record the audit log, the run's stream and the
+    trace all say (``sandbox.isolation``'s ``sandbox_command``, ``sandbox.audited``)."""
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    found = {
+        "trellis.command.text": record.get("command"),
+        "trellis.command.exit_code": record.get("exit_code"),
+        "trellis.command.duration_ms": record.get("duration_ms"),
+        "trellis.command.limit": record.get("limit"),
+        "trellis.command.sandbox": record.get("sandbox"),
+        "trellis.command.where": record.get("where") or where or "host",
+    }
+    span.set_attributes(redact_attributes(found))
+    limit = record.get("limit")
+    if limit:
+        span.set_attributes({LEVEL: "WARNING", STATUS_MESSAGE: f"stopped by its {limit} limit"})
+    _shells[span.get_span_context().span_id] = True
+
+
+def shell_ended(span: trace.Span, outcome: Any, latency_ms: float | None) -> None:
+    """A shell call ended (``outcome``, a ``ToolOutcome``) with no audit record of the command
+    (:func:`command`: a framework ran it): its duration, its exit code where its result names
+    one, and the time limit when it timed out."""
+    ident = span.get_span_context().span_id
+    if _shells.pop(ident, True):
+        return
+    output = outcome.output
+    code = next((output[k] for k in EXIT_KEYS if isinstance(output, Mapping) and k in output), None)
+    timed_out = outcome.status.value == "timeout"
+    found = {
+        "trellis.command.duration_ms": latency_ms,
+        "trellis.command.exit_code": code if isinstance(code, int) else None,
+        "trellis.command.limit": "time" if timed_out else None,
+    }
+    span.set_attributes(redact_attributes(found))
+
+
 @contextmanager
 def tool_span(
     name: str,
@@ -531,8 +606,10 @@ def tool_span(
     start_time: int | None = None,
 ) -> Iterator[trace.Span]:
     """A tool call's ``execute_tool`` span; ``start_time`` (ns since the epoch) for a call its
-    framework ran itself and reported after it ran (it ends now)."""
+    framework ran itself and reported after it ran (it ends now). A shell's (:data:`SHELLS`)
+    also says its command and where it runs (``trellis.command.*``)."""
     with _span(f"execute_tool {name}", start_time=start_time) as current:
+        ident = current.get_span_context().span_id
         if current.is_recording():
             attributes = {
                 "gen_ai.operation.name": "execute_tool",
@@ -544,9 +621,17 @@ def tool_span(
                 "trellis.tool.source": source,
                 "trellis.governance.action": action,
             }
+            text = command_text(args) if name in SHELLS else None
+            if text is not None:
+                attributes["trellis.command.text"] = text
+                attributes["trellis.command.where"] = SHELLS[name]
+                _shells[ident] = False
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)
-        yield current
+        try:
+            yield current
+        finally:
+            _shells.pop(ident, None)
 
 
 @contextmanager

@@ -38,7 +38,7 @@ from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
-from trellis.harness.sandbox.base import hint
+from trellis.harness.sandbox.base import audited, hint
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 from trellis.harness.tools.results import EXECUTE
 
@@ -75,7 +75,7 @@ class SandboxBackend(BaseSandbox):
         box = await self.source.opened(runtime, changes=True)
         await self.source.with_results(runtime, box)  # the results the run keeps, there too
         bounds = [s for s in (timeout, self.call_timeout, runtime.remaining()) if s is not None]
-        result = await box.exec(command, timeout=min(bounds))
+        result = await audited(box, command, timeout=min(bounds))
         why = hint(result.exit_code, result.stderr, self.source.spec)
         output = "\n".join(part for part in (result.stdout, result.stderr, why) if part)
         return ExecuteResponse(output=output, exit_code=result.exit_code)
