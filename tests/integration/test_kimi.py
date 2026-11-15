@@ -244,23 +244,77 @@ async def test_a_call_kimis_own_config_allows_is_still_asked_about_once(
     assert own.startswith("default_thinking = false\n" + rules) and 'decision = "ask"' in own
 
 
-async def test_a_config_whose_allow_rules_cannot_be_asked_over_stops_the_run_before_its_prompt(
+async def test_a_config_whose_rules_are_inline_is_still_asked_about(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    """APR-01. A team's config that writes its ``[permission]`` rules inline takes no rule
-    after them (TOML): its ``allow`` rule would let the call run unasked, so the run gets no
-    prompt and fails naming the rule."""
+    """APR-01. A team's config that writes its ``[permission]`` rules inline takes no
+    ``[[permission.rules]]`` after them (TOML), but it takes Kimi's other form of an ``ask``
+    rule (``[[permission.ask]]``, which Kimi reads too): its ``allow`` rule is asked over —
+    Kimi asks, and a person is asked before the call runs."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
     inline = '[permission]\nrules = [{ decision = "allow", pattern = "Bash(touch *)" }]\n'
     (home / "config.toml").write_text(inline)
     endpoint.plan = [("Bash", {"command": "touch made.txt"})]
-    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline").run(
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline")
+    paused = await agent.run("make it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    call = paused.interrupt.tool_call
+    assert call is not None and call.args == {"command": "touch made.txt"}
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    own = (kimi_home_of("u1") / "config.toml").read_text()
+    assert own.startswith(inline) and '[[permission.ask]]\npattern = "Bash(touch *)"' in own
+
+
+async def test_a_config_whose_whole_permission_is_inline_stops_the_run_before_its_prompt(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """APR-01. A ``permission`` written as one inline table takes no rule after it in any form
+    (TOML): its ``allow`` rule would let the call run unasked, so the run gets no prompt and
+    fails naming the rule."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    inline = 'permission = { rules = [{ decision = "allow", pattern = "Bash(touch *)" }] }\n'
+    (home / "config.toml").write_text(inline)
+    endpoint.plan = [("Bash", {"command": "touch made.txt"})]
+    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline-all").run(
         "make it", user="u1"
     )
     assert done.status is RunStatus.ERROR and done.error is not None
     assert "Bash(touch *)" in done.error.message and "config.toml" in done.error.message
     assert not endpoint.requests and not (tmp_path / "kimi-work" / "made.txt").exists()
+
+
+@pytest.mark.parametrize("asks", [False, True], ids=["a-read", "the-catalog-asks"])
+async def test_a_skill_kimi_loads_is_decided_by_governance(
+    endpoint: PlannedEndpoint, tmp_path: Path, asks: bool
+) -> None:
+    """KIMI-SKILL-1. Kimi runs its ``Skill`` tool unasked by default; a run's Kimi asks about
+    it (an ``ask`` rule in its user's config), so governance decides the call: a read runs at
+    once and is the run's call; a catalog that says more has a person asked first."""
+    from tests.support.skills import SkillStore
+    from trellis.skills import combine
+
+    store = SkillStore()
+    store.put("sql-review", "Check every JOIN.", description="Reviews SQL queries for joins.")
+    endpoint.plan = [("Skill", {"skill": "sql-review"})]
+    rules = {"Skill": Rule(risk="irreversible")} if asks else {}
+    async with with_governance(Harness(), Governance(FakeCatalog(rules))) as h:
+        target = kimi_target(endpoint, tmp_path, **combine(store).kimi())
+        agent = h.wrap(target, id=f"kimi-skill-{asks}")
+        events = [e async for e in agent.stream("review my SQL", user="u1")]
+        finished = events[-1]
+        if asks:
+            interrupt = finished.data.get("interrupt") or {}
+            call = interrupt.get("tool_call") or {}
+            assert call.get("tool") == "Skill", finished.data
+            assert call.get("args") == {"skill": "sql-review"}
+        else:
+            assert finished.data.get("interrupt") is None, finished.data
+            assert finished.error is None, finished.error
+            ended = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+            assert [(r["tool"], r["status"]) for r in ended] == [("Skill", "ok")]
+    assert 'pattern = "Skill"' in (kimi_home_of("u1") / "config.toml").read_text()
 
 
 async def test_two_users_never_share_a_kimi_home(

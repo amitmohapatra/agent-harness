@@ -618,7 +618,8 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
 ) -> None:
     """SEC (DECISIONS A2, for Kimi). Kimi is started in its user's own home: the team's login
     and setup linked, its config the team's with an ``ask`` rule after it for each ``allow``
-    rule that would let a call run unasked, its sessions its user's alone."""
+    rule that would let a call run unasked and for Kimi's ``Skill`` (KIMI-SKILL-1), its
+    sessions its user's alone."""
     team = tmp_path / "home"
     team.mkdir()
     (team / "credentials").mkdir()
@@ -632,24 +633,44 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
     for home in homes:
         assert (home / "credentials").resolve() == team / "credentials"
         asked = (home / "config.toml").read_text().removeprefix(rules)
-        assert asked == '\n[[permission.rules]]\ndecision = "ask"\npattern = "Bash(rm *)"\n'
+        assert asked == "".join(
+            f'\n[[permission.rules]]\ndecision = "ask"\npattern = "{pattern}"\n'
+            for pattern in ("Bash(rm *)", "Skill")
+        )
         assert len(list(home.glob("sessions/*/session_*"))) == 1
     assert (team / "config.toml").read_text() == rules and not (team / "sessions").exists()
 
 
-async def test_a_config_whose_allow_rules_take_no_rule_after_them_stops_the_run_before_its_prompt(
-    harness: Harness, tmp_path: Path
+@pytest.mark.parametrize(
+    ("given", "asked"),
+    [
+        (
+            '[permission]\nrules = [{ decision = "allow", pattern = "Bash(rm *)" }]\n',
+            '\n[[permission.ask]]\npattern = "Bash(rm *)"\n\n[[permission.ask]]\npattern = "Skill"\n',
+        ),
+        ('permission = { rules = [{ decision = "allow", pattern = "Bash(rm *)" }] }\n', None),
+    ],
+    ids=["inline-rules", "inline-permission"],
+)
+async def test_a_config_written_inline_is_asked_over_where_toml_lets_a_rule_follow(
+    harness: Harness, tmp_path: Path, given: str, asked: str | None
 ) -> None:
-    """APR-01. A config that writes its ``[permission]`` rules inline takes none after them:
-    its ``allow`` rule would let a call run unasked, so the run is not started, and says
-    which rules."""
+    """APR-01. A config whose ``[permission]`` rules are inline takes Kimi's other form of an
+    ``ask`` rule after them (``[[permission.ask]]``): the run goes on, Kimi asking. One whose
+    whole ``permission`` is an inline table takes none: its ``allow`` rule would let a call run
+    unasked, so the run is not started, and says which rules."""
     home = tmp_path / "home"
     home.mkdir()
-    inline = '[permission]\nrules = [{ decision = "allow", pattern = "Bash(rm *)" }]\n'
-    (home / "config.toml").write_text(inline)
+    (home / "config.toml").write_text(given)
     done = await harness.wrap(fake(tmp_path, [{"text": "ok"}]), id="allows").run("x", user="u1")
-    assert done.status is RunStatus.ERROR and done.error is not None
-    assert "Bash(rm *)" in done.error.message and "prompts" not in recorded(tmp_path)
+    own = (kimi_home_of("u1") / "config.toml").read_text()
+    if asked is None:
+        assert done.status is RunStatus.ERROR and done.error is not None
+        assert "Bash(rm *)" in done.error.message and "prompts" not in recorded(tmp_path)
+        assert own == given
+    else:
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert own == given + asked
 
 
 async def test_a_failed_sub_agent_ends_its_child_run_failed(

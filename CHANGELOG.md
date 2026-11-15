@@ -94,6 +94,10 @@ chat's own on its thread stream when it is idle; its questions asked through the
 - Deep Agents' tasks on a server of yours: the outcomes of such tasks, told by turns of the
   chat's own, may start or update a task three times in a row, as a harness task's may; the
   fourth fails saying so. Each outcome counted as the first, so a chain never ended.
+- Kimi: a skill Kimi loads (`Skill`) is decided by governance — Kimi asks about it (an `ask`
+  rule in its user's config), so the catalog can have a person approve it. A team config whose
+  `[permission]` rules are written inline is asked over (a `[[permission.ask]]` rule after it)
+  instead of refusing the run; only a `permission = { ... }` inline table is still refused.
 
 ### Fixed: each library's own skills, through the harness
 

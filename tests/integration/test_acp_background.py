@@ -369,7 +369,7 @@ async def test_a_session_whose_hold_lapses_leaves_no_process_no_running_run_and_
     await _no_child_left(before)
     runs = [s async for s in harness.runs.iterate()]
     assert not [s for s in runs if s.status is RunStatus.RUNNING]
-    assert (home / "config.toml").read_text() == (team / "config.toml").read_text()
+    assert (home / "config.toml").read_text().startswith((team / "config.toml").read_text())
     assert (home / "credentials").resolve() == team / "credentials"
     assert (home / "sessions").is_dir()  # only the session's own folder went
     assert agent.sessions.get(conversation_key("default", USER, THREAD)) is None
@@ -412,7 +412,7 @@ async def test_a_session_kept_when_the_harness_closes_leaves_no_process_and_no_f
     record = await harness.runs.get(child.run_id)
     assert record is not None and record.status is RunStatus.ERROR
     home = session.log.home
-    assert (home / "config.toml").read_text() == (team / "config.toml").read_text()
+    assert (home / "config.toml").read_text().startswith((team / "config.toml").read_text())
     assert (home / "credentials").resolve() == team / "credentials"
 
 
