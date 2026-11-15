@@ -226,6 +226,46 @@ async def test_a_large_table_travels_as_an_artifact(client: httpx.AsyncClient) -
     assert missing.status_code == 404
 
 
+async def test_another_users_artifact_is_not_found(client: httpx.AsyncClient) -> None:
+    """The data a paused run's question carries is its user's, as the run is: another user
+    of the tenant who has its run and artifact ids (a shared link) reads nothing."""
+    paused = finished(await post(client, body("table")))
+    reference = paused["outcome"]["interrupts"][0]["metadata"]["payload_ref"]
+    route = f"{PATH}/runs/{paused['runId']}/artifacts/{reference['artifact_id']}"
+    stranger = await client.get(route, headers={"x-user": "u2"})
+    assert stranger.status_code == 404 and "table" not in stranger.text
+    assert (await client.get(route)).status_code == 200
+
+
+async def test_a_run_id_another_replica_used_is_refused() -> None:
+    """A client's ``runId`` names a new run: one the run store has already — another user's
+    run served by another replica, or one this replica's buffers forgot — is refused, not
+    attempted again under the caller's name (its events, its record)."""
+    first, replica = Harness(config=Settings()), Harness(config=Settings())
+    replica.runs = first.runs  # two processes, one run store
+    apps = [FastAPI(), FastAPI()]
+    first.wrap(agent_fn, id="chat").serve_chat(apps[0], identity=user_of)
+    replica.wrap(agent_fn, id="chat").serve_chat(apps[1], identity=user_of)
+    owner, stranger = (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=a), base_url="http://agui", headers={"x-user": u}
+        )
+        for a, u in zip(apps, ("u1", "u2"), strict=True)
+    )
+    try:
+        asked = finished(decode((await owner.post(f"{PATH}/run", json=body("ask"))).text))
+        run_id = asked["runId"]
+        reused = await stranger.post(f"{PATH}/run", json=body("hello", runId=run_id))
+        assert reused.status_code == 422 and reused.json()["code"] == "VALIDATION"
+        record = await first.runs.get(run_id)
+        assert record is not None and record.user_id == "u1" and record.awaiting is not None
+    finally:
+        await owner.aclose()
+        await stranger.aclose()
+        await first.aclose()
+        await replica.aclose()
+
+
 async def test_a_large_table_is_served_by_another_replica_and_only_while_awaited() -> None:
     first, replica = Harness(config=Settings()), Harness(config=Settings())
     replica.runs = first.runs  # two processes, one run store
