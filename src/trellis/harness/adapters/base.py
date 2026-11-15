@@ -64,7 +64,6 @@ DEPLOYMENT_ONLY: Final[Mapping[str, Mapping[str, str]]] = {
         "permission_mode": "a permission mode that lets calls through without asking",
         "extra_args": "the CLI's own flags: its permission mode, allowed tools, MCP servers",
         "settings": "Claude Code's settings: its permission rules",
-        "can_use_tool": "who answers when Claude Code would ask its user",
     },
     "acp": {"mcp_servers": "which MCP servers it reaches"},
 }
