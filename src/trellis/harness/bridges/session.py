@@ -13,8 +13,10 @@ run's transcript), so what the SDK adds to the session is not written a second t
 turns of the run itself (an earlier attempt's, before a pause) are not read back — the SDK
 holds them. The thread only grows: removing an item through the session is refused
 (:class:`ThreadReadOnly`). A read returns at most :data:`HISTORY_LIMIT` messages, the newest.
-The calls are the run's: made in its memory scope, they fail as a memory call fails, and that
-failure is the SDK's (the run fails).
+The calls are the run's, made in its memory scope. A read the service cannot answer for want of
+it (down, its circuit open: ``DependencyUnavailableError``) does not fail the run: it is a
+warning, and the earlier turns are the run store's, as for a run with memory unreachable; any
+other failure is the SDK's (the run fails).
 """
 
 from __future__ import annotations
@@ -23,9 +25,9 @@ import json
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ErrorCategory, HarnessError
-from trellis.harness import snapshots
+from trellis.harness import conversation, snapshots
 from trellis.harness.history import Said, Speaker, answered, said_of
-from trellis.memory.errors import NotFoundError
+from trellis.memory.errors import DependencyUnavailableError, NotFoundError
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -65,14 +67,17 @@ class MemorySession:
             messages = await ctx.history(limit=HISTORY_LIMIT, include_internal=True)
         except NotFoundError:
             return []
-        run_id = self.runtime.run_id
-        said = [
-            said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})
-            for m in messages
-            if m.role in ROLES
-            and (m.kind == "VISIBLE" or (m.model_extra or {}).get("tool_call_id"))
-            and (m.model_extra or {}).get("agent_run_id") != run_id
-        ]
+        except DependencyUnavailableError as exc:
+            said = await self._from_run_store(exc)
+        else:
+            run_id = self.runtime.run_id
+            said = [
+                said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})
+                for m in messages
+                if m.role in ROLES
+                and (m.kind == "VISIBLE" or (m.model_extra or {}).get("tool_call_id"))
+                and (m.model_extra or {}).get("agent_run_id") != run_id
+            ]
         # an earlier value of a live tool is out of date, as the memory window's replay says,
         # and its tool stays offered: the model fetches it again
         said, stale = snapshots.out_of_date(
@@ -82,6 +87,18 @@ class MemorySession:
             self.runtime.offered |= set(stale)
         items = [item for s in answered(said) for item in input_items(s)]
         return items if limit is None else items[-limit:] if limit > 0 else []
+
+    async def _from_run_store(self, down: DependencyUnavailableError) -> list[Said]:
+        """The memory service unreachable: the run goes on as any run does without memory —
+        the conversation's earlier turns as the run store keeps them (``conversation.earlier``),
+        and a warning that memory's thread could not be read (none at all when neither can)."""
+        runtime = self.runtime
+        runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {down}")
+        try:
+            return await conversation.earlier(runtime)
+        except Exception as exc:
+            runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+            return []
 
     async def add_items(self, items: list[Any]) -> None:
         """Nothing: the harness records the run's turns in the thread itself."""

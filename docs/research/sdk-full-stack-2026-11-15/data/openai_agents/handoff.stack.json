@@ -1,0 +1,124 @@
+{
+ "sdk": "openai_agents",
+ "feature": "handoff",
+ "arm": "stack",
+ "error": null,
+ "seconds": 9.6,
+ "spend": {
+  "requests": 3,
+  "in": 8836,
+  "out": 256,
+  "usd": 0.001012,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "O-9"
+ ],
+ "answers": [
+  "Order O-9 has been refunded."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve refund? refund is write. Allow once, allow for this conversation, always allow, or deny.",
+   "tool_call": {
+    "tool": "refund",
+    "args": {
+     "order": "O-9"
+    },
+    "task": "Please refund order O-9.",
+    "step": null,
+    "idempotency_key": "477c9e4d2c47837ed2b482f8"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='always' label='Always allow' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_e37faf3e58264f19b60b322fdb56b22f"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-handoff-6da40ac1",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_e37faf3e58264f19b60b322fdb56b22f",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "022c9b9b",
+    "user_id": "oa-handoff-6da40ac1",
+    "agent_id": "oa-handoff",
+    "attempt": 2,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_e37faf3e58264f19b60b322fdb56b22f": {
+     "RUN_STARTED": 2,
+     "CONTEXT_LOADED": 2,
+     "INTERRUPT": 1,
+     "RUN_FINISHED": 2,
+     "CUSTOM": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1
+    }
+   },
+   "messages": {
+    "run_e37faf3e58264f19b60b322fdb56b22f": [
+     {
+      "role": "USER",
+      "content": "Please refund order O-9."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "refunded O-9"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Order O-9 has been refunded."
+     }
+    ]
+   },
+   "tools": {
+    "run_e37faf3e58264f19b60b322fdb56b22f": [
+     {
+      "tool_name": "refund",
+      "status": "ok",
+      "output": "refunded O-9"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

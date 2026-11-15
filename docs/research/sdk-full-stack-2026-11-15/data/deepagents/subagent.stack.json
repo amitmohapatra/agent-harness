@@ -1,0 +1,123 @@
+{
+ "sdk": "deepagents",
+ "feature": "subagent",
+ "arm": "stack",
+ "error": null,
+ "seconds": 6.8,
+ "spend": {
+  "requests": 4,
+  "in": 15993,
+  "out": 483,
+  "usd": 0.00134,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "sub_calls": [
+  "O-31"
+ ],
+ "answers": [
+  "Order O-31 has shipped. It went out on 2026-11-02 via DHL.\n\nThe lookup did not return an expected delivery date, the current DHL tracking status, or a last-updated time, so I can't say where the package is now or when it will arrive. A DHL tracking number would be needed to check that."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_b5da3704014d4f45a6dd9bffa58cfd6f"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "da-sub-af300e07",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_b5da3704014d4f45a6dd9bffa58cfd6f",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "5964c953",
+    "user_id": "da-sub-af300e07",
+    "agent_id": "da-sub",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [
+    {
+     "run_id": "run_099d773aecd09e64deba6e831cab53d1",
+     "status": "SUCCESS",
+     "agent_id": "da-sub",
+     "error": null
+    }
+   ],
+   "events": {
+    "run_b5da3704014d4f45a6dd9bffa58cfd6f": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 2,
+     "TOOL_CALL_ARGS": 2,
+     "CUSTOM": 2,
+     "TOOL_CALL_END": 2,
+     "TOOL_CALL_RESULT": 2,
+     "RUN_FINISHED": 1
+    },
+    "run_099d773aecd09e64deba6e831cab53d1": {}
+   },
+   "messages": {
+    "run_b5da3704014d4f45a6dd9bffa58cfd6f": [
+     {
+      "role": "USER",
+      "content": "Delegate to the order-checker sub-agent: what is the status of order O-31?"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Order O-31 has shipped. It was shipped on 2026-11-02 via DHL.\n\nThe lookup did not return an expected delivery date, a current carrier tracking status, or a last-updated time, so I can't confirm where the package is now or when it will arrive. A DHL tracking number would be needed to check that."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Order O-31 has shipped. It went out on 2026-11-02 via DHL.\n\nThe lookup did not return an expected delivery date, the current DHL tracking status, or a last-updated time, so I can't say where the package is now or when it will arrive. A DHL tracking number would be needed to check that."
+     }
+    ],
+    "run_099d773aecd09e64deba6e831cab53d1": [
+     {
+      "role": "USER",
+      "content": "Look up the status of order O-31. Report the current status, and any relevant details such as shipping state, expected delivery date, or last update time. If the order cannot be found, say so clearly and report what you searched."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Order O-31 has shipped. It was shipped on 2026-11-02 via DHL.\n\nThe lookup did not return an expected delivery date, a current carrier tracking status, or a last-updated time, so I can't confirm where the package is now or when it will arrive. A DHL tracking number would be needed to check that."
+     }
+    ]
+   },
+   "tools": {
+    "run_b5da3704014d4f45a6dd9bffa58cfd6f": [
+     {
+      "tool_name": "task",
+      "status": "ok",
+      "output": "Order O-31 has shipped. It was shipped on 2026-11-02 via DHL.\n\nThe lookup did not return an expected delivery date, a current carrier tracking status, or a last-updated time, so I can't confirm where "
+     }
+    ],
+    "run_099d773aecd09e64deba6e831cab53d1": [
+     {
+      "tool_name": "lookup_order",
+      "status": "ok",
+      "output": "order O-31: shipped on 2026-11-02 via DHL"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

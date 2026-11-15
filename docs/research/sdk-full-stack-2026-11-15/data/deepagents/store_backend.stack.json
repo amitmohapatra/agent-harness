@@ -1,0 +1,176 @@
+{
+ "sdk": "deepagents",
+ "feature": "store_backend",
+ "arm": "stack",
+ "error": null,
+ "seconds": 9.9,
+ "spend": {
+  "requests": 5,
+  "in": 23275,
+  "out": 469,
+  "usd": 0.000701,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "in_own_store": [
+  "/prefs.md"
+ ],
+ "answers": [
+  "Done.",
+  "Your favourite city is Lisbon. That's what `/memories/prefs.md` says."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_b854761947e443a48f7fe42dd440ee78",
+  "run_2159de670c3d4fea81922b551004e9cc"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "da-store-80b9f862",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_b854761947e443a48f7fe42dd440ee78",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "run_b854761947e443a48f7fe42dd440ee78",
+    "user_id": "da-store-80b9f862",
+    "agent_id": "da-store",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_b854761947e443a48f7fe42dd440ee78": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 2,
+     "TOOL_CALL_ARGS": 2,
+     "TOOL_CALL_END": 2,
+     "TOOL_CALL_RESULT": 2,
+     "CUSTOM": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_b854761947e443a48f7fe42dd440ee78": [
+     {
+      "role": "USER",
+      "content": "Save the text 'favourite city: Lisbon' to /memories/prefs.md. Then say done."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "No files found"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated file /memories/prefs.md"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Done."
+     }
+    ]
+   },
+   "tools": {
+    "run_b854761947e443a48f7fe42dd440ee78": [
+     {
+      "tool_name": "ls",
+      "status": "ok",
+      "output": "No files found"
+     },
+     {
+      "tool_name": "write_file",
+      "status": "ok",
+      "output": "Updated file /memories/prefs.md"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  },
+  {
+   "run": {
+    "run_id": "run_2159de670c3d4fea81922b551004e9cc",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "run_2159de670c3d4fea81922b551004e9cc",
+    "user_id": "da-store-80b9f862",
+    "agent_id": "da-store",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_2159de670c3d4fea81922b551004e9cc": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_2159de670c3d4fea81922b551004e9cc": [
+     {
+      "role": "USER",
+      "content": "Read /memories/prefs.md and tell me my favourite city."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "@@ lines 1-1 of 1 @@\nfavourite city: Lisbon"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Your favourite city is Lisbon. That's what `/memories/prefs.md` says."
+     }
+    ]
+   },
+   "tools": {
+    "run_2159de670c3d4fea81922b551004e9cc": [
+     {
+      "tool_name": "read_file",
+      "status": "ok",
+      "output": "@@ lines 1-1 of 1 @@\nfavourite city: Lisbon"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

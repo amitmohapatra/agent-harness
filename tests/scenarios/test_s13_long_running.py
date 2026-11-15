@@ -147,6 +147,7 @@ async def test_a_two_hundred_step_task(h: Harness, adapter: str, uid: str, tmp_p
     from trellis import middleware
     from trellis.harness.middleware import RunCheckpointer
 
+    chat = BrainChat()  # ReAct's model: what it was sent is read below
     if adapter == "middleware":
         target = create_agent(
             BrainChatModel(),
@@ -157,7 +158,7 @@ async def test_a_two_hundred_step_task(h: Harness, adapter: str, uid: str, tmp_p
     else:
         target = ReAct(
             SYSTEM,
-            BrainChat(),
+            chat,
             max_steps=230,
             context_window=8_000 if adapter == "react_fitted" else None,
         )
@@ -173,7 +174,7 @@ async def test_a_two_hundred_step_task(h: Harness, adapter: str, uid: str, tmp_p
     spent = [e.data["spent"] for e in events if e.type is RunEventType.RUN_FINISHED][-1]
     assert int(spent["tool_calls"]) == 200, spent
     if adapter == "react_fitted":
-        biggest = max(len(json.dumps(r["messages"])) for r in target.model.requests)  # type: ignore[union-attr]
+        biggest = max(len(json.dumps(r["messages"])) for r in chat.requests)
         assert biggest / 4 <= 8_000 * 1.25, biggest
 
 

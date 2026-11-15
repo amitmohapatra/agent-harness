@@ -18,7 +18,7 @@ from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Harness, Settings
-from trellis.contracts import RunStatus, ToolSpec
+from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolSpec
 from trellis.harness import budget, snapshots
 from trellis.harness.adapters.openai_agents import _said_inside
 from trellis.harness.bridges.session import HISTORY_LIMIT, MemorySession, ThreadReadOnly
@@ -57,6 +57,47 @@ async def test_the_thread_in_memory_is_the_agents_session(
     kept = await memory_harness.conversation(user="u1", thread="t1")
     texts = [m["content"] for m in memory_service.threads[kept]]
     assert texts.count("remember tides") == 1 and texts.count("what did I say?") == 1
+
+
+async def test_with_memory_down_the_run_answers_from_the_run_stores_turns(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The memory service down mid-chat (its context and its thread both unreachable): the
+    run goes on as every adapter's does — the earlier turns from the run store, a warning
+    for what memory could not give — instead of failing in the SDK's session read."""
+    model = ScriptedModel(["noted", "you said tides"])
+    agent = memory_harness.wrap(Agent(name="s", model=model), id="down")
+    await agent.run("remember tides", user="u1", thread="t1")
+    await memory_harness.writes.drain()
+    memory_service.fail |= {"context", "thread_messages"}
+    events = [e async for e in agent.stream("what did I say?", user="u1", thread="t1")]
+    finished = events[-1]
+    assert finished.type is RunEventType.RUN_FINISHED
+    assert finished.outcome is RunOutcome.SUCCESS, finished.data
+    said = [e.data["message"] for e in events if e.data.get("name") == "warning"]
+    assert any("the conversation's earlier turns" in s for s in said), said
+    told = " ".join(text for _, text in said_to_model(model, 1))
+    assert "remember tides" in told and "noted" in told  # the run store's turn
+
+
+async def test_with_memory_and_the_run_store_unreadable_the_run_answers_without_earlier_turns(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unreadable(runtime: object) -> list[object]:
+        raise ConnectionError("the run store is unreachable")
+
+    model = ScriptedModel(["noted", "I do not know"])
+    agent = memory_harness.wrap(Agent(name="s", model=model), id="down2")
+    await agent.run("remember tides", user="u1", thread="t1")
+    await memory_harness.writes.drain()
+    memory_service.fail |= {"context", "thread_messages"}
+    monkeypatch.setattr("trellis.harness.bridges.session.conversation.earlier", unreadable)
+    events = [e async for e in agent.stream("what did I say?", user="u1", thread="t1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS, events[-1].data
+    said = [e.data["message"] for e in events if e.data.get("name") == "warning"]
+    assert any("the run store is unreachable" in s for s in said), said
+    assert said_to_model(model, 1)[-1] == ("user", "what did I say?")
+    assert "remember tides" not in " ".join(text for _, text in said_to_model(model, 1))
 
 
 async def test_a_session_of_the_teams_own_is_kept(memory_harness: Harness) -> None:

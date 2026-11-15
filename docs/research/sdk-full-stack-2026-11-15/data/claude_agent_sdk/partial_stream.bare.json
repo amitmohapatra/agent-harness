@@ -1,0 +1,25 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "partial_stream",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.5,
+ "spend": {
+  "requests": 1,
+  "in": 14456,
+  "out": 71,
+  "usd": 0.000591,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "deltas": 15,
+ "answers": [
+  "Rivers carve their own paths through stone and soil over thousands of years. They carry water, sediment, and nutrients from mountains to the sea. Along their banks, they support farms, cities, and entire ecosystems."
+ ],
+ "tools_used": [],
+ "subtypes": [
+  "success"
+ ]
+}

@@ -16,6 +16,8 @@
 #   SCEN_MODELS                      the memory service's frozen models folder (embedding, NLI)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
+# this script by its absolute path: `runs` changes directory before `start` relaunches it
+SELF=$HERE/scripts/scenarios/$(basename "$0")
 : "${SCEN_HOME:=/var/tmp/scen}" "${SCEN_PG_PORT:=5432}" "${SCEN_REDIS_PORT:=56380}"
 : "${SCEN_MEM_PORT:=18380}" "${SCEN_RUNS_PORT:=18390}"
 : "${SCEN_MEM_ROOT:=$HERE/../agent-memory-service}" "${SCEN_RUNS_ROOT:=$HERE/../agent-runs}"
@@ -24,7 +26,7 @@ HERE=$(cd "$(dirname "$0")/../.." && pwd)
 : "${SCEN_PY:=$HERE/.venv/bin/python}" "${SCEN_MODELS:=$SCEN_MEM_ROOT/models}"
 : "${SCEN_DB_MEM:=scen_memory}" "${SCEN_DB_RUNS:=scen_runs}" "${SCEN_TENANT:=scen}"
 H=$SCEN_HOME
-mkdir -p "$H"/{logs,run,tmp,home}
+mkdir -p "$H"/{logs,run,tmp,svctmp,home}   # tmp: the tests'; svctmp: the services' (a restarted one leaves files)
 [ -f "$H/keys.env" ] && . "$H/keys.env"
 psqlc() { psql -h 127.0.0.1 -p "$SCEN_PG_PORT" -U postgres -qAt "$@"; }
 up() { curl -fsS --noproxy '*' -o /dev/null "http://127.0.0.1:$1/health/live" 2>/dev/null; }
@@ -36,7 +38,7 @@ memory() {  # memory [migrate]: the memory API and its job worker (tests/scenari
   mkdir -p "$w/blob" "$w/qdrant"; ln -sfn "$SCEN_MODELS" "$w/models"
   local env=(PATH=/usr/bin:/bin HOME=$H/home LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
     PYTHONPATH="$SCEN_MEM_ROOT/src:$SCEN_MEM_ROOT:$SCEN_MEM_ROOT/sdk/python/src:$SCEN_CONTRACTS:$SCEN_BIFROST"
-    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 NO_PROXY='*' TMPDIR=$H/tmp
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 NO_PROXY='*' TMPDIR=$H/svctmp
     MEMORY__SERVICE__ENVIRONMENT=dev MEMORY__SERVICE__PORT=$SCEN_MEM_PORT MEMORY__SERVICE__WORKERS=1
     MEMORY__SERVICE__LOG_JSON=false MEMORY__AUTHENTICATION__BOOTSTRAP_ADMIN_KEY="$SCEN_BOOTSTRAP_KEY"
     MEMORY__DATABASE__URL="$url" MEMORY__DATABASE__DIRECT_URL="$url"
@@ -52,7 +54,7 @@ memory() {  # memory [migrate]: the memory API and its job worker (tests/scenari
 runs() {  # runs migrate|api|ticker
   local w=$H/runswork; mkdir -p "$w/blob"
   local env=(PATH=/usr/bin:/bin HOME=$H/home LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 NO_PROXY='*'
-    TMPDIR=$H/tmp PYTHONPATH="$SCEN_RUNS_ROOT/src:$SCEN_RUNS_ROOT/sdk/python/src:$SCEN_CONTRACTS"
+    TMPDIR=$H/svctmp PYTHONPATH="$SCEN_RUNS_ROOT/src:$SCEN_RUNS_ROOT/sdk/python/src:$SCEN_CONTRACTS"
     RUNS__SERVICE__ENVIRONMENT=dev RUNS__SERVICE__HOST=127.0.0.1 RUNS__SERVICE__PORT=$SCEN_RUNS_PORT
     RUNS__SERVICE__WORKERS=1 RUNS__MEMORY__URL=http://127.0.0.1:$SCEN_MEM_PORT
     RUNS__DATABASE__URL="postgresql+psycopg://postgres@127.0.0.1:$SCEN_PG_PORT/$SCEN_DB_RUNS"
@@ -67,9 +69,9 @@ runs() {  # runs migrate|api|ticker
 }
 start_one() {
   case $1 in
-    memory) launch memory "$0" _memory ;;
-    runs-api) launch runs-api "$0" _runs api ;;
-    runs-ticker) launch runs-ticker "$0" _runs ticker ;;
+    memory) launch memory "$SELF" _memory ;;
+    runs-api) launch runs-api "$SELF" _runs api ;;
+    runs-ticker) launch runs-ticker "$SELF" _runs ticker ;;
   esac
 }
 stop_one() { alive "$1" && kill "$(cat "$H/run/$1.pid")"; for _ in $(seq 1 40); do alive "$1" || break; sleep 0.5; done; rm -f "$H/run/$1.pid"; }
@@ -111,10 +113,16 @@ case "${1:-status}" in
         rm -rf "$H/memwork" "$H/runswork" "$H/redis" "$H/keys.env" ;;
   test) shift
     . "$H/keys.env"
-    cd "$HERE" && env -i PATH="$PATH" HOME="$H/home" LANG=C.UTF-8 NO_PROXY='*' TMPDIR="$H/tmp" HF_HUB_OFFLINE=1 \
+    # the stack's settings go to the tests too: a test that stops or starts a service
+    # (SC_STACK stop-one / start-one) runs this script again, and must reach this stack
+    settings=()
+    for v in SCEN_HOME SCEN_PG_PORT SCEN_REDIS_PORT SCEN_MEM_PORT SCEN_RUNS_PORT SCEN_MEM_ROOT \
+             SCEN_RUNS_ROOT SCEN_CONTRACTS SCEN_BIFROST SCEN_SVC_PY SCEN_RUNS_PY SCEN_PY SCEN_MODELS \
+             SCEN_DB_MEM SCEN_DB_RUNS SCEN_TENANT; do settings+=("$v=${!v}"); done
+    cd "$HERE" && env -i "${settings[@]}" PATH="$PATH" HOME="$H/home" LANG=C.UTF-8 NO_PROXY='*' TMPDIR="$H/tmp" HF_HUB_OFFLINE=1 \
       PYTHONPATH="$HERE/src:$SCEN_MEM_ROOT/sdk/python/src:$SCEN_RUNS_ROOT/sdk/python/src:$SCEN_CONTRACTS:$SCEN_BIFROST" \
       MEMORY_URL=http://127.0.0.1:$SCEN_MEM_PORT RUNS_URL=http://127.0.0.1:$SCEN_RUNS_PORT \
       TRELLIS_API_KEY="$SCEN_KEY" TRELLIS_ADMIN_KEY="$SCEN_ADMIN_KEY" TRELLIS_API_KEY_OTHER="$SCEN_KEY2" \
       TRELLIS_MEMORY_OPENAPI="$SCEN_MEM_ROOT/docs/openapi.json" TRELLIS_RUNS_OPENAPI="$SCEN_RUNS_ROOT/docs/openapi.json" \
-      SC_STACK="$0" SC="$H" "$SCEN_PY" -m pytest -m scenario tests/scenarios -p no:cacheprovider -rfEsxX "$@" ;;
+      SC_STACK="$SELF" SC="$H" "$SCEN_PY" -m pytest -m scenario tests/scenarios -p no:cacheprovider -rfEsxX "$@" ;;
 esac

@@ -1,0 +1,30 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "can_use_tool",
+ "arm": "bare",
+ "error": null,
+ "seconds": 4.5,
+ "spend": {
+  "requests": 2,
+  "in": 32179,
+  "out": 450,
+  "usd": 0.002405,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "gate_asked": [
+  "Bash"
+ ],
+ "answers": [
+  "I couldn't run `touch made.txt`. The Bash tool returned \"Shell commands are not allowed for you,\" so the command didn't execute and no file was created. I haven't tried another way to create the file, since that would get around the restriction. If you want the file created, you can run `touch made.txt` yourself, or let me know if shell access should be enabled for this session."
+ ],
+ "tools_used": [
+  "Bash"
+ ],
+ "subtypes": [
+  "success"
+ ],
+ "deltas": null
+}

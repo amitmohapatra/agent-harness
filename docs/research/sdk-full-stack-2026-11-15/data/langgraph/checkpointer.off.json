@@ -1,0 +1,24 @@
+{
+ "sdk": "langgraph",
+ "feature": "checkpointer",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.8,
+ "spend": {
+  "requests": 2,
+  "in": 123,
+  "out": 12,
+  "usd": 1.8e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "Teal.",
+ "thread_messages": 4,
+ "status": "SUCCESS",
+ "run_ids": [
+  "run_1b30ad09b4db4de7a0277fd9f4c26e44",
+  "run_01fb4ff4c40740b0b53e2df9291a5fd7"
+ ]
+}

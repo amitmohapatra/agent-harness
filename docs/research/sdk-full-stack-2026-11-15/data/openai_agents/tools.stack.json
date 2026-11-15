@@ -1,0 +1,97 @@
+{
+ "sdk": "openai_agents",
+ "feature": "tools",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.0,
+ "spend": {
+  "requests": 2,
+  "in": 7817,
+  "out": 68,
+  "usd": 0.000816,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [
+  "SKU-1"
+ ],
+ "answers": [
+  "SKU-1 has 7 units in stock."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_7f7eec146e8440bfa543a0d871b76599"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-tools-ecac8532",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_7f7eec146e8440bfa543a0d871b76599",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "072093f2",
+    "user_id": "oa-tools-ecac8532",
+    "agent_id": "oa-tools",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_7f7eec146e8440bfa543a0d871b76599": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_7f7eec146e8440bfa543a0d871b76599": [
+     {
+      "role": "USER",
+      "content": "How many units of SKU-1 are in stock?"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "SKU-1: 7 units in stock"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "SKU-1 has 7 units in stock."
+     }
+    ]
+   },
+   "tools": {
+    "run_7f7eec146e8440bfa543a0d871b76599": [
+     {
+      "tool_name": "stock",
+      "status": "ok",
+      "output": "SKU-1: 7 units in stock"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

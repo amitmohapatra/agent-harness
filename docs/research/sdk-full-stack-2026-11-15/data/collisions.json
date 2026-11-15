@@ -1,0 +1,32 @@
+{
+ "TodoListMiddleware": {
+  "create_agent + middleware()": "AssertionError: Please remove duplicate middleware instances.",
+  "create_deep_agent + middleware()": "AssertionError: Please remove duplicate middleware instances.",
+  "ReAct(middleware=[own])": "ConfigurationError: ReAct(middleware=) adds your middleware and replaces none of the harness's: TodoListMiddleware is the harness's (always on)"
+ },
+ "ContextEditingMiddleware": {
+  "create_agent + middleware()": "built",
+  "create_deep_agent + middleware()": "built",
+  "ReAct(middleware=[own])": "ConfigurationError: ReAct(middleware=) adds your middleware and replaces none of the harness's: ContextEditingMiddleware is the harness's (context_window=)"
+ },
+ "ModelCallLimitMiddleware": {
+  "create_agent + middleware()": "AssertionError: Please remove duplicate middleware instances.",
+  "create_deep_agent + middleware()": "AssertionError: Please remove duplicate middleware instances.",
+  "ReAct(middleware=[own])": "ConfigurationError: ReAct(middleware=) adds your middleware and replaces none of the harness's: ModelCallLimitMiddleware is the harness's (max_steps=)"
+ },
+ "AnthropicPromptCachingMiddleware": {
+  "create_agent + middleware()": "AssertionError: Please remove duplicate middleware instances.",
+  "create_deep_agent + middleware()": "built",
+  "ReAct(middleware=[own])": "built"
+ },
+ "SummarizationMiddleware": {
+  "create_agent + middleware()": "built",
+  "create_deep_agent + middleware()": "built",
+  "ReAct(middleware=[own])": "built"
+ },
+ "ToolRetryMiddleware": {
+  "create_agent + middleware()": "built",
+  "create_deep_agent + middleware()": "built",
+  "ReAct(middleware=[own])": "built"
+ }
+}

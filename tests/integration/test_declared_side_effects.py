@@ -4,8 +4,9 @@ Nothing refuses a tool that declares no side effects (``@tool`` alone, ``tool(fn
 function in ``tools=[...]`` or given to ``agent.tools``, ``governed``, a source of the team's
 own, an MCP server's tool with no annotations, a framework's own tool object): it is held to
 nothing, so each call waits for a person — the body never runs before, the approval covers
-that one call, a rejected call never runs — on every adapter, and the toolbox names such tools
-once. The three cases a live test found running unasked are here as planned runs: a purge, a
+that one call, a rejected call never runs — on every adapter, with the same choices for every
+way it came (allow once, for this conversation, always with a memory service, deny), and the
+toolbox names such tools once. The three cases a live test found running unasked are here as planned runs: a purge, a
 bulk price change and another account's data."""
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from trellis.contracts import InterruptReason, RunStatus, ToolSpec
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.governance import Decision, Governance, Rejected, governed
 from trellis.harness.governance.catalog import entry
-from trellis.harness.governance.decision import CHOICES, EVERY_TIME, KEPT, SAID, Action, decide
+from trellis.harness.governance.decision import CHOICES, KEPT, SAID, Action, decide
 from trellis.harness.middleware import GovernTools, declare_files, spec_of
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.mcp import MCPSource
@@ -212,21 +213,44 @@ async def test_a_check_that_names_no_side_effects_asks() -> None:
     assert await governance.may_ask([ToolSpec(name="purge")]) == {"purge"}
 
 
-def test_the_catalog_is_told_the_default_of_a_tool_that_says_nothing() -> None:
-    """The service derives a tool's risk from its annotations: one the harness holds
-    irreversible for what it does not say is published saying so, never with a
-    ``side_effects`` of its own — an administrator's word in the catalog stays."""
+def test_the_catalog_is_told_nothing_of_a_tool_that_says_nothing() -> None:
+    """The service derives a tool's risk from its annotations: an MCP tool with none says
+    nothing, so nothing is published of it — no annotations, no ``side_effects`` — the catalog
+    keeps no risk for it, and the harness's own rule decides (it asks with the choices), as
+    for any tool that says nothing. Annotations that leave a tool destructive by the
+    protocol's defaults are published saying so, so the catalog derives the same risk."""
     silent = ToolSpec(name="office-purge_records", source="mcp", server="office")
-    assert entry(silent, None)["annotations"] == {"destructiveHint": True}
     for sent in (entry(silent, None), entry(ToolSpec(name="native"), None)):
-        assert "side_effects" not in sent
-    # not an MCP tool: no protocol default to say, so nothing is said (the catalog keeps no
-    # risk, and the harness's own rule decides: it asks with the three choices)
-    assert "annotations" not in entry(ToolSpec(name="native"), None)
+        assert "side_effects" not in sent and "annotations" not in sent
+    assert entry(silent, {"readOnlyHint": False})["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+    }
     assert entry(silent, {"readOnlyHint": True})["annotations"] == {"readOnlyHint": True}
     assert entry(silent, {"destructiveHint": False})["annotations"] == {"destructiveHint": False}
     said = entry(ToolSpec(name="count", side_effects="read"), None)
     assert said["side_effects"] == "read" and "annotations" not in said
+
+
+@pytest.mark.parametrize(
+    ("risk", "said"),
+    [
+        ("read", {"readOnlyHint": True}),
+        ("write", {"destructiveHint": False}),
+        ("irreversible", {"destructiveHint": True}),
+    ],
+)
+def test_an_mcp_tool_whose_listing_gave_its_risk_is_published_saying_it(
+    risk: str, said: dict[str, bool]
+) -> None:
+    """An MCP tool a framework listed with its annotations (a Claude in-process server's) comes
+    as a spec whose ``side_effects`` they gave, with no annotations beside it: the catalog is
+    told the annotations that say that risk — not the protocol's default for a tool that says
+    nothing, which the catalog's derived ``irreversible`` would then put over the tool's own
+    word. Annotations given beside it are what is said."""
+    listed = ToolSpec(name="mcp__shop__stock", source="mcp", server="shop", side_effects=risk)
+    assert entry(listed, None)["annotations"] == said
+    assert entry(listed, {"readOnlyHint": True})["annotations"] == {"readOnlyHint": True}
 
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
@@ -252,10 +276,10 @@ async def test_a_tool_that_declares_nothing_never_runs_unapproved_on_any_adapter
             OWN[tool_name],
             lambda: list(done),
         )
-    else:
+    else:  # no annotations at all: it says nothing, as the bare function does
         name, why, source, ran_so_far = (
             f"office-{tool_name}",
-            f"is irreversible. {SAID[EVERY_TIME]}",
+            f"has not declared its side effects. {THREE}",
             back_office(ran),
             lambda: lines(ran),
         )
@@ -279,8 +303,9 @@ async def test_a_tool_that_declares_nothing_never_runs_unapproved_on_any_adapter
 async def test_the_catalogs_word_on_a_tool_that_says_nothing(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
-    """With the tool catalog, what the harness published keeps the tool asking, and an
-    administrator's risk — the one place a tool nobody could declare is declared — lets it run."""
+    """With the tool catalog, what the harness published (nothing of its risk) keeps the tool
+    asking with the choices of a tool that says nothing, and an administrator's risk — the one
+    place a tool nobody could declare is declared — lets it run."""
     ran = tmp_path / "ran"
 
     async def reader(input: str, agent: Runtime) -> Any:
@@ -297,12 +322,16 @@ async def test_the_catalogs_word_on_a_tool_that_says_nothing(
         if t["name"] == "office-read_account"
     ]
     assert published and "side_effects" not in published[-1], published
-    assert published[-1]["annotations"] == {"destructiveHint": True}
+    assert "annotations" not in published[-1], published
     memory_service.catalog["office-read_account"] = dict(published[-1])  # as the service keeps it
     still = await arm(memory_harness.wrap(reader, id="reader-2"), [back_office(ran)]).run(
         "read", user="u"
     )
-    assert still.status is RunStatus.PAUSED and lines(ran) == []  # the catalog derives the same
+    assert still.status is RunStatus.PAUSED and lines(ran) == []  # the catalog keeps no risk
+    assert still.interrupt is not None and still.interrupt.question == (
+        "Approve office-read_account? office-read_account has not declared its side effects. "
+        f"{SAID[KEPT]}"
+    )
     memory_service.catalog["office-read_account"]["side_effects"] = "read"  # an administrator's
     done = await arm(memory_harness.wrap(reader, id="reader-3"), [back_office(ran)]).run(
         "read", user="u"

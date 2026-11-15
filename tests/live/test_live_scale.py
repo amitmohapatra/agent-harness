@@ -17,6 +17,7 @@ from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
+from trellis.harness.agui.hub import number_of
 from trellis.harness.agui.sse import decode
 from trellis.runs import RunsClient
 
@@ -70,7 +71,11 @@ async def test_a_workers_run_is_streamed_by_another_replica_from_agent_runs() ->
         async with httpx.AsyncClient(transport=transport, base_url="http://replica") as http:
             response = await http.get(f"/agui/runs/{handle.id}/events")
         replayed = decode(response.text)
-        assert replayed[0][0] == 1 and replayed[-1][1]["type"] == "RUN_FINISHED"
+        # each id is its event's place in the run's log (``number_of``: attempt, sequence), as
+        # the serving replica numbered it; the replay starts at the log's first event
+        assert replayed[0][0] == number_of(events[0])
+        assert {number for number, _ in replayed} <= {number_of(e) for e in events}
+        assert replayed[-1][1]["type"] == "RUN_FINISHED"
         assert replayed[-1][1]["outcome"]["type"] == "success"
 
 

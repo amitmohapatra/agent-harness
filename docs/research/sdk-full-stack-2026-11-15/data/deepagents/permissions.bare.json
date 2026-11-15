@@ -1,0 +1,23 @@
+{
+ "sdk": "deepagents",
+ "feature": "permissions",
+ "arm": "bare",
+ "error": null,
+ "seconds": 4.1,
+ "spend": {
+  "requests": 2,
+  "in": 7849,
+  "out": 163,
+  "usd": 0.000181,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "I tried to read `/secrets/key.txt`, but the system denied permission, so I can't tell you what it says. The file is probably restricted on purpose. If you need its contents, you could check the permissions on that path, or ask whoever manages the system to grant read access. If you paste the contents here, I can help with whatever you're working on."
+ ],
+ "asked": [],
+ "todos": null,
+ "files": []
+}

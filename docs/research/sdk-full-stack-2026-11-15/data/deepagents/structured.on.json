@@ -1,0 +1,33 @@
+{
+ "sdk": "deepagents",
+ "feature": "structured",
+ "arm": "on",
+ "error": null,
+ "seconds": 1.6,
+ "spend": {
+  "requests": 1,
+  "in": 5545,
+  "out": 63,
+  "usd": 0.000724,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "type": "Verdict",
+ "answers": [
+  "sentiment='positive' score=9"
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_83016062c812430db913fcacceb7bc34"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "da-structured-e1ae0ff5",
+ "records": null
+}

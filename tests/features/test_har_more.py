@@ -8,8 +8,10 @@
 * HAR-MCP an MCP server of the agent's own over stdio: its tools governed by their annotations,
   recorded in memory as the harness's tools are, on every adapter that takes them;
 * HAR-EVAL ``h.evaluate`` with the grounding evaluator: the memory service verifies the answers
-  against the contexts the runs were given (``/v1/verify``);
-* BG background work: the parts pending on unmerged branches are strict xfails, listed.
+  against the contexts the runs were given (``/v1/verify``).
+
+Background work (BG, WF-08) is proven end to end by the scenario suite (``tests/scenarios``:
+``test_s05_background.py``, ``test_s13_long_running.py``, ``test_s17_background_more.py``).
 """
 
 from __future__ import annotations
@@ -133,29 +135,3 @@ async def test_evaluate_verifies_answers_against_their_contexts_in_memory(uid: s
         )
     scores = [s for item in report.items for s in item.scores if s.name == "grounding"]
     assert scores and isinstance(scores[0].value, float) and scores[0].value > 0.5, report
-
-
-#: Background work pending on unmerged branches: each test fails until its branch is merged
-#: (the module or name the branch adds is missing here), then passes and must be replaced by the
-#: branch's own end-to-end proof — strict, so the merge cannot go unnoticed.
-PENDING = {
-    "react-background": ("trellis.harness.background", None),
-    "bg-kimi": ("trellis.harness.bridges.acp_live", None),
-    "bg-claude-da": ("trellis.harness.adapters.claude", "WORKFLOW"),
-}
-
-
-@pytest.mark.plan("BG", "BG-01", "BG-02", "BG-04", "BG-05", "BG-07", "BG-09", "BG-10", "WF-08")
-@pytest.mark.parametrize("branch", list(PENDING))
-@pytest.mark.xfail(
-    strict=True,
-    reason="background work pending on an unmerged branch "
-    "(react-background: harness-native tasks, L4; bg-kimi: Kimi work across its "
-    "process exit, L5; bg-claude-da: a Claude workflow as one child run, L6)",
-)
-def test_background_work_of_an_unmerged_branch(branch: str) -> None:
-    import importlib
-
-    module, name = PENDING[branch]
-    loaded = importlib.import_module(module)
-    assert name is None or hasattr(loaded, name)

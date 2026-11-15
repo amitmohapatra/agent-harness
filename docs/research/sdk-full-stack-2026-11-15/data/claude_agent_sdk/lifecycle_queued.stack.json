@@ -1,0 +1,62 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "lifecycle_queued",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.6,
+ "spend": {
+  "requests": 1,
+  "in": 18016,
+  "out": 51,
+  "usd": 0.000682,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "SUCCESS",
+ "output": "51",
+ "records": {
+  "run": {
+   "run_id": "run_8b4a87429f5b492694f2c60bb6788e4a",
+   "status": "SUCCESS",
+   "parent_run_id": null,
+   "thread_id": "run_8b4a87429f5b492694f2c60bb6788e4a",
+   "user_id": "life-3e179c30",
+   "agent_id": "lc-claude_agent_sdk-queued",
+   "attempt": 1,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_8b4a87429f5b492694f2c60bb6788e4a": {
+    "RUN_STARTED": 1,
+    "CONTEXT_LOADED": 1,
+    "RUN_FINISHED": 1
+   }
+  },
+  "messages": {
+   "run_8b4a87429f5b492694f2c60bb6788e4a": [
+    {
+     "role": "USER",
+     "content": "What is 17 times 3? Answer with the number only."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": "51"
+    }
+   ]
+  },
+  "tools": {
+   "run_8b4a87429f5b492694f2c60bb6788e4a": []
+  },
+  "feedback": [
+   {
+    "target_kind": "run",
+    "verdict": "confirm",
+    "source": "system"
+   }
+  ]
+ }
+}

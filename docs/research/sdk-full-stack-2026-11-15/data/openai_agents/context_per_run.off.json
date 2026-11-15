@@ -1,0 +1,65 @@
+{
+ "sdk": "openai_agents",
+ "feature": "context_per_run",
+ "arm": "off",
+ "error": null,
+ "seconds": 3.7,
+ "spend": {
+  "requests": 3,
+  "in": 5649,
+  "out": 96,
+  "usd": 0.000613,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": false,
+ "answers": [
+  "I couldn't get your balance. The balance tool returned an error on two attempts. Please try again in a little while."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve balance? balance has not declared its side effects. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "balance",
+    "args": {},
+    "task": "What is my balance?",
+    "step": null,
+    "idempotency_key": "cfd41d108974af511c0c968b"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  },
+  {
+   "reason": "APPROVAL",
+   "question": "Approve balance? balance has not declared its side effects. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "balance",
+    "args": {},
+    "task": "What is my balance?",
+    "step": null,
+    "idempotency_key": "cfd41d108974af511c0c968b"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_735f18a6beab4d15bdeb17ae3778b80f"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-context-005ca4a2",
+ "records": null
+}

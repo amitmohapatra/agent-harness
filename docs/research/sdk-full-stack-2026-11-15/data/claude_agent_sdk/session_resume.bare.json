@@ -1,0 +1,27 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "session_resume",
+ "arm": "bare",
+ "error": null,
+ "seconds": 2.4,
+ "spend": {
+  "requests": 2,
+  "in": 29019,
+  "out": 76,
+  "usd": 0.000752,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Noted.",
+  "Your favourite colour is teal."
+ ],
+ "tools_used": [],
+ "subtypes": [
+  "success",
+  "success"
+ ],
+ "deltas": null
+}

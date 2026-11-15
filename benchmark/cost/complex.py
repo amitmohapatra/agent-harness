@@ -128,6 +128,11 @@ ADVERSARIAL: Final = "adversarial"
 #: The ``--variant`` of ``--adapter deepagents`` built with no checkpointer of its own: its
 #: conversation's files and todos are the harness's to carry from turn to turn.
 UNTHREADED: Final = "unthreaded"
+#: The ``--variant``s of ``--adapter deepagents`` given Deep Agents' planning, LangChain's
+#: ``TodoListMiddleware`` (``write_todos``), as a team adds it beside ``middleware()``: with a
+#: checkpointer of its own, and with none.
+PLANNED: Final = "todos"
+PLANNED_UNTHREADED: Final = "todos-unthreaded"
 TIERS: Final = (1, 2, 3)
 STRICT_KINDS: Final = (
     "number", "record", "set", "abstain", "clarify", "flags", "tools", "steps", "cannot",
@@ -2634,18 +2639,6 @@ def cases() -> tuple[Case, ...]:
             (),
             ("file export",),
         ),
-        (
-            "cantdo-04",
-            "Run a k-means clustering (k=3) of our 40 stores by their weekly 2026 revenue "
-            "profile and tell me which stores fall in each cluster.",
-            r"cluster (?:1|2|3|a|b|c)\b.{0,40}\bS\d\d|\bi (?:ran|have run|clustered)\b",
-            r"group|revenue|query|rank|instead|figures|table",
-            "I can't run a k-means clustering here: this setup has no code execution for custom "
-            "algorithms. I can give you each store's weekly revenue, or group them by revenue "
-            "band with a query, instead.",
-            (),
-            ("custom algorithm",),
-        ),
     )
     for case_id, text, fake, offer, ref, calls, edges, *computed in cant:
         truth = computed[0] if computed else None
@@ -3620,7 +3613,8 @@ def target_of(
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter. ``variant``: the
     ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents), or
-    ``deepagents`` built with no checkpointer of its own (:data:`UNTHREADED`).
+    ``deepagents`` built with no checkpointer of its own (:data:`UNTHREADED`), or given
+    ``TodoListMiddleware`` (:data:`PLANNED`, :data:`PLANNED_UNTHREADED`).
     ``skills``: a skill set (``trellis.skills``) given to each framework in its own skills
     slot, as docs/skills.md says — ``ReAct(skills=)``, ``create_deep_agent(**deep_agent())``,
     ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
@@ -3656,9 +3650,12 @@ def target_of(
             tools = [*tools, *([skills.tools()] if skills is not None else [])]
         else:
             from deepagents import create_deep_agent
+            from langchain.agents.middleware import TodoListMiddleware
 
             # unthreaded: no checkpointer of its own, so the harness carries its files and todos
-            saver = None if variant == UNTHREADED else InMemorySaver()
+            saver = None if variant in (UNTHREADED, PLANNED_UNTHREADED) else InMemorySaver()
+            if variant in (PLANNED, PLANNED_UNTHREADED):
+                stack = [TodoListMiddleware(), *stack]  # Deep Agents' planning, as a team adds it
             graph = create_deep_agent(
                 model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
                 checkpointer=saver, name="complex",
@@ -3920,8 +3917,11 @@ async def run_case(
         tools=(*r.TOOLS, *case.tools),
         bound=await h.memory_tools() if kind == "graph" else (), variant=variant,
     )  # fmt: skip
+    # each variant its own agent: a worker claims queued runs by agent id, so two variants on
+    # one run store (agent-runs) would take each other's runs
+    named = kind if variant == "main" else f"{kind}-{variant}"
     agent = h.wrap(
-        target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
+        target, id=agent_id or f"complex-{named}-{case.id}", hooks=[trace],
         run_timeout=run_seconds,
         **options,
     )  # fmt: skip
@@ -4309,7 +4309,7 @@ async def bench(
             f"--max-usd needs a price: {model_name} is not in benchmark.cost.prices (use --price)"
         )
     spend = Spend(price, args.max_usd, usd=sum(x.get("usd", 0.0) for x in rows))
-    h = harness or runner.harness(memory=args.history == "memory")
+    h = harness or runner.harness(memory=args.history == "memory", runs=args.runs)
     tag = uuid.uuid4().hex[:6]
     stopped = None
     try:
@@ -4382,6 +4382,11 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--history", choices=("thread", "memory"), default="thread")
     p.add_argument(
+        "--runs",
+        action="store_true",
+        help="the environment's agent-runs (RUNS_URL) the run store, not the in-process one",
+    )
+    p.add_argument(
         "--adapter",
         choices=ADAPTERS,
         default=None,
@@ -4389,11 +4394,12 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--variant",
-        choices=("main", "deep", UNTHREADED, *variants.CAPABILITIES),
+        choices=("main", "deep", UNTHREADED, PLANNED, PLANNED_UNTHREADED, *variants.CAPABILITIES),
         default="main",
         help="with --adapter react: ReAct as built (main), on Deep Agents (deep: a backend), "
         "or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
-        f"--adapter deepagents: {UNTHREADED}, built with no checkpointer of its own",
+        f"--adapter deepagents: {UNTHREADED}, built with no checkpointer of its own; "
+        f"{PLANNED} ({PLANNED_UNTHREADED}), given TodoListMiddleware (and no checkpointer)",
     )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(

@@ -1,0 +1,38 @@
+[
+  {
+    "t": 1794734492.648,
+    "run": "run_bf6006c4083e44cfad186cd7a52d62a5",
+    "parent": null,
+    "input_tokens": 6375,
+    "output_tokens": 110,
+    "cached": 3132,
+    "cost": 0.0004915949999999999
+  },
+  {
+    "t": 1794734494.756,
+    "run": "run_bf6006c4083e44cfad186cd7a52d62a5",
+    "parent": null,
+    "input_tokens": 6858,
+    "output_tokens": 75,
+    "cached": 6614,
+    "cost": 0.00013399
+  },
+  {
+    "t": 1794734496.834,
+    "run": "run_e8036eaef72f4b52be52da9f6e69d5bd",
+    "parent": null,
+    "input_tokens": 6332,
+    "output_tokens": 105,
+    "cached": 3113,
+    "cost": 0.00048590499999999996
+  },
+  {
+    "t": 1794734498.372,
+    "run": "run_e8036eaef72f4b52be52da9f6e69d5bd",
+    "parent": null,
+    "input_tokens": 3331,
+    "output_tokens": 111,
+    "cached": 3215,
+    "cost": 0.00010205
+  }
+]

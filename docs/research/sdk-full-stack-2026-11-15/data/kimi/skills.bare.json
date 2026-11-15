@@ -1,0 +1,23 @@
+{
+ "sdk": "kimi",
+ "feature": "skills",
+ "arm": "bare",
+ "error": null,
+ "seconds": 7.4,
+ "spend": {
+  "requests": 2,
+  "in": 41260,
+  "out": 319,
+  "usd": 0.001008,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Autumn rain falls soft\non the maple's crimson leaves\nthe pond keeps its breath\n-- SKILL:HAIKU"
+ ],
+ "tools_used": [
+  "Skill"
+ ]
+}
