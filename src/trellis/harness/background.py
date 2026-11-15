@@ -665,13 +665,13 @@ async def delivered(
     if update is None:
         task = {"task_id": origin["task_id"], "agent_name": origin.get("name", "")}
         update = update_of(task, record)
-    if update is None:
-        return
     live = parent.turns.live(conversation_key(record.tenant_id, user, thread))
-    if live is not None and live.run_id != ending:
-        live.later.append(lambda: _told_later(parent, record, update))
-        return
-    if await idle(parent, record.tenant_id, user, thread, ending=ending):
+    if update is None:  # it works: nothing to tell
+        pass
+    elif live is not None and live.run_id != ending:
+        told = update
+        live.later.append(lambda: _told_later(parent, record, told))
+    elif await idle(parent, record.tenant_id, user, thread, ending=ending):
         await notify(parent, record, update, user=user, thread=thread, origin=origin)
 
 
@@ -716,12 +716,10 @@ async def origin_of(parent: Agent, record: RunRecord) -> dict[str, Any] | None:
 async def idle(
     agent: Agent, tenant: str, user: str, thread: str, *, ending: str | None = None
 ) -> bool:
-    """Whether ``user``'s chat ``thread`` with ``agent`` has no turn at work (here, or in the
-    run store) and none waiting for a person — where a turn of its own may begin — but the one
-    ``ending`` now."""
-    live = agent.turns.live(conversation_key(tenant, user, thread))
-    if live is not None and live.run_id != ending:
-        return False
+    """Whether ``user``'s chat ``thread`` with ``agent`` has no turn at work in the run store
+    and none waiting for a person — where a turn of its own may begin — but the one ``ending``
+    now (one holding the chat's turn in this process, its end written already, is
+    :func:`delivered`'s to wait for)."""
     runs = agent.harness.runs
     async for summary in runs.iterate(
         agent_id=agent.id, thread_id=thread, tenant=tenant, limit=IDLE_RUNS, max_pages=1

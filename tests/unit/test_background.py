@@ -458,6 +458,24 @@ async def test_a_chat_is_idle_whatever_another_users_thread_of_its_name_does() -
     assert await background.idle(agent, "t", "u", "chat-1", ending="run_u")
 
 
+async def test_a_task_that_still_works_tells_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task's run that works has no outcome — a turn's last look found it pending, and it
+    runs now: nothing is told to its chat, idle or not."""
+    from trellis.harness.conversation import Turns
+
+    runs = LocalRuns()
+    agent = runtime(runs).agent
+    agent.turns = Turns()
+    told: list[Any] = []
+
+    async def notify(*args: Any, **kwargs: Any) -> None:
+        told.append(args)
+
+    monkeypatch.setattr(background, "notify", notify)
+    await background.delivered(agent, await stored(runs), ending="run_u")
+    assert told == []
+
+
 async def test_a_question_answered_elsewhere_is_not_asked_again() -> None:
     runs = LocalRuns()
     await stored(runs)  # its run works again: answered on another server
