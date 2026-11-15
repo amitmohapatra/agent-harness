@@ -27,9 +27,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 from trellis.contracts import ToolError
 
@@ -70,11 +76,32 @@ IN_PARTS: Final = (
 )
 
 
-def hint(code: int, stderr: str, spec: SandboxSpec) -> str | None:
+#: What a command stopped at one of its limits (``ExecResult.limit``) is told.
+LIMIT_HINTS: Final = {
+    "cpu": "Stopped: the command used all the CPU time one command may. Make the work smaller "
+    "(fewer rows, a cheaper method) or split it into several commands.",
+    "memory": "Out of memory: the command went past the memory one command may use. {parts}",
+    "processes": "Stopped: the command started more processes than the run may have at once. "
+    "Start fewer at a time.",
+    "file": "Stopped: the command wrote a file larger than the run may. Write less, or several "
+    "smaller files.",
+    "files": "Stopped: the command opened more files at once than it may. Close each file once "
+    "it is read.",
+}
+
+
+def hint(code: int, stderr: str, spec: SandboxSpec, limit: str | None = None) -> str | None:
     """What the sandbox knows about why a command failed that its own output does not say:
-    the memory limit it went past (a SIGKILL, or Python's ``MemoryError``), and whether a
-    module Python could not import can be installed there (the sandbox's network). ``None``
-    for any other outcome: the command's output says all there is."""
+    the limit of the isolation layer it hit (``limit``, :data:`LIMIT_HINTS`), the memory limit
+    it went past (a SIGKILL, or Python's ``MemoryError``), and whether a module Python could
+    not import can be installed there (the sandbox's network). ``None`` for any other outcome:
+    the command's output says all there is."""
+    if limit in LIMIT_HINTS:
+        return LIMIT_HINTS[limit].format(parts=IN_PARTS)
+    return _hint(code, stderr, spec)
+
+
+def _hint(code: int, stderr: str, spec: SandboxSpec) -> str | None:
     limit = f"{spec.memory} MiB" if spec.memory is not None else "the provider's"
     if code == KILLED:
         return (
@@ -118,13 +145,28 @@ class SandboxRef(BaseModel):
 
 class ExecResult(BaseModel):
     """What a command did: its ``exit_code`` and what it wrote to ``stdout`` and ``stderr``
-    (a provider may keep only their end)."""
+    (a provider may keep only their end) — and, where the isolation layer ran it
+    (``sandbox.isolation``), how long it took (``duration_ms``) and the limit it hit
+    (``limit``: ``cpu``, ``memory``, ``processes``, ``file``, ``files``)."""
 
     model_config = ConfigDict(frozen=True)
 
     exit_code: int
     stdout: str = ""
     stderr: str = ""
+    duration_ms: int | None = None
+    limit: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _said(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Dumped without the isolation layer's fields when a provider leaves them unset: what a
+        command did, as every provider's result has said it."""
+        dumped: dict[str, Any] = handler(self)
+        return {k: v for k, v in dumped.items() if v is not None or k not in _OPTIONAL}
+
+
+#: What an :class:`ExecResult` says only when its provider knows it.
+_OPTIONAL: Final = frozenset({"duration_ms", "limit"})
 
 
 class SandboxLost(ToolError):

@@ -45,14 +45,13 @@ import dataclasses
 import itertools
 import logging
 import posixpath
-import re
 import time
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import ToolError, ToolSpec, stable_id
+from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.bounded import LRU
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import (
@@ -70,6 +69,15 @@ from trellis.harness.sandbox.base import (
     hint,
 )
 from trellis.harness.sandbox.docker import DockerSandbox
+from trellis.harness.sandbox.isolation import (
+    HostSandbox,
+    Limits,
+    isolated_end,
+    isolated_run,
+    layer_of,
+    name_of,
+)
+from trellis.harness.sandbox.shared import SharedDockerSandbox
 from trellis.harness.tools import query
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
 
@@ -290,11 +298,13 @@ class SandboxSource:
         return {"backend": SandboxBackend(self, call_timeout=self.call_timeout)}
 
     def provider_for(self) -> SandboxProvider:
-        """The provider given: a ``sandbox()`` without one makes Docker containers (the daemon
-        ``DOCKER_HOST`` names, else the docker context, else the local socket), of the spec's
+        """The provider given: a ``sandbox()`` without one works in the tenant's shared
+        container (:class:`~trellis.harness.sandbox.shared.SharedDockerSandbox`: a workspace and
+        a uid of the run's own in it, through the isolation layer) on the Docker daemon
+        ``DOCKER_HOST`` names (else the docker context, else the local socket), of the spec's
         image."""
         if self.provider is None:
-            self.provider = DockerSandbox(self.spec.image)
+            self.provider = SharedDockerSandbox(self.spec.image)
         return self.provider
 
     async def opened(self, runtime: Runtime, *, changes: bool = False) -> Sandbox:
@@ -370,7 +380,7 @@ class SandboxSource:
         command = str(args["command"])
         await self.seen(runtime, box)
         result = await box.exec(command, timeout=runtime.remaining())
-        why = hint(result.exit_code, result.stderr, self.spec)
+        why = hint(result.exit_code, result.stderr, self.spec, result.limit)
         kept = await self.outputs_said(runtime, box, command)
         told = {"hint": why, OUTPUTS: kept}
         return result.model_dump() | {k: v for k, v in told.items() if v is not None}
@@ -563,11 +573,8 @@ def ref_of(runtime: Runtime, provider: str) -> SandboxRef:
     """The sandbox of ``runtime``'s run: named after it — the same name in every attempt, which
     makes ``create`` idempotent — and labelled with its run, tenant and agent."""
     run_id = runtime.run_id
-    name = f"trellis-{run_id}"
-    if len(name) > NAME_CHARS or not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
-        name = f"trellis-{stable_id(run_id)}"
     labels = {RUN: run_id, TENANT: runtime.tenant, AGENT: runtime.agent_id}
-    return SandboxRef(provider=provider, id=name, labels=labels)
+    return SandboxRef(provider=provider, id=name_of(run_id), labels=labels)
 
 
 async def paused(runtime: Runtime) -> None:
@@ -603,13 +610,16 @@ async def ended(
         return
     ref = SandboxRef.model_validate(recorded)
     source = _source(agent, added)
-    if source is None:  # not among the agent's own sources (a handoff's specialist's)
+    provider = source.provider_for() if source is not None else None
+    if ref.provider == HostSandbox.name and (provider is None or provider.name != ref.provider):
+        provider = layer_of(ref)  # a command on the host (isolated_run): the layer's
+    if provider is None:  # not among the agent's own sources (a handoff's specialist's)
         log.warning("the sandbox %s of run %s is left to the reaper", ref.id, run_id)
         return
     if not _claimed(ref):  # the reaper is deleting it
         return
     try:
-        await source.provider_for().delete(ref)
+        await provider.delete(ref)
     except Exception as exc:
         log.warning("the sandbox %s of run %s was not deleted: %s", ref.id, run_id, exc)
         return
@@ -672,6 +682,8 @@ def _recorded(ref: SandboxRef) -> dict[str, Any]:
 __all__ = [
     "DockerSandbox",
     "ExecResult",
+    "HostSandbox",
+    "Limits",
     "Sandbox",
     "SandboxLost",
     "SandboxProvider",
@@ -679,10 +691,13 @@ __all__ = [
     "SandboxSource",
     "SandboxSpec",
     "SandboxTools",
+    "SharedDockerSandbox",
     "SupportsPause",
     "SupportsSnapshot",
     "card_of",
     "delivered",
+    "isolated_end",
+    "isolated_run",
     "reap",
     "sandbox",
 ]

@@ -5,6 +5,24 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: commands run in the tenant's shared sandbox, with a workspace and a uid per run
+
+`sandbox()` now works in **one container per tenant** (`SharedDockerSandbox`), never shared
+across tenants, instead of a container per run. Inside it one isolation layer
+(`trellis.harness.sandbox.isolation`) gives each run a workspace (mode 0700) and an
+unprivileged uid of its own; each command runs in process and mount namespaces of its own (it
+sees and can signal only its own processes), with every filesystem but its workspace read-only,
+within per-command limits (`Limits`: CPU time, memory, processes, file size, open files, and
+the call's timeout; the limit hit is in the result, `limit`), with an environment of its own
+(no secret of the service's) and the container's network (none by default). A run's end — any
+way it ends, a crash's takeover included — delivers its `outputs/`, then kills its processes,
+deletes its workspace and frees its uid; the reaper does so for runs that died. Every command is
+audited (`sandbox_command` on the run's stream, the `trellis.sandbox.audit` log). The same
+layer runs commands on the host when an administrator allows it (`HostSandbox`,
+`isolated_run(tenant, user, run, command, limits)`), and refuses to when the service cannot
+switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
+`duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).
+
 ### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
 
 An MCP tool whose server sent **no annotations at all** is now *undeclared*, as a function

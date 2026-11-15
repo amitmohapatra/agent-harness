@@ -326,9 +326,18 @@ async def _put(
 
 
 async def _output(client: httpx.AsyncClient, exec_id: str, ref: SandboxRef) -> tuple[str, str]:
+    """Start the exec and read its output to the end, each stream's end kept, as text."""
+    out, err = await _streams(client, exec_id, ref)
+    return out.text(), err.text()
+
+
+async def _streams(
+    client: httpx.AsyncClient, exec_id: str, ref: SandboxRef, keep: int | None = OUTPUT_BYTES
+) -> tuple[_Tail, _Tail]:
     """Start the exec and read its output to the end: the multiplexed stream's frames (a
-    header — the stream, 3 bytes, the length — then the bytes), each stream's end kept."""
-    streams = {1: _Tail(), 2: _Tail()}
+    header — the stream, 3 bytes, the length — then the bytes), each stream's last ``keep``
+    bytes kept (``None``: all)."""
+    streams = {1: _Tail(keep), 2: _Tail(keep)}
     pending = bytearray()
     start = {"Detach": False, "Tty": False}
     async with client.stream("POST", f"/exec/{exec_id}/start", json=start, timeout=None) as got:
@@ -344,19 +353,21 @@ async def _output(client: httpx.AsyncClient, exec_id: str, ref: SandboxRef) -> t
                 if pending[0] in streams:
                     streams[pending[0]].add(bytes(pending[8 : 8 + size]))
                 del pending[: 8 + size]
-    return streams[1].text(), streams[2].text()
+    return streams[1], streams[2]
 
 
 class _Tail:
-    """The last :data:`OUTPUT_BYTES` of a stream, and how much was cut before them."""
+    """The last ``limit`` bytes of a stream (:data:`OUTPUT_BYTES` unless given; ``None``: all
+    of it), and how much was cut before them."""
 
-    def __init__(self) -> None:
+    def __init__(self, limit: int | None = OUTPUT_BYTES) -> None:
+        self.limit = limit
         self.kept = bytearray()
         self.cut = 0
 
     def add(self, data: bytes) -> None:
         self.kept += data
-        over = len(self.kept) - OUTPUT_BYTES
+        over = len(self.kept) - self.limit if self.limit is not None else 0
         if over > 0:
             del self.kept[:over]
             self.cut += over
