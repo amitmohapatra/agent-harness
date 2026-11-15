@@ -16,6 +16,10 @@ jobs:
     # every gate on each Python the harness supports (requires-python >=3.12)
     name: gates (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A whole run takes about 80 minutes. A hung test must not hold a runner for GitHub's
+    # 6-hour default: with the free plan's few concurrent jobs, two hung runs stopped every
+    # later run from starting.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
