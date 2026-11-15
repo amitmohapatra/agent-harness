@@ -25,7 +25,7 @@ from tests.support.gateway import URL, FakeGateway
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Settings
-from trellis.contracts import ConfigurationError
+from trellis.contracts import ConfigurationError, RunEventType
 from trellis.harness import doctor, gateways
 from trellis.harness.adapters.claude import routed_env
 from trellis.harness.evals import EvalServices, OpenAICompatibleJudge, llm_judge
@@ -337,6 +337,42 @@ async def test_a_gateway_without_a_responses_route_answers_on_chat_completions(
     assert json.loads(fake.completions[0].content)["model"] == "openai/gpt-x"
     told = "does not serve 'openai/gpt-x' on /v1/responses"
     assert len([r for r in caplog.records if told in r.getMessage()]) == 1
+
+
+async def test_a_streamed_turn_on_a_gateway_without_a_responses_route_streams_from_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streamed, the same: the gateway refuses the Responses stream before its first event
+    (nothing was said), so the turn streams from chat completions, its answer whole; the next
+    streamed turn goes there at once."""
+    fake = FakeGateway(turns=["routed", "again"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
+        first = [e async for e in agent.stream("x", user="u")]
+        second = [e async for e in agent.stream("x", user="u")]
+    for events, said in ((first, "routed"), (second, "again")):
+        text = "".join(
+            e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT
+        )
+        assert text == said and events[-1].data["result"] == said
+    assert len(fake.refused) == 1 and len(fake.completions) == 2  # one fallback
+
+
+async def test_a_streamed_turn_of_a_model_known_on_responses_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model that has streamed on Responses: a later refusal of the route is the run's
+    error, never the turn streamed again from chat completions."""
+    fake = FakeGateway(turns=["streamed", "never"], serves_responses=1)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
+        first = [e async for e in agent.stream("x", user="u")]
+        second = [e async for e in agent.stream("x", user="u")]
+    assert first[-1].data["result"] == "streamed"
+    assert second[-1].type is RunEventType.RUN_FINISHED and second[-1].error is not None
+    assert len(fake.refused) == 1 and fake.completions == []
 
 
 async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_name(
