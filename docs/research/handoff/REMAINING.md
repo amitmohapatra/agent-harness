@@ -623,7 +623,7 @@ Memory (parked by the owner until this phase)
      one audit record per command (Langfuse and the log), the Kimi command-label fix.
   Known on that branch: 3 failing tests in `test_killed_server.py` and 38 uncovered lines (carry,
   relay, `_relayed`, shared, openai_local, acp_live), from the security review's full run.
-- **Resource limits the security review found missing (2026-11-15; found, not fixed).** Each
+- **Resource limits the security review found missing (2026-11-15; found, not fixed; parked by the owner: not needed now).** Each
   lets one user or tenant exhaust what every tenant shares. Recommended defaults in brackets;
   none is coded until the owner decides:
   1. **Disk per run.** Only one file's size is capped (`Limits.file_mib`): eight 1 MiB files
