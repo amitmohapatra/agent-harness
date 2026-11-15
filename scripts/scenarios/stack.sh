@@ -16,6 +16,8 @@
 #   SCEN_MODELS                      the memory service's frozen models folder (embedding, NLI)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
+# this script by its absolute path: `runs` changes directory before `start` relaunches it
+SELF=$HERE/scripts/scenarios/$(basename "$0")
 : "${SCEN_HOME:=/var/tmp/scen}" "${SCEN_PG_PORT:=5432}" "${SCEN_REDIS_PORT:=56380}"
 : "${SCEN_MEM_PORT:=18380}" "${SCEN_RUNS_PORT:=18390}"
 : "${SCEN_MEM_ROOT:=$HERE/../agent-memory-service}" "${SCEN_RUNS_ROOT:=$HERE/../agent-runs}"
@@ -67,9 +69,9 @@ runs() {  # runs migrate|api|ticker
 }
 start_one() {
   case $1 in
-    memory) launch memory "$0" _memory ;;
-    runs-api) launch runs-api "$0" _runs api ;;
-    runs-ticker) launch runs-ticker "$0" _runs ticker ;;
+    memory) launch memory "$SELF" _memory ;;
+    runs-api) launch runs-api "$SELF" _runs api ;;
+    runs-ticker) launch runs-ticker "$SELF" _runs ticker ;;
   esac
 }
 stop_one() { alive "$1" && kill "$(cat "$H/run/$1.pid")"; for _ in $(seq 1 40); do alive "$1" || break; sleep 0.5; done; rm -f "$H/run/$1.pid"; }
@@ -116,5 +118,5 @@ case "${1:-status}" in
       MEMORY_URL=http://127.0.0.1:$SCEN_MEM_PORT RUNS_URL=http://127.0.0.1:$SCEN_RUNS_PORT \
       TRELLIS_API_KEY="$SCEN_KEY" TRELLIS_ADMIN_KEY="$SCEN_ADMIN_KEY" TRELLIS_API_KEY_OTHER="$SCEN_KEY2" \
       TRELLIS_MEMORY_OPENAPI="$SCEN_MEM_ROOT/docs/openapi.json" TRELLIS_RUNS_OPENAPI="$SCEN_RUNS_ROOT/docs/openapi.json" \
-      SC_STACK="$0" SC="$H" "$SCEN_PY" -m pytest -m scenario tests/scenarios -p no:cacheprovider -rfEsxX "$@" ;;
+      SC_STACK="$SELF" SC="$H" "$SCEN_PY" -m pytest -m scenario tests/scenarios -p no:cacheprovider -rfEsxX "$@" ;;
 esac
