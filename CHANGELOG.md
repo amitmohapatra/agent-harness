@@ -17,6 +17,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   now accounts them apart (`budget.account(written=)`, `RUN_FINISHED`'s
   `spent.cache_written_tokens`, [observability.md](docs/observability.md#events)), and the
   benchmark prices them at `benchmark.cost.prices`' cache-write rate.
+* **A server keeps at most 8 agent processes of a framework, not 16.** Claude's and Kimi's
+  conversations each keep their CLI between turns; at 16, the comparison held 3.3 GB of Claude
+  Code processes (about 200 MB each). The bound (`live.KEPT`) is now 8, about 1.6 GB: a ninth
+  conversation's turn takes the place of the idle session asked for longest ago, as before
+  ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md), [kimi.md](docs/frameworks/kimi.md)).
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 
