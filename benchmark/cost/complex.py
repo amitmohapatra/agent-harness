@@ -121,8 +121,13 @@ CATEGORIES: Final = (
     # what a deployment can do, with exact answers (``benchmark.cost.cando``): the same figure
     # with or without a sandbox, the user's file with the right content
     "cando",
+    # a later turn needs a file or a todo list an earlier one made (``benchmark.cost.carry``)
+    "carry",
 )
 ADVERSARIAL: Final = "adversarial"
+#: The ``--variant`` of ``--adapter deepagents`` built with no checkpointer of its own: its
+#: conversation's files and todos are the harness's to carry from turn to turn.
+UNTHREADED: Final = "unthreaded"
 TIERS: Final = (1, 2, 3)
 STRICT_KINDS: Final = (
     "number", "record", "set", "abstain", "clarify", "flags", "tools", "steps", "cannot",
@@ -2666,6 +2671,9 @@ def cases() -> tuple[Case, ...]:
     from benchmark.cost import cando
 
     out.extend(cando.cases())
+    from benchmark.cost import carry
+
+    out.extend(carry.cases())
     return tuple(out)
 
 
@@ -3611,7 +3619,8 @@ def target_of(
     ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter. ``variant``: the
-    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents).
+    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents), or
+    ``deepagents`` built with no checkpointer of its own (:data:`UNTHREADED`).
     ``skills``: a skill set (``trellis.skills``) given to each framework in its own skills
     slot, as docs/skills.md says — ``ReAct(skills=)``, ``create_deep_agent(**deep_agent())``,
     ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
@@ -3648,9 +3657,11 @@ def target_of(
         else:
             from deepagents import create_deep_agent
 
+            # unthreaded: no checkpointer of its own, so the harness carries its files and todos
+            saver = None if variant == UNTHREADED else InMemorySaver()
             graph = create_deep_agent(
                 model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
-                checkpointer=InMemorySaver(), name="complex",
+                checkpointer=saver, name="complex",
                 **(skills.deep_agent() if skills is not None else {}),
             )  # fmt: skip
         setattr(graph, TOOLS_ATTRIBUTE, list(tools))
@@ -4229,7 +4240,7 @@ def _write(path: Path, rows: Sequence[dict[str, Any]], mode: str = "a") -> None:
 def _names(c: Case) -> set[str]:
     """What ``--cases`` picks a case by: its id, its category, its tier, and ``adversarial``
     for every ``adv_*`` category."""
-    from benchmark.cost import breakfix, history, longtasks
+    from benchmark.cost import breakfix, carry, history, longtasks
 
     return (
         {c.id, c.category, f"tier:{c.tier}"}
@@ -4237,6 +4248,7 @@ def _names(c: Case) -> set[str]:
         | breakfix.names(c)
         | history.names(c)
         | longtasks.names(c)
+        | carry.names(c)
     )
 
 
@@ -4377,10 +4389,11 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--variant",
-        choices=("main", "deep", *variants.CAPABILITIES),
+        choices=("main", "deep", UNTHREADED, *variants.CAPABILITIES),
         default="main",
         help="with --adapter react: ReAct as built (main), on Deep Agents (deep: a backend), "
-        "or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES)",
+        "or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
+        f"--adapter deepagents: {UNTHREADED}, built with no checkpointer of its own",
     )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(
