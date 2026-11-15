@@ -213,8 +213,10 @@ environment of its own, the network off (a network namespace of its own; `HostSa
 "open")` is the administrator's to give), the service's working folder, home, `/root`,
 `/home` and a pod's secret folders (`/var/run/secrets`, `/run/secrets`: the service account's
 token among them) covered (`hidden=`), clean-up at the run's end and the reaper, the same audit.
-**The cloud metadata server** (169.254.169.254 — `metadata.google.internal` — and
-`fd00:ec2::254`) **is out of every command's reach**, the network open or not: with none, a
+**The cloud metadata server and the platform's other credential endpoints** (the link-local
+169.254.0.0/16: 169.254.169.254 — `metadata.google.internal` —, an ECS task's role credentials
+at 169.254.170.2, EKS Pod Identity's at 169.254.170.23; and `fd00:ec2::254`) **are out of every
+command's reach**, the network open or not: with none, a
 command's namespace has no route; open, an iptables owner rule refuses the layer's uids (the
 service keeps its own); in the shared container, a blackhole route in the container's own
 network (its layer has `NET_ADMIN` there, its commands none). It needs root: the service

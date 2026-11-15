@@ -93,11 +93,13 @@ ROOT_ENV: Final = {"PATH": PATH, "LANG": "C.UTF-8"}
 READ_MAX_BYTES: Final = 64 * 1024 * 1024
 #: Kept results are read at this path (``tools.results``): the run's own, in its workspace.
 RESULTS_PATH: Final = "/large_tool_results"
-#: The cloud metadata server (169.254.169.254: AWS's, Google's — ``metadata.google.internal`` —
-#: and Azure's; ``fd00:ec2::254``: AWS's over IPv6): no command reaches it, whatever the
-#: network — with none, a command's network namespace has no route; open, the layer's uids are
-#: refused it (:data:`GUARD`).
-METADATA: Final = ("169.254.169.254", "fd00:ec2::254")
+#: The cloud metadata server and the platform's other credential endpoints: the link-local
+#: 169.254.0.0/16 (169.254.169.254: AWS's, Google's — ``metadata.google.internal`` — and
+#: Azure's; 169.254.170.2: an ECS task's role credentials; 169.254.170.23: EKS Pod Identity's)
+#: and ``fd00:ec2::254`` (AWS's over IPv6): no command reaches them, whatever the network —
+#: with none, a command's network namespace has no route; open, the layer's uids are refused
+#: them (:data:`GUARD`).
+METADATA: Final = ("169.254.0.0/16", "fd00:ec2::254/128")
 #: What refuses the layer's uids the metadata server on the host's network (iptables' owner
 #: match: the service and every other user keep it).
 FIREWALL: Final = ("iptables", "ip6tables")
