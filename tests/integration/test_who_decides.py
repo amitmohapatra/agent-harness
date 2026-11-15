@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
 
 from tests.support.adapters import CLI
 from tests.support.memory import FakeMemoryService
@@ -179,6 +179,35 @@ async def test_claude_mcp_servers_and_permission_modes_are_the_deployments(
             await agent.run("x", user="ada", framework_options=given)
     planned = await agent.run("plan it", user="ada", framework_options={"permission_mode": "plan"})
     assert planned.status is RunStatus.SUCCESS, planned
+
+
+async def allow_everything(*_: Any) -> PermissionResultAllow:
+    return PermissionResultAllow()
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        {"extra_args": {"permission-mode": "bypassPermissions"}},
+        {"extra_args": {"allowedTools": "Write"}},
+        {"settings": json.dumps({"permissions": {"allow": ["Write"]}})},
+        {"can_use_tool": allow_everything},
+    ],
+    ids=["flag-mode", "flag-allowed", "settings", "can_use_tool"],
+)
+async def test_claudes_permissions_are_loosened_by_no_other_run_option(
+    memory_harness: Harness, tmp_path: Path, given: dict[str, Any]
+) -> None:
+    """What lets Claude Code run a call without its user — the CLI's own flags, its settings'
+    permission rules, an answer to its question — is the deployment's as its permission mode
+    is: a run's own ``framework_options`` saying it is refused, and the user decides the write
+    under the one rule."""
+    step = {"builtin": "Write", "args": {"file_path": "notes.md"}}
+    agent = memory_harness.wrap(claude(tmp_path, step), id="loosened")
+    with pytest.raises(ConfigurationError, match=r"h\.wrap"):
+        await agent.run("w", user="ada", framework_options=given)
+    paused = await agent.run("w", user="ada")
+    assert paused.interrupt is not None and ran(tmp_path) == [], paused
 
 
 # --------------------------------------------------------------------------- Kimi Code
