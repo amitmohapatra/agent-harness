@@ -1,0 +1,33 @@
+{
+ "sdk": "kimi",
+ "feature": "subagent",
+ "arm": "off",
+ "error": null,
+ "seconds": 9.3,
+ "spend": {
+  "requests": 4,
+  "in": 61894,
+  "out": 454,
+  "usd": 0.001576,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "delegated": null,
+ "answers": [
+  "The project codename is **HERON**. The explore sub-agent found it on line 1 of `facts.txt`: \"The project codename is HERON.\""
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_8b9e5db5035446989258c7b397da5216"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "ki-sub-78a9d13b",
+ "records": null
+}

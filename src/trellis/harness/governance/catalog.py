@@ -35,7 +35,7 @@ from typing import Any, Final, Protocol
 
 from trellis.contracts import Feedback, ToolSpec
 from trellis.harness.bounded import LRUSet
-from trellis.harness.tools.mcp import DESTRUCTIVE, side_effects_of
+from trellis.harness.tools.mcp import DESTRUCTIVE, annotations_of, side_effects_of
 from trellis.memory import MemoryContext
 from trellis.memory.models import ApprovalSuggestion, SideEffects
 
@@ -163,11 +163,14 @@ class MemoryCatalog:
 def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, object]:
     """A tool as the catalog stores it. ``side_effects`` only where they are known (a local
     tool declares them, an OpenAPI method implies them). An MCP tool sends its annotations
-    instead and the service derives the risk, so an administrator's stays; one the harness
-    holds irreversible for what it does not say (``tools.mcp.side_effects_of``: the protocol's
-    default) sends that default said, so the catalog derives the same risk. Any other tool that
-    says nothing sends nothing of it: the catalog keeps no risk for it, and the harness's own
-    rule decides (it asks)."""
+    instead and the service derives the risk, so an administrator's stays (one listed with
+    none beside its spec, those its ``side_effects`` say: ``tools.mcp.annotations_of``); one
+    whose annotations the harness holds irreversible by the protocol's defaults
+    (``tools.mcp.side_effects_of``: ``readOnlyHint`` false and no ``destructiveHint``) sends
+    that default said, so the catalog derives the same risk. A tool that says nothing — an MCP
+    tool with no annotations at all among them — sends nothing of it: the catalog keeps no risk
+    for it, and the harness's own rule decides (it asks, and can be allowed for the
+    conversation or always)."""
     stored: dict[str, object] = {
         "name": spec.name,
         "description": spec.description,
@@ -177,8 +180,11 @@ def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, ob
     }
     if spec.source != "mcp" and spec.side_effects in RISKS:
         stored["side_effects"] = spec.side_effects
-    elif spec.source == "mcp" and side_effects_of(annotations) == TOP_RISK:
-        annotations = {**(annotations or {}), DESTRUCTIVE: True}
+    elif spec.source == "mcp":
+        # a tool its framework listed with its annotations comes with the risk they gave
+        annotations = annotations or annotations_of(spec.side_effects)
+        if side_effects_of(annotations) == TOP_RISK:
+            annotations = {**(annotations or {}), DESTRUCTIVE: True}
     if annotations:
         stored["annotations"] = dict(annotations)
     return stored

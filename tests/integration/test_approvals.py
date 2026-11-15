@@ -355,6 +355,60 @@ async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness
     assert scanned.answer == {"pages": 1}
 
 
+async def test_a_tool_resumed_by_running_again_runs_the_code_before_its_ask_again(
+    harness: Harness,
+) -> None:
+    """With no checkpoint to continue in place (a function; any target resumed by a re-run),
+    the tool asked in runs again from its start: the journal answers its ``ask``, so the
+    person is not asked twice, but what the tool did before the ``ask`` is done again — as
+    LangGraph's own ``interrupt()`` runs its node again. The safe tool asks first and acts on
+    the answer, or makes what comes before the ``ask`` idempotent (keyed by what it does)."""
+    sent: list[str] = []  # before its ask: done on the attempt that paused and on the resume
+    outbox: dict[str, str] = {}  # before its ask, keyed by the contract: done twice, kept once
+    filed: list[str] = []  # after its ask: done once
+
+    @tool(side_effects="write")
+    async def send_then_ask(contract: str) -> str:
+        """Send a contract out, then wait for its signature."""
+        sent.append(contract)
+        outbox[contract] = "sent for signature"
+        return await asked(f"Signed {contract}?")
+
+    @tool(side_effects="write")
+    async def ask_then_file(contract: str) -> str:
+        """Wait for a contract's signature, then file it."""
+        answer = await asked(f"Signed {contract}?")
+        filed.append(answer)
+        return answer
+
+    async def asked(question: str) -> str:
+        runtime = current()
+        assert runtime is not None
+        return await runtime.ask(question, expects={"type": "string"})
+
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call(input, contract="c-1")
+
+    agent = arm(harness.wrap(fn, id="asks-again"), [send_then_ask, ask_then_file])
+
+    async def signed(name: str) -> Any:
+        """``name``'s call approved, paused on its question, then answered: its answer."""
+        approval = await agent.run(name, user="ada")
+        paused = await agent.resume(approval.run_id, "approve", reviewer="ada")
+        assert paused.interrupt is not None and paused.interrupt.question == "Signed c-1?"
+        assert (len(sent), len(filed)) == ((1, 0) if name == "send_then_ask" else (0, 0))
+        done = await agent.resume(paused.run_id, "answer", answer="signed", reviewer="esign")
+        assert done.status is RunStatus.SUCCESS, done
+        return done.answer
+
+    assert await signed("send_then_ask") == "signed"
+    assert sent == ["c-1", "c-1"]  # what came before the ask: done twice
+    assert outbox == {"c-1": "sent for signature"}  # keyed: kept once
+    sent.clear()
+    assert await signed("ask_then_file") == "signed"
+    assert filed == ["signed"] and not sent  # what comes after the ask: done once
+
+
 # --------------------------------------------------------------------------- learned rules
 
 

@@ -1,0 +1,52 @@
+{
+ "sdk": "react",
+ "feature": "r_reject",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.0,
+ "spend": {
+  "requests": 2,
+  "in": 3870,
+  "out": 196,
+  "usd": 0.000365,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [],
+ "answers": [
+  "The wire of 300 to ACME-1 was not sent. The approver rejected it because the account is frozen. I haven't retried, since a frozen account needs to be resolved on your end or by whoever manages approvals before any payment can go through. Once it's unfrozen, I can send the wire again."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve wire? wire is irreversible. Allow once, or deny.",
+   "tool_call": {
+    "tool": "wire",
+    "args": {
+     "amount": 300,
+     "to": "ACME-1"
+    },
+    "task": "Wire 300 to account ACME-1 now. The currency is the account default; do not ask, just call the tool.",
+    "step": 1,
+    "idempotency_key": "toolu_01Kstax8wrfmtuJ5C6E52zq3"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_cfbe5f12d1ef4a7dbe350c4b9b51d10b"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "re-reject-62c10eca",
+ "records": null
+}

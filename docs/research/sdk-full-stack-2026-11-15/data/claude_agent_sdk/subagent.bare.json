@@ -1,0 +1,32 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "subagent",
+ "arm": "bare",
+ "error": null,
+ "seconds": 4.3,
+ "spend": {
+  "requests": 4,
+  "in": 32219,
+  "out": 373,
+  "usd": 0.001149,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [
+  "SKU-8"
+ ],
+ "delegated": true,
+ "answers": [
+  "SKU-8 has 7 units in stock. The stock tool returned only the quantity, with no location, reserved units, or restock date."
+ ],
+ "tools_used": [
+  "Agent",
+  "mcp__shop__stock"
+ ],
+ "subtypes": [
+  "success"
+ ],
+ "deltas": null
+}

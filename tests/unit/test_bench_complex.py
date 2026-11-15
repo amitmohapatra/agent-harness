@@ -25,6 +25,7 @@ from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
 from trellis import Settings
+from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import KEPT_BY_RUN
 from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
@@ -230,6 +231,48 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
     # cross-chat: the other thread's request holds nothing of the first
     other = next(q for q in asked if q["case"] == "explain-07" and q["turn"] == 1)
     assert [m["role"] for m in other["messages"]] == ["system", "user"]
+
+
+async def test_runs_puts_the_environments_run_store_under_the_run(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--runs``: the harness the run makes keeps the environment's agent-runs (``RUNS_URL``);
+    without it the run store is the in-process one, as before."""
+    asked: list[dict[str, Any]] = []
+    made = run.harness
+
+    def harness(**kw: Any) -> Any:
+        asked.append(kw)
+        return made(**kw)
+
+    monkeypatch.setattr(cx.runner, "harness", harness)
+    assert cx.arguments(["--scripted"]).runs is False
+    await cx.bench(_args(tmp_path / "off", cases="multihop-01"), progress=lambda _: None)
+    await cx.bench(_args(tmp_path / "on", cases="multihop-01", runs=True), progress=lambda _: None)
+    assert asked == [{"memory": False, "runs": False}, {"memory": False, "runs": True}]
+    assert cx.arguments(["--scripted", "--runs"]).runs is True
+
+
+async def test_each_variant_wraps_its_own_agent_so_runs_on_one_store_stay_apart(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two variants of one adapter run side by side on one run store (agent-runs, ``--runs``)
+    claim queued runs by agent id: each variant's agent has an id of its own, so a worker of
+    one never takes the other's run (``main`` keeps the id it always had)."""
+    ids: list[str] = []
+    async with run.harness() as h:
+        wrap = h.wrap
+
+        def spy(target: Any, **kw: Any) -> Any:
+            ids.append(kw["id"])
+            return wrap(target, **kw)
+
+        monkeypatch.setattr(h, "wrap", spy)
+        for variant in ("main", "deep"):
+            out = tmp_path / variant
+            args = _args(out, cases="multihop-01", adapter="react", variant=variant)
+            await cx.bench(args, harness=h, progress=lambda _: None)
+    assert ids == ["complex-react-multihop-01", "complex-react-deep-multihop-01"]
 
 
 async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> None:
@@ -460,8 +503,35 @@ def test_a_cannot_do_answer_must_say_so_why_and_what_instead_with_nothing_made_u
         "Here they are as a table too."
     )
     assert {c.id for c in cx.cases() if c.category == "cantdo"} == {
-        "cantdo-01", "cantdo-02", "cantdo-03", "cantdo-04"
+        "cantdo-01", "cantdo-02", "cantdo-03"
     }  # fmt: skip
+
+
+def test_a_k_means_of_the_stores_is_scored_as_the_clustering_this_deployment_gives() -> None:
+    """A k-means of the 40 stores was a ``cantdo`` case, though ``query_result`` computes one
+    (``cando-04`` clusters without a sandbox): it is a ``cando`` case from fixed starting
+    centres — one right answer — scored on the clustering, and a refusal is wrong."""
+    case = next(c for c in cx.cases() if c.id == "cando-06")
+    turn = case.turns[0]
+    assert case.category == "cando" and turn.expect is not None
+    expect = turn.expect
+
+    def ok(answer: str) -> bool:
+        return cx.score(expect, answer, [], turn.text)["correct"]
+
+    assert ok(expect.reference)
+    assert ok(
+        "Lowest centre first: 13 stores, 25 stores, and 2 stores (S07 Cambridge and S22 Bath). "
+        "The final centres are £356,847.33, £379,422.48 and £1,484,167.29."
+    )
+    assert not ok(
+        "I can't run a k-means clustering here: this setup has no code execution for custom "
+        "algorithms. I can give you each store's revenue, or group them by revenue band, instead."
+    )
+    assert not ok(  # the groups of another start, or of none: not this clustering
+        "Lowest centre first: 14 stores, 24 stores, and 2 stores (S07 and S22). The final "
+        "centres are £357,301.10, £380,112.40 and £1,484,167.29."
+    )
 
 
 def test_an_export_the_run_saved_for_the_user_is_no_made_up_file() -> None:
@@ -788,7 +858,13 @@ def test_the_carry_set_picks_its_own_conversations_of_more_than_one_turn() -> No
 
 @pytest.mark.parametrize(
     ("adapter", "variant"),
-    [("react", "deep"), ("deepagents", "main"), ("deepagents", cx.UNTHREADED)],
+    [
+        ("react", "deep"),
+        ("deepagents", "main"),
+        ("deepagents", cx.UNTHREADED),
+        ("deepagents", cx.PLANNED),
+        ("deepagents", cx.PLANNED_UNTHREADED),
+    ],
 )
 async def test_a_later_turn_finds_the_file_and_todos_an_earlier_turn_made(
     tmp_path: Path, offline: None, adapter: str, variant: str
@@ -818,6 +894,18 @@ def test_an_unthreaded_deep_agent_has_no_checkpointer_of_its_own() -> None:
     own, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents")
     bare, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents", variant=cx.UNTHREADED)
     assert own.checkpointer is not None and bare.checkpointer is None
+
+
+@pytest.mark.parametrize("window", [8_000, None])
+def test_a_planned_deep_agent_has_deep_agents_planning(window: int | None) -> None:
+    """``todos``: Deep Agents given LangChain's ``TodoListMiddleware`` beside ``middleware()``,
+    at a window known or not; ``main`` has none, as Deep Agents alone."""
+    for variant, saver in ((cx.PLANNED, True), (cx.PLANNED_UNTHREADED, False)):
+        graph, _ = cx.target_of("m", "thread", window, 6, adapter="deepagents", variant=variant)
+        assert "write_todos" in {t.name for t in graph_tools(graph)}
+        assert (graph.checkpointer is not None) is saver
+    plain, _ = cx.target_of("m", "thread", window, 6, adapter="deepagents")
+    assert "write_todos" not in {t.name for t in graph_tools(plain)}
 
 
 def test_the_long_set_truths_are_worked_from_the_tools_own_output() -> None:
@@ -1940,16 +2028,26 @@ def test_a_count_said_as_a_share_of_a_sized_group_is_read(answer: str, right: bo
 
 def test_an_offer_to_rank_is_not_a_claim_to_have_run() -> None:
     """ "I rank the stores by revenue" matched the claim "I ran" (no word boundary): a right
-    refusal that offered a ranking instead was scored as made up. "I ran k-means" still is."""
-    clusters = next(c for c in cx.cases() if c.id == "cantdo-04").turns[0]
-    assert clusters.expect is not None
+    refusal that offered a ranking instead was scored as made up. "I ran k-means" still is.
+    (The case it was found on, a k-means of the stores, is a ``cando`` case now: its
+    ``cannot`` expectation is kept here.)"""
+    text = (
+        "Run a k-means clustering (k=3) of our 40 stores by their weekly 2026 revenue profile "
+        "and tell me which stores fall in each cluster."
+    )
+    expect = cx.cannot(
+        r"cluster (?:1|2|3|a|b|c)\b.{0,40}\bS\d\d|\bi (?:ran|have run|clustered)\b",
+        r"group|revenue|query|rank|instead|figures|table",
+        "I can't run a k-means clustering here: this setup has no code execution for custom "
+        "algorithms. I can group the stores by revenue band with a query instead.",
+    )
     offer = (
         "I can't run k-means here: this deployment has no code interpreter. Instead I rank the "
         "40 stores by total 2026 revenue and split them into three bands with a query."
     )
-    assert cx.score(clusters.expect, offer, [], clusters.text)["correct"]
+    assert cx.score(expect, offer, [], text)["correct"]
     claim = "I ran k-means with k=3. I can't show the code, but a query gave the groups."
-    assert cx.score(clusters.expect, claim, [], clusters.text)["made_up"]
+    assert cx.score(expect, claim, [], text)["made_up"]
 
 
 @pytest.mark.parametrize("seed", range(30))
@@ -2210,7 +2308,7 @@ async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox
         )
         found = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
         rows[variant] = {x["case"]: x for x in found}
-    assert set(rows["main"]) == set(rows["sandbox"]) == {f"cando-0{n}" for n in range(1, 6)}
+    assert set(rows["main"]) == set(rows["sandbox"]) == {f"cando-0{n}" for n in range(1, 7)}
     # the clustering runs both ways too: its figures judge it, with or without code
     assert not any("not_applicable" in rows[v]["cando-04"] for v in rows)
     for variant, cases in rows.items():

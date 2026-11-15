@@ -1,0 +1,35 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "sdk_tool",
+ "arm": "off",
+ "error": null,
+ "seconds": 4.5,
+ "spend": {
+  "requests": 3,
+  "in": 48447,
+  "out": 205,
+  "usd": 0.002462,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [
+  "SKU-1"
+ ],
+ "answers": [
+  "SKU-1 has 7 units in stock."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_8ea0c11f720940d582d20a5650721a50"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "cl-tool-5f930254",
+ "records": null
+}

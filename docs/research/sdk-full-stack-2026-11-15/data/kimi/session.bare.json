@@ -1,0 +1,22 @@
+{
+ "sdk": "kimi",
+ "feature": "session",
+ "arm": "bare",
+ "error": null,
+ "seconds": 5.6,
+ "spend": {
+  "requests": 2,
+  "in": 40951,
+  "out": 11,
+  "usd": 0.000825,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "ok",
+  "PELICAN"
+ ],
+ "tools_used": []
+}

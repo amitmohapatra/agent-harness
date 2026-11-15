@@ -21,6 +21,7 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.events import WARNING
 from trellis.harness.middleware import (
+    FIT_SHARE,
     FITTED,
     ContextTooLarge,
     FitWindow,
@@ -142,6 +143,23 @@ async def test_a_user_message_that_cannot_fit_fails_naming_the_window() -> None:
     given = request([HumanMessage("y" * 40_000)], [lc("a")], max_tokens=500)
     with pytest.raises(ContextTooLarge, match="the user's message alone"):
         await sent(FitWindow(4000), given)
+
+
+async def test_a_window_given_below_the_models_own_reserves_the_reply_out_of_the_models_own() -> (
+    None
+):
+    """``middleware(context_window=)`` below the model's own window — 16,000 tokens for a model
+    of 200,000 that replies up to 64,000, as a team's ``create_agent`` is given it: the reply is
+    reserved out of the model's own window, as ``ReAct(context_window=)`` does, not out of the
+    one given, which left nothing for the input and refused every request of the run."""
+    given = request([HumanMessage("hello")], [lc("a")], max_tokens=64_000)
+    own = given.model.model_copy(update={"profile": {"max_input_tokens": 200_000}})
+    given = given.override(model=own)
+    assert FitWindow(16_000)._budget(given) == int(16_000 * FIT_SHARE)
+    assert await sent(FitWindow(16_000), given) is given
+    # a model that says no window of its own: the reply is still taken out of the one given
+    alone = request([HumanMessage("hello")], [lc("a")], max_tokens=1_000)
+    assert FitWindow(16_000)._budget(alone) == int(16_000 * FIT_SHARE) - 1_000
 
 
 async def test_react_on_a_small_window_with_many_tools_runs_and_says_what_it_dropped(

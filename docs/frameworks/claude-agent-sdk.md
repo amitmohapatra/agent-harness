@@ -51,8 +51,9 @@ if result.interrupt:
 
 Your tools stay yours: your in-process servers (`create_sdk_mcp_server`), Claude Code's
 built-ins, your MCP servers — each call governed as the CLI makes it (below), its risk the
-server's annotations (`destructiveHint`: irreversible, `readOnlyHint`: read) unless the tool
-catalog says otherwise. The harness's tools — the MCP tools the Bifrost virtual key allows and,
+server's annotations (`destructiveHint`: irreversible, `readOnlyHint`: read, none at all: it
+says nothing, so it asks) unless the tool catalog says otherwise — one rule, as for every
+adapter ([governance.md](../governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)). The harness's tools — the MCP tools the Bifrost virtual key allows and,
 memory on, the memory tools — reach Claude as one more in-process MCP server named `trellis`
 (tool names `mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file
 path or its JSON text); the harness's permission callback lets them through: the bridge is
@@ -95,8 +96,12 @@ the user Claude Code would ask:
 * **When Claude Code would ask** its user, it asks the harness (its `can_use_tool`): a call
   that only reads runs — a read tool, or a `Bash` command the harness reads as read-only (`ls`,
   `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`, read with
-  `shlex` and `ast`); any other asks a person. Approved (or edited), it runs once; rejected or
-  denied, Claude reads why. A read-only command reads only what the run may read: the CLI's
+  `shlex` and `ast`); any other asks a person, who picks as for a harness tool: allow once,
+  for this conversation, always (with a memory service), deny — allow once or deny for an
+  irreversible tool. What Claude Code would keep for its session ("don't ask again"), the run
+  keeps: a tool allowed for the conversation or always is not asked about again there, in a
+  query or a live session. Approved once (or edited), it runs once; rejected or denied,
+  Claude reads why. A read-only command reads only what the run may read: the CLI's
   `cwd`, the folders `add_dirs` adds (Claude Code reads and works there itself: name a folder
   of yours there, such as the tool results the CLI saves), the run's skills, and where a kept
   result is read. Claude Code's shell keeps the folder a `cd` left it in, so after a `cd` a
@@ -122,8 +127,8 @@ the user Claude Code would ask:
   Code would have asked, unless the tool catalog has a rule for the tool that lets it run.
   Your in-process server's tool is what its annotations say; any other tool (an MCP server's
   of yours the CLI reaches itself, a tool of a newer CLI's the harness has no word on) says
-  nothing of what it does: a person approves each call, until its risk is in the tool
-  catalog. `PowerShell` gets no read-only analysis (`Bash` does).
+  nothing of what it does: a person approves its calls (and may allow it for the
+  conversation or always), until its risk is in the tool catalog. `PowerShell` gets no read-only analysis (`Bash` does).
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)): a team that wants every shell command approved, even
   one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
@@ -294,7 +299,10 @@ await agent.run(
 ## Streaming
 
 `agent.stream(...)` yields each assistant text block as a text delta, the harness tool calls as
-`TOOL_CALL_*` events, then `RUN_FINISHED`.
+`TOOL_CALL_*` events, then `RUN_FINISHED`. With `include_partial_messages=True` on the options
+the CLI sends the model's text as it writes it (the SDK's `StreamEvent`s), and the run's
+stream carries each of those deltas as it comes instead of the whole block once, as the SDK's
+own stream does.
 
 ## Sub-agents and child runs
 

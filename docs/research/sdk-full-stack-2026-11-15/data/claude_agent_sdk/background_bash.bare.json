@@ -1,0 +1,34 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "background_bash",
+ "arm": "bare",
+ "error": null,
+ "seconds": 8.5,
+ "spend": {
+  "requests": 6,
+  "in": 91146,
+  "out": 1074,
+  "usd": 0.002105,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "started",
+  "4",
+  "The background command finished, and `out.txt` contains `BG-DONE-77`."
+ ],
+ "tools_used": [
+  "Bash",
+  "Read",
+  "Read",
+  "Bash"
+ ],
+ "subtypes": [
+  "success",
+  "success",
+  "success"
+ ],
+ "deltas": null
+}

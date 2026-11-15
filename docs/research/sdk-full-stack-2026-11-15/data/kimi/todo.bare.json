@@ -1,0 +1,27 @@
+{
+ "sdk": "kimi",
+ "feature": "todo",
+ "arm": "bare",
+ "error": null,
+ "seconds": 6.7,
+ "spend": {
+  "requests": 5,
+  "in": 104224,
+  "out": 474,
+  "usd": 0.001768,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "planned": true,
+ "answers": [
+  "Fruit: apple\nVegetable: carrot\nGrain: rice"
+ ],
+ "tools_used": [
+  "TodoList",
+  "TodoList",
+  "TodoList",
+  "TodoList"
+ ]
+}

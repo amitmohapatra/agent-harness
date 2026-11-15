@@ -146,7 +146,8 @@ async def test_the_tools_ranked_first_stay_callable_when_the_latest_turn_fills_t
     used = runtime.used
     sent = offered(await fitted(window, request, runtime))
     assert used <= set(sent)
-    beside = [name for name in sent if name not in used]
+    # the generated tools (those it must keep besides — ``read_file`` — may be compacted)
+    beside = [name for name in sent if name not in used and name.startswith("tool_")]
     assert len(beside) >= min(ours.FIT_KEEP, count - len(used))
     for name in beside[: ours.FIT_KEEP]:
         function = sent[name]["function"] if isinstance(sent[name], dict) else None
@@ -177,3 +178,20 @@ def test_a_signature_is_a_tools_name_and_arguments() -> None:
     }
     assert function["parameters"]["required"] == ["key"]
     assert ours._signature(bare) == bare  # a signature already
+
+
+async def test_a_large_tool_it_must_keep_does_not_crowd_out_the_tools_of_the_task() -> None:
+    """A tool it must keep — ``write_todos``, a state tool, its description 1,100 tokens — is
+    kept whole only where the others still fit beside it, else by its first sentence: at 8,000
+    tokens Haiku was held back the sales tools the question needed (and said so) to keep
+    ``write_todos`` whole, which the descriptions step then cut anyway."""
+    from langchain.agents.middleware import TodoListMiddleware
+
+    request, runtime, _ = situation(40, 0, 0)
+    runtime.offered = None
+    assert len(offered(await fitted(6_000, request, runtime))) == 40  # all of them fit
+    todos = TodoListMiddleware().tools[0]
+    request = request.override(tools=[todos, *request.tools])
+    sent = offered(await fitted(6_000, request, runtime))
+    assert set(sent) == {ours._named(t) for t in request.tools}  # nothing held back for it
+    assert ours._described(sent["write_todos"]) == ours._described(ours._compact(todos))
