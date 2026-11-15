@@ -62,6 +62,9 @@ Table = query.Table
 Sheets = dict[str, Table]
 #: The rows a sheet's header is looked for in (a title may be above it).
 HEAD_ROWS: Final = 20
+#: The most cells a sheet is read into, its merged cells spread included: a file of a few
+#: kilobytes can say a million rows of 16,384 columns (its dimension, a merged range).
+MAX_CELLS: Final = 10_000_000
 #: A sheet's merged cells, as its XML lists them, and how much of it is read at once.
 _MERGED: Final = re.compile(rb'<(?:\w+:)?mergeCell\s+ref="([A-Z]+[0-9]+):([A-Z]+[0-9]+)"')
 CHUNK_BYTES: Final = 1 << 20
@@ -293,10 +296,15 @@ def _sheet(sheet: Any, merged: list[tuple[int, int, int, int]]) -> Table:
     """A sheet as a table: a merged cell's value in each cell it spans; its header the row
     :func:`_head` finds (a title above it left out); the rows after it that hold a value (a
     time as its ISO text)."""
-    rows = [list(row) for row in sheet.iter_rows(min_row=1, min_col=1, values_only=True)]
+    rows: list[list[Any]] = []
+    cells = 0
+    for row in sheet.iter_rows(min_row=1, min_col=1, values_only=True):
+        cells = _counted(sheet, cells, len(row))
+        rows.append(list(row))
     for top, left, bottom, right in merged:
         value = rows[top - 1][left - 1] if top <= len(rows) and left <= len(rows[top - 1]) else None
         for r in range(top - 1, min(bottom, len(rows))):
+            cells = _counted(sheet, cells, right - len(rows[r]))
             rows[r].extend([None] * (right - len(rows[r])))
             rows[r][left - 1 : right] = [value] * (right - left + 1)
     head = _head(rows)
@@ -308,6 +316,15 @@ def _sheet(sheet: Any, merged: list[tuple[int, int, int, int]]) -> Table:
         for row in rows[head + 1 :]
         if any(v is not None for v in row)
     ]
+
+
+def _counted(sheet: Any, cells: int, more: int) -> int:
+    """``cells`` read of ``sheet`` and ``more``: past :data:`MAX_CELLS` the sheet is no table
+    read here (``ValueError``)."""
+    cells += max(more, 0)
+    if cells > MAX_CELLS:
+        raise ValueError(f"the sheet {sheet.title} holds more than {MAX_CELLS} cells")
+    return cells
 
 
 def _head(rows: list[list[Any]]) -> int:
