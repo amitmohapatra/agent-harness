@@ -4,14 +4,15 @@ administrator's switch that turns off every shell outside a sandbox (``trellis.h
 * The harness's own commands on this machine go through its isolation layer: ``sandbox()``
   with no provider is Docker when its daemon answers, else ``HostSandbox`` when it can isolate,
   else no shell, each command refused with the reason (said once).
-* Claude Code's and Kimi Code's own shells run as they do, announced and recorded; a team's own
-  Claude ``SandboxSettings`` is honoured as given.
-* Deep Agents' ``LocalShellBackend``, LangChain's host shell and the OpenAI SDK's Unix-local
-  sandbox run with no isolation: refused at ``h.wrap`` whatever the setting, naming
-  ``sandbox()``.
+* The frameworks' own shells (Claude Code's, Kimi Code's, an OpenAI local shell or Unix-local
+  sandbox, LangChain's host shell) run as they do; a team's own Claude ``SandboxSettings`` is
+  honoured as given.
+* Deep Agents' ``LocalShellBackend`` runs with no isolation: refused at ``h.wrap`` whatever the
+  setting, naming ``sandbox()``.
 * ``deny`` refuses, per adapter, Claude Code's shell (``Bash``, ``PowerShell``, ``REPL``,
-  ``Monitor``) and Kimi's ``Bash`` on the host, an OpenAI local shell tool, and the isolation
-  layer's own commands; commands in a sandbox are not affected."""
+  ``Monitor``) and Kimi's ``Bash`` on the host, an OpenAI local shell tool or Unix-local
+  sandbox, LangChain's host shell, and the isolation layer's own commands; commands in a
+  sandbox are not affected."""
 
 from __future__ import annotations
 

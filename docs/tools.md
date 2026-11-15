@@ -28,10 +28,9 @@ where its virtual key is configured, in the gateway. Tool names must be unique a
 toolbox.
 
 A shell is a sandbox's: `sandbox()` here (Docker, else this machine's isolation layer), or a
-framework's own. Deep Agents' `execute` on a `LocalShellBackend`, LangChain's
-`ShellToolMiddleware` on the host and the OpenAI SDK's Unix-local sandbox have no isolation and
-are refused at `h.wrap`; `TRELLIS_HOST_EXECUTION=deny` switches every shell outside a sandbox
-off ([governance.md](governance.md#commands-on-the-host)).
+framework's own. Deep Agents' `execute` on a `LocalShellBackend` has no isolation and is
+refused at `h.wrap`, naming `sandbox()`; `TRELLIS_HOST_EXECUTION=deny` switches every shell
+outside a sandbox off ([governance.md](governance.md#commands-on-the-host)).
 
 With memory on, every tool is published to the memory service's tool catalog, through
 governance, in the background and once per content: MCP tools (the gateway's and your own

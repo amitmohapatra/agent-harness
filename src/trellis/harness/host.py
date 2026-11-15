@@ -12,13 +12,14 @@ as the service's own user, never on a run user's approval. What runs a command h
   as the service's user — not through the harness's isolation layer, which cannot carry a
   framework's own process — announced and recorded at each call. A team's own Claude
   ``SandboxSettings`` is honoured as given; ``kimi(sandbox=sandbox())`` isolates Kimi's.
-* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``**: its executor is code of
-  yours on this machine, governed at each call as any tool of yours.
-* **Unisolated shells — Deep Agents' ``execute`` on a ``LocalShellBackend`` (alone, a
-  ``CompositeBackend``'s default, a sub-agent's; ``ReAct(backend=)`` too), LangChain's
-  ``ShellToolMiddleware`` on the host, the OpenAI SDK's ``UnixLocalSandboxClient``**: no
-  isolation the harness can give them, so refused at ``h.wrap`` whatever the setting, naming
-  ``sandbox()`` (which falls back to this machine's isolation layer when no Docker answers).
+* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``** (its executor: code of yours
+  on this machine), **the SDK's ``UnixLocalSandboxClient``**, **LangChain's
+  ``ShellToolMiddleware`` on the host**: a framework's own shell, run as it is, governed at each
+  call as the framework's tools are.
+* **Deep Agents' ``execute`` on a ``LocalShellBackend``** (alone, a ``CompositeBackend``'s
+  default, a sub-agent's; ``ReAct(backend=)`` too): no isolation, and ``sandbox()`` is the same
+  library's isolated backend — refused at ``h.wrap`` whatever the setting, naming ``sandbox()``
+  (Docker, else this machine's isolation layer).
 
 ``deny`` refuses every one at ``h.wrap``, and a run whose own ``framework_options`` would make
 one, naming the setting. Isolated sandboxes are never refused: ``sandbox()``, a Deep Agents
@@ -145,6 +146,7 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
                 HostShell(
                     "LangChain's ShellToolMiddleware on the host",
                     "ShellToolMiddleware(execution_policy=DockerExecutionPolicy())",
+                    "framework",
                 )
             )
     return shells
@@ -220,6 +222,7 @@ def _openai(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
                 "the OpenAI Agents SDK's UnixLocalSandboxClient (no isolation)",
                 "SandboxRunConfig(client=DockerSandboxClient(...)) or a hosted client "
                 "(agents.extensions.sandbox)",
+                "framework",
             )
         )
     return shells

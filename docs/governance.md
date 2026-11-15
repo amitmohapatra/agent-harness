@@ -75,10 +75,9 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
   Never a command as the service's own user. A deployment that configured its own layer (a
   root helper, limits, a network) installs it at start with
   `trellis.harness.host.install(HostSandbox(...))`, refused at once when it cannot isolate.
-* **A shell the harness could isolate and does not is refused, whatever the setting:** Deep
-  Agents' `execute` on a `LocalShellBackend` (alone, a `CompositeBackend`'s default, a
-  sub-agent's; `ReAct(backend=)` too), LangChain's `ShellToolMiddleware` on the host, the OpenAI
-  SDK's `UnixLocalSandboxClient` — at `h.wrap`, naming `sandbox()`.
+* **Deep Agents' `execute` on a `LocalShellBackend`** (alone, a `CompositeBackend`'s default,
+  a sub-agent's; `ReAct(backend=)` too) has no isolation, and `sandbox()` is the same library's
+  isolated backend: refused at `h.wrap` whatever the setting, naming `sandbox()`.
 * **Claude Code's and Kimi Code's own shells run as they do today:** in their working folder,
   as the service's own user, **without the harness's isolation** — announced and recorded at
   each call, never asked of the run's user. A team's own Claude `SandboxSettings` is honoured
@@ -86,10 +85,12 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
   (`ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": False})`, which
   needs bubblewrap and socat on Linux — without them the CLI runs the command unsandboxed,
   warning only on its stderr), `kimi(sandbox=sandbox())`. An OpenAI agent's `LocalShellTool` or
-  local `ShellTool` runs its executor — code of yours — governed as any tool of yours.
+  local `ShellTool` runs its executor — code of yours — governed as any tool of yours; the
+  SDK's `UnixLocalSandboxClient` and LangChain's `ShellToolMiddleware` on the host run as they
+  do, unisolated (a Docker client or policy isolates them).
 * **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
   sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
-  host, an OpenAI local shell tool — refused at `h.wrap`, and a run whose own
+  host, an OpenAI local shell tool or Unix-local sandbox, LangChain's host shell — refused at `h.wrap`, and a run whose own
   `framework_options` would make one, naming the setting — and the isolation layer's own
   commands, refused at the call. Commands in a sandbox are not affected.
 
@@ -98,7 +99,8 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
 | The way to a shell | Default (`allow`) | `deny` |
 |---|---|---|
 | `sandbox()` (ReAct, Deep Agents, `sandbox().tools()`), sandboxed Kimi | runs in Docker, else this machine's isolation layer, else refused with the reason | Docker or another provider runs; the isolation layer on this machine is refused |
-| Deep Agents `LocalShellBackend`, LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | refused, naming `sandbox()` | refused |
+| Deep Agents `LocalShellBackend` | refused, naming `sandbox()` | refused |
+| LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | runs as the framework runs it, unisolated | refused |
 | Claude Code's shell (no sandbox, or one that lets a command out) | runs as the service's user, unisolated, announced | refused |
 | Claude Code's shell in its own sandbox (`allowUnsandboxedCommands: False`, no `excludedCommands`) | runs in it | runs in it |
 | Kimi's `Bash` with no `sandbox=` | runs as the service's user, unisolated, announced | refused |
