@@ -54,7 +54,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, middleware
 from trellis.harness.agent import Agent
 from trellis.harness.automatic import JournalBackend
-from trellis.harness.middleware import RunCheckpointer
+from trellis.harness.middleware import STEPS_LEFT_COUNT, RunCheckpointer
 from trellis.harness.tools.convert import text_of
 
 CLI: Final = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -103,10 +103,11 @@ ADAPTERS: Final = (
     "claude_agent_sdk",
     "kimi",
 )
-#: the adapters whose framework takes a steered message at its next step (``Adapter.steers``)
-STEERS: Final = frozenset(
-    {"react", "react_da", "middleware", "openai_agents", "claude_agent_sdk", "deepagents"}
-)
+#: the adapters whose framework takes a steered message at its next step (``Adapter.steers``).
+#: Not ``deepagents``: a ``create_deep_agent`` graph without the harness's middleware has no
+#: step the harness can add a message at, so a steer waits as ``mode="queue"`` does, said once
+#: (docs/frameworks/deepagents.md, "Conversations"; ``LangGraphAdapter.steers``)
+STEERS: Final = frozenset({"react", "react_da", "middleware", "openai_agents", "claude_agent_sdk"})
 
 
 def token(chat: str, n: int) -> str:
@@ -123,6 +124,7 @@ class Turned:
     """What the brain decided for one request: a call, or the answer."""
 
     call: Any = None  # (tool, args), or a list of them made in one message
+    #: the answer — with a call to make, the one it gives when it is offered no tool
     answer: str = ""
     slow: float = 0.0
     #: the kind of provider failure the message asks for (a key of :data:`PROVIDER_ERRORS`)
@@ -134,7 +136,7 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
     result's role is ``tool``."""
     latest = -1
     for n, (role, text) in enumerate(messages):
-        if role == "user" and TOKEN.search(text):
+        if role == "user" and TOKEN.search(text) and not STEPS_LEFT_COUNT.search(text):
             latest = n
     if latest < 0:
         everything = " ".join(t for _, t in messages)
@@ -143,7 +145,9 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
     asked = messages[latest][1].split("</memory_context>")[-1]
     mine = (TOKEN.findall(asked) or TOKEN.findall(messages[latest][1]))[0]
     asked = asked[asked.find(mine) :]
-    results = [t for role, t in messages[latest + 1 :] if role == "tool"]
+    # the steps the harness left out to fit the window, said in a note: made, as it says
+    left = [int(m[1]) for _, t in messages[latest + 1 :] if (m := STEPS_LEFT_COUNT.search(t))]
+    results = [""] * sum(left) + [t for role, t in messages[latest + 1 :] if role == "tool"]
     commands = _commands(asked)
     for n, tool in LOOP.findall(asked):
         commands += [(tool, {"key": f"k{i}"}) for i in range(int(n))]
@@ -162,21 +166,23 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
             return Turned(call=(redo[1].removeprefix("mcp__trellis__"), json.loads(redo[2])))
         except ValueError:
             pass
+    everything = " ".join(t for _, t in messages)
+    recalled = " ".join(MEMORIES.findall(everything))
+    conversation = MEMORIES.sub("", everything)
+    last = results[-1] if results else ""
+    # what it answers now: with every call made, or — calls still to make — when it is offered
+    # no tool (a step limit's or a budget's last call: ``tool_choice="none"``), as a model then
+    # answers with what it has
+    answer = f"ANS {mine.upper()} SEEN {_seen(conversation, mine)} MEM {_seen(recalled, mine)} LAST {last}"
     done = 0
     for step in _steps(commands):  # a step: one call, or several in one message (``batch``)
         size = len(step) if isinstance(step, list) else 1
         if len(results) < done + size:
             pending = step[len(results) - done :] if isinstance(step, list) else step
-            return Turned(call=pending, slow=float(slow[1]) if slow and not results else 0)
+            slowed = float(slow[1]) if slow and not results else 0
+            return Turned(call=pending, answer=answer, slow=slowed)
         done += size
-    everything = " ".join(t for _, t in messages)
-    recalled = " ".join(MEMORIES.findall(everything))
-    conversation = MEMORIES.sub("", everything)
-    last = results[-1] if results else ""
-    return Turned(
-        answer=f"ANS {mine.upper()} SEEN {_seen(conversation, mine)} MEM {_seen(recalled, mine)} LAST {last}",
-        slow=float(slow[1]) if slow and not commands else 0.0,
-    )
+    return Turned(answer=answer, slow=float(slow[1]) if slow and not commands else 0.0)
 
 
 def _commands(asked: str) -> list[tuple[str, dict[str, Any]]]:
@@ -273,6 +279,17 @@ class _BrainScript(Script):
         answered = super().reply(body)
         for call in answered["choices"][0]["message"].get("tool_calls") or []:
             call["id"] = f"call_{self.prefix}_{call['id'].removeprefix('call_')}"
+        # the request's size, as a model's usage says it (a token per 4 characters of what it
+        # was sent): the harness fits its later requests by what replies say theirs were, and
+        # a fixed 10 taught it each was a fifth of its count (``middleware._calibrated``)
+        sent = len(json.dumps(body.get("messages") or [])) + len(
+            json.dumps(body.get("tools") or [])
+        )
+        answered["usage"] = {
+            "prompt_tokens": sent // 4,
+            "completion_tokens": 5,
+            "total_tokens": sent // 4 + 5,
+        }
         return answered
 
     def next(self, body: dict[str, Any]) -> Any:
@@ -372,6 +389,24 @@ def _item_text(item: Any) -> tuple[str, str]:
     return str(role), text(get("content"))
 
 
+def _provider_error(kind: str) -> Exception:
+    """What the OpenAI client raises for a ``fail:`` the OpenAI Agents SDK's model meets: the
+    status error of its API's answer (:data:`PROVIDER_ERRORS`), as its Responses model raises
+    one it gets (``OpenAIResponsesModel``: ``openai.InternalServerError`` for a 500)."""
+    import openai
+
+    status, kind_of, message = PROVIDER_ERRORS[kind]
+    code = "context_length_exceeded" if kind == "overflow" else None
+    body = {"error": {"message": message, "type": kind_of, "code": code}}
+    response = httpx.Response(
+        status, json=body, request=httpx.Request("POST", f"{BASE_URL}/responses")
+    )
+    error = {500: openai.InternalServerError, 429: openai.RateLimitError}.get(
+        status, openai.BadRequestError
+    )
+    return error(f"Error code: {status} - {body}", response=response, body=body["error"])
+
+
 class BrainModel(ScriptedModel):
     """An OpenAI Agents SDK model answered by the brain."""
 
@@ -397,6 +432,8 @@ class BrainModel(ScriptedModel):
         turned = decide(self._request(input, system_instructions))
         if turned.slow:
             await asyncio.sleep(turned.slow)
+        if turned.fail:
+            raise _provider_error(turned.fail)
         return await super().get_response(system_instructions, input, *args, **kwargs)
 
     async def stream_response(  # type: ignore[override]
@@ -405,6 +442,8 @@ class BrainModel(ScriptedModel):
         turned = decide(self._request(input, system_instructions))
         if turned.slow:
             await asyncio.sleep(turned.slow)
+        if turned.fail:
+            raise _provider_error(turned.fail)
         async for event in super().stream_response(system_instructions, input, *args, **kwargs):
             yield event
 

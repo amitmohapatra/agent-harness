@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import httpx
@@ -432,6 +432,59 @@ async def test_scn4_only_the_turns_memory_lacks_are_added_after_its_window(
             "Fine.",
         ], said
         assert len(said) == 5, said
+
+
+async def test_scn4_a_rendered_window_has_the_turn_before_while_its_write_is_on_its_way(
+    kept: asyncio.Event,
+) -> None:
+    """SCN-4 for a target whose context carries the conversation as text (a function, OpenAI
+    Agents, Claude with no session of its own, an ACP agent: ``Window.RENDERED``): memory's
+    rendered window names no message ids, so the run store's turns cannot be matched to it
+    (``Agent.caught_up`` is the messages window's). The turns this process wrote whose writes
+    are still on their way are said after memory's context, once each, until memory has them.
+    They were left out: on the scenario suite's stress (100 chats, 3 servers, memory writes at
+    p90 6 s), a function chat's turn answered without the turn before."""
+    seen: list[str] = []
+
+    async def echo(input: Any, agent: Runtime) -> str:
+        seen.append(agent.context or "")
+        return f"answer number {len(seen)}"
+
+    async with Harness(config=Settings(), memory=_holding(FakeMemoryService(), kept)) as h:
+        agent = h.wrap(echo, id="scn4r")
+        await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        await agent.run("What is the locker code?", user="ada", thread="t1")
+        assert "The locker code is 4242." in seen[-1], seen[-1]
+        assert seen[-1].count("answer number 1") == 1, seen[-1]
+        kept.set()
+        await h.writes.drain()
+        await agent.run("And now?", user="ada", thread="t1")
+        # memory has them: said once, from memory's window, none of them again
+        for said in ("The locker code is 4242.", "What is the locker code?", "answer number 2"):
+            assert seen[-1].count(said) == 1, (said, seen[-1])
+
+
+async def test_a_turn_on_its_way_is_said_only_where_memory_lacks_it_and_not_to_itself(
+    harness: Harness,
+) -> None:
+    """What a rendered window adds: a turn on its way that memory's window says already (its
+    write landed, the queue not yet told) is not said again, and a run's own earlier attempt's
+    turn (a resumed run's) is not said back to it."""
+    from types import SimpleNamespace
+
+    from trellis.harness.history import Said, Speaker
+
+    async def answer(input: Any, agent: Runtime) -> str:
+        return "x"
+
+    agent = harness.wrap(answer, id="unwritten")
+    turn = [Said(role=Speaker.USER, content="ping"), Said(role=Speaker.ASSISTANT, content="pong")]
+    agent.unwritten["conv"] = {"run_a": turn}
+    other = cast(Runtime, SimpleNamespace(conversation="conv", run_id="run_b"))
+    itself = cast(Runtime, SimpleNamespace(conversation="conv", run_id="run_a"))
+    assert agent.unwritten_said(other, "USER: ping\nASSISTANT: pong") == ""  # memory has it
+    assert agent.unwritten_said(itself, "") == ""
+    assert agent.unwritten_said(other, "").endswith("user: ping\nassistant: pong")
 
 
 async def test_scn4_the_turn_before_is_had_by_another_replica(kept: asyncio.Event) -> None:

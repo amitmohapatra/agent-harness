@@ -18,6 +18,7 @@ from trellis.harness.events import RunEvents
 from trellis.harness.writes import SPOOL_FILE, Writes
 from trellis.memory.breaker import CircuitBreaker
 from trellis.memory.errors import CircuitOpenError, DependencyUnavailableError, ValidationError
+from trellis.memory.errors import TimeoutError as MemoryTimeoutError
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +142,37 @@ async def test_the_first_write_of_an_outage_outlasts_the_failures_that_open_the_
     await writes.submit("memory.transcript", write)
     await writes.drain()
     assert len(tries) == 7 and writes.failed == 0
+    await writes.aclose()
+
+
+async def test_a_write_whose_own_calls_time_out_gives_up_though_the_circuit_reopens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service is up, and answers this write's every call with its own timeout (a 504:
+    ``/v1/verify`` past its 15 s budget on a busy machine). Those timeouts open the client's
+    circuit, and its cool-downs spend no attempt — but the timed-out calls do, across them: the
+    write is given up after its attempts, not tried again forever. It was: its attempts whole
+    after each cool-down, every probe timing out and opening the circuit again, a drain never
+    ended (the scenario suite's 55-turn Claude chat, out of time at 1800 s, its grounding
+    checks still queued). An outage — the service not answering at all — still spends none."""
+    sleep = asyncio.sleep
+
+    async def at_once(seconds: float) -> None:  # the cool-downs and backoffs, not waited
+        await sleep(0)
+
+    monkeypatch.setattr(module.asyncio, "sleep", at_once)
+    writes, tries = Writes(), []
+
+    async def verify() -> None:
+        tries.append(1)
+        if len(tries) % 2:
+            raise MemoryTimeoutError("past its time", code="TIMEOUT", status=504, retryable=True)
+        raise circuit_open(30.0)
+
+    await writes.submit("memory.verify", verify)
+    async with asyncio.timeout(5):
+        await writes.drain()
+    assert writes.failed == 1 and len(tries) == 2 * module.WRITE_ATTEMPTS - 1, len(tries)
     await writes.aclose()
 
 

@@ -390,6 +390,17 @@ def rendered(history: Sequence[Said]) -> str:
     return "## Earlier in this conversation\n" + "\n".join(lines)
 
 
+#: The heading of the latest turns a rendered window does not hold yet (:func:`latest`).
+LATEST: Final = "## The latest turns of this conversation (after those above)"
+
+
+def latest(history: Sequence[Said]) -> str:
+    """The conversation's latest turns, which memory's window does not hold yet, as text after
+    it (``Agent.unwritten_said``)."""
+    lines = [f"{s.role.value}: {s.content}" for s in history if s.content]
+    return f"{LATEST}\n" + "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- busy conversations
 @dataclass(eq=False, slots=True)
 class Steer:

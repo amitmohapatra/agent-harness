@@ -14,6 +14,7 @@
 #   SCEN_BIFROST=../bifrost-sdk/src
 #   SCEN_SVC_PY (the memory service's python)  SCEN_RUNS_PY (agent-runs' python)  SCEN_PY (this repository's)
 #   SCEN_MODELS                      the memory service's frozen models folder (embedding, NLI)
+#   SCEN_RUNS_PER_MINUTE=30000 SCEN_RUNS_BURST=5000   agent-runs' request budget for the tenant
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
 # this script by its absolute path: `runs` changes directory before `start` relaunches it
@@ -59,7 +60,10 @@ runs() {  # runs migrate|api|ticker
     RUNS__SERVICE__WORKERS=1 RUNS__MEMORY__URL=http://127.0.0.1:$SCEN_MEM_PORT
     RUNS__DATABASE__URL="postgresql+psycopg://postgres@127.0.0.1:$SCEN_PG_PORT/$SCEN_DB_RUNS"
     RUNS__BLOB__ROOT="$w/blob" RUNS__TICKER__HEARTBEAT_FILE="$w/ticker.heartbeat"
-    RUNS__OBSERVABILITY__LOG_JSON=false)
+    RUNS__OBSERVABILITY__LOG_JSON=false
+    # the suite is one tenant at a stress (100 chats on 3 servers at once: test_s14) past a
+    # tenant's default budget (3,000 requests a minute): sized for it, not for one tenant's plan
+    RUNS__RATE_LIMIT__PER_MINUTE="${SCEN_RUNS_PER_MINUTE:-30000}" RUNS__RATE_LIMIT__BURST="${SCEN_RUNS_BURST:-5000}")
   cd "$SCEN_RUNS_ROOT" || exit 1
   case $1 in
     migrate) env -i "${env[@]}" "$SCEN_RUNS_PY" "$(dirname "$SCEN_RUNS_PY")/alembic" upgrade head ;;
