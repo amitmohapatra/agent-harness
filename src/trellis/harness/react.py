@@ -144,7 +144,9 @@ def middleware(
                                   checkpointer=RunCheckpointer())
         agent = h.wrap(graph, id="stock")
 
-    In order: planning on a long task (:class:`~.automatic.Planning`); the run's tools per
+    In order: planning on a long task (:class:`~.automatic.Planning`: in ``create_agent``; in
+    ``create_deep_agent`` it steps aside, Deep Agents' planning being the ``TodoListMiddleware``
+    a team adds beside it, offered at every window); the run's tools per
     model call, narrowed per turn, the memory and gateway MCP tools among them
     (:class:`~.middleware.HarnessTools`); the graph's own tools governed with full parity
     (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
@@ -171,6 +173,7 @@ def middleware(
             call_timeout=call_timeout,
             context_window=context_window,
             system_prompt=system_prompt,
+            yields=True,
         ),
         PromptCache(),
     ]
@@ -189,6 +192,7 @@ def _middleware(
     summarization: Any = None,
     card: Any = None,
     scoped: bool = False,
+    yields: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools held until a
     long task (``held``: with no Deep Agents capability asked for, the scratch file tools and
@@ -196,7 +200,9 @@ def _middleware(
     the start (``planned``, ``files``: a capability was asked for), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
     sent; and whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
-    resume included — :func:`~.middleware.step_limit`)."""
+    resume included — :func:`~.middleware.step_limit`). ``yields`` (:func:`middleware`'s, never
+    ``ReAct``'s): planning steps aside in a ``create_deep_agent`` graph, whose planning is the
+    ``TodoListMiddleware`` a team adds (:class:`~.automatic.Planning`)."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -234,7 +240,7 @@ def _middleware(
     )
     return [
         # what a long task is offered, decided before anything reads the request's tools
-        automatic.Planning(window=window, always=planned),
+        automatic.Planning(window=window, always=planned, yields=yields),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
         ours.HarnessTools(),
         ours.GovernTools(),

@@ -25,6 +25,7 @@ from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
 from trellis import Settings
+from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import KEPT_BY_RUN
 from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
@@ -788,7 +789,13 @@ def test_the_carry_set_picks_its_own_conversations_of_more_than_one_turn() -> No
 
 @pytest.mark.parametrize(
     ("adapter", "variant"),
-    [("react", "deep"), ("deepagents", "main"), ("deepagents", cx.UNTHREADED)],
+    [
+        ("react", "deep"),
+        ("deepagents", "main"),
+        ("deepagents", cx.UNTHREADED),
+        ("deepagents", cx.PLANNED),
+        ("deepagents", cx.PLANNED_UNTHREADED),
+    ],
 )
 async def test_a_later_turn_finds_the_file_and_todos_an_earlier_turn_made(
     tmp_path: Path, offline: None, adapter: str, variant: str
@@ -818,6 +825,18 @@ def test_an_unthreaded_deep_agent_has_no_checkpointer_of_its_own() -> None:
     own, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents")
     bare, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents", variant=cx.UNTHREADED)
     assert own.checkpointer is not None and bare.checkpointer is None
+
+
+@pytest.mark.parametrize("window", [8_000, None])
+def test_a_planned_deep_agent_has_deep_agents_planning(window: int | None) -> None:
+    """``todos``: Deep Agents given LangChain's ``TodoListMiddleware`` beside ``middleware()``,
+    at a window known or not; ``main`` has none, as Deep Agents alone."""
+    for variant, saver in ((cx.PLANNED, True), (cx.PLANNED_UNTHREADED, False)):
+        graph, _ = cx.target_of("m", "thread", window, 6, adapter="deepagents", variant=variant)
+        assert "write_todos" in {t.name for t in graph_tools(graph)}
+        assert (graph.checkpointer is not None) is saver
+    plain, _ = cx.target_of("m", "thread", window, 6, adapter="deepagents")
+    assert "write_todos" not in {t.name for t in graph_tools(plain)}
 
 
 def test_the_long_set_truths_are_worked_from_the_tools_own_output() -> None:

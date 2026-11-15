@@ -302,7 +302,8 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
 ## Limits
 
 * `middleware()` brings middleware named as LangChain's own — `TodoListMiddleware`
-  (planning), `ContextEditingMiddleware` (with a `context_window`), `ModelCallLimitMiddleware`
+  (planning; in a `create_deep_agent` graph it steps aside for yours:
+  [deepagents.md](deepagents.md#planning)), `ContextEditingMiddleware` (with a `context_window`), `ModelCallLimitMiddleware`
   (`max_steps`) and `AnthropicPromptCachingMiddleware` (the prompt cache). `create_agent`
   takes one middleware per name: given one of those of your own beside `middleware()`, it
   raises `AssertionError: Please remove duplicate middleware instances` when the graph is

@@ -16,6 +16,7 @@ LangGraph graph, and the Way 2 recipe applies as it is: [blocks/langgraph.md](..
 
 ```python
 from deepagents import create_deep_agent
+from langchain.agents.middleware import TodoListMiddleware
 from trellis import middleware
 from trellis.harness.middleware import RunCheckpointer
 
@@ -24,9 +25,10 @@ graph = create_deep_agent(
     model=model,
     tools=tools,
     system_prompt="You process refund requests.",
-    # the harness's part of ReAct: the MCP and memory tools per call, narrowed per turn; the
-    # step limit and stall guard; the hooks, spans and call_timeout; planning on a long task
-    middleware=middleware(max_steps=20, call_timeout=60),
+    # Deep Agents' planning (write_todos), as Deep Agents takes it; then the harness's part of
+    # ReAct: the MCP and memory tools per call, narrowed per turn; the step limit and stall
+    # guard; the hooks, spans and call_timeout
+    middleware=[TodoListMiddleware(), *middleware(max_steps=20, call_timeout=60)],
     subagents=[
         {
             "name": "order-checker",
@@ -58,7 +60,7 @@ no checkpointer is run with it. Runnable:
 |---|---|
 | Your tools | the graph's own, governed at each call as the graph runs them: the catalog's risk and rules, approvals, journal, records, spans — in the main agent and in a sub-agent alike (a sub-agent's calls happen inside the run, so they are the run's) |
 | Sub-agents (`subagents=[...]`, the `task` tool) | each `task` call is a child run of the run ([below](#sub-agents-and-child-runs)): its own record, its turns in memory, its spans in the run's trace. Give a sub-agent the tools it needs (`"tools": tools`); the default `general-purpose` sub-agent gets the main agent's tools |
-| Planning (`TodoListMiddleware`, `write_todos`) | the plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is Deep Agents' own tool, not a harness tool |
+| Planning (`TodoListMiddleware`, `write_todos`) | Deep Agents' own, opt-in there: `create_deep_agent` has no `write_todos` until you add LangChain's `TodoListMiddleware` ([below](#planning)). The plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is the library's tool, not a harness tool |
 | Built-in tools | Deep Agents' own. Those that only change the graph's state — `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` on its default backend — run as they are (the run's checkpoint keeps them); `execute` is governed as a write (the catalog's risk over it), and a tool of yours as any of the graph's own is — one that shares a built-in's name too; `task` is a child run. On a backend outside the graph's state (a disk, a store, a sandbox), the file tools change real files and are governed too, `ls`, `read_file`, `glob` and `grep` as reads, `write_file`, `edit_file` and `delete` as writes, in the main agent and its sub-agents alike. A `CompositeBackend` is decided call by call, by where Deep Agents routes the path: a file on a state route is the graph's own, a file on a disk, store or sandbox route is governed — and so is a read of the run's skills under `/skills/` (a `SKILL.md` or a file of its skill: a read, recorded, never asked), and so is a listing or a search from a folder that holds such a route. Gate more with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
 | Hooks | the tool and run hooks as for every target; a model call is LangChain middleware, as for `create_agent`: `create_deep_agent(..., middleware=[yours, ModelHooks()])` ([hooks.md](../hooks.md)) |
@@ -68,6 +70,36 @@ no checkpointer is run with it. Runnable:
 
 Deep Agents' own `memory=[...]` (AGENTS.md files) and `skills=[...]` are prompts it loads from
 its backend; they are independent of the memory service and can be used beside it.
+
+## Planning
+
+Deep Agents plans with LangChain's `TodoListMiddleware` (`write_todos`), which it leaves to you:
+`create_deep_agent(..., middleware=[TodoListMiddleware(), *middleware()])`. With `middleware()`
+on, it works as it does alone — offered from the first call, its own guidance in the
+instructions — at every window: known small or large, or unknown (`context_window=None`).
+The harness's planning (`Planning`, which in `create_agent` and `ReAct` offers `write_todos` on
+a long task) stays out of a Deep Agents graph: `create_deep_agent` binds its backend to the
+middleware it is given, and there `Planning` steps aside — no tool, no name of LangChain's, so
+your `TodoListMiddleware` beside it is no duplicate. Without one, a Deep Agent has no
+`write_todos`, as Deep Agents alone.
+
+The list is the graph's state, and the model reads it in the `write_todos` call that wrote it.
+When no such call is in a request — the older turns' calls left out to fit a small window
+(`FitWindow`), a summary in their place, or the earlier turns replayed as text (a graph with no
+thread of its own) — the list as last written opens the turn's question ("Your todo list
+(write_todos), as you last wrote it: ..."); the instructions stay as they are. A graph with no
+thread of its own carries its todos to the next turn though LangChain leaves `todos` out of a
+graph's input (the turn starts with them written to its state).
+
+Measured on Haiku (`claude-haiku-5-5`, 2026-11-15, the complex suite's `carry` todo cases and
+long multi-step cases, `--adapter deepagents --variant todos`, with and without a checkpointer
+of its own) at windows of 8,000, 16,000, 32,000 and 128,000 tokens and unknown: `write_todos`
+offered on every call of the main agent and used to plan in every todo case, the list seen by every
+later turn's request, every todo turn right at every window, 79 of 80 strict turns (one
+rounding slip of the model's)
+([docs/research/deepagents-planning-2026-11-15](../research/deepagents-planning-2026-11-15/README.md)).
+At a small window `write_todos` is kept by its first sentence when whole it would crowd out the
+task's tools.
 
 ## Sub-agents and child runs
 
@@ -158,10 +190,10 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and
   the approval resumes the sub-agent where it stopped with a checkpointer, or re-runs the run
   from its journal without one — either way the call runs once.
-* `middleware()` beside a middleware of your own with one of its names — Deep Agents'
-  planning is `TodoListMiddleware`, which `middleware()` also brings — fails when the graph
+* `middleware()` beside a middleware of your own with one of its names fails when the graph
   is built (`AssertionError: Please remove duplicate middleware instances`, LangChain's):
-  see [langgraph.md](langgraph.md#limits).
+  see [langgraph.md](langgraph.md#limits). `TodoListMiddleware` is not one of them in a Deep
+  Agents graph: there the harness's planning steps aside for yours ([Planning](#planning)).
 * A sub-agent is given the context for its task, not the main agent's tools: give it the
   memory tools (`memory_search`) when it should read memory itself.
 * The harness knows Deep Agents' state tools by name (`write_todos`, the file tools). A tool
@@ -172,8 +204,8 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
   `edit_file`, `delete`, `glob`, `grep` and `task` are 3,854 input tokens a call on Claude
   (`count_tokens`; `grep` 1,107, `glob` 903, `task` 874, `read_file` 858 alone). None of them
   duplicates a harness tool on a graph built with `middleware()`: `read_file` is Deep Agents'
-  only, planning is LangChain's `TodoListMiddleware` (`Planning` in its place, offered on a long
-  task), `task` is the only helper tool. They are the agent's own and stay offered; with
+  only, planning is the `TodoListMiddleware` you add (the harness's steps aside), `task` is the
+  only helper tool. They are the agent's own and stay offered; with
   `middleware()`'s prompt cache they are in the cached prefix. To drop ones an agent never needs,
   use Deep Agents' own `HarnessProfile(excluded_tools=...)` (`register_harness_profile`).
 

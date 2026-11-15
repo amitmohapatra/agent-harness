@@ -2647,6 +2647,10 @@ FIT_HELD: Final = "Tools held back to fit the window ({how}): {names}"
 FIT_FOUND: Final = f"{TOOL_SEARCH} finds one and offers it again"
 FIT_NOT_FOUND: Final = "not offered at this window size"
 _HELD: Final = FIT_HELD.split("(", maxsplit=1)[0]
+#: What the latest question of a request opens with when no ``write_todos`` call in it shows
+#: the todo list the graph's state keeps (:func:`todos_shown`).
+TODOS_SHOWN: Final = "Your todo list (write_todos), as you last wrote it:\n{todos}"
+_TODOS_SHOWN: Final = TODOS_SHOWN.split(":", maxsplit=1)[0]
 _HELD_SIZE: Final = len(FIT_HELD.format(how=FIT_FOUND, names="")) / 4 + 1
 #: The characters a cut result's marker takes at most (its size, and where the rest is read).
 CUT_MARKER: Final = 192
@@ -2897,6 +2901,7 @@ class FitWindow(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
+        request = todos_shown(request)
         budget = self._budget(request)
         if budget is None:
             return await self._learning(request, handler)
@@ -2963,7 +2968,8 @@ class FitWindow(AgentMiddleware):
         that makes the call (a model name's: the one its route resolves to; read from the
         name there was none, and 950,000 tokens were sent where the provider took 872,000).
         A window the caller gives below the model's own is not what the reply is taken out
-        of: given 32,000 for a model replying up to 64,000, nothing was left for the input.
+        of: given 32,000 for a model replying up to 64,000, nothing was left for the input —
+        the model's own is its profile's (``ReAct``'s copy keeps it as :data:`OWN_WINDOW`).
         The window is the one given, else the model's profile's, else the one its server
         named when it refused a request (``said_now``, :data:`_LEARNED`); ``None``: no one
         has said it."""
@@ -2979,7 +2985,7 @@ class FitWindow(AgentMiddleware):
             value = request.model_settings.get(key, getattr(sends, key, None))
             if isinstance(value, int) and not isinstance(value, bool):
                 reply = max(reply, value)
-        own = said.get(OWN_WINDOW) or window
+        own = said.get(OWN_WINDOW) or said.get("max_input_tokens") or window
         return max(0, min(int(window * FIT_SHARE), int(own * FIT_SHARE) - reply))
 
     def _results(
@@ -3011,10 +3017,10 @@ class FitWindow(AgentMiddleware):
         that fills the window by itself is not made to fit by taking away the tools it goes on
         with. Only a request the model's server itself refused (``refit``) gives them up too."""
         if self.turns:
-            request = _answers(request, budget)
+            request = todos_shown(_answers(request, budget))
             if _size(request) <= budget:
                 return request
-            request = _latest(request)
+            request = todos_shown(_latest(request))
         return _narrowed(
             request,
             budget,
@@ -3140,7 +3146,8 @@ def _narrowed(
     kept (``before``: the same set call after call, so a prompt cache keeps its prefix), those
     the tool hints chose, then by the words they share with the user's latest message — and
     kept in that order while they fit what the messages leave, ``least`` of them at least
-    besides those it must keep.
+    besides those it must keep — which are set aside first by their first sentence
+    (:func:`_compact`), and kept whole only where that leaves the others room.
 
     A tool it does not keep is still offered while its signature fits (:func:`_signature`:
     its name and arguments, what a call takes), and whatever the room when the tool hints chose
@@ -3173,11 +3180,19 @@ def _narrowed(
     aside = {name: (len(name) + 2) / 4 for name in offered if name not in must}
     room = budget - _size(request.override(tools=[])) - (_HELD_SIZE + sum(aside.values()))
     kept: dict[int, BaseTool | dict[str, Any]] = {}
+    ranked = sorted(enumerate(tools), key=rank)
+    # those it must keep take their compacted room first, and are kept whole only where the
+    # others still fit beside them (``write_todos`` whole held back the task's tools at 8,000)
+    musts = {n: tool for n, tool in ranked if _named(tool) in must}
+    least_of = {n: count_tokens_approximately([], tools=[_compact(t)]) for n, t in musts.items()}
+    room -= sum(least_of.values())
     more = 0  # kept, or offered by signature, beside those it must keep
-    for n, tool in sorted(enumerate(tools), key=rank):
+    for n, tool in ranked:
         name = _named(tool)
+        if n in musts:
+            continue
         cost = count_tokens_approximately([], tools=[tool]) - aside.get(name, 0)
-        if name in must or more < least or cost <= room:
+        if more < least or cost <= room:
             kept[n] = tool
         else:
             bare = _signature(tool)
@@ -3185,8 +3200,13 @@ def _narrowed(
             if not (name in hinted or more < signed or cost <= room):
                 continue  # held back: named in the instructions
             kept[n] = bare
-        more += name not in must
+        more += 1
         room -= cost
+    for n, tool in musts.items():
+        extra = count_tokens_approximately([], tools=[tool]) - least_of[n]
+        whole = extra <= room
+        kept[n] = tool if whole else _compact(tool)
+        room -= extra if whole else 0
     if all(kept.get(n) is tool for n, tool in enumerate(tools)):
         return incoming
     out = request.override(tools=[kept[n] for n in sorted(kept)])  # the offered order kept
@@ -3324,6 +3344,36 @@ def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
     if not gone:
         return request
     return request.override(messages=[m for n, m in enumerate(messages) if n not in gone])
+
+
+def todos_shown(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the todo list the graph's state keeps (``todos``: LangChain's
+    ``TodoListMiddleware``) said at the start of its latest question (:data:`TODOS_SHOWN`)
+    when none of its messages is a ``write_todos`` call — the call that wrote it left out to
+    fit the window (:class:`FitWindow`), a summary in its place, or the earlier turns given as
+    text (a graph with no thread of its own): the model reads the list only in that call. Said
+    once; only the request changes, never the conversation the graph keeps."""
+    todos = request.state.get("todos")
+    messages = list(request.messages)
+    at = max((n for n, m in enumerate(messages) if typed(m)), default=None)
+    if not todos or at is None or _TODOS_SHOWN in messages[at].text:
+        return request
+    if any(isinstance(m, AIMessage) and _wrote_todos(m) for m in messages):
+        return request
+    listed = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in todos)
+    question = messages[at]
+    said = (
+        question.content
+        if isinstance(question.content, list)
+        else [{"type": "text", "text": question.content}]
+    )
+    told = [{"type": "text", "text": TODOS_SHOWN.format(todos=listed)}, *said]
+    messages[at] = question.model_copy(update={"content": told})
+    return request.override(messages=messages)
+
+
+def _wrote_todos(message: AIMessage) -> bool:
+    return any(call["name"] == "write_todos" for call in message.tool_calls)
 
 
 #: The memory context's sections (``## ...``), its items' lines (``- ...``) and their handles
