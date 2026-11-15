@@ -16,7 +16,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -220,6 +220,48 @@ async def test_a_workers_queued_turn_and_the_servers_turns_take_turns(
     assert (await second).status is RunStatus.SUCCESS
     assert await servers[0].worker([a]).run_once() is True
     assert [e[1] for e in log if e[0] == "start"] == ["one", "two", "three"]
+
+
+async def test_turns_resumed_with_no_line_run_together_and_leave_the_conversation_free() -> None:
+    """Paused turns of a conversation that a release before the line made (no
+    ``concurrency_key``: no line) take their turn at once when answered, together; whichever
+    ends first, the turn is free once both have ended, and the conversation's next message
+    runs."""
+    log: Log = []
+    gates = {"one": asyncio.Event(), "two": asyncio.Event()}
+
+    async def answer(input: str, agent: Runtime) -> str:
+        if input in gates:
+            said = await agent.ask(f"go on with {input}?")
+            log.append(("start", input, said))
+            await gates[input].wait()
+        log.append(("end", input))
+        return f"re: {input}"
+
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(answer, id="chat")
+        paused = [await agent.run(q, user="ada", thread=THREAD) for q in ("one", "two")]
+        store = cast("LocalRuns", h.runs)
+        for result in paused:
+            assert result.status is RunStatus.PAUSED and result.interrupt is not None
+            record = store._runs[result.run_id]
+            store._runs[result.run_id] = record.model_copy(update={"concurrency_key": None})
+        resumed = [
+            asyncio.create_task(
+                agent.resume(r.interrupt.interrupt_id, "answer", answer="yes", reviewer="ada")
+            )
+            for r in paused
+            if r.interrupt is not None
+        ]
+        await started(log, "one")
+        await started(log, "two")  # together: neither waits for the other
+        gates["two"].set()
+        assert (await resumed[1]).status is RunStatus.SUCCESS
+        gates["one"].set()
+        assert (await resumed[0]).status is RunStatus.SUCCESS
+        after = await asyncio.wait_for(agent.run("three", user="ada", thread=THREAD), 10)
+    assert after.status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "end"] == ["two", "one", "three"]
 
 
 async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
@@ -479,6 +521,26 @@ async def test_a_run_listed_in_the_line_but_ended_when_read_holds_nobody_up() ->
     line = Line(runs, mine, LRU(), Followers(lambda: None))
     assert await line.ahead() == []
     assert await line.holder() == mine.run_id
+    await runs.aclose()
+
+
+async def test_an_earlier_turn_listed_but_gone_when_read_is_not_in_the_history() -> None:
+    """A conversation's earlier turns are the store's listing, each turn then read once: one
+    the listing still shows that is gone when it is read (removed meanwhile) is left out of
+    the next turn's history — the turns that are there are given, and the turn runs."""
+    runs = Lagging()
+    log: Log = []
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = chat(h, log, {})
+        first = await agent.run("one", user="ada", thread=THREAD)
+        record = await runs.get(first.run_id)
+        assert record is not None
+        ghost = {**record.model_dump(), "run_id": "run_gone", "status": RunStatus.SUCCESS}
+        runs.listed = [RunSummary.model_validate(ghost)]
+        runs.gone.add("run_gone")
+        second = await agent.run("two", user="ada", thread=THREAD)
+    assert second.status is RunStatus.SUCCESS
+    assert log[-2] == ("start", "two", ["one", "re: one"])  # the turn that is there, alone
     await runs.aclose()
 
 
