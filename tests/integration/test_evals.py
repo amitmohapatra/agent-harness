@@ -665,6 +665,43 @@ async def test_the_judge_asks_the_judge_model_through_bifrost_with_the_judge_key
     assert body["model"] == "judges/strong" and body["temperature"] == 0
 
 
+async def test_a_judge_model_that_takes_no_temperature_is_sent_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model whose profile says it takes no temperature (``claude-haiku-5-5``) is not sent
+    one: Anthropic's OpenAI-compatible API refuses the request ("`temperature` is deprecated
+    for this model"), seen live with no gateway, and the judge failed on every run. A model
+    that takes one is still asked at temperature 0."""
+    import openai
+
+    sent: dict[str, dict[str, Any]] = {}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent[body["model"]] = body
+        if body["model"] == "claude-haiku-5-5" and "temperature" in body:
+            error = {"message": "`temperature` is deprecated for this model."}
+            return httpx.Response(400, json={"error": error})
+        return httpx.Response(200, json=judge_reply('{"score": 0.6, "reasoning": "ok"}'))
+
+    class Client(openai.AsyncOpenAI):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", Client)
+    settings = Settings(llm_base_url="https://models.example/v1", llm_api_key="k")
+    async with Harness(config=settings) as h:
+        report = await h.evaluate(
+            h.wrap(capital, id="c"),
+            [{"input": "France"}],
+            [llm_judge("ok?", model="claude-haiku-5-5"), llm_judge("ok?", model="gpt-4o")],
+        )
+    assert report.summary["llm_judge"].failures == 0 and report.summary["llm_judge"].count == 2
+    assert "temperature" not in sent["claude-haiku-5-5"]
+    assert sent["gpt-4o"]["temperature"] == 0
+
+
 @respx.mock
 async def test_without_a_judge_model_the_gateways_judge_alias_is_asked(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch

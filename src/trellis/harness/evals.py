@@ -68,7 +68,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, telemetry
 from trellis.harness.clients.bifrost import Gateway, PromptPin
-from trellis.harness.gateways import ModelGateway, model_gateway, openai_auth
+from trellis.harness.gateways import ModelGateway, model_gateway, openai_auth, profile
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.removed import removed
@@ -616,8 +616,12 @@ class llm_judge:
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": _judge_prompt(self.criteria, case)},
         ]
+        # temperature 0, unless the model's profile says it takes none (Anthropic's newest
+        # models refuse one: "`temperature` is deprecated for this model")
+        named = model.model if isinstance(model, _Named | OpenAICompatibleJudge) else None
+        sampling = {"temperature": 0} if named is None or profile(named).temperature else {}
         for attempt in range(2):
-            message = _message(await model.complete(messages, temperature=0))
+            message = _message(await model.complete(messages, **sampling))
             content = message.get("content")
             score, problem = _verdict(content)
             if score is not None:
