@@ -114,7 +114,7 @@ class ChildModelHooks(ModelHooks):
 def counted(runtime: Any, model: str | None, usage: Any) -> None:
     """A reply's ``usage`` (of ``model``, when named) counted toward the run's budget."""
     details = getattr(usage, "input_tokens_details", None)
-    budget.account(
+    budget.reported(
         runtime,
         model=model,
         input_tokens=usage.input_tokens,

@@ -202,6 +202,10 @@ class Runtime:
     offered: set[str] | None = None
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
+    #: governance's action (``run``, ``announce``, ``ask``) on each call its framework runs
+    #: itself, by the call's key (``journal.call_key``), as decided before it ran
+    #: (``bridge.permitted``): what its ``execute_tool`` span says once it ran (``observed``)
+    governed: dict[str, str] = field(default_factory=dict)
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None

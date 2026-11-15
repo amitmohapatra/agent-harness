@@ -23,6 +23,33 @@ layer runs commands on the host when an administrator allows it (`HostSandbox`,
 switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` gains
 `duration_ms` and `limit` (dumped only when set). See [docs/sandbox.md](docs/sandbox.md#the-shared-sandbox-one-per-tenant-isolated-per-run).
 
+### Added: every step of every run in Langfuse
+
+* **A framework's own tool calls are `execute_tool` spans,** with a harness tool's attributes
+  and governance's action (`ask` for a call a person approved): Claude Code's built-ins and MCP
+  tools, Kimi Code's tools, Deep Agents' file tools (on its state backend too), `execute` and
+  `task`, OpenAI Agents' function and hosted tools, a LangChain tool in a graph of your own.
+* **Every shell command is a span** — the harness's `sandbox_exec`, Deep Agents' `execute`,
+  Claude Code's `Bash`/`Monitor`, Kimi's `Bash`, OpenAI Agents' shell tools: the command
+  (redacted), where it ran (sandbox, host isolation, the framework's own), its exit code,
+  duration and the limit that stopped it, from the command's audit record where the harness
+  ran it (the isolation layer's `sandbox_command` record is the span's).
+* **A sub-agent its framework spawns is an agent span** (`invoke_agent <helper>`) its calls
+  and replies nest under; **a framework's own model replies are `chat` generations** with
+  their usage, cache tokens and cost (Claude, Kimi, OpenAI Agents); a `ReAct` generation
+  carries the cost the gateway reported (`gen_ai.usage.cost`).
+* **An approval is an `interrupt` event** (who is asked, the question, the call) **and its
+  answer a `decision` event** (the choice: once, conversation, always, deny); a resumed
+  attempt says so (`trellis.resumed`).
+* **The attempt's span says how it ended** — `trellis.run.status`, the spend (and, on the
+  run's trace, `langfuse.trace.metadata.status` and `spent_*`), a failure's status and
+  message, the step limit, a budget, a time-out or a cancellation with its reason (a level, a
+  status message and an event) — and **a pause is no longer an error span**.
+* **Redaction:** an error raised out of a span was recorded with its message as it was (the
+  OTel SDK's `record_exception`), and a credential inside longer text (a command line, an
+  error message) was kept; both are masked now. [observability.md](docs/observability.md#what-reaches-langfuse-by-adapter)
+  lists what reaches Langfuse by adapter, and what goes elsewhere.
+
 ### Fixed: what the framework comparison of 2026-11-15 found
 
 * **Claude Agent SDK: a model call for each reply.** A run's `model_calls` counted one per
