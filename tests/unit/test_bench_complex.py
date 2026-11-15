@@ -252,6 +252,28 @@ async def test_runs_puts_the_environments_run_store_under_the_run(
     assert cx.arguments(["--scripted", "--runs"]).runs is True
 
 
+async def test_each_variant_wraps_its_own_agent_so_runs_on_one_store_stay_apart(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two variants of one adapter run side by side on one run store (agent-runs, ``--runs``)
+    claim queued runs by agent id: each variant's agent has an id of its own, so a worker of
+    one never takes the other's run (``main`` keeps the id it always had)."""
+    ids: list[str] = []
+    async with run.harness() as h:
+        wrap = h.wrap
+
+        def spy(target: Any, **kw: Any) -> Any:
+            ids.append(kw["id"])
+            return wrap(target, **kw)
+
+        monkeypatch.setattr(h, "wrap", spy)
+        for variant in ("main", "deep"):
+            out = tmp_path / variant
+            args = _args(out, cases="multihop-01", adapter="react", variant=variant)
+            await cx.bench(args, harness=h, progress=lambda _: None)
+    assert ids == ["complex-react-multihop-01", "complex-react-deep-multihop-01"]
+
+
 async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> None:
     out = tmp_path / "cap"
     # the scripted model reports each request's own size in and 50 out: the run stops at the

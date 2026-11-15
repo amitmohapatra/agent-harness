@@ -3920,8 +3920,11 @@ async def run_case(
         tools=(*r.TOOLS, *case.tools),
         bound=await h.memory_tools() if kind == "graph" else (), variant=variant,
     )  # fmt: skip
+    # each variant its own agent: a worker claims queued runs by agent id, so two variants on
+    # one run store (agent-runs) would take each other's runs
+    named = kind if variant == "main" else f"{kind}-{variant}"
     agent = h.wrap(
-        target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
+        target, id=agent_id or f"complex-{named}-{case.id}", hooks=[trace],
         run_timeout=run_seconds,
         **options,
     )  # fmt: skip
