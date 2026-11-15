@@ -16,8 +16,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 * **Claude Agent SDK: an in-process tool named in `allowed_tools` keeps its annotations.**
   A `create_sdk_mcp_server` tool marked `readOnlyHint` (a read) asked a person at every call
   when `allowed_tools` also named it, as the SDK's docs pre-approve an MCP tool: the name alone
-  took the place of the server's listing, which carries the risk. The server's listing now
-  decides it ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#using-an-existing-claude-agent-sdk-project)).
+  took the place of the server's listing, which carries the risk. With the memory service the
+  tool was also published to the tool catalog as saying nothing — the protocol's default,
+  `destructiveHint` — so the catalog's derived `irreversible` asked at every call whatever the
+  tool said. The server's listing now decides it, and the catalog is told its annotations ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#using-an-existing-claude-agent-sdk-project)).
 * **Claude Agent SDK: `include_partial_messages` streams.** The run's stream gave one text
   event per assistant message although the options asked the CLI for the model's deltas;
   it now carries each delta as it comes, as the SDK's own stream does

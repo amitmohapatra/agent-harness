@@ -116,6 +116,17 @@ def side_effects_of(annotations: Any) -> SideEffects:
     return "write"
 
 
+def annotations_of(side_effects: str | None) -> dict[str, bool] | None:
+    """The annotations that say ``side_effects`` as :func:`side_effects_of` reads them back
+    (``read``: ``readOnlyHint``; ``write``: not destructive; ``irreversible``: destructive);
+    ``None`` for a risk not declared."""
+    return {
+        "read": {READ_ONLY: True},
+        "write": {DESTRUCTIVE: False},
+        "irreversible": {DESTRUCTIVE: True},
+    }.get(side_effects or "")
+
+
 def data_of_listed(listed: Any) -> dict[str, Any]:
     """An MCP tool's declared freshness (``tools.base.data_of``): in its ``_meta`` (MCP's place
     for what the protocol does not name: ``{"freshness": "live"}``, ``{"maxAge": 60}``), else
