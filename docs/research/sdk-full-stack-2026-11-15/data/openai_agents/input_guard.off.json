@@ -1,0 +1,36 @@
+{
+ "sdk": "openai_agents",
+ "feature": "input_guard",
+ "arm": "off",
+ "error": null,
+ "seconds": 0.8,
+ "spend": {
+  "requests": 1,
+  "in": 1761,
+  "out": 12,
+  "usd": 0.000182,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  null,
+  "The capital of France is Paris."
+ ],
+ "statuses": [
+  "ERROR",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_fee9b38ebfdf4910947389db4a83c76b",
+  "run_80b1022706b1461380d6fb653a5ac151"
+ ],
+ "errors": [
+  "code='InputGuardrailTripwireTriggered' category=<ErrorCategory.UNKNOWN: 'UNKNOWN'> message='Guardrail InputGuardrail triggered tripwire' retryable=False source='openai_agents' details={} trace_id=None",
+  null
+ ],
+ "user": "oa-inguard-97df4103",
+ "records": null
+}

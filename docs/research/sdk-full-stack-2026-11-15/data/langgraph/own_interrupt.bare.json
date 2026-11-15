@@ -1,0 +1,22 @@
+{
+ "sdk": "langgraph",
+ "feature": "own_interrupt",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.4,
+ "spend": {
+  "requests": 2,
+  "in": 860,
+  "out": 80,
+  "usd": 0.000126,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "asked": "{'question': 'Which address should O-5 go to?'}",
+ "tool_got": [
+  "12 Elm Street"
+ ],
+ "answer": "Delivery for order O-5 is scheduled to 12 Elm Street."
+}

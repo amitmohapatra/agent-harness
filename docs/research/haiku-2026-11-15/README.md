@@ -114,8 +114,8 @@ The provider's usage is each response's, recorded by `meter_proxy.py`; the harne
 | Claude, live session 2 turns | 6,202 / 12, $0.000471 | same, cost $0.000471 | exact |
 | Claude, turn limit | 21,414 / 516, $0.000930 | same | exact |
 | Claude, background subagent | 35,413 / 365, $0.001461 | 29,025 / 229, $0.001461 | dollars exact; tokens short — **fixed** (below) |
-| Claude, approved call | 12,925 / 194, $0.000659 | 9,686 / 107, $0.000163 | paused attempt's dollars not charged |
-| Claude, rejected call | 9,512 / 141, $0.000580 | 6,297 / 69, $0.000099 | same |
+| Claude, approved call | 12,925 / 194, $0.000659 | 9,686 / 107, $0.000163 | paused attempt's dollars not charged — **fixed** (below) |
+| Claude, rejected call | 9,512 / 141, $0.000580 | 6,297 / 69, $0.000099 | same — **fixed** |
 
 The Claude CLI's `total_cost_usd` equals the provider's usage at the list price wherever a
 result is charged. Findings:
@@ -125,11 +125,16 @@ result is charged. Findings:
   tokens on no run). Now its run is charged in full, or, with no run to charge, the next turn.
   After the fix the background probe's input tokens match the provider's exactly
   (35,507 = 35,507; 35,454 = 35,454).
-- **Not fixed (needs a design decision)**: a query that pauses in a process of its own is
-  charged its replies' tokens with no dollars (the CLI gives a cost only in a result), and
-  the model's reply to the pause placeholder ("Waiting for a person's approval.") is billed
-  but never seen; the paused attempt was 75% and 83% of these runs' dollars (51% and 60% in the round
-  before, with the prompt cache warm).
+- **Fixed** (`adapters/claude.py`, `_settled`; decided: charge the paused attempt in full): a
+  query that paused in a process of its own was charged its replies' tokens with no dollars
+  (the CLI gives a cost only in a result), and the model's reply to the pause placeholder
+  ("Waiting for a person's approval.") was billed but never seen; the paused attempt was 75%
+  and 83% of these runs' dollars (51% and 60% in the round before, with the prompt cache
+  warm). Now the process is read to its turn's result (30 s at most; a call made in the
+  reply is refused, ending the turn) and the run is charged it. Re-run on Haiku
+  ([paused-charge](../../../benchmark/cost/results/haiku-2026-11-15/claude/paused-charge/)),
+  provider against harness: approved 13,233 / 185, $0.000626 both (4 replies, 4.2 s);
+  rejected 9,663 / 216, $0.000588 both (3 replies, 3.6 s); spend $0.0012.
 - **Not fixed (CLI behaviour)**: a subagent's or a paused reply's output tokens are the
   stream's snapshot (24 of 57, 8 of 43, 32 of 61): the SDK's `AssistantMessage.usage` is
   taken before the reply ends, and only a result carries the final count.

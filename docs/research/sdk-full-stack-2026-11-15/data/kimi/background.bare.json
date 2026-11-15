@@ -1,0 +1,27 @@
+{
+ "sdk": "kimi",
+ "feature": "background",
+ "arm": "bare",
+ "error": null,
+ "seconds": 19.5,
+ "spend": {
+  "requests": 7,
+  "in": 147043,
+  "out": 424,
+  "usd": 0.002201,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "The background command finished, and `out.txt` contains `BG-DONE-77`. I left the file in place since you asked for it.",
+  "4",
+  "The background command had already finished. `out.txt` contains `BG-DONE-77`."
+ ],
+ "tools_used": [
+  "Bash",
+  "Bash",
+  "Bash"
+ ]
+}

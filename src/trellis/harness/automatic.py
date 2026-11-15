@@ -135,25 +135,46 @@ class Planning(_LongTasks, TodoListMiddleware):
     asked for a Deep Agents capability is Deep Agents' from its first step). Its guidance
     travels in the tool's own description (LangChain's), never in the instructions: the system
     prompt stays the same from the first call to the last, so a provider's prompt cache keeps
-    its prefix. Named as LangChain's."""
+    its prefix. Named as LangChain's.
 
-    def __init__(self, *, window: int | None = None, always: bool = False) -> None:
+    ``yields`` (``middleware()``'s): in a ``create_deep_agent`` graph it steps aside
+    (:meth:`bind_backend`): Deep Agents' planning is the ``TodoListMiddleware`` a team adds, the
+    library's own at every window."""
+
+    def __init__(
+        self, *, window: int | None = None, always: bool = False, yields: bool = False
+    ) -> None:
         super().__init__()
         self.window = window
         self.always = always
+        self.yields = yields
+        self.aside = False
+
+    def bind_backend(self, backend: Any) -> None:
+        """Deep Agents' hook (``BackendConsumer``): ``create_deep_agent`` calls it on each
+        middleware it is given. One that ``yields`` steps aside there — no ``write_todos`` of
+        its own, not named as LangChain's (a team's ``TodoListMiddleware`` beside it is not a
+        duplicate), and the team's tool let through as it is."""
+        if self.yields:
+            self.aside = True
+            self.tools = []
 
     @property
     def name(self) -> str:
-        return TodoListMiddleware.__name__
+        return type(self).__name__ if self.aside else TodoListMiddleware.__name__
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> Any:
-        if self.always or self.wanted(request) or plan_mode_asked():
+        if self.aside or self.always or self.wanted(request) or plan_mode_asked():
             return await handler(request)  # the tool, its description its guidance
         return await handler(without_tools(request, {TODOS}))
+
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """LangChain's check of parallel ``write_todos`` calls — the team's own, when aside."""
+        return None if self.aside else await super().aafter_model(state, runtime)
 
 
 # --------------------------------------------------------------------------- files

@@ -1,0 +1,17 @@
+{
+ "sdk": "openai_agents",
+ "feature": "stream",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.1,
+ "spend": {
+  "requests": 1,
+  "in": 0,
+  "out": 0,
+  "usd": 0.0,
+  "models": []
+ },
+ "ok": true,
+ "deltas": 27,
+ "text": "Rivers carve valleys over thousands of years as they flow toward the sea. They carry water, sediment, and nutrients that sustain forests, farms, and wildlife along their banks. Many of the world's great cities were built beside them because they offered water, food, and a way to trade."
+}

@@ -17,9 +17,11 @@ tests that stop one of them skip without it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import subprocess
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
@@ -164,20 +166,32 @@ async def test_memory_down_mid_chat_then_back(uid: str, tmp_path: Path, invarian
             )
             assert ok.status is RunStatus.SUCCESS, (a, ok.error)
         await h.writes.drain()
-        invariants.allow("INV-7", "the memory service is stopped on purpose: refused connections")  # type: ignore[attr-defined]
-        _stack("stop-one", "memory")
-        try:
-            for a, agent in agents.items():
-                down = await agent.run(
-                    f"{token(a[:3] + uid[:4], 2)} while memory is down",
-                    user=user,
-                    thread=f"t-{a}-{uid}",
-                )
-                assert down.status is RunStatus.SUCCESS, (a, down.error)  # answered without memory
-                assert parse(down.answer).mine == token(a[:3] + uid[:4], 2), (a, down.answer)
-        finally:
-            _stack("start-one", "memory")
-        await _up(os.environ["MEMORY_URL"])
+        # agent-runs asks the memory service who a key is and keeps the answer 60 s from that
+        # question (agent_runs/keys.py): with memory down it starts runs only for a key it
+        # learned in the last minute. The turns made while memory is down are a fresh key's,
+        # learned just before the stop, so the outage, not the cache's age, is what is tested.
+        async with _fresh_harness(h, f"s6m-{uid}") as during:
+            downs = {
+                a: (await wrapped(during, a, TOOLS, tmp_path, id=agent.id))[0]
+                for a, agent in agents.items()
+            }
+            why = "the memory service is stopped on purpose: refused connections"
+            invariants.allow("INV-7", why)  # type: ignore[attr-defined]
+            _stack("stop-one", "memory")
+            try:
+                for a, agent in downs.items():
+                    down = await agent.run(
+                        f"{token(a[:3] + uid[:4], 2)} while memory is down",
+                        user=user,
+                        thread=f"t-{a}-{uid}",
+                    )
+                    assert down.status is RunStatus.SUCCESS, (a, down.error)  # without memory
+                    assert parse(down.answer).mine == token(a[:3] + uid[:4], 2), (a, down.answer)
+            finally:
+                _stack("start-one", "memory")
+            await _up(os.environ["MEMORY_URL"])
+            await during.writes.drain()
+            assert during.writes.failed == 0
         await h.writes.drain()
         for a, agent in agents.items():
             kept = await history(h, user=user, agent_id=agent.id, thread=f"t-{a}-{uid}")
@@ -188,6 +202,25 @@ async def test_memory_down_mid_chat_then_back(uid: str, tmp_path: Path, invarian
                 kept,
             )
             assert h.writes.failed == 0
+
+
+@contextlib.asynccontextmanager
+async def _fresh_harness(h: Harness, name: str) -> AsyncIterator[Harness]:
+    """A harness on a service key issued now, which agent-runs and this harness have each
+    just learned (one run listing, the key's tenant read): both keep it while memory is down."""
+    from tests.scenarios.conftest import harness
+    from trellis.memory import MemoryClient
+    from trellis.runs import RunsClient
+
+    tenant = await h._tenant()
+    url, admin_key = os.environ["MEMORY_URL"], os.environ["TRELLIS_ADMIN_KEY"]
+    async with MemoryClient(url, api_key=admin_key) as admin:
+        issued = await admin.administer(tenant).keys.issue("service", name)
+    async with RunsClient(base_url=os.environ["RUNS_URL"], api_key=issued.token) as runs:
+        await runs.list(agent_id=name)
+    async with harness(key=issued.token) as made:
+        await made._tenant()
+        yield made
 
 
 # --------------------------------------------------------------------------- runs slow / down

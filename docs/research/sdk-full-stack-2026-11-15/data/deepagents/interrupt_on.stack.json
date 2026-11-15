@@ -1,0 +1,120 @@
+{
+ "sdk": "deepagents",
+ "feature": "interrupt_on",
+ "arm": "stack",
+ "error": null,
+ "seconds": 3.9,
+ "spend": {
+  "requests": 2,
+  "in": 8988,
+  "out": 99,
+  "usd": 0.000662,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "sent": [
+  "bob@example.com"
+ ],
+ "answers": [
+  "I sent the email to bob@example.com with the body \"the build is green\"."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve send_email?",
+   "tool_call": {
+    "tool": "send_email",
+    "args": {
+     "to": "bob@example.com",
+     "body": "the build is green"
+    },
+    "task": "",
+    "step": null,
+    "idempotency_key": "0cb6f4bd9e830a54212b8a26f3430fca"
+   },
+   "options": []
+  }
+ ],
+ "run_ids": [
+  "run_b17b3a3b476f4f7b8337a2ffc17eb587"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "da-hitl-3cb00cf1",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_b17b3a3b476f4f7b8337a2ffc17eb587",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "84e471a3",
+    "user_id": "da-hitl-3cb00cf1",
+    "agent_id": "da-hitl",
+    "attempt": 2,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_b17b3a3b476f4f7b8337a2ffc17eb587": {
+     "RUN_STARTED": 2,
+     "CONTEXT_LOADED": 2,
+     "INTERRUPT": 1,
+     "RUN_FINISHED": 2,
+     "CUSTOM": 3,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1
+    }
+   },
+   "messages": {
+    "run_b17b3a3b476f4f7b8337a2ffc17eb587": [
+     {
+      "role": "USER",
+      "content": "Send an e-mail to bob@example.com saying 'the build is green'."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "sent to bob@example.com"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "I sent the email to bob@example.com with the body \"the build is green\"."
+     }
+    ]
+   },
+   "tools": {
+    "run_b17b3a3b476f4f7b8337a2ffc17eb587": [
+     {
+      "tool_name": "send_email",
+      "status": "ok",
+      "output": "sent to bob@example.com"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

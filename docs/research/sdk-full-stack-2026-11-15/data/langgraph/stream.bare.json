@@ -1,0 +1,19 @@
+{
+ "sdk": "langgraph",
+ "feature": "stream",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.1,
+ "spend": {
+  "requests": 1,
+  "in": 20,
+  "out": 68,
+  "usd": 3.6e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "chunks": 19,
+ "text": "Rivers carry fresh water from mountains and hills down to the sea. Many of the world's great civilizations grew up along riverbanks. Over time, flowing water can carve deep canyons through solid rock."
+}

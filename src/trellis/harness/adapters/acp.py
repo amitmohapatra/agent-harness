@@ -785,10 +785,27 @@ class ACPAdapter:
         #: each conversation's agent process, kept while work in its background goes on
         #: (``bridges.acp_live``)
         self.live = LiveSessions()
+        #: the sessions kept for a conversation's next turn (``Agent.sessions``) that no
+        #: process holds, by id: their files, which that turn resumes them from, until the
+        #: agent lets go of them (:meth:`session_gone`) — the most recent (``bounded.MAXSIZE``,
+        #: past it the oldest's files go)
+        self.idle: LRU[str, UsageLog] = LRU(gone=lambda _, log: log.removed())
 
     async def aclose(self) -> None:
-        """The agent is closing: every conversation's kept process ends."""
-        await self.live.aclose()
+        """The agent is closing: every conversation's kept process ends, and the files of the
+        sessions kept for a conversation's next turn go (this process's next turn of it would
+        start a new one)."""
+        try:
+            await self.live.aclose()
+        finally:
+            for session in self.idle:
+                self.idle.discard(session)
+
+    def session_gone(self, session: str) -> None:
+        """The agent keeps the session ``session`` for no conversation's next turn any more
+        (``Agent.sessions``): its files leave its user's Kimi home (``UsageLog.removed``) — one
+        a process holds keeps them until that process lets go of it (``ACPSession.released``)."""
+        self.idle.discard(session)
 
     def steers(self, target: Any) -> bool:
         """None: ACP has no point between an agent's steps where a client adds a message to a
@@ -1091,6 +1108,7 @@ class ACPAdapter:
                 compat.require_binary(profile.name, found, command=target.command[0])
             servers = [*(_server(s) for s in target.mcp_servers), *session.servers]
             opened = await session.opened(init, started.cwd, servers, runtime, fork=started.fork)
+            self.idle.pop(opened)  # held by a process again: its end decides its files
             usage = profile.usage if profile is not None else None
             await session.asking(target.mode, usage(env, opened) if usage is not None else None)
             if usage is not None:
@@ -1117,6 +1135,8 @@ class ACPAdapter:
         if self.live.get(session.key) is session:
             self.live.forget(session, "nothing works in its background")
         await session.close()
+        if session.keeps and runtime.pending is None:  # kept for the conversation's next turn
+            self.idle[session.log.session_id] = session.log
 
     async def _gone(self, runtime: Runtime, native_input: Any) -> None:
         """The answer this turn brings to a background sub-agent's question

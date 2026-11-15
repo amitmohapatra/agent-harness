@@ -1,0 +1,32 @@
+{
+ "sdk": "openai_agents",
+ "feature": "output_guard",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.2,
+ "spend": {
+  "requests": 1,
+  "in": 1773,
+  "out": 12,
+  "usd": 0.000183,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  null
+ ],
+ "statuses": [
+  "ERROR"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_15943a7b64c742598a277007b5c52970"
+ ],
+ "errors": [
+  "code='OutputGuardrailTripwireTriggered' category=<ErrorCategory.UNKNOWN: 'UNKNOWN'> message='Guardrail OutputGuardrail triggered tripwire' retryable=False source='openai_agents' details={} trace_id=None"
+ ],
+ "user": "oa-outguard-22ae0908",
+ "records": null
+}

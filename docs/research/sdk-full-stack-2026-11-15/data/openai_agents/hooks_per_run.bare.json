@@ -1,0 +1,28 @@
+{
+ "sdk": "openai_agents",
+ "feature": "hooks_per_run",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.5,
+ "spend": {
+  "requests": 2,
+  "in": 899,
+  "out": 68,
+  "usd": 0.000124,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "hooks_seen": [
+  "llm_end",
+  "tool_start:stock",
+  "llm_end"
+ ],
+ "answers": [
+  "SKU-2 has 7 units in stock."
+ ],
+ "errors": [
+  null
+ ]
+}

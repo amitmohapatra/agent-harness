@@ -379,7 +379,8 @@ The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents
 middleware=middleware())` — the settings meaning what
 [`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
 MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` (LangChain's model call limit), the
-run's budget, planning on a long task, older results cleared and read back (with a
+run's budget, planning on a long task (in `create_agent`: a Deep Agents graph keeps its own
+`TodoListMiddleware`, offered at every window), older results cleared and read back (with a
 `context_window`), the request fitted to the window, and `ModelHooks` (the span, a failed
 call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). A graph
 compiled without a checkpointer is run with `RunCheckpointer()` (`trellis.harness.middleware`):

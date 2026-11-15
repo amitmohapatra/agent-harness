@@ -18,10 +18,14 @@ class LRU[K, V]:
     """A mapping of at most ``maxsize`` entries: reading or writing one makes it the most
     recently used; past the bound the least recently used goes."""
 
-    def __init__(self, maxsize: int = MAXSIZE) -> None:
+    def __init__(
+        self, maxsize: int = MAXSIZE, *, gone: Callable[[K, V], None] | None = None
+    ) -> None:
         if maxsize < 1:
             raise ValueError("an LRU holds at least one entry")
         self.maxsize = maxsize
+        #: told of each entry the mapping lets go of: one past its bound, or one discarded
+        self.gone = gone
         self._data: OrderedDict[K, V] = OrderedDict()
 
     def get(self, key: K, default: V | None = None) -> V | None:
@@ -39,7 +43,7 @@ class LRU[K, V]:
         self._data[key] = value
         self._data.move_to_end(key)
         while len(self._data) > self.maxsize:
-            self._data.popitem(last=False)
+            self._let_go(*self._data.popitem(last=False))
 
     def setdefault(self, key: K, make: Callable[[], V]) -> V:
         """The value of ``key``, made (``make()``) and kept when it is not there."""
@@ -50,7 +54,17 @@ class LRU[K, V]:
         return value
 
     def pop(self, key: K, default: V | None = None) -> V | None:
+        """``key``'s entry taken out (the caller's now: no entry let go of)."""
         return self._data.pop(key, default)
+
+    def discard(self, key: K) -> None:
+        """``key``'s entry let go of, if there is one (told: ``gone``)."""
+        if key in self._data:
+            self._let_go(key, self._data.pop(key))
+
+    def _let_go(self, key: K, value: V) -> None:
+        if self.gone is not None:
+            self.gone(key, value)
 
     def __contains__(self, key: object) -> bool:
         return key in self._data

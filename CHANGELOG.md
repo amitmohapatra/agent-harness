@@ -5,6 +5,55 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: one approval rule on every adapter — an MCP tool with no annotations asks like any tool that says nothing
+
+An MCP tool whose server sent **no annotations at all** is now *undeclared*, as a function
+without `side_effects` is, on every way a tool arrives: it asks, and the person may allow it
+once, for this conversation, always (with a memory service) or deny. Before, on the harness's
+own `mcp(...)`, the gateway's MCP listing, an OpenAI agent's `MCPServer*` and Claude's
+in-process servers it was `irreversible` — asked at every call, never "for this conversation"
+or "always" — while the same tool through `langchain.mcp` / langchain-mcp-adapters was
+undeclared. Annotations that leave a tool destructive by the MCP defaults (`destructiveHint:
+true`, or `readOnlyHint: false` with no `destructiveHint`) still make it `irreversible`. The
+harness publishes nothing of such a tool's risk to the tool catalog (it published
+`destructiveHint: true`), so the catalog's risk for it is null and an administrator's still
+wins.
+
+A call a framework runs and asks its own user about — Claude Code's permission check (its
+built-ins, its own MCP servers' tools, in a query and in a live session) and Kimi's permission
+request — now offers the person the same choices as a harness tool's: always allow too, with a
+memory service (Claude Code's question offered no choice at all, and asked again at every
+call). What is allowed for the conversation or always holds as Claude Code's own "don't ask
+again" would. The tool catalog's word on such a tool (a risk, an `approve_when`) decides before
+the framework's own question, as for every tool.
+Deep Agents' own `write_file`, `edit_file` and `delete` on a disk, a store or a sandbox (a
+backend, or a route of a `CompositeBackend`) now **ask** as any write — allow once, for this
+conversation, always — where they were only announced (a framework's own tool), while a tool
+of yours that writes in the same graph asked; `ls`, `read_file`, `glob`, `grep` still run, and
+the file tools on the graph's own state stay its scratch. `ReAct(backend=)` alike.
+`tests/matrix/test_approval_rule.py` walks every adapter × way × risk × answer
+([governance.md](docs/governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)).
+
+### Fixed: three SDK features under the harness (real Haiku, the real stack)
+
+* **OpenAI Agents: a governed call inside an agent tool resumes.** An `Agent.as_tool` agent
+  whose own `FunctionTool` declares nothing paused the run on that call (governance asks),
+  and the approval then failed the run (`AttributeError: 'Agent' object has no attribute
+  'aget_state'`): the pause carried the agent tool's own SDK handle, which the run took for
+  a LangGraph checkpointer's. A pause the framework gave no handle of is now answered from
+  the journal: the agent tool is called again and the approved call runs once.
+* **Claude Agent SDK: an in-process tool named in `allowed_tools` keeps its annotations.**
+  A `create_sdk_mcp_server` tool marked `readOnlyHint` (a read) asked a person at every call
+  when `allowed_tools` also named it, as the SDK's docs pre-approve an MCP tool: the name alone
+  took the place of the server's listing, which carries the risk. With the memory service the
+  tool was also published to the tool catalog as saying nothing — the protocol's default,
+  `destructiveHint` — so the catalog's derived `irreversible` asked at every call whatever the
+  tool said. The server's listing now decides it, and the catalog is told its annotations ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#using-an-existing-claude-agent-sdk-project)).
+* **Claude Agent SDK: `include_partial_messages` streams.** The run's stream gave one text
+  event per assistant message although the options asked the CLI for the model's deltas;
+  it now carries each delta as it comes, as the SDK's own stream does
+  ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#streaming)).
+
 ### Added: a provider's own tools in `ReAct`
 
 `ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web
@@ -98,6 +147,11 @@ chat's own on its thread stream when it is idle; its questions asked through the
   session's own folder leaves its user's Kimi home (its login and config stay). The
   conversation's next turn starts a new session, given its earlier turns by the harness, where
   it resumed a session whose files stayed on disk for good.
+- Kimi: a session kept for a conversation's next turn whose process ended with its turn
+  (nothing at work in its background) leaves its folder in its user's Kimi home once the agent
+  no longer keeps it for that conversation (its place among the 128 most recent conversations'
+  given away, or dropped for a later turn another worker served) and when the harness closes.
+  Its folder stayed on disk for good.
 - `ReAct(skills=)` and Deep Agents with the run's skills: reading a skill (`read_file`, `ls`,
   `glob`, `grep` under `/skills/`) is a call of the run — on its stream, traced, in memory's
   record of its calls — governed as a read, never asked. It was taken for the graph's own
@@ -113,6 +167,15 @@ chat's own on its thread stream when it is idle; its questions asked through the
   `[permission]` rules are written inline is asked over (a `[[permission.ask]]` rule after it)
   instead of refusing the run; only a `permission = { ... }` inline table is still refused.
 
+### Fixed: what the framework comparison on Haiku found
+
+- `middleware(context_window=)` below the model's own window (a team's `create_agent` or
+  `create_deep_agent` given 16,000 tokens for a model of 200,000 that replies up to 64,000)
+  reserves the reply out of the model's own window, as `ReAct(context_window=)` does. Before,
+  it was taken out of the window given, which left 0 tokens for the input: every request of
+  such a run was refused (`ContextTooLarge`), 10 scored turns of the comparison's small-window
+  cases on LangGraph ([compare-2026-11-15](docs/research/compare-2026-11-15/README.md)).
+
 ### Fixed: what the real-model (Haiku) acceptance found
 
 - Claude: the turn a live session runs by itself once a background task ended is charged in
@@ -120,6 +183,14 @@ chat's own on its thread stream when it is idle; its questions asked through the
   to charge (a background shell command's end), to the conversation's next turn. Before, only
   its cost was charged: against Haiku through the real CLI, 6,388 input and 70 output tokens
   of such a turn were on no run's budget.
+- Claude: a query that pauses in a process of its own is charged its turn as the provider
+  billed it. Claude Code sends the pause's placeholder to the model as the paused call's
+  result, and the model's reply to it is billed; the harness left the process at the pause,
+  so the run was charged its replies' tokens and no dollars, and never that reply (51-83% of
+  the paused attempt's dollars against Haiku). The process is now read to its turn's result
+  (30 seconds at most; a call made in that reply is refused, ending the turn), and the run is
+  charged it: against Haiku, an approved and a rejected call match the provider's bill in
+  tokens and dollars.
 
 ### Fixed: each library's own skills, through the harness
 
@@ -368,6 +439,10 @@ whichever replica each reaches.
   next hold renewal, within 20 s). `steer` to a run in another process waits its turn, said
   once.
 - A run cancelled while it waits its turn, from any process, never runs.
+- A run waiting its turn that the run store ended (its deadline: `TIMEOUT`) reports what the
+  store says: its result and its `RUN_FINISHED` are `TIMEOUT` with the store's error (AG-UI's
+  `RUN_ERROR`), and nothing is written. Its refused hold stopped it, and it said `CANCELLED`
+  and tried to write that over the store's ending.
 - A run waiting behind a turn in another process follows that turn's events (one shared
   stream a run ahead, at most 32 a process, on its own client) instead of polling.
 - A turn's earlier turns are read with one listing per ending, never paging past the messages

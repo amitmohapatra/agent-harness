@@ -1,0 +1,33 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "max_turns",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.4,
+ "spend": {
+  "requests": 1,
+  "in": 15959,
+  "out": 152,
+  "usd": 0.000653,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [],
+ "answers": [
+  null
+ ],
+ "statuses": [
+  "PARTIAL"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_e7e14e838bef4e03bb24931ed800ee5b"
+ ],
+ "errors": [
+  "code='BUDGET_EXCEEDED' category=<ErrorCategory.POLICY: 'POLICY'> message=\"the run's budget is spent: the turn limit (1) was reached\" retryable=False source=None details={} trace_id=None"
+ ],
+ "user": "cl-turns-cce9cbc5",
+ "records": null
+}

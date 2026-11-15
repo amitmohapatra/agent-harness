@@ -1,0 +1,36 @@
+{
+ "sdk": "deepagents",
+ "feature": "todos",
+ "arm": "bare",
+ "error": null,
+ "seconds": 7.0,
+ "spend": {
+  "requests": 6,
+  "in": 38771,
+  "out": 797,
+  "usd": 0.001592,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Fruit: apple. Vegetable: carrot. Grain: rice.\n\nThe first attempt to update the todo list failed because I sent two `write_todos` calls in parallel. I then made them one at a time, and all three items are now marked completed."
+ ],
+ "asked": [],
+ "todos": [
+  {
+   "content": "Name a fruit",
+   "status": "completed"
+  },
+  {
+   "content": "Name a vegetable",
+   "status": "completed"
+  },
+  {
+   "content": "Name a grain",
+   "status": "completed"
+  }
+ ],
+ "files": []
+}

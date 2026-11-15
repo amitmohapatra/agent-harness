@@ -1,0 +1,62 @@
+{
+ "sdk": "langgraph",
+ "feature": "lifecycle_queued",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.1,
+ "spend": {
+  "requests": 1,
+  "in": 946,
+  "out": 3,
+  "usd": 9.6e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "SUCCESS",
+ "output": "51",
+ "records": {
+  "run": {
+   "run_id": "run_194cd9d78195495d93b869d5a7a98bf8",
+   "status": "SUCCESS",
+   "parent_run_id": null,
+   "thread_id": "run_194cd9d78195495d93b869d5a7a98bf8",
+   "user_id": "life-52585691",
+   "agent_id": "lc-langgraph-queued",
+   "attempt": 1,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_194cd9d78195495d93b869d5a7a98bf8": {
+    "RUN_STARTED": 1,
+    "CONTEXT_LOADED": 1,
+    "RUN_FINISHED": 1
+   }
+  },
+  "messages": {
+   "run_194cd9d78195495d93b869d5a7a98bf8": [
+    {
+     "role": "USER",
+     "content": "What is 17 times 3? Answer with the number only."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": "51"
+    }
+   ]
+  },
+  "tools": {
+   "run_194cd9d78195495d93b869d5a7a98bf8": []
+  },
+  "feedback": [
+   {
+    "target_kind": "run",
+    "verdict": "confirm",
+    "source": "system"
+   }
+  ]
+ }
+}

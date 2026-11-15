@@ -17,8 +17,9 @@ headers (a session is the identity's that opened it), each closed after
 Its tools are named ``<server>-<tool>`` (``server`` from ``name=``, else the name the server
 gives itself), their side effects come from their annotations as the protocol reads them
 (``readOnlyHint``: ``read``; else ``irreversible`` — a person approves each call — unless the
-tool says ``destructiveHint: false``: ``write``; a tool with no annotations says nothing, so it
-is ``irreversible``; the catalog has the last word), and
+tool says ``destructiveHint: false``: ``write``; a tool with no annotations at all says nothing,
+so it is undeclared, as any tool that says nothing is: it asks, and can be allowed for the
+conversation or always; the catalog has the last word), and
 every call goes through the bridge as any other: governance, the journal, retries of reads,
 paging, the run's records.
 
@@ -52,7 +53,7 @@ from trellis.harness.asking import RunCancelled
 from trellis.harness.credentials import IDLE_SECONDS, Target, headers_for
 from trellis.harness.runtime import current
 from trellis.harness.tools import resources
-from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool, data_of
+from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, UNDECLARED, Tool, data_of
 from trellis.harness.tools.elicit import elicited
 from trellis.harness.tools.pages import MAX_PAGES
 
@@ -103,17 +104,33 @@ def server_name(text: str) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", text.strip().lower()).strip("_")
 
 
-def side_effects_of(annotations: Any) -> SideEffects:
+def side_effects_of(annotations: Any) -> str:
     """An MCP tool's side effects from its server's annotations — the MCP SDK's or, through the
     gateway, bifrost-sdk's ``ToolAnnotations`` — read as the protocol defines them: a hint a
     tool does not give has the protocol's default (``readOnlyHint`` false, ``destructiveHint``
-    true), so a tool is ``irreversible`` unless it says it only reads or is not destructive —
-    one with no annotations too. Hints, not guarantees (the catalog has the last word)."""
+    true), so a tool with annotations is ``irreversible`` unless it says it only reads or is
+    not destructive. A tool with no annotations at all says nothing: it is undeclared
+    (``UNDECLARED``), as a function without ``side_effects`` is — a person approves its calls,
+    and may allow it for the conversation or always. Hints, not guarantees (the catalog has the
+    last word)."""
+    if annotations is None:
+        return UNDECLARED
     if _hint(annotations, "read_only_hint", READ_ONLY, default=False):
         return "read"
     if _hint(annotations, "destructive_hint", DESTRUCTIVE, default=True):
         return "irreversible"
     return "write"
+
+
+def annotations_of(side_effects: str | None) -> dict[str, bool] | None:
+    """The annotations that say ``side_effects`` as :func:`side_effects_of` reads them back
+    (``read``: ``readOnlyHint``; ``write``: not destructive; ``irreversible``: destructive);
+    ``None`` for a risk not declared."""
+    return {
+        "read": {READ_ONLY: True},
+        "write": {DESTRUCTIVE: False},
+        "irreversible": {DESTRUCTIVE: True},
+    }.get(side_effects or "")
 
 
 def data_of_listed(listed: Any) -> dict[str, Any]:

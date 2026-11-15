@@ -1,0 +1,32 @@
+{
+ "sdk": "deepagents",
+ "feature": "skills",
+ "arm": "on",
+ "error": null,
+ "seconds": 4.6,
+ "spend": {
+  "requests": 2,
+  "in": 12294,
+  "out": 644,
+  "usd": 0.000565,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Cold drops on red leaves,\nrain sinks through the quiet hills,\nthe creek carries gold.\n-- SKILL:HAIKU"
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_7f2fc039c2704c9f9c5b14fb2ce7c46c"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "da-skills-dad86fd4",
+ "records": null
+}

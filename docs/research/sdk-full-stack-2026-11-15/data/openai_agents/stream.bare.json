@@ -1,0 +1,17 @@
+{
+ "sdk": "openai_agents",
+ "feature": "stream",
+ "arm": "bare",
+ "error": null,
+ "seconds": 0.9,
+ "spend": {
+  "requests": 1,
+  "in": 0,
+  "out": 0,
+  "usd": 0.0,
+  "models": []
+ },
+ "ok": true,
+ "deltas": 17,
+ "text": "Rivers carve valleys through stone over thousands of years. They carry water, sediment, and nutrients from mountains to the sea. Many of the world's first cities grew up along their banks."
+}

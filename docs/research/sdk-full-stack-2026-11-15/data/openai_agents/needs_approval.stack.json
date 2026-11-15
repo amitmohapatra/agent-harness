@@ -1,0 +1,119 @@
+{
+ "sdk": "openai_agents",
+ "feature": "needs_approval",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.5,
+ "spend": {
+  "requests": 2,
+  "in": 7762,
+  "out": 67,
+  "usd": 0.00081,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "U-12"
+ ],
+ "answers": [
+  "The user account U-12 has been deleted."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve delete_user?",
+   "tool_call": {
+    "tool": "delete_user",
+    "args": {
+     "user_id": "U-12"
+    },
+    "task": "",
+    "step": null,
+    "idempotency_key": "toolu_012bBrTGZF62W2VMbyKpKyHK"
+   },
+   "options": []
+  }
+ ],
+ "run_ids": [
+  "run_84b9059bd9af40ab93a3f5482aab6f31"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-approval-401bff4e",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_84b9059bd9af40ab93a3f5482aab6f31",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "144efcc4",
+    "user_id": "oa-approval-401bff4e",
+    "agent_id": "oa-approval",
+    "attempt": 2,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_84b9059bd9af40ab93a3f5482aab6f31": {
+     "RUN_STARTED": 2,
+     "CONTEXT_LOADED": 2,
+     "INTERRUPT": 1,
+     "RUN_FINISHED": 2,
+     "CUSTOM": 3,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1
+    }
+   },
+   "messages": {
+    "run_84b9059bd9af40ab93a3f5482aab6f31": [
+     {
+      "role": "USER",
+      "content": "Delete the user account U-12."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "deleted U-12"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "The user account U-12 has been deleted."
+     }
+    ]
+   },
+   "tools": {
+    "run_84b9059bd9af40ab93a3f5482aab6f31": [
+     {
+      "tool_name": "delete_user",
+      "status": "ok",
+      "output": "deleted U-12"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

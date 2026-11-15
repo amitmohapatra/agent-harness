@@ -1,0 +1,123 @@
+{
+ "sdk": "react",
+ "feature": "r_approval",
+ "arm": "stack",
+ "error": null,
+ "seconds": 3.6,
+ "spend": {
+  "requests": 2,
+  "in": 7850,
+  "out": 102,
+  "usd": 0.000586,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "ACME-1"
+ ],
+ "answers": [
+  "I wired 300 to ACME-1 in the account's default currency. The transfer went through."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve wire? wire is irreversible. Allow once, or deny.",
+   "tool_call": {
+    "tool": "wire",
+    "args": {
+     "amount": 300,
+     "to": "ACME-1"
+    },
+    "task": "Wire 300 to account ACME-1 now. The currency is the account default; do not ask, just call the tool.",
+    "step": 1,
+    "idempotency_key": "toolu_01StLdyNgsLripLoGzhcsrgG"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_fcaef591c9b84b06988863d1543df5b6"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "re-approval-e527abc8",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_fcaef591c9b84b06988863d1543df5b6",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "c1a11736",
+    "user_id": "re-approval-e527abc8",
+    "agent_id": "re-approval",
+    "attempt": 2,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_fcaef591c9b84b06988863d1543df5b6": {
+     "RUN_STARTED": 2,
+     "CONTEXT_LOADED": 2,
+     "INTERRUPT": 1,
+     "RUN_FINISHED": 2,
+     "CUSTOM": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1
+    }
+   },
+   "messages": {
+    "run_fcaef591c9b84b06988863d1543df5b6": [
+     {
+      "role": "USER",
+      "content": "Wire 300 to account ACME-1 now. The currency is the account default; do not ask, just call the tool."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "wired 300 to ACME-1"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "I wired 300 to ACME-1 in the account's default currency. The transfer went through."
+     }
+    ]
+   },
+   "tools": {
+    "run_fcaef591c9b84b06988863d1543df5b6": [
+     {
+      "tool_name": "wire",
+      "status": "ok",
+      "output": "wired 300 to ACME-1"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

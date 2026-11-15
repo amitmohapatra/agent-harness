@@ -124,7 +124,7 @@ async def test_mcp_tools_have_the_side_effects_of_their_annotations() -> None:
     )
     assert {n: t.side_effects for n, t in tools.items()} == {
         "erp-get_stock": "read",
-        "erp-create_po": "irreversible",  # no annotations: the protocol's default
+        "erp-create_po": "unknown",  # no annotations at all: it says nothing, so it asks
         "erp-delete_po": "irreversible",
     }
     assert await tools["erp-get_stock"].run({"sku": "a"}) == {"ok": "erp-get_stock"}
@@ -134,7 +134,7 @@ async def test_mcp_tools_have_the_side_effects_of_their_annotations() -> None:
 @pytest.mark.parametrize(
     ("hints", "expected"),
     [
-        (None, "irreversible"),  # nothing said: the protocol's default is destructive
+        (None, "unknown"),  # no annotations at all: nothing said (undeclared, it asks)
         ({}, "irreversible"),
         ({"read_only_hint": False}, "irreversible"),
         ({"idempotent_hint": True}, "irreversible"),
