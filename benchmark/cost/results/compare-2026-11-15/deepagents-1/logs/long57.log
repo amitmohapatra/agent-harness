@@ -1,0 +1,146 @@
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+multihop-04      tier 3 [True] $0.0011
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+multihop-05      tier 3 [True] $0.0024
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+the turn could not be written before the run returned; it is queued
+multihop-08      tier 3 [True] $0.0045
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+the turn could not be written before the run returned; it is queued
+multihop-10      tier 3 [True] $0.0053
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+aggregate-03     tier 3 [True] $0.0087
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+aggregate-04     tier 3 [True] $0.0183
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+aggregate-07     tier 3 [True] $0.0192
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+formula-04       tier 3 [True] $0.0212
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+formula-06       tier 3 [True] $0.0242
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+stats-03         tier 3 [True] $0.0258
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+stats-04         tier 3 [True] $0.0267
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+stats-07         tier 3 [True] $0.0293
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+whatif-02        tier 3 [True] $0.0306
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+whatif-03        tier 3 [True] $0.0343
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+the turn could not be written before the run returned; it is queued
+the turn could not be written before the run returned; it is queued
+the turn could not be written before the run returned; it is queued
+the turn could not be written before the run returned; it is queued
+conversation-08  tier 3 [True, True] $0.0404
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+conversation-10  tier 3 [True, True] $0.0421
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+explain-04       tier 3 [True, None] $0.0442
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+freshness-03     tier 3 [True, True] $0.0459
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+conflict-02      tier 3 [True] $0.0469
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+edge-05          tier 3 [True] $0.0479
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+edge-07          tier 3 [True] $0.0488
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+planning-02      tier 3 [True] $0.0510
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+planning-03      tier 3 [True] $0.0528
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+planning-05      tier 3 [True] $0.0538
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-01    tier 3 [True] $0.0554
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-02    tier 3 [True] $0.0577
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-03    tier 3 [True] $0.0589
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-04    tier 3 [True] $0.0610
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-05    tier 3 [True] $0.0628
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-06    tier 3 [True] $0.0659
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-07    tier 3 [True] $0.0671
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-01     tier 3 [True] $0.0680
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-02     tier 3 [True] $0.0758
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-03     tier 3 [True] $0.0768
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-04     tier 3 [True] $0.0778
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-05     tier 3 [True] $0.0791
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-06     tier 3 [True] $0.0887
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-07     tier 3 [True] $0.0901
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-08     tier 3 [True] $0.0990
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-09     tier 3 [True] $0.1009
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-01    tier 3 [True] $0.1037
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-02    tier 3 [True] $0.1091
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-03    tier 3 [True] $0.1104
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-04    tier 3 [True] $0.1123
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-05    tier 3 [True] $0.1131
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-06    tier 3 [True, True] $0.1154
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-07    tier 3 [True] $0.1168
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-multi-08    tier 3 [True] $0.1175
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-01     tier 3 [True] $0.1309
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-02     tier 3 [True] $0.1415
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-03     tier 3 [True] $0.1468
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-04     tier 3 [False] $0.1485
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-05     tier 3 [True, True, True, True, True, True, True, True, True, True, True, True] $0.1686
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-06     tier 3 [True] $0.1712
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-07     tier 3 [True] $0.1729
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-flow-08     tier 3 [True] $0.1743
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+the turn could not be written before the run returned; it is queued
+long-flow-09     tier 3 [True] $0.1795
+trellis write: memory.verify failed and is lost: still undelivered when the process stopped (said once as an error; later failures of memory.verify are warnings)
+# complex: claude-haiku-5-5 (deepagents, memory history)
+
+Spend: $0.1795 (cap $0.6)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 57 | 73 | 0.99 ± 0.03 | 1 | 0 | 1 | 4 of 113 |
+| multihop | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| aggregate | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| formula | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| stats | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| whatif | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| conversation | 2 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 10 |
+| explain | 1 | 2 | 1.00 | 1 | 0 | 0 | 0 of 2 |
+| freshness | 1 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| conflict | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| edge | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| planning | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| long_chain | 7 | 7 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 7 |
+| long_data | 9 | 9 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 9 |
+| long_multi | 8 | 9 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 9 |
+| long_flow | 9 | 20 | 0.95 ± 0.10 | 0 | 0 | 1 | 4 of 54 |
+| tier 3 | 57 | 73 | 0.99 ± 0.03 | 1 | 0 | 1 | 4 of 113 |

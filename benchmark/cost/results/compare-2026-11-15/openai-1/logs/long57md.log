@@ -1,0 +1,12 @@
+the memory service refused http://127.0.0.1:18106/v1/ (GET http://127.0.0.1:18106/v1/models answered 400: check the endpoint's key and auth, and that base_url is the API root (it usually ends in /v1).): its LLM work for these agents runs on its own settings
+long-flow-05     tier 3 [True, True, True, True, True, True, True, True, True, True, True, True] $0.0296
+long-flow-06     tier 3 [True] $0.0391
+# complex: claude-haiku-5-5 (openai, memory history)
+
+Spend: $0.0391 (cap $0.15)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 2 | 13 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 18 |
+| long_flow | 2 | 13 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 18 |
+| tier 3 | 2 | 13 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 18 |
