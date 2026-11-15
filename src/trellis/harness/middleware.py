@@ -2968,7 +2968,9 @@ class FitWindow(AgentMiddleware):
             value = request.model_settings.get(key, getattr(sends, key, None))
             if isinstance(value, int) and not isinstance(value, bool):
                 reply = max(reply, value)
-        own = said.get(OWN_WINDOW) or window
+        # the model's own window: kept beside the given one by ReAct, the profile's where the
+        # window was given here (``middleware(context_window=)``), else the one in use
+        own = said.get(OWN_WINDOW) or said.get("max_input_tokens") or learned or window
         return max(0, min(int(window * FIT_SHARE), int(own * FIT_SHARE) - reply))
 
     def _results(
