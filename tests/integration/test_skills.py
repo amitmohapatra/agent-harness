@@ -231,9 +231,9 @@ async def test_a_deep_agent_of_your_own_takes_a_sandbox_and_skills_in_one_backen
 
 
 async def test_a_sandboxs_files_are_governed_beside_the_skills_route(harness: Harness) -> None:
-    """SEC: the documented recipe, a sandbox and the run's skills in one backend. The skills
-    route is read as the graph's own (no call of the run); a file written to the sandbox is a
-    write of the run, governed and recorded, as on the sandbox alone."""
+    """SEC: the documented recipe, a sandbox and the run's skills in one backend. A read of
+    the skills route is a call of the run — recorded, a read, never asked; a file written to
+    the sandbox is a write of the run, governed and recorded, as on the sandbox alone."""
     provider = FakeSandboxes()
     model = ScriptedChatModel(
         turns=[
@@ -252,9 +252,47 @@ async def test_a_sandboxs_files_are_governed_beside_the_skills_route(harness: Ha
         for e in events
         if e.type is RunEventType.TOOL_CALL_RESULT
     ]
-    assert ended == [("write_file", "ok"), ("execute", "ok")]
-    only = create_deep_agent(model=read_skill(), **src.deep_agent())
-    assert (await harness.wrap(only, id="deep-skills").run("go", user="ada")).answer
+    assert ended == [("read_file", "ok"), ("write_file", "ok"), ("execute", "ok")]
+    assert "Check every JOIN." in tool_said(model)
+
+
+@pytest.mark.parametrize("built", ["react", "deep-agent"])
+async def test_reading_a_skill_is_a_recorded_read_of_the_run_never_asked(
+    memory_service: FakeMemoryService, built: str
+) -> None:
+    """SKILL-REC-1. ``read_file`` of a ``SKILL.md`` through the ``/skills/`` route (``ReAct``,
+    Deep Agents with the skills alone) is an action of the run: on its stream under its run,
+    at a time, of its user, and in memory's record of its tool calls — governed as a read, so
+    a governance that asks before every write asks nothing. A file of the graph's own state
+    stays its scratch (no call of the run)."""
+    model = ScriptedChatModel(
+        turns=[
+            ("read_file", {"file_path": SKILL, "limit": 1000}),
+            ("write_file", {"file_path": "/notes.md", "content": "draft"}),
+            "read",
+        ]
+    )
+    src = skills.combine(store_with(owner="acme"))  # the tenant memory's key names
+    target = (
+        ReAct("s", model, skills=src)
+        if built == "react"
+        else create_deep_agent(model=model, **src.deep_agent())
+    )
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        agent = h.wrap(target, id=f"skill-read-{built}")
+        events = [e async for e in agent.stream("review my SQL", user="ada", thread="t1")]
+        finished = events[-1]
+        assert finished.data["result"] == "read", finished.data
+        assert not [e for e in events if e.type is RunEventType.INTERRUPT]
+        [read] = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+        assert read.data["tool"] == "read_file" and read.data["status"] == "ok"
+        assert read.run_id == finished.run_id and read.timestamp is not None
+        record = await h.runs.get(finished.run_id)
+        assert record is not None and record.user_id == "ada"
+        await h.writes.drain()
+    recorded = [c.body for c in memory_service.named("record_tool")]
+    assert [b["tool"] for b in recorded] == ["read_file"]
+    assert "Check every JOIN." in tool_said(model)
 
 
 # --------------------------------------------------------------------------- Claude

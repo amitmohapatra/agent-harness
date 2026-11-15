@@ -84,6 +84,10 @@ chat's own on its thread stream when it is idle; its questions asked through the
   session's own folder leaves its user's Kimi home (its login and config stay). The
   conversation's next turn starts a new session, given its earlier turns by the harness, where
   it resumed a session whose files stayed on disk for good.
+- `ReAct(skills=)` and Deep Agents with the run's skills: reading a skill (`read_file`, `ls`,
+  `glob`, `grep` under `/skills/`) is a call of the run — on its stream, traced, in memory's
+  record of its calls — governed as a read, never asked. It was taken for the graph's own
+  scratch and left no record.
 
 ### Fixed: each library's own skills, through the harness
 

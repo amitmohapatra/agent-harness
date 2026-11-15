@@ -158,6 +158,7 @@ from trellis.harness.outbound import TargetRefused
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
+from trellis.harness.skills import serves_skills
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
@@ -327,14 +328,23 @@ def files_backend(tool: Any) -> Any | None:
     return None
 
 
+def _state(backend: Any) -> bool:
+    """Whether ``backend`` keeps its files in the graph's state: a ``StateBackend`` — not the
+    run's skills (``skills.serves_skills``), which it reads as one, from their store: reading
+    a skill is a call of the run."""
+    from deepagents.backends import StateBackend  # noqa: PLC0415 - an extra
+
+    return isinstance(backend, StateBackend) and not serves_skills(backend)
+
+
 def _all_state(backend: Any) -> bool:
-    """Whether every file of ``backend`` is kept in the graph's state: a ``StateBackend``, or
-    a composite of nothing else."""
-    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+    """Whether every file of ``backend`` is kept in the graph's state (:func:`_state`), or a
+    composite of nothing else."""
+    from deepagents.backends import CompositeBackend  # noqa: PLC0415 - an extra
 
     if isinstance(backend, CompositeBackend):
         return all(_all_state(b) for b in (backend.default, *backend.routes.values()))
-    return isinstance(backend, StateBackend)
+    return _state(backend)
 
 
 def in_state(backend: Any, args: Mapping[str, Any]) -> bool:
@@ -379,11 +389,11 @@ def _file_marks(tool: Any, name: str) -> dict[str, Any]:
 
 
 def _routes_some_to_state(backend: Any) -> bool:
-    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+    from deepagents.backends import CompositeBackend  # noqa: PLC0415 - an extra
 
     if isinstance(backend, CompositeBackend):
         return any(_routes_some_to_state(b) for b in (backend.default, *backend.routes.values()))
-    return isinstance(backend, StateBackend)
+    return _state(backend)
 
 
 def scratch(tool: Any, call: Mapping[str, Any]) -> bool:
