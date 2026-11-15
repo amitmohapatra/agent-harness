@@ -60,11 +60,14 @@ _EXTRAS = re.compile(r"\n?<mcp-result-extras>.*</mcp-result-extras>\s*$", re.DOT
 _FAILED = re.compile(r"^<system>ERROR: [^<]*</system>\n?")
 #: A tool result of a call that did not run: the run paused on it, or stopped the turn.
 #: (Kimi's own words for a call it aborted when the turn was stopped before the call's result
-#: reached it: its ``abortedToolOutput``.)
+#: reached it: its ``abortedToolOutput``; and its ``Bash``'s for a command whose turn was
+#: stopped while it waited for approval — a pause sends its answer, then ``session/cancel``,
+#: and Kimi may take the cancel first, on a loaded machine.)
 NOT_RUN: Final = (
     "approval request was cancelled",
     "Waiting for a person's approval.",
     "The user manually interrupted",
+    "Aborted before command started",
 )
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
 _REJECTED = re.compile(r"^Your call to \S+ was not run: ")
