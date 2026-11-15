@@ -33,5 +33,5 @@ def main(path: str, token: str) -> int:
                 data = data[os.write(fd, data) :]
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - run by the framework's shell, as a script
     sys.exit(main(sys.argv[1], sys.argv[2]))

@@ -99,3 +99,69 @@ async def test_only_a_file_in_the_workspace_is_adopted(tmp_path: Path) -> None:
 def test_the_client_is_standard_library_only() -> None:
     names = [line for line in Path(_relayed.__file__).read_text().splitlines() if "import" in line]
     assert names == ["import os", "import socket", "import struct", "import sys"]
+
+
+class FakeBox:
+    """A workspace whose command answers as told (``ran``: what it was asked to run)."""
+
+    def __init__(self, home: str, outcome: Any) -> None:
+        self.home, self.uid, self.outcome = home, os.getuid(), outcome
+        self.ran: list[list[str]] = []
+        self.cancelled = asyncio.Event()
+
+    async def exec(self, command: str, *, argv: list[str], sink: Any, **_: Any) -> Any:
+        from trellis.harness.sandbox.base import ExecResult
+
+        self.ran.append(argv)
+        if self.outcome == "forever":
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled.set()
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        sink(1, b"out")
+        return ExecResult(exit_code=self.outcome, stdout="out", stderr="", duration_ms=1)
+
+
+async def asked(relay: Relay, line: str) -> bytes:
+    token = line.rsplit(maxsplit=1)[-1]
+    reader, writer = await asyncio.open_unix_connection(relay.path)
+    writer.write(f"{token}\n".encode())
+    await writer.drain()
+    return await reader.read()
+
+
+async def test_powershell_runs_in_pwsh_and_a_command_the_layer_refuses_says_why(
+    tmp_path: Path,
+) -> None:
+    from trellis.contracts import ToolError
+
+    box: Any = FakeBox(str(tmp_path), 0)
+    relay = await Relay(box).start()
+    try:
+        said = await asked(relay, relay.command("PowerShell", "Get-ChildItem"))
+        assert box.ran == [["pwsh", "-NoProfile", "-NonInteractive", "-Command", "Get-ChildItem"]]
+        assert said.endswith(HEADER.pack(0, 1) + b"0")
+        box.outcome = ToolError("cannot be isolated here", source="tools")
+        refused = await asked(relay, relay.command("Bash", "id"))
+        assert b"cannot be isolated here" in refused and refused.endswith(b"126")
+    finally:
+        await relay.aclose()
+
+
+async def test_a_client_that_goes_has_its_command_killed(tmp_path: Path) -> None:
+    box: Any = FakeBox(str(tmp_path), "forever")
+    relay = await Relay(box).start()
+    try:
+        token = relay.command("Bash", "sleep 300").split()[-1]
+        reader, writer = await asyncio.open_unix_connection(relay.path)
+        writer.write(f"{token}\n".encode())
+        await writer.drain()
+        while not box.ran:  # noqa: ASYNC110 - the command started
+            await asyncio.sleep(0.01)
+        writer.close()  # the framework killed its client: its timeout, a task stopped
+        async with asyncio.timeout(5):
+            await box.cancelled.wait()
+    finally:
+        await relay.aclose()

@@ -260,3 +260,29 @@ def test_without_a_provider_a_sandbox_is_the_tenants_shared_container(
     chosen = sandbox(image="registry.test/img:1").provider_for()
     assert isinstance(chosen, SharedDockerSandbox) and chosen.image == "registry.test/img:1"
     assert RunEventType.CUSTOM  # the stream's audit events are CUSTOM ones
+
+
+async def test_an_open_containers_layer_keeps_the_metadata_server_out_once(
+    provider: SharedDockerSandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the network open, the container's layer adds its blackhole routes (``ROUTES``,
+    over netlink, as root with ``NET_ADMIN``) before the first workspace, once per container.
+    (The containers are this machine here: the script is recorded, not run.)"""
+    from trellis.harness.sandbox import isolation, shared
+
+    routed: list[tuple[str, ...]] = []
+    real = isolation.Isolation._root
+
+    async def recorded(self: Any, script: str, *args: str, missing: int | None = None) -> Any:
+        if script == shared.ROUTES:
+            routed.append(args)
+            return isolation.Ran(0, isolation._Tail(), isolation._Tail())
+        return await real(self, script, *args, missing=missing)
+
+    monkeypatch.setattr(isolation.Isolation, "_root", recorded)
+    spec = SandboxSpec(network="open")
+    one = await provider.create(ref("r1"), spec)
+    two = await provider.create(ref("r2"), spec)
+    assert routed == [isolation.METADATA] and one.network == two.network == "open"
+    await provider.delete(one.ref)
+    await provider.delete(two.ref)

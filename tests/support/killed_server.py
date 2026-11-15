@@ -39,6 +39,7 @@ from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import holding, pipeline
 from trellis.harness.frontend import Frontend
+from trellis.harness.sandbox.isolation import HostSandbox, use_host
 
 CLI: Final = str(Path(__file__).resolve().parent / "fake_claude_cli.py")
 AGENT_ID: Final = "chat"
@@ -134,7 +135,10 @@ async def running(store: FileRuns) -> list[str]:
 async def main(store_path: Path, folder: Path, scenario: str) -> None:
     setattr(holding, "HOLD_SECONDS", HOLD_SECONDS)  # noqa: B010 - a Final, for this process
     store = FileRuns(store_path)
-    # Claude Code runs its shell in a folder of this machine: this deployment allows it
+    # as in every test (``tests/conftest.py``): this machine's layer cannot isolate a command,
+    # so Claude Code's shell is off and its conversation's process is kept between turns —
+    # and a killed server leaves no workspace behind
+    use_host(HostSandbox("/var/lib/trellis-test-none", helper=("false",)))
     async with Harness(config=Settings(host_execution="allow"), runs=store) as harness:
         if scenario == "asked":
             await asked(harness, store, folder)
