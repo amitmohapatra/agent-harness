@@ -41,7 +41,8 @@ from pydantic import BaseModel
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
-from trellis import Harness, middleware
+from tests.support.runlog import LoggedRuns
+from trellis import Harness, Settings, middleware
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import RunCheckpointer
@@ -101,6 +102,33 @@ async def test_the_general_purpose_sub_agent_works_with_the_main_agents_tools(
     run_id = events[-1].run_id
     kids = [r async for r in harness.runs.iterate(parent_run_id=run_id)]
     assert [k.status for k in kids] == [RunStatus.SUCCESS]
+
+
+async def test_a_sub_agents_calls_are_on_its_parents_log_between_its_start_and_end() -> None:
+    """SUB-HELPER-LOG (docs/subagents.md, Limits): a framework's own helper is a step of its
+    parent's run — its tool calls are on the parent's log in agent-runs, between
+    ``helper_started`` and ``helper_finished``, as Deep Agents streams them in the run that
+    spawned it; its child run logs no event of its own (each call is logged once)."""
+    model = ScriptedChatModel(
+        turns=[
+            ("task", {"description": "count a", "subagent_type": "general-purpose"}),
+            ("stock", {"sku": "a"}),
+            "a: 7",
+            "7 units of a",
+        ]
+    )
+    runs = LoggedRuns()
+    async with Harness(config=Settings(), runs=runs) as h:
+        graph = create_deep_agent(model=model, tools=[stock], checkpointer=InMemorySaver())
+        result = await h.wrap(graph, id="deep").run("how many a?", user="u", thread="t")
+        [kid] = [r async for r in h.runs.iterate(parent_run_id=result.run_id)]
+    steps = [
+        e.data.get("name") or e.data.get("tool")
+        for e in runs.logged(result.run_id)
+        if e.type in (RunEventType.CUSTOM, RunEventType.TOOL_CALL_RESULT)
+    ]
+    assert steps == ["helper_started", "stock", "helper_finished", "task"]
+    assert runs.logged(kid.run_id) == []
 
 
 class Verdict(BaseModel):

@@ -44,6 +44,7 @@ from trellis.harness.sandbox import (
     ExecResult,
     SandboxRef,
     SandboxSpec,
+    SharedDockerSandbox,
     card_of,
     ended,
     paused,
@@ -641,9 +642,11 @@ def test_a_sandbox_name_is_at_most_63_characters_else_the_run_ids_digest() -> No
 
 
 def test_without_a_provider_a_sandbox_is_dockers_of_the_image_given() -> None:
+    """Docker's, in the tenant's shared container (``SharedDockerSandbox``)."""
     chosen = sandbox(image="registry.test/img:1").provider_for()
-    assert isinstance(chosen, DockerSandbox) and chosen.image == "registry.test/img:1"
-    assert cast(DockerSandbox, sandbox().provider_for()).image == DEFAULT_IMAGE
+    assert isinstance(chosen, SharedDockerSandbox) and chosen.image == "registry.test/img:1"
+    assert isinstance(chosen.docker, DockerSandbox)
+    assert cast(SharedDockerSandbox, sandbox().provider_for()).image == DEFAULT_IMAGE
     given = FakeSandboxes()
     assert sandbox(given).provider_for() is given
     with pytest.raises(ConfigurationError, match="sandbox_exec: a timeout is a number of seconds"):

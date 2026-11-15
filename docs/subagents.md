@@ -174,7 +174,8 @@ tool (`Agent.as_tool`) and Claude's `agents=` subagents are child runs too
 they are given (the context, then `## Your task`), their tool calls governed as the run's and
 recorded under their own run (Claude's built-ins and its MCP servers' tools by the subagent the
 CLI names; the harness's own tools that a Claude subagent calls are recorded under the run),
-their turns and their outcome in memory, their tokens on the run's budget. A call of theirs
+their turns and their outcome in memory, their tokens on the run's budget; their tool calls
+are on the run's stream, not on a stream of the child's ([Limits](#limits)). A call of theirs
 that asks pauses the run, and the approval's `payload["native_helper"]` names the helper
 (`run_id`, `name`): the person's decision is fed back on the helper's run, where the call was
 recorded, so the memory service counts it.
@@ -208,8 +209,14 @@ announced writes; a check and the list read), and the mechanism is the harness's
   workers (a task in the background too: in the process that started it, apart from the
   call). "Running elsewhere" can only be what a crashed attempt left: it is continued, not
   waited for.
-* A child's events (its text, its own tool calls) are on its own run's stream, not the
-  parent's; the parent's stream shows the call and its result.
+* A wrapped agent's child run has its events (its text, its own tool calls) on its own run's
+  stream, not the parent's; the parent's stream shows the call and its result. A framework's
+  own helper (a Deep Agents `task`, an `Agent.as_tool`, a Claude `agents=` subagent, a Kimi
+  `Agent`) is the other way round: its work is a step of the parent's framework run, and its
+  tool calls are on the parent's stream (between `helper_started` and `helper_finished`), as
+  the library's own stream shows them in the run that spawned it; its child run has its
+  record, its turns and tool records in memory and its outcome, and no events of its own —
+  putting them on the child's log too would log each call twice.
 * agent-runs' own listings (`runs.iterate(status=PAUSED)`, an inbox built on them outside
   `h.inbox`) show a paused child next to its parent: answer the parent's.
 * A checkpointed LangGraph child runs on the conversation's LangGraph thread, which its other

@@ -408,6 +408,15 @@ class Agent:
         self._published_native: LRU[str, tuple[str, ...]] = LRU()
         #: the runs an attempt of which runs in this process now, by id
         self.running: dict[str, Runtime] = {}
+        #: the runs ``cancel`` is stopping here, with the reason the run store keeps: their
+        #: attempt's end is the store's cancel (``pipeline._settle_cancelled``); each only
+        #: while its ``cancel`` waits for that end
+        self.cancelling: dict[str, str | None] = {}
+        #: the framework options a run started here was given that are not JSON (objects: an
+        #: OpenAI Agents ``RunHooks``, a ``context``), by run id: its record keeps the JSON
+        #: ones only, so a resume in this process gets these again (:meth:`_continue`); let go
+        #: of when the run ends (``pipeline.attempt``) — the most recent kept
+        self.run_objects: LRU[str, dict[str, Any]] = LRU()
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
         self.turns = Turns()
         #: the conversations' ended turns ``conversation.earlier`` read (each ended run once)
@@ -482,7 +491,8 @@ class Agent:
         framework's own options for this run's call, over the agent's
         (``h.wrap(framework_options=)``; each framework's page says where they go). The run
         keeps the JSON ones with its record, for its later attempts (a resume); a value that
-        is not JSON (an object) is this call's only. ``document_ids``: the documents
+        is not JSON (an object) is kept in this process only: a resume here runs with it, one in
+        another process does not. ``document_ids``: the documents
         (``h.add_document``'s ``document_id``) the run's memory context draws its passages
         from, none else (unset: all the person's); kept with the run, its sub-agents' runs
         included. ``mode``: what the run does when another run of the same conversation
@@ -644,18 +654,41 @@ class Agent:
         runtime = self.running.get(run_id)
         # read first: its ending clears the checkpoint, which names the run's sandbox
         held = await runs.get(run_id, tenant=tenant) if runtime is None else None
-        record = await runs.cancel(run_id, reason=reason, tenant=tenant)
-        ending = self.stop(run_id, reason or "cancelled")
-        if ending is not None:  # it works, or waits its turn, here: it ends itself
+        if runtime is not None and runtime.worker_id is not None:
+            # a worker's lease: the store asks it to stop first (its events are taken till it
+            # ends), then its attempt here stops and ends it
+            await runs.cancel(run_id, reason=reason, tenant=tenant)
+            ending = self.stop(run_id, reason or "cancelled")
+            assert ending is not None
             await asyncio.wait({ending})
+        else:
+            # it works or waits its turn here: it stops first, so its log takes its last
+            # events, and its end is the store's cancel (``pipeline._settle_cancelled``)
+            ending = await self._stopped(run_id, reason)
+        if ending is None:  # neither works nor waits here: the store cancels it
+            record = await runs.cancel(run_id, reason=reason, tenant=tenant)
+            if held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
+                await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
+                self._unwatched(run_id)
+        else:
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
-        elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
-            await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
-            self._unwatched(run_id)
         await cancel_children(self, run_id, reason=reason, tenant=tenant)
         return record
+
+    async def _stopped(self, run_id: str, reason: str | None) -> asyncio.Future[Any] | None:
+        """Stop run ``run_id``'s attempt here (or its wait for its turn) for ``cancel``, and
+        wait for its end, which the store's cancel writes with ``reason``; ``None`` when
+        nothing here ends it."""
+        self.cancelling[run_id] = reason
+        try:
+            ending = self.stop(run_id, reason or "cancelled")
+            if ending is not None:
+                await asyncio.wait({ending})
+            return ending
+        finally:
+            del self.cancelling[run_id]
 
     def stop(self, run_id: str, reason: str) -> asyncio.Future[Any] | None:
         """Stop what this process does for run ``run_id``, cancelled for ``reason``: its
@@ -977,9 +1010,13 @@ class Agent:
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
+        given = dict(resumed.metadata)
         if app is not None:
-            given = {**resumed.metadata, FRONTEND: app.kept()}
-            resumed = resumed.model_copy(update={"metadata": given})
+            given[FRONTEND] = app.kept()
+        objects = self.run_objects.get(record.run_id)
+        if objects is not None:  # the run's own objects: in the process it was started in
+            given[FRAMEWORK_OPTIONS] = {**given.get(FRAMEWORK_OPTIONS, {}), **objects}
+        resumed = resumed.model_copy(update={"metadata": given})
         return await pipeline.attempt(
             self, resumed, record.input, journal=journal, resolution=resolution, listener=listener
         )
@@ -1703,6 +1740,9 @@ class Agent:
         record = RunRecord.from_start(start)
         if not framework_options:
             return record
+        objects = {key: value for key, value in framework_options.items() if not _json(value)}
+        if objects:
+            self.run_objects[record.run_id] = objects
         given = {**record.metadata, FRAMEWORK_OPTIONS: dict(framework_options)}
         return record.model_copy(update={"metadata": given})
 
