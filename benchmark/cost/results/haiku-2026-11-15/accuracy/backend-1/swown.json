@@ -1,0 +1,102 @@
+{
+  "suite": "complex",
+  "model": "claude-haiku-5-5",
+  "history": "thread",
+  "adapter": "react",
+  "variant": "deep",
+  "window": null,
+  "date": "2026-11-15",
+  "usd": 0.037859,
+  "max_usd": 0.1,
+  "stopped": null,
+  "cases_total": 267,
+  "summary": {
+    "all": {
+      "cases": 2,
+      "scored_turns": 3,
+      "strict": {
+        "mean": 1.0,
+        "ci95": 0.0,
+        "n": 3
+      },
+      "judge_only": 0,
+      "unverified": 0,
+      "not_success": 0,
+      "checks": 21,
+      "checks_failed": 0,
+      "not_applicable": 0
+    },
+    "by_category": {
+      "adv_conversation": {
+        "cases": 1,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 16,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_flow": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 5,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "by_tier": {
+      "3": {
+        "cases": 2,
+        "scored_turns": 3,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 3
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 21,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "cost": {
+      "input_tokens": {
+        "mean": 173801.5,
+        "ci95": 627695.4589999999,
+        "n": 2
+      },
+      "output_tokens": {
+        "mean": 11969.5,
+        "ci95": 58847.83899999999,
+        "n": 2
+      },
+      "model_calls": {
+        "mean": 24.0,
+        "ci95": 203.296,
+        "n": 2
+      },
+      "seconds": {
+        "mean": 65.2975,
+        "ci95": 105.58050699999998,
+        "n": 2
+      }
+    },
+    "turns": 15
+  }
+}

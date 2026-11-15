@@ -420,7 +420,8 @@ async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the
 ) -> None:
     """A result's cost is the process's running total: what it grew by between two turns —
     the subagent's own replies, the turn the session ran for its end — is charged to the
-    subagent's run, with its replies' tokens, and the next turn is charged its own."""
+    subagent's run, with its replies' tokens and that turn's own (a model call of the run's,
+    as the provider bills it), and the next turn is charged its own."""
     counted: list[tuple[str, int, float, int]] = []
     account = budget.account
 
@@ -448,16 +449,46 @@ async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the
         # what both cost, known at the session's next result and shared by their tokens;
         # and the turn the session ran for the task's end
         (child.run_id, 0, 1.0, 0),
-        (child.run_id, 0, 0.5, 0),
+        (child.run_id, 15, 0.5, 1),
         (second.run_id, 15, 0.5, 1),  # one step of its own
     ]
     assert seen[-1].data["spent"] == {
-        "tokens": 30,
+        "tokens": 45,
         "cached_tokens": 0,
         "cost": 1.5,
-        "model_calls": 2,
+        "model_calls": 3,
         "tool_calls": 0,
     }
+
+
+async def test_a_turn_the_session_ran_with_no_run_to_charge_is_on_the_next_turn_in_full(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn the session runs for a background shell command's end has no run of its own:
+    what it spent — its tokens as well as its cost, as the provider bills them — is charged
+    to the conversation's next turn, never lost."""
+    counted: list[tuple[str, int, float]] = []
+    account = budget.account
+
+    def count(run: Any, **kw: Any) -> None:
+        counted.append((run.run_id, kw["input_tokens"] + kw["output_tokens"], kw["cost"]))
+        account(run, **kw)
+
+    monkeypatch.setattr(budget, "account", count)
+    scripts = [[SHELL, {"text": "started it"}], [{"text": "ok"}]]
+    target = options(tmp_path, scripts, model="m", allowed_tools=["Bash"],
+                     env={"FAKE_CLAUDE_COST": "0.5"})  # fmt: skip
+    agent = harness.wrap(target, id="owed")
+    first = await agent.run("watch the build", user="u1", thread="t1")
+    (tmp_path / "tasks" / "s1.done").write_text("the build passed")
+    await until(lambda: own_turns(tmp_path))
+    second = await agent.run("and?", user="u1", thread="t1")
+    assert second.answer == "ok"
+    assert counted == [
+        (first.run_id, 30, 1.0),  # two steps
+        # its own step, and the session's own turn's (its cost was already)
+        (second.run_id, 30, 1.5),
+    ]
 
 
 async def test_the_options_own_budget_stays_a_querys_each_turn_in_a_process_of_its_own(

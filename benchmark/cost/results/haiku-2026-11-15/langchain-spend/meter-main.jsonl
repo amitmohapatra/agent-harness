@@ -1,0 +1,16 @@
+{"t": 1794720372.801, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 60, "prompt_tokens": 4302, "total_tokens": 4362}}
+{"t": 1794720373.717, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 54, "prompt_tokens": 4436, "total_tokens": 4490}}
+{"t": 1794720374.945, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 164, "prompt_tokens": 4559, "total_tokens": 4723}}
+{"t": 1794720376.188, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 250, "prompt_tokens": 4327, "total_tokens": 4577}}
+{"t": 1794720378.232, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 418, "prompt_tokens": 7635, "total_tokens": 8053}}
+{"t": 1794720380.303, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 343, "prompt_tokens": 7974, "total_tokens": 8317}}
+{"t": 1794720381.229, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 170, "prompt_tokens": 4295, "total_tokens": 4465}}
+{"t": 1794720382.161, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 131, "prompt_tokens": 4552, "total_tokens": 4683}}
+{"t": 1794720384.236, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 447, "prompt_tokens": 4719, "total_tokens": 5166}}
+{"t": 1794720385.783, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 223, "prompt_tokens": 5143, "total_tokens": 5366}}
+{"t": 1794720387.757, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 242, "prompt_tokens": 5276, "total_tokens": 5518}}
+{"t": 1794720388.886, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 142, "prompt_tokens": 5577, "total_tokens": 5719}}
+{"t": 1794720389.981, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 194, "prompt_tokens": 4372, "total_tokens": 4566}}
+{"t": 1794720392.026, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 418, "prompt_tokens": 6043, "total_tokens": 6461}}
+{"t": 1794720393.408, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 315, "prompt_tokens": 7049, "total_tokens": 7364}}
+{"t": 1794720396.31, "path": "/v1/chat/completions", "status": 200, "model": "claude-haiku-5-5", "stream": false, "usage": {"completion_tokens": 748, "prompt_tokens": 8036, "total_tokens": 8784}}
