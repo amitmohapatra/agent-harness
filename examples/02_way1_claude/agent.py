@@ -29,6 +29,7 @@ from mcp.types import ToolAnnotations
 
 from trellis import Harness, Hooks, Rewrite
 from trellis.contracts import ToolCall
+from trellis.harness.host import CLAUDE_SHELLS
 
 #: How Claude names your server's tool.
 CLOSE: str = "mcp__desk__close_ticket"
@@ -70,6 +71,9 @@ async def main() -> None:
         options = ClaudeAgentOptions(
             system_prompt="You triage support tickets.",
             mcp_servers={"desk": create_sdk_mcp_server("desk", tools=[close_ticket])},
+            # no shell: Claude Code's own would run on this machine as the service's user (give
+            # it its own sandbox to isolate it)
+            disallowed_tools=sorted(CLAUDE_SHELLS),
             **claude_cli(script, "trellis"),
         )
         agent = h.wrap(

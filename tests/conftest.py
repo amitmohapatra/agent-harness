@@ -214,9 +214,18 @@ async def _kimi_endpoints_stopped() -> None:
     await detached()
 
 
+def deployment(request: pytest.FixtureRequest) -> Settings:
+    """The deployment a test's harness fixture is: commands on this machine outside a sandbox
+    refused, as by default, unless the test is marked ``host_execution`` (it runs Claude Code,
+    Kimi Code or a local shell here: ``TRELLIS_HOST_EXECUTION=allow``)."""
+    if request.node.get_closest_marker("host_execution") is not None:
+        return Settings(host_execution="allow")
+    return Settings()
+
+
 @pytest.fixture
-async def harness() -> AsyncIterator[Harness]:
-    async with Harness(config=Settings()) as h:
+async def harness(request: pytest.FixtureRequest) -> AsyncIterator[Harness]:
+    async with Harness(config=deployment(request)) as h:
         yield h
     await _kimi_endpoints_stopped()
 
@@ -227,7 +236,9 @@ def memory_service() -> FakeMemoryService:
 
 
 @pytest.fixture
-async def memory_harness(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+async def memory_harness(
+    request: pytest.FixtureRequest, memory_service: FakeMemoryService
+) -> AsyncIterator[Harness]:
+    async with Harness(config=deployment(request), memory=memory_service.client()) as h:
         yield h
     await _kimi_endpoints_stopped()

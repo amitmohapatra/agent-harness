@@ -50,6 +50,7 @@ from trellis.harness import (
     conversation,
     frontend,
     history,
+    host,
     pipeline,
     sandbox,
     snapshots,
@@ -62,6 +63,7 @@ from trellis.harness.adapters.base import (
     PROMPT_METADATA,
     context_window,
     declared_tools,
+    deployed,
     merged,
     metadata_of,
     model_name,
@@ -1846,6 +1848,8 @@ class Agent:
         own = dict(framework_options or {})
         if own:
             self.adapter.check_options(merged(self.framework_options, own))
+            host.refuse(self, merged(self.framework_options, own))
+            deployed(self.adapter.name, self.framework_options, own)
         metadata: dict[str, Any] = {WITHOUT: sorted(without)} if without else {}
         kept = {key: value for key, value in own.items() if _json(value)}
         if kept:

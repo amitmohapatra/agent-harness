@@ -220,6 +220,8 @@ async def _claude(
         cli_path=CLI,
         system_prompt=system,
         env={"FAKE_CLAUDE_SCRIPT": json.dumps(script), "FAKE_CLAUDE_RECORD": str(record)},
+        # Claude Code in its sandbox, nothing let out: no command on the host to allow
+        sandbox={"enabled": True, "allowUnsandboxedCommands": False},
     )
     return options, tools
 
@@ -242,7 +244,14 @@ async def _kimi(
         pytest.skip(needs_kimi.kwargs["reason"])
     endpoint = await PlannedEndpoint(plan, stall=stall).attached()
     _saw(seen, endpoint)
+    allow_host(h)
     return kimi_target(endpoint, tmp / f"kimi-{uuid.uuid4().hex[:6]}"), tools
+
+
+def allow_host(h: Harness) -> None:
+    """Kimi Code runs its shell in a folder of this machine: the test's deployment allows
+    commands here (``TRELLIS_HOST_EXECUTION=allow``), said explicitly where the agent is built."""
+    h.settings = h.settings.model_copy(update={"host_execution": "allow"})
 
 
 def _saw(seen: list[Any] | None, model: Any) -> None:

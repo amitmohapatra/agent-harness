@@ -22,7 +22,7 @@ from claude_agent_sdk import (
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
-from trellis import Deny, Harness, Hooks, Rewrite, current, tool
+from trellis import Deny, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import (
     Option,
     RunEventType,
@@ -48,8 +48,12 @@ from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
 
 #: These tests are about what a write does once it runs, not whether it asks.
-pytestmark = pytest.mark.usefixtures("writes_unasked")
+#: Claude Code runs its shell in a folder of this machine: the tests' deployment allows it
+#: (TRELLIS_HOST_EXECUTION=allow, the harness fixtures).
+pytestmark = [pytest.mark.usefixtures("writes_unasked"), pytest.mark.host_execution]
 
+#: the deployment of the tests that make their own harness
+HOST_ALLOWED = Settings(host_execution="allow")
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 refunds: list[str] = []
 
@@ -544,76 +548,52 @@ async def test_claudes_question_is_asked_once_though_it_words_it_anew(
 async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """A ``Bash`` command Claude Code asks about asks a person; approved, it runs once — the
+    """A write Claude Code asks about (``Edit``) asks a person; approved, it runs once — the
     resumed session does not run it again when the run pauses later, on a harness tool. A
-    command that only reads runs without asking."""
+    command runs without asking (the shell is the deployment's)."""
     refunds.clear()
     script = [
         {"builtin": "Read", "args": {"file_path": "orders.csv"}},
         {"builtin": "Bash", "args": {"command": "ls"}},
-        {"builtin": "Bash", "args": {"command": "rm -rf build"}},
+        {"builtin": "Edit", "args": {"file_path": "build.txt"}},
         {"tool": "refund", "args": {"order": "o3"}},
         {"text": "done: {last}"},
     ]
     agent = arm(harness.wrap(options(tmp_path, script), id="ops"), [refund])
     asked = await agent.run("tidy up, then refund o3", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"command": "rm -rf build"}
+    assert asked.interrupt.tool_call.args == {"file_path": "build.txt"}
     assert asked.interrupt.question == (
-        "Approve Bash? Claude Code asks before it runs this call. "
+        "Approve Edit? Claude Code asks before it runs this call. "
         "Allow once, allow for this conversation, or deny."
     )
     assert [b["tool"] for b in built_ins(tmp_path)] == ["Read", "Bash"]  # ls: not asked
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert started_with(tmp_path)["prompt"] == RESUMED_CALL.format(tool="Bash")  # a built-in
+    assert started_with(tmp_path)["prompt"] == RESUMED_CALL.format(tool="Edit")  # a built-in
     assert again.interrupt is not None and again.interrupt.tool_call is not None
     assert again.interrupt.tool_call.tool == "refund"
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: refunded o3"
     assert [b["args"] for b in built_ins(tmp_path)][1:] == [
         {"command": "ls"},
-        {"command": "rm -rf build"},
+        {"file_path": "build.txt"},
     ]  # each once
     assert refunds == ["o3"]
 
 
-async def test_a_read_outside_the_working_folder_asks_a_person(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """A command that only reads runs unasked inside the folder Claude Code works in; a file
-    anywhere else on the machine (``/etc/passwd``) changes nothing, but asks a person."""
-    script = [
-        {"builtin": "Bash", "args": {"command": "ls"}},
-        {"builtin": "Bash", "args": {"command": "cat /etc/passwd"}},
-        {"text": "done"},
-    ]
-    agent = harness.wrap(options(tmp_path, script), id="ops")
-    asked = await agent.run("look around", user="u1")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"command": "cat /etc/passwd"}
-    assert [b["args"] for b in built_ins(tmp_path)] == [{"command": "ls"}]  # ls: not asked
-
-
-async def test_a_read_after_a_cd_is_placed_from_where_the_shell_may_be(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """Claude Code's shell keeps the folder a ``cd`` left it in: once it went to a folder the
-    options add (``add_dirs``: readable, so the ``cd`` runs unasked), a relative read is placed
-    from there too, and one that leads out of what the run may read from there asks."""
+async def test_a_command_runs_unasked_wherever_it_reads(harness: Harness, tmp_path: Path) -> None:
+    """The shell is the deployment's (Claude Code's sandbox, or a host its administrator
+    allows): Claude Code's question about a command is not the user's, whatever it reads —
+    inside its folder, outside it (``/etc/passwd``), after a ``cd``."""
     run, kept = tmp_path / "a" / "run", tmp_path / "b" / "kept"
     run.mkdir(parents=True)
     kept.mkdir(parents=True)
-    script = [
-        {"builtin": "Bash", "args": {"command": f"cd {kept}"}},
-        {"builtin": "Bash", "args": {"command": "cat x.csv"}},
-        {"builtin": "Bash", "args": {"command": "cat ../run/x.csv"}},  # b/run, not a/run
-        {"text": "done"},
-    ]
+    commands = ["ls", "cat /etc/passwd", f"cd {kept}", "cat x.csv", "cat ../run/x.csv"]
+    script = [*({"builtin": "Bash", "args": {"command": c}} for c in commands), {"text": "done"}]
     target = options(tmp_path, script, cwd=str(run), add_dirs=[str(kept)])
-    asked = await harness.wrap(target, id="ops").run("look around", user="u1")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"command": "cat ../run/x.csv"}
-    assert [b["args"]["command"] for b in built_ins(tmp_path)] == [f"cd {kept}", "cat x.csv"]
+    done = await harness.wrap(target, id="ops").run("look around", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
+    assert [b["args"]["command"] for b in built_ins(tmp_path)] == commands
 
 
 async def test_a_command_claudes_own_rules_allow_runs_without_asking_a_person(
@@ -631,12 +611,12 @@ async def test_a_command_claudes_own_rules_allow_runs_without_asking_a_person(
 async def test_a_command_a_person_rejected_is_not_run_and_claude_reads_why(
     harness: Harness, tmp_path: Path
 ) -> None:
-    script = [{"builtin": "Bash", "args": {"command": "rm -rf build"}}, {"text": "said: {last}"}]
+    script = [{"builtin": "Edit", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
     agent = harness.wrap(options(tmp_path, script), id="careful")
     asked = await agent.run("clean", user="u1")
     assert asked.interrupt is not None
     done = await agent.resume(asked.interrupt.interrupt_id, "reject", reviewer="u1")
-    assert done.answer == "said: Bash was not run: the approver rejected it"
+    assert done.answer == "said: Edit was not run: the approver rejected it"
     assert built_ins(tmp_path) == []
 
 
@@ -649,7 +629,9 @@ async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_cat
     """The tool catalog's word on ``Bash`` (its risk, or an ``approve_when``) is the team's:
     then a command that only reads asks a person too, before Claude Code is asked."""
     script = [{"builtin": "Bash", "args": {"command": "ls"}}, {"text": "said: {last}"}]
-    async with with_governance(Harness(), Governance(FakeCatalog({"Bash": rule}))) as h:
+    async with with_governance(
+        Harness(config=HOST_ALLOWED), Governance(FakeCatalog({"Bash": rule}))
+    ) as h:
         asked = await h.wrap(options(tmp_path, script), id="strict").run("look", user="u1")
         assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
         call = asked.interrupt.tool_call
@@ -696,7 +678,9 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
         (work / "outputs" / name).write_text(text)
     (work / "notes.txt").write_text("scratch")
     script = [{"text": "saved"}]
-    harness = Harness(config=Settings(files_url=f"memory://claude-out-{id(tmp_path)}"))
+    harness = Harness(
+        config=Settings(host_execution="allow", files_url=f"memory://claude-out-{id(tmp_path)}")
+    )
     agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="saver")
     events = [e async for e in agent.stream("save it", user="u1")]
     assert events[-1].outcome is RunOutcome.SUCCESS
@@ -808,10 +792,10 @@ async def test_a_read_is_not_replayed_across_a_write_of_the_run(
     once, still runs exactly once."""
     read = {"builtin": "Read", "args": {"file_path": "notes.txt"}}
     write = {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "new"}}
-    deploy = {"builtin": "Bash", "args": {"command": "make deploy"}}
+    deploy = {"builtin": "Edit", "args": {"file_path": "deploy.txt"}}
     ran = await _rerun_from_its_prompt(harness, tmp_path, [read, write, deploy, {"text": "ok"}])
-    # the first attempts: Read, Write; the query again: Read anew (Write ran since), then Bash
-    assert ran == ["Read", "Write", "Read", "Bash"]
+    # the first attempts: Read, Write; the query again: Read anew (Write ran since), then Edit
+    assert ran == ["Read", "Write", "Read", "Edit"]
 
 
 async def test_a_read_no_write_followed_is_answered_from_the_journal(
@@ -820,9 +804,9 @@ async def test_a_read_no_write_followed_is_answered_from_the_journal(
     """The neighbour: with no write since, a read made again is answered with what it
     returned (it is not run twice), and so is a second, different read."""
     reads = [{"builtin": "Read", "args": {"file_path": name}} for name in ("a.txt", "b.txt")]
-    deploy = {"builtin": "Bash", "args": {"command": "make deploy"}}
+    deploy = {"builtin": "Edit", "args": {"file_path": "deploy.txt"}}
     ran = await _rerun_from_its_prompt(harness, tmp_path, [*reads, deploy, {"text": "ok"}])
-    assert ran == ["Read", "Read", "Bash"]
+    assert ran == ["Read", "Read", "Edit"]
 
 
 async def test_a_permission_prompt_tool_of_the_teams_own_is_refused(
@@ -922,13 +906,13 @@ async def test_a_skill_claude_loads_is_a_call_of_the_run_and_asks_where_the_cata
         folder.mkdir()
         return options(folder, [load, {"text": "said: {last}"}], **combine(store).claude())
 
-    async with with_governance(Harness(), Governance(FakeCatalog({}))) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog({}))) as h:
         events = [e async for e in h.wrap(target(tmp_path / "a"), id="a").stream("go", user="u")]
         assert events[-1].error is None and built_ins(tmp_path / "a") == ran
         ended = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
         assert [(e["tool"], e["status"]) for e in ended] == [("Skill", "ok")]
     strict = Governance(FakeCatalog({"Skill": Rule(risk="irreversible")}))
-    async with with_governance(Harness(), strict) as h:
+    async with with_governance(Harness(config=HOST_ALLOWED), strict) as h:
         agent = h.wrap(target(tmp_path / "b"), id="b")
         asked = await agent.run("go", user="u")
         assert asked.interrupt is not None and asked.interrupt.tool_call is not None

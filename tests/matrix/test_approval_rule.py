@@ -506,10 +506,16 @@ async def deployed(row: Row, tmp: Path) -> AsyncIterator[Deployment]:
 
     memory = FakeMemoryService()
     gateway: Any = False
-    settings = Settings()
+    # Claude Code and Kimi Code run in folders of this machine: the deployment allows it
+    settings = Settings(host_execution="allow")
     if row.way == "gateway_mcp":
         gateway = LedgerGateway(tmp / "ran").gateway()
-        settings = Settings(llm_api_key="vk", llm_base_url=GATEWAY_URL, llm_gateway="bifrost")
+        settings = Settings(
+            host_execution="allow",
+            llm_api_key="vk",
+            llm_base_url=GATEWAY_URL,
+            llm_gateway="bifrost",
+        )
     async with (
         contextlib.AsyncExitStack() as servers,
         Harness(config=settings, memory=memory.client(), gateway=gateway) as h,

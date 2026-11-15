@@ -183,8 +183,10 @@ def harness(*, memory: bool = False, runs: bool = False) -> Harness:
     the environment's memory service on (its context and tool hints); ``runs``: the
     environment's agent-runs (``RUNS_URL``) the run store."""
     config = Settings.from_env()
+    # the suite runs Claude Code and Kimi Code in work folders of this machine: its deployment
+    # allows commands here (TRELLIS_HOST_EXECUTION=allow)
     off = (
-        {"otlp_endpoint": None}
+        {"otlp_endpoint": None, "host_execution": "allow"}
         | ({} if runs else {"runs_url": None})
         | ({} if memory else {"memory_url": None})
     )

@@ -3,11 +3,13 @@ is in ``.env.example``): where the models are and how they are reached (``LLM_BA
 ``LLM_API_KEY``, ``LLM_GATEWAY``, ``LLM_AUTH``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), where the
 services are and the key they are reached with (``MEMORY_URL``, ``TRELLIS_API_KEY``,
 ``RUNS_URL``), where undelivered writes are kept (``TRELLIS_SPOOL_DIR``), where the files
-runs make for their users are (``TRELLIS_FILES_URL``) and the two limits of schedules set in
-chat (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``). Each setting
-lives in exactly one layer:
+runs make for their users are (``TRELLIS_FILES_URL``), the two limits of schedules set in
+chat (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``) and whether
+agents may run shell commands on this machine outside a sandbox (``TRELLIS_HOST_EXECUTION``:
+``allow`` by default, ``deny`` the administrator's switch; ``trellis.harness.host``). Each
+setting lives in exactly one layer:
 
-* **the environment** — what differs per deployment: the twelve above. The tools' own variables
+* **the environment** — what differs per deployment: the thirteen above. The tools' own variables
   are read by their own SDKs, or under their own names, never mirrored here: ``OTEL_*`` (the
   OpenTelemetry SDK; ``service.version`` in ``OTEL_RESOURCE_ATTRIBUTES`` is the agents'
   version), ``LANGFUSE_*`` (its scores, datasets and — with no OpenTelemetry exporter variable
@@ -36,10 +38,12 @@ import os
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 from urllib.parse import unquote
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from trellis.contracts import ConfigurationError
 
 log = logging.getLogger("trellis.settings")
 
@@ -75,7 +79,14 @@ VARIABLES: Final = {
     "files_url": "TRELLIS_FILES_URL",
     "schedule_min_interval": "TRELLIS_SCHEDULE_MIN_INTERVAL",
     "schedule_max_per_user": "TRELLIS_SCHEDULE_MAX_PER_USER",
-    "require_sandbox": "TRELLIS_REQUIRE_SANDBOX",
+    "host_execution": "TRELLIS_HOST_EXECUTION",
+}
+#: The settings a release took out, refused by name with what replaces them.
+REMOVED: Final = {
+    "require_sandbox": (
+        "host_execution replaces require_sandbox: TRELLIS_HOST_EXECUTION=deny switches shell "
+        "commands on this machine outside a sandbox off"
+    ),
 }
 
 
@@ -122,12 +133,22 @@ class Settings(BaseModel):
     #: How many schedules set in chat one user may have, per agent; ``Harness(
     #: schedule_limits=)`` overrides it per user.
     schedule_max_per_user: int = Field(default=20, ge=0)
-    #: Refuse to wrap an agent that runs a shell of its own (Claude Code, an ACP agent such
-    #: as Kimi Code) without a sandbox — Claude's ``sandbox`` enabled with no unsandboxed
-    #: commands allowed, an ``ACPAgent(sandbox=...)`` — for a tenant that must not run them on
-    #: the host. Off by default: a sandbox is not always available, and governance asks before
-    #: their writes and shell commands either way.
-    require_sandbox: bool = False
+    #: Whether agents may run shell commands on this machine outside a sandbox
+    #: (``trellis.harness.host``): ``allow`` (the default) — the harness's own through its
+    #: isolation layer, Claude Code's and Kimi Code's own shells as they run; ``deny`` — the
+    #: administrator's switch: every such shell refused where the agent is wrapped (and the
+    #: isolation layer's commands at the call), naming this setting. Commands in a sandbox are
+    #: not affected. Never a run's user's to approve.
+    host_execution: Literal["deny", "allow"] = "allow"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, given: Any) -> Any:
+        """A removed setting is refused by name, with what replaces it (:data:`REMOVED`)."""
+        for name in REMOVED:
+            if isinstance(given, Mapping) and name in given:
+                raise ConfigurationError(f"Settings({name}=) was removed: {REMOVED[name]}")
+        return given
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:

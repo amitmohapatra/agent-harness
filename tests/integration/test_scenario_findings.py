@@ -140,6 +140,7 @@ async def test_lr02_a_two_hundred_step_task_on_a_small_window_keeps_every_reques
     assert biggest / 4 <= 8_000 * 1.25, biggest
 
 
+@pytest.mark.host_execution
 @pytest.mark.parametrize("memory", [False, True])
 async def test_claude_a_burst_to_one_chat_each_turn_continues_the_turn_before(
     harness: Harness, memory_harness: Harness, memory: bool, tmp_path: Path
