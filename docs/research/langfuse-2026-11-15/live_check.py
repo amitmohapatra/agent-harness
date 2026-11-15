@@ -16,10 +16,15 @@ from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions
-
 from tests.support.arm import arm
+
 from trellis import Harness, ReAct, tool
 from trellis.harness import telemetry
+
+
+def say(*parts: Any) -> None:
+    sys.stdout.write(" ".join(str(p) for p in parts) + "\n")
+
 
 MODEL = "claude-haiku-5-5"
 #: US dollars per million tokens (benchmark.cost.prices)
@@ -40,14 +45,15 @@ def spans_of(trace_hex: str) -> list[dict[str, Any]]:
             for scope in resource.get("scopeSpans", []):
                 for span in scope.get("spans", []):
                     if span["traceId"] == trace_hex:
-                        attrs = {a["key"]: next(iter(a["value"].values())) for a in span.get("attributes", [])}
+                        given = span.get("attributes", [])
+                        attrs = {a["key"]: next(iter(a["value"].values())) for a in given}
                         found.append({**span, "attrs": attrs})
     return found
 
 
 def show(title: str, spans: list[dict[str, Any]]) -> None:
     by_id = {s["spanId"]: s for s in spans}
-    print(f"\n## {title}: {len(spans)} spans")
+    say(f"\n## {title}: {len(spans)} spans")
     for s in sorted(spans, key=lambda s: int(s["startTimeUnixNano"])):
         parent = by_id.get(s.get("parentSpanId", ""), {}).get("name", "-")
         a = s["attrs"]
@@ -65,12 +71,10 @@ def show(title: str, spans: list[dict[str, Any]]) -> None:
             )
             if k in a
         }
-        print(f"- {s['name']}  (under {parent})  {keep}")
+        say(f"- {s['name']}  (under {parent})  {keep}")
 
 
 async def main() -> None:
-    WORK.mkdir(parents=True, exist_ok=True)
-    (WORK / "notes.txt").write_text("The order to chase is O-4471.\n")
     async with Harness() as h:
         target = ReAct(system_prompt="Answer briefly.", model=MODEL)
         react = arm(h.wrap(target, id="live-react"), [order_status])
@@ -90,7 +94,7 @@ async def main() -> None:
         )
     await asyncio.sleep(3)  # the collector's batch
     for title, result in (("ReAct", one), ("Claude Code", two)):
-        print(f"\n{title}: {result.status.value} answer={str(result.answer)[:120]!r}")
+        say(f"\n{title}: {result.status.value} answer={str(result.answer)[:120]!r}")
         spans = spans_of(telemetry.trace_hex(result.run_id))
         show(title, spans)
         names = [s["name"] for s in spans]
@@ -98,9 +102,11 @@ async def main() -> None:
         assert any(n.startswith("execute_tool ") for n in names), names
         assert any(n.startswith("chat ") for n in names), names
         ended = [s["attrs"] for s in spans if s["name"].startswith("invoke_agent live-")][-1]
-        print("spent:", {k: v for k, v in ended.items() if k.startswith("trellis.spent.")})
+        say("spent:", {k: v for k, v in ended.items() if k.startswith("trellis.spent.")})
     claude_spans = spans_of(telemetry.trace_hex(two.run_id))
     assert "execute_tool Read" in [s["name"] for s in claude_spans]
 
 
+WORK.mkdir(parents=True, exist_ok=True)
+(WORK / "notes.txt").write_text("The order to chase is O-4471.\n")
 asyncio.run(main())
