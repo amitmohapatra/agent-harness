@@ -932,7 +932,8 @@ def test_a_request_is_fitted_to_what_the_provider_accepts_beside_the_reply(
     send (a name's reply is its resolved chat model's: read from the name itself there was
     none, so 950,000 tokens were sent where the provider accepts 872,000), and a window the
     caller gives is not eaten by a reply that fits the model's own (a 32,000 window given for
-    a model replying up to 64,000 was left no input at all)."""
+    a model replying up to 64,000 was left no input at all — and so was a graph's own model
+    beside ``middleware(context_window=8_000)``, its profile the model's own window)."""
     import random
     from types import SimpleNamespace
 
@@ -956,17 +957,19 @@ def test_a_request_is_fitted_to_what_the_provider_accepts_beside_the_reply(
         model = ChatAnthropic(model_name=name, max_tokens=reply, api_key="sk-ant")  # type: ignore[call-arg,arg-type]
         model = model.model_copy(update={"profile": {"max_input_tokens": own}})
         sends = reply
-    request = SimpleNamespace(model=_profiled(model, given), model_settings={})
-    budget = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
     window = given or own
-    assert budget is not None and 0 < budget <= int(window * FIT_SHARE)
-    assert budget + sends <= int(own * FIT_SHARE)  # the provider takes input and reply
-    if int(window * FIT_SHARE) + sends <= int(own * FIT_SHARE):
-        assert budget == int(window * FIT_SHARE)  # room for the reply: the window's whole share
-    # a reply asked for on this call alone is the one reserved
-    request.model_settings = {"max_tokens": 1_000}
-    less = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
-    assert less == min(int(window * FIT_SHARE), int(own * FIT_SHARE) - 1_000)
+    # ReAct's model, its profile the window given; a graph's own beside middleware(), as it is
+    for sent in (_profiled(model, given), model):
+        request = SimpleNamespace(model=sent, model_settings={})
+        budget = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
+        assert budget is not None and 0 < budget <= int(window * FIT_SHARE)
+        assert budget + sends <= int(own * FIT_SHARE)  # the provider takes input and reply
+        if int(window * FIT_SHARE) + sends <= int(own * FIT_SHARE):
+            assert budget == int(window * FIT_SHARE)  # room for the reply: the window's share
+        # a reply asked for on this call alone is the one reserved
+        request.model_settings = {"max_tokens": 1_000}
+        less = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
+        assert less == min(int(window * FIT_SHARE), int(own * FIT_SHARE) - 1_000)
 
 
 def test_a_name_no_route_can_make_reserves_nothing_and_the_call_says_why() -> None:

@@ -799,7 +799,9 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     # a new turn's state starts with what its conversation carries (:data:`CARRIED`)
     carried = getattr(runtime, "carried", None)
     started = (
-        {**native_input, **carried} if carried and isinstance(native_input, dict) else native_input
+        _carrying(target, native_input, carried)
+        if carried and isinstance(native_input, dict)
+        else native_input
     )
     if carried and ACTIVE_AGENT in carried:  # whose turn it is, on the run's stream
         runtime.events.custom(ACTIVE_AGENT, agent=carried[ACTIVE_AGENT])
@@ -822,6 +824,21 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     latest = configurable.get("checkpoint_id")
     replay.resumed = latest if isinstance(latest, str) else None
     return native_input if resumed else None
+
+
+def _carrying(target: Any, native_input: dict[str, Any], carried: Mapping[str, Any]) -> Any:
+    """A new turn's input with what its conversation carries: merged into it — or, when the
+    graph's input leaves a carried channel out (LangChain's ``OmitFromInput``:
+    ``TodoListMiddleware``'s ``todos``, which an input would drop), written to the graph's
+    state as the turn starts (``Command(update=)``), what is not a channel of the graph left
+    out as an input leaves it."""
+    from langgraph.types import Command
+
+    started = {**native_input, **carried}
+    taken = target.get_input_jsonschema().get("properties") or {}
+    if all(name in taken for name in carried):
+        return started
+    return Command(update={k: v for k, v in started.items() if k in target.channels})
 
 
 def _answered(target: Any, native_input: Any, values: Any) -> Any:
