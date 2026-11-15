@@ -17,7 +17,7 @@
   it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
-  agent-runs.
+  agent-runs. Only the run's own user.
 * ``GET {path}/runs/{run_id}/files/{name}`` — a file the run kept for its user (its ``file``
   event names it): a redirect to a link the store signs for :data:`~trellis.harness.files.
   LINK_SECONDS` (GCS, S3, Azure), else its bytes streamed. Only the run's own user.
@@ -238,6 +238,9 @@ class _Surface:
             safe_id(body.run_id) != body.run_id
             or self.hub.get(body.run_id)
             or body.run_id in self._starting
+            # one the run store has (another replica's, one the hub forgot): never attempted
+            # again under this caller's name
+            or await agent.harness.runs.get(body.run_id, tenant=tenant) is not None
         ):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
         try:
@@ -382,7 +385,9 @@ class _Surface:
         return record.status
 
     async def artifact(self, request: Request, run_id: str, artifact_id: str) -> Response:
-        await self.user(request)
+        """The data the interrupt the user's own run waits on carries by reference: 404 for
+        anyone else's run."""
+        user = await self.user(request)
         agent = self.agent
         tenant = await agent.harness._tenant()
         record = await agent.harness.runs.get(run_id, tenant=tenant)
@@ -391,6 +396,7 @@ class _Surface:
         if (
             record is None
             or record.agent_id != agent.id
+            or record.user_id != user
             or ref is None
             or ref.artifact_id != artifact_id
         ):
@@ -621,7 +627,8 @@ def _router(surface: _Surface, path: str) -> APIRouter:
     )
     async def artifact(request: Request, run_id: str, artifact_id: str) -> Response:
         """The bytes of the `payload_ref` of the interrupt the run waits on (an `ask`
-        table or diff), from agent-runs — so any replica serves them."""
+        table or diff), from agent-runs — so any replica serves them. Only the run's own
+        user."""
         try:
             return await surface.artifact(request, run_id, artifact_id)
         except HTTPException as exc:
