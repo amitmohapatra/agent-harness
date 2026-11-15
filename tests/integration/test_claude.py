@@ -699,6 +699,29 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     await harness.aclose()
 
 
+async def test_a_link_in_the_outputs_folder_is_not_followed(tmp_path: Path) -> None:
+    """A link in ``outputs/`` (``ln -s`` from Claude's shell) is not a file the run wrote: what
+    it leads to — any file the harness's own account may read, which the run's may not — is
+    never kept for the user; the link is left, said in a warning."""
+    secret = tmp_path / "service.env"
+    secret.write_text("TRELLIS_API_KEY=sk-secret\n")
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    (work / "outputs" / "env.txt").symlink_to(secret)
+    store = f"memory://claude-link-{id(tmp_path)}"
+    harness = Harness(config=Settings(host_execution="allow", files_url=store))
+    agent = harness.wrap(options(tmp_path, [{"text": "saved"}], cwd=str(work)), id="saver")
+    events = [e async for e in agent.stream("save it", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    assert not [e for e in events if e.data.get("name") == "file"]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "sandbox"]
+    assert len(warned) == 1 and warned[0].startswith("the output env.txt was not kept: a link")
+    kept = await harness.files.files("")
+    assert all(name != "env.txt" for _, name, _ in kept)
+    assert (work / "outputs" / "env.txt").is_symlink()
+    await harness.aclose()
+
+
 async def test_a_built_in_tool_goes_through_the_hooks_then_the_teams_own_callback(
     harness: Harness, tmp_path: Path
 ) -> None:

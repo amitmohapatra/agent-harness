@@ -45,12 +45,14 @@ import dataclasses
 import functools
 import itertools
 import logging
+import os
 import posixpath
 import socket
 import time
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
@@ -601,7 +603,7 @@ async def delivered(runtime: Runtime) -> None:
     its sandbox's, before the sandbox is deleted, and that of the folder its framework works in
     on this machine (``Adapter.workdir``: Claude Code's, Kimi Code's), moved out of it so a
     later run does not give it again. A file that cannot be kept (its name, its size past
-    :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
+    :data:`OUTPUT_MAX_BYTES`, a link there: :func:`_written`) is left, said in a warning."""
     box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
     if box is not None and source is not None:
         tool = EXEC if EXEC in runtime.toolbox else "execute"
@@ -617,10 +619,22 @@ async def delivered(runtime: Runtime) -> None:
         files = sorted(f for f in here.iterdir() if f.is_file())
 
         async def read(name: str) -> bytes:
-            return await asyncio.to_thread((here / name).read_bytes)
+            return await asyncio.to_thread(_written, here / name)
 
-        sized = [(f.stat().st_size, f.name) for f in files]
+        sized = [(f.lstat().st_size, f.name) for f in files]
         await _kept(runtime, sized, read, agent.adapter.name, moved=lambda n: (here / n).unlink())
+
+
+def _written(path: Path) -> bytes:
+    """The bytes of the file at ``path`` itself, never of where a link there leads: any file
+    this process may read, which the run's own account may not (``O_NOFOLLOW``, so a link
+    put there after it was listed is refused too)."""
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:  # ELOOP: a link
+        raise ToolError("a link, not a file written there", source="tools") from exc
+    with os.fdopen(handle, "rb") as opened:
+        return opened.read()
 
 
 async def _kept(
