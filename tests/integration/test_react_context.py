@@ -271,3 +271,41 @@ async def test_langchains_own_summarization_keeps_the_task_and_its_memory_ahead(
         said = str(messages)
         assert "take five notes" in said, messages
         assert "The user prefers email." in said, messages
+
+
+async def test_langchains_own_summarization_keeps_the_task_ahead_with_no_memory(
+    harness: Harness,
+) -> None:
+    """The same with no memory service: no context was pushed with the question, so the
+    question alone is sent ahead of the summary — no empty context block before it."""
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    from trellis.harness.history import ASKED_WITH
+    from trellis.harness.react import middleware
+
+    @tool(side_effects="read")
+    def note(text: str) -> str:
+        """Take a note."""
+        return "noted"
+
+    script: list[Any] = [("note", {"text": f"{n} " + "n" * 400}) for n in range(5)]
+    summarizing = Summarizing([*script, "done"])
+    model = ScriptedChat(script=summarizing)
+    summarize = SummarizationMiddleware(model, trigger=("messages", 6), keep=("messages", 2))
+    graph = create_agent(model, tools=[], middleware=[summarize, *middleware()])
+    agent = arm(harness.wrap(graph, id="lc-notes"), [note])
+    done = await agent.run("take five notes", user="u")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+    assert summarizing.summaries >= 1
+    after = [
+        r["messages"]
+        for r in model.requests
+        if "SESSION INTENT" in str(r["messages"])
+        and "Messages to summarize" not in str(r["messages"][-1].get("content"))
+    ]
+    assert after, "no request after the summary"
+    marker = ASKED_WITH.split("{context}")[0].strip()
+    for messages in after:
+        assert "take five notes" in str(messages), messages
+        assert marker not in str(messages), messages

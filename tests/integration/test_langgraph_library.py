@@ -864,6 +864,77 @@ async def test_the_stream_transformers_a_graph_is_compiled_with_shape_what_the_r
     assert deltas == ["QUIET ", "WORDS"]
 
 
+async def test_through_stream_transformers_only_a_models_text_is_the_runs_text(
+    harness: Harness,
+) -> None:
+    """A graph compiled with stream transformers is streamed through them: a model's thinking
+    and its tool call's streamed arguments pass too, as deltas that are not text — none of them
+    is the run's text, only the answer's words are."""
+    from langchain.agents import create_agent
+    from langgraph.stream import StreamTransformer
+
+    class Passing(StreamTransformer):
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            return True
+
+    @lc_tool
+    def look(sku: str) -> str:
+        """Look a SKU up."""
+        return f"{sku} in stock"
+
+    look.metadata = {"side_effects": "read"}
+    model = StreamingChatModel(
+        turns=[("look", {"sku": "a"}), "quiet words"], thinking="hmm, let me see", piece=6
+    )
+    graph = create_agent(model, tools=[look], transformers=[Passing])
+    events = [e async for e in harness.wrap(graph, id="passes").stream("hi", user="u")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert "".join(deltas) == "quiet words", deltas
+    assert events[-1].data["result"] == "quiet words"
+
+
+@pytest.mark.parametrize("transformed", [False, True], ids=["plain", "transformers"])
+async def test_a_subgraphs_custom_writes_are_its_own_not_the_runs(
+    harness: Harness, transformed: bool
+) -> None:
+    """The run streams its root graph's events: what a subgraph node writes to the ``custom``
+    stream stays the subgraph's — through stream transformers too, which see every
+    namespace's events and leave the subgraphs' out of the run's."""
+    from langgraph.stream import StreamTransformer
+
+    class Passing(StreamTransformer):
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            return True
+
+    def inner_step(state: Tried) -> dict[str, Any]:
+        get_stream_writer()({"from": "inner"})
+        return {"n": 1}
+
+    def outer_step(state: Tried) -> dict[str, Any]:
+        get_stream_writer()({"from": "outer"})
+        return {"n": 2}
+
+    inner = StateGraph(Tried)
+    inner.add_node("step", inner_step)
+    inner.add_edge(START, "step")
+    inner.add_edge("step", END)
+    graph = StateGraph(Tried)
+    graph.add_node("sub", inner.compile())
+    graph.add_node("step", outer_step)
+    graph.add_edge(START, "sub")
+    graph.add_edge("sub", "step")
+    graph.add_edge("step", END)
+    compiled = graph.compile(transformers=[Passing]) if transformed else graph.compile()
+    events = [e async for e in harness.wrap(compiled, id="nested").stream({}, user="u")]
+    assert custom(events) == [{"name": "custom", "value": {"from": "outer"}}]
+
+
 async def test_a_run_not_streamed_has_the_custom_writes_among_its_events(harness: Harness) -> None:
     """``agent.run`` emits the same events as ``agent.stream`` (its log, ``agent.events``, a
     surface): the writes are among them."""

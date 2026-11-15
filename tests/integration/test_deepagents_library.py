@@ -284,6 +284,8 @@ async def test_a_composite_backend_routes_each_path_to_its_backend(
             True,
         ),
         (("edit_file", {"file_path": "/s.md", "old_string": "a", "new_string": "b"}), False),
+        # a path Deep Agents refuses cannot be placed: governed, it fails closed
+        (("read_file", {"file_path": "../kept/final.md"}), True),
     ],
 )
 async def test_a_composite_backends_call_is_governed_when_it_reaches_past_the_state(
