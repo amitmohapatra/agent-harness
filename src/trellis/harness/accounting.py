@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import logging
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import Any, Final
 from uuid import UUID
@@ -24,7 +25,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.tracers.context import register_configure_hook
 
 from trellis.harness import admission, budget
-from trellis.harness.bounded import LRU, SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.gateways import Capability
 from trellis.harness.runtime import current
 
@@ -56,6 +57,25 @@ def at_output_limit(message: AIMessage) -> bool:
     return any(said.get(key) in AT_OUTPUT_LIMIT for key in STOP_KEYS)
 
 
+#: The chat models whose client tries a failed request again unless told otherwise
+#: (``max_retries`` unset: the provider SDK's default retries), by LangChain class name.
+RETRYING_CLIENTS: Final = frozenset({"ChatOpenAI", "AzureChatOpenAI", "ChatAnthropic"})
+
+
+def retries_itself(serialized: Mapping[str, Any] | None) -> bool:
+    """Whether the chat model a call was made with tries a failed request again itself, as
+    LangChain serializes it (its class, the fields set on it): a ``max_retries`` set and not
+    0, or — none set — one of :data:`RETRYING_CLIENTS`. A model the harness routes sets none
+    and is none of them (the gateway retries)."""
+    if not serialized:
+        return False
+    given = (serialized.get("kwargs") or {}).get("max_retries")
+    if given is not None:
+        return given != 0
+    kind = (serialized.get("id") or [""])[-1]
+    return kind in RETRYING_CLIENTS
+
+
 class UsageAccounting(BaseCallbackHandler):
     """Each chat model reply's usage (and the gateway's cost), accounted to the current run;
     each call watched for a stall from its start to its end."""
@@ -69,6 +89,8 @@ class UsageAccounting(BaseCallbackHandler):
         if runtime is not None:
             runtime.model_started(str(run_id))
             _STARTED[str(run_id)] = time.monotonic()
+            if retries_itself(serialized):
+                _RETRYING.add(str(run_id))
             _routed_or_said(runtime, serialized)
 
     def on_llm_start(
@@ -83,7 +105,10 @@ class UsageAccounting(BaseCallbackHandler):
         if runtime is not None:
             runtime.model_ended(str(run_id))
             runtime.model_failures += 1
+            if str(run_id) in _RETRYING:  # its client tried again before it failed
+                runtime.model_failures += 1
             _STARTED.pop(str(run_id))
+            _RETRYING.discard(str(run_id))
             if _status(error) == RATE_LIMITED:
                 admission.ADMISSION.throttled()
 
@@ -112,6 +137,7 @@ class UsageAccounting(BaseCallbackHandler):
         runtime.model_ended(str(run_id))
         runtime.model_failures = 0
         began = _STARTED.pop(str(run_id))
+        _RETRYING.discard(str(run_id))
         for generations in response.generations:
             for generation in generations:
                 message = getattr(generation, "message", None)
@@ -128,6 +154,8 @@ RATE_LIMITED: Final = 429
 #: When each chat model call under way started, by its LangChain run id (bounded: a call that
 #: never ends is forgotten).
 _STARTED: Final[LRU[str, float]] = LRU(1024)
+#: The calls under way whose client tries a failed request again itself (:func:`retries_itself`).
+_RETRYING: Final[LRUSet[str]] = LRUSet(maxsize=1024)
 
 
 def _status(error: BaseException) -> int | None:

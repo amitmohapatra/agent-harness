@@ -147,3 +147,34 @@ async def test_every_langchain_model_call_of_a_run_is_watched() -> None:
     callbacks.on_llm_start({}, ["prompt"], run_id=text)
     callbacks.on_llm_error(RuntimeError("down"), run_id=text)
     assert calls == []
+
+
+def test_a_client_that_retries_itself_is_known_from_how_langchain_serializes_it() -> None:
+    """``max_retries`` set: as set (0 retries not); unset: the provider SDK's default, which
+    retries for OpenAI's and Anthropic's clients; any other model, or none: not."""
+    openai = ["langchain", "chat_models", "openai", "ChatOpenAI"]
+    assert accounting.retries_itself({"id": openai, "kwargs": {}})
+    assert not accounting.retries_itself({"id": openai, "kwargs": {"max_retries": 0}})
+    assert accounting.retries_itself({"id": ["x", "Mine"], "kwargs": {"max_retries": 3}})
+    assert not accounting.retries_itself({"id": ["x", "RoutedChatModel"], "kwargs": {}})
+    assert not accounting.retries_itself(None)
+
+
+async def test_a_failure_after_the_clients_own_retries_is_counted_as_retried() -> None:
+    """Without the harness's ``ModelHooks`` (a graph of the user's own), a call whose client
+    tried again itself and still failed counts as a retried failure: the run store does not run
+    the whole run again on top of those tries (``pipeline._settled``)."""
+    runtime, _ = _runtime()
+    token = _current.set(runtime)
+    try:
+        handler = accounting.UsageAccounting()
+        retrying, plain = uuid.uuid4(), uuid.uuid4()
+        handler.on_chat_model_start({"id": ["x", "ChatAnthropic"]}, [], run_id=retrying)
+        handler.on_llm_error(RuntimeError("503"), run_id=retrying)
+        assert runtime.model_failures == 2
+        runtime.model_failures = 0
+        handler.on_chat_model_start({"id": ["x", "Routed"], "kwargs": {}}, [], run_id=plain)
+        handler.on_llm_error(RuntimeError("503"), run_id=plain)
+        assert runtime.model_failures == 1
+    finally:
+        _current.reset(token)
