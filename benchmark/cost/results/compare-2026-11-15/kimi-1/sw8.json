@@ -1,0 +1,102 @@
+{
+  "suite": "complex",
+  "model": "claude-haiku-5-5",
+  "history": "memory",
+  "adapter": "kimi",
+  "variant": "main",
+  "window": 8000,
+  "date": "2026-11-15",
+  "usd": 0.008712,
+  "max_usd": 0.1,
+  "stopped": null,
+  "cases_total": 267,
+  "summary": {
+    "all": {
+      "cases": 2,
+      "scored_turns": 2,
+      "strict": {
+        "mean": 1.0,
+        "ci95": 0.0,
+        "n": 2
+      },
+      "judge_only": 0,
+      "unverified": 0,
+      "not_success": 0,
+      "checks": 2,
+      "checks_failed": 0,
+      "not_applicable": 0
+    },
+    "by_category": {
+      "long_data": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 1,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_multi": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 1,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "by_tier": {
+      "3": {
+        "cases": 2,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "cost": {
+      "input_tokens": {
+        "mean": 157213.5,
+        "ci95": 899413.269,
+        "n": 2
+      },
+      "output_tokens": {
+        "mean": 2680.0,
+        "ci95": 19910.302,
+        "n": 2
+      },
+      "model_calls": {
+        "mean": 4.0,
+        "ci95": 12.706,
+        "n": 2
+      },
+      "seconds": {
+        "mean": 21.2185,
+        "ci95": 92.64579900000001,
+        "n": 2
+      }
+    },
+    "turns": 2
+  }
+}

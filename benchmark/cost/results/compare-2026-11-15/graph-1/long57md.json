@@ -1,0 +1,87 @@
+{
+  "suite": "complex",
+  "model": "claude-haiku-5-5",
+  "history": "memory",
+  "adapter": "graph",
+  "variant": "main",
+  "window": null,
+  "date": "2026-11-15",
+  "usd": 0.025853,
+  "max_usd": 0.15,
+  "stopped": null,
+  "cases_total": 267,
+  "summary": {
+    "all": {
+      "cases": 2,
+      "scored_turns": 13,
+      "strict": {
+        "mean": 1.0,
+        "ci95": 0.0,
+        "n": 13
+      },
+      "judge_only": 0,
+      "unverified": 0,
+      "not_success": 0,
+      "checks": 18,
+      "checks_failed": 0,
+      "not_applicable": 0
+    },
+    "by_category": {
+      "long_flow": {
+        "cases": 2,
+        "scored_turns": 13,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 13
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 18,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "by_tier": {
+      "3": {
+        "cases": 2,
+        "scored_turns": 13,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 13
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 18,
+        "checks_failed": 0,
+        "not_applicable": 0
+      }
+    },
+    "cost": {
+      "input_tokens": {
+        "mean": 103697.5,
+        "ci95": 883162.2949999999,
+        "n": 2
+      },
+      "output_tokens": {
+        "mean": 5113.0,
+        "ci95": 44979.24,
+        "n": 2
+      },
+      "model_calls": {
+        "mean": 10.5,
+        "ci95": 69.883,
+        "n": 2
+      },
+      "seconds": {
+        "mean": 92.0775,
+        "ci95": 790.6499090000001,
+        "n": 2
+      }
+    },
+    "turns": 13
+  }
+}
