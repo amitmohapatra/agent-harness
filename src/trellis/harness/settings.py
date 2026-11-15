@@ -72,6 +72,7 @@ VARIABLES: Final = {
     "files_url": "TRELLIS_FILES_URL",
     "schedule_min_interval": "TRELLIS_SCHEDULE_MIN_INTERVAL",
     "schedule_max_per_user": "TRELLIS_SCHEDULE_MAX_PER_USER",
+    "require_sandbox": "TRELLIS_REQUIRE_SANDBOX",
 }
 
 
@@ -117,6 +118,12 @@ class Settings(BaseModel):
     #: How many schedules set in chat one user may have, per agent; ``Harness(
     #: schedule_limits=)`` overrides it per user.
     schedule_max_per_user: int = Field(default=20, ge=0)
+    #: Refuse to wrap an agent that runs a shell of its own (Claude Code, an ACP agent such
+    #: as Kimi Code) without a sandbox — Claude's ``sandbox`` enabled with no unsandboxed
+    #: commands allowed, an ``ACPAgent(sandbox=...)`` — for a tenant that must not run them on
+    #: the host. Off by default: a sandbox is not always available, and governance asks before
+    #: their writes and shell commands either way.
+    require_sandbox: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:

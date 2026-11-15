@@ -29,6 +29,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "TRELLIS_FILES_URL": "gs://acme/files",
         "TRELLIS_SCHEDULE_MIN_INTERVAL": "600",
         "TRELLIS_SCHEDULE_MAX_PER_USER": "5",
+        "TRELLIS_REQUIRE_SANDBOX": "true",
     }
     settings = Settings.from_env(env)
     assert settings.model_dump() == {
@@ -44,6 +45,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "files_url": "gs://acme/files",
         "schedule_min_interval": 600.0,
         "schedule_max_per_user": 5,
+        "require_sandbox": True,
     }
     assert set(env) == set(settings_module.VARIABLES.values())  # every one, and only them
     assert sourced(env)["api_key"] == ("tk", "TRELLIS_API_KEY")
@@ -155,3 +157,32 @@ def test_env_example_documents_exactly_what_is_read() -> None:
         "OTEL_RESOURCE_ATTRIBUTES",
     }
     assert read == documented
+
+
+def test_a_deployment_that_requires_a_sandbox_wraps_no_shell_agent_without_one() -> None:
+    """``require_sandbox``: Claude Code without its sandbox enabled (or with commands let out of
+    it) and an ACP agent without one are refused at ``h.wrap``, saying how; with one they wrap,
+    and a framework that runs no shell of its own is not checked."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from trellis import Harness
+    from trellis.contracts import ConfigurationError
+    from trellis.harness.adapters.acp import ACPAgent
+
+    async def plain(input: str) -> str:
+        return input
+
+    h = Harness(config=Settings(require_sandbox=True), memory=False)
+    for n, refused in enumerate(
+        [
+            ClaudeAgentOptions(),
+            ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": True}),
+            ACPAgent(command=["kimi", "acp"]),
+        ]
+    ):
+        with pytest.raises(ConfigurationError, match="TRELLIS_REQUIRE_SANDBOX"):
+            h.wrap(refused, id=f"refused-{n}")
+    h.wrap(ClaudeAgentOptions(sandbox={"enabled": True}), id="claude-boxed")
+    h.wrap(ACPAgent(command=["kimi", "acp"], sandbox=object()), id="kimi-boxed")
+    h.wrap(plain, id="no-shell")
+    assert set(h.agents) == {"claude-boxed", "kimi-boxed", "no-shell"}
