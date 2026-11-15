@@ -131,7 +131,7 @@ class Internal(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"internal")
 
-    def log_message(self, *_: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
 
