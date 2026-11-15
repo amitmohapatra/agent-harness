@@ -243,7 +243,11 @@ that ends with nothing at work ends it, as ever.
   session's own folder (`sessions/<workspace>/<session>`) leaves its user's Kimi home too — its
   login and config stay — and the conversation's next turn starts a new session, given its
   earlier turns by the harness (a session closed for other settings, or as the turn ends with
-  nothing at work, stays on disk: the next turn resumes it).
+  nothing at work, stays on disk: the next turn resumes it). Such a session's folder stays as
+  long as the agent keeps the session for the conversation's next turn: it leaves the Kimi home
+  once the agent lets go of it — its place given to the 128 conversations whose turns are more
+  recent, or dropped because another worker served a later turn — and with the harness
+  (`Harness.aclose`). A paused turn's session stays: its run's resume continues it.
 * **On another worker.** A turn whose session another worker's process still holds (a background
   run it handed on, not ended) forks it (`session/fork`) and goes on there in a process of its own.
 * **Not kept:** a run with no `thread`, a sub-agent's run, a sandboxed run (its sandbox is the

@@ -44,6 +44,20 @@ def test_an_lru_forgets_the_least_recently_used_past_its_bound() -> None:
     assert list(seen) == ["z"]
 
 
+def test_an_lru_tells_of_each_entry_it_lets_go_of() -> None:
+    """Past its bound and discarded, each entry once; one written over or taken out (popped),
+    or one it does not hold, is no entry let go of."""
+    gone: list[tuple[str, int]] = []
+    lru: LRU[str, int] = LRU(3, gone=lambda key, value: gone.append((key, value)))
+    lru["a"], lru["b"], lru["c"] = 1, 2, 3
+    lru["b"] = 4
+    lru["d"] = 5
+    assert lru.pop("c") == 3
+    lru.discard("b")
+    lru.discard("zz")
+    assert gone == [("a", 1), ("b", 4)] and list(lru) == ["d"]
+
+
 async def test_per_tenant_state_is_bounded() -> None:
     async with Harness(config=Settings()) as h:
         h._governances = LRU(3)

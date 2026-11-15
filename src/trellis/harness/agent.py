@@ -414,8 +414,11 @@ class Agent:
         self.earlier_turns: LRU[str, Turn] = LRU()
         #: the session its framework kept for each conversation's last turn in this process
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
-        #: turn continues it (``pipeline``, ADR 0005), the most recent kept
-        self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
+        #: turn continues it (``pipeline``, ADR 0005), the most recent kept; one let go of is
+        #: the framework's to forget (:meth:`_session_gone`)
+        self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(
+            SESSIONS_KEPT, gone=self._session_gone
+        )
         #: the latest turn of each conversation this process served: a session kept here is
         #: stale once another worker started a later one (``pipeline._served_elsewhere``)
         self.turned: LRU[str, str] = LRU(SESSIONS_KEPT)
@@ -429,10 +432,19 @@ class Agent:
 
     async def aclose(self) -> None:
         """End what the agent's framework keeps running between runs in this process (the
-        Claude Agent SDK's live sessions: ``bridges.claude_live``), where it keeps any."""
+        Claude Agent SDK's live sessions: ``bridges.claude_live``; an ACP agent's, and the
+        files of the sessions kept for a conversation's next turn), where it keeps any."""
         close = getattr(self.adapter, "aclose", None)
         if close is not None:
             await close()
+
+    def _session_gone(self, conversation: str, kept: tuple[str, Any]) -> None:
+        """The session kept for ``conversation``'s next turn is kept no more (its place given
+        to another conversation's, or dropped): the framework lets go of what it keeps of it,
+        where it keeps any (an ACP agent's files: ``ACPAdapter.session_gone``)."""
+        gone = getattr(self.adapter, "session_gone", None)
+        if gone is not None:
+            gone(kept[0])
 
     @property
     def evals(self) -> EvalServices:
