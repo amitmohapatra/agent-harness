@@ -30,3 +30,9 @@ benchmark/cost/results/**/*.jsonl
 benchmark/cost/results/**/*.gz
 benchmark/cost/results/**/*.log
 docs/research/*/data/*/
+
+# stray files: merge leftovers, agent worktrees, local agent settings
+*.orig
+*.rej
+.claude/worktrees/
+.claude/settings.local.json
