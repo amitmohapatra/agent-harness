@@ -26,6 +26,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   agent's options. The process the run started in now keeps them for its resume; a resume in
   another process runs with the agent's, as documented — an object is not stored
   ([configuration.md](docs/configuration.md#the-frameworks-own-run-options)).
+* **Claude and Kimi: a file the user places is written where they said.** The line the
+  harness adds about `outputs/` ("save a file the user asks for there") made Claude write a
+  `hello.txt` the user asked for in the working folder into `outputs/` instead (1 run of 2 on
+  Haiku). It now says a file the user names (a bare name: the working folder) or places goes where
+  they said, and `outputs/` is for a file made to give the user with no place named
+  ([sandbox.md](docs/sandbox.md)).
 * **Docs: Kimi offers its model an MCP server over HTTP, not a stdio one.** Kimi 2.6.2 starts
   a stdio MCP server and lists its tools but leaves them out of its model's requests, given in
   ACP's `session/new` or in its own `mcp.json` alike; one over HTTP is offered at once

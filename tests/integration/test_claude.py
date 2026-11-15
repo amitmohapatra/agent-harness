@@ -108,6 +108,32 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     assert target.mcp_servers == {}  # the team's options are untouched
 
 
+#: What docs/sandbox.md says Claude (and Kimi) is told of its working folder's ``outputs/``.
+SANDBOX_DOCS = Path(__file__).resolve().parents[2] / "docs" / "sandbox.md"
+TOLD_OF_OUTPUTS = (
+    "Files you write in outputs/ of your working directory are given to the user when you "
+    "finish. Write a file the user names, or gives a path or folder for, exactly there (a bare "
+    "name is in your working directory); use outputs/ for a file you make to give the user that "
+    "they named no place for."
+)
+
+
+async def test_the_outputs_line_sends_there_only_a_file_for_the_user_with_no_place_named(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """SBX-OUTPUTS-LINE: the line after the team's system prompt hands over what is written in
+    ``outputs/``, and leaves a file the user asked for at a named place where they said — the
+    SDK's own ``Write`` as without the harness (a line telling Claude to save any file the
+    user asks for in ``outputs/`` moved a ``hello.txt`` asked for in the working folder there).
+    It is the one sandbox.md documents."""
+    target = options(tmp_path, [{"text": "written"}], system_prompt="You write.")
+    result = await harness.wrap(target, id="writes").run("write hello.txt here", user="u1")
+    assert result.status is RunStatus.SUCCESS
+    assert started_with(tmp_path)["system_prompt"] == f"You write.\n\n{TOLD_OF_OUTPUTS}"
+    documented = SANDBOX_DOCS.read_text()
+    assert " ".join(TOLD_OF_OUTPUTS.split()) in " ".join(documented.split())
+
+
 asked: list[dict[str, Any]] = []
 
 

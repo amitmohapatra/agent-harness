@@ -182,10 +182,14 @@ STARTS: Final = (
     "filter, a ranking or a join over saved rows is query_result's: exact over every row."
 )
 #: What an agent working in a folder of its own on this machine (Claude Code's, Kimi Code's:
-#: ``Adapter.workdir``) is told with its context: the same ``outputs/``, kept the same way.
+#: ``Adapter.workdir``) is told with its context: the same ``outputs/``, kept the same way —
+#: for a file meant for the user that they named no place for; one they placed goes where
+#: they said (its own ``Write`` as the SDK does it without the harness).
 DELIVERS_HERE: Final = (
     f"Files you write in {OUTPUTS}/ of your working directory are given to the user when you "
-    "finish: save a file the user asks for there."
+    "finish. Write a file the user names, or gives a path or folder for, exactly there (a bare "
+    f"name is in your working directory); use {OUTPUTS}/ for a file you make to give the user "
+    "that they named no place for."
 )
 
 
