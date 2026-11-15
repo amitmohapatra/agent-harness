@@ -226,7 +226,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 | its shell in its sandbox | the deployment | runs unasked, announced (`tool_notice`) and recorded |
 | its shell on the host (no sandbox, or one that lets a command out) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it, give Claude Code its own sandbox (below) |
 | `WebFetch`, `WebSearch` | the administrator, in the tool catalog | refused until the catalog gives the tool a risk or an `approve_when` |
-| MCP servers, `allowed_tools`, a `permission_mode` that lets calls through (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`) | the deployment | on the options you wrap or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused (`default` and `plan` it may choose) |
+| MCP servers, `allowed_tools`, a `permission_mode` that lets calls through (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`), the CLI's own flags (`extra_args`), its `settings` | the deployment | on the options you wrap or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused (`default` and `plan` it may choose) |
 
 ## Where sandbox, skills and hooks go
 

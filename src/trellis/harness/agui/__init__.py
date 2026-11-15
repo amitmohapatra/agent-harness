@@ -17,7 +17,7 @@
   it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
-  agent-runs.
+  agent-runs. Only the run's own user.
 * ``GET {path}/runs/{run_id}/files/{name}`` — a file the run kept for its user (its ``file``
   event names it): a redirect to a link the store signs for :data:`~trellis.harness.files.
   LINK_SECONDS` (GCS, S3, Azure), else its bytes streamed. Only the run's own user.
@@ -92,7 +92,7 @@ from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_u
 from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
-from trellis.harness.runtime import run_of
+from trellis.harness.runtime import answers, run_of
 from trellis.harness.schedules import zone_of
 from trellis.memory.errors import AuthorizationError, NotFoundError
 from trellis.runs import ConflictError
@@ -159,7 +159,8 @@ def _refusals(*statuses: int) -> dict[int | str, dict[str, Any]]:
         401: f"no trusted identity: the {IDENTITY_HEADER} header is missing or refused (or "
         "the deployment's identity(request) named nobody)",
         404: "no such run, interrupt, artifact or attached document for this caller",
-        409: "a resume that cannot be read as a decision, or that the run refuses (BAD_RESUME)",
+        409: "a resume that cannot be read as a decision, that the run refuses, or of a "
+        "question assigned to someone else (BAD_RESUME)",
         422: "a runId that is not a fresh identifier, or a file part not attached by its "
         "document id (a problem document), or a body that is not a RunAgentInput (FastAPI's "
         "validation error)",
@@ -238,6 +239,9 @@ class _Surface:
             safe_id(body.run_id) != body.run_id
             or self.hub.get(body.run_id)
             or body.run_id in self._starting
+            # one the run store has (another replica's, one the hub forgot): never attempted
+            # again under this caller's name
+            or await agent.harness.runs.get(body.run_id, tenant=tenant) is not None
         ):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
         try:
@@ -343,6 +347,9 @@ class _Surface:
             or record.awaiting is None
         ):
             raise HTTPException(404, "no such interrupt for this thread")
+        assignee = record.awaiting.assignee
+        if not answers(assignee, user):
+            raise HTTPException(409, f"{BAD_RESUME}: it is {assignee}'s to answer, not yours")
         try:
             decision = _decision(answer, record.awaiting)
             record, resolution = await agent._resolution(
@@ -382,7 +389,9 @@ class _Surface:
         return record.status
 
     async def artifact(self, request: Request, run_id: str, artifact_id: str) -> Response:
-        await self.user(request)
+        """The data the interrupt the user's own run waits on carries by reference: 404 for
+        anyone else's run."""
+        user = await self.user(request)
         agent = self.agent
         tenant = await agent.harness._tenant()
         record = await agent.harness.runs.get(run_id, tenant=tenant)
@@ -391,6 +400,7 @@ class _Surface:
         if (
             record is None
             or record.agent_id != agent.id
+            or record.user_id != user
             or ref is None
             or ref.artifact_id != artifact_id
         ):
@@ -621,7 +631,8 @@ def _router(surface: _Surface, path: str) -> APIRouter:
     )
     async def artifact(request: Request, run_id: str, artifact_id: str) -> Response:
         """The bytes of the `payload_ref` of the interrupt the run waits on (an `ask`
-        table or diff), from agent-runs — so any replica serves them."""
+        table or diff), from agent-runs — so any replica serves them. Only the run's own
+        user."""
         try:
             return await surface.artifact(request, run_id, artifact_id)
         except HTTPException as exc:

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import io
 import itertools
+import re
+import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -298,6 +300,49 @@ def test_a_cell_merged_in_the_last_row_or_column_is_its_value_in_every_cell_it_s
     book.save(out)
     table = (["k", "v", "w"], [["x", 1, 2], ["y", None, 2], ["z", 5, 5]])
     assert stored._sheets(out.getvalue()) == {"Sheet": table}
+
+
+def spread(data: bytes, dimension: str, rows: int = 0, merged: str = "") -> bytes:
+    """An Excel file whose first sheet says ``dimension`` (each row read that wide), with
+    rows up to ``rows`` of one cell each and ``merged`` (a range) merged: kilobytes that say
+    millions of cells."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as given, zipfile.ZipFile(out, "w") as made:
+        for item in given.infolist():
+            xml = given.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                more = "".join(
+                    f'<row r="{n}"><c r="A{n}"><v>1</v></c></row>' for n in range(3, rows)
+                )
+                merges = f'<mergeCells><mergeCell ref="{merged}"/></mergeCells>' if merged else ""
+                said = f'<dimension ref="{dimension}"/>'.encode()
+                xml = re.sub(rb'<dimension ref="[^"]*" ?/>', said, xml)
+                xml = xml.replace(b"</sheetData>", f"{more}</sheetData>{merges}".encode())
+            made.writestr(item, xml)
+    return out.getvalue()
+
+
+async def test_a_sheet_that_spreads_past_the_cells_read_is_no_table(
+    run: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workbook of a few kilobytes can say millions of cells — its dimension each row is
+    read as wide as, a merged range each cell of it is spread over — which would fill the
+    harness's memory, every user's: past :data:`stored.MAX_CELLS` it is no table, said."""
+    monkeypatch.setattr(stored, "MAX_CELLS", 1000)
+    files = run.agent.harness.files
+    plain = sheet(("k", "v"), ("x", 1))
+    await files.put("t/u/c_1/r0", "wide.xlsx", spread(plain, "A1:XFD100", 100), source="x")
+    said = await stored.read("/files/r0/wide.xlsx")
+    assert said == (
+        "Error: /files/r0/wide.xlsx is no table: ValueError: the sheet Sheet holds more than "
+        "1000 cells"
+    ), said
+    merged = spread(plain, "A1:B100", 100, merged="A3:XFD100")
+    await files.put("t/u/c_1/r0", "merged.xlsx", merged, source="x")
+    said = await stored.read("/files/r0/merged.xlsx")
+    assert said.endswith("ValueError: the sheet Sheet holds more than 1000 cells"), said
+    await files.put("t/u/c_1/r0", "fits.xlsx", spread(plain, "A1:B100", 100), source="x")
+    assert (await stored.read("/files/r0/fits.xlsx")).endswith("99  1,"), said
 
 
 async def test_a_csv_file_reads_as_it_is_after_how_it_was_made(run: Run) -> None:
