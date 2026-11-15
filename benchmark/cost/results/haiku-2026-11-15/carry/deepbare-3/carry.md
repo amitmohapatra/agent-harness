@@ -1,0 +1,10 @@
+# complex: claude-haiku-5-5 (deepagents, thread history)
+
+Spend: $0.0108 (cap $0.06)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 6 | 8 | 0.75 ± 0.39 | 0 | 0 | 0 | 0 of 24 |
+| carry | 6 | 8 | 0.75 ± 0.39 | 0 | 0 | 0 | 0 of 24 |
+| tier 2 | 5 | 7 | 0.71 ± 0.45 | 0 | 0 | 0 | 0 of 19 |
+| tier 3 | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 5 |

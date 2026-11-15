@@ -1,0 +1,15 @@
+{
+  "replies": 4,
+  "input_tokens": 10,
+  "cache_read_input_tokens": 17761,
+  "cache_creation_input_tokens": 6618,
+  "output_tokens": 358,
+  "usd_at_list_price": 0.001185,
+  "harness_accounted": {
+    "input_tokens": 35507.0,
+    "output_tokens": 390.0,
+    "cached": 27371.0,
+    "cost": 0.001512,
+    "replies_or_results": 6
+  }
+}
