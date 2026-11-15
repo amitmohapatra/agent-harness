@@ -22,6 +22,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   Code processes (about 200 MB each). The bound (`live.KEPT`) is now 8, about 1.6 GB: a ninth
   conversation's turn takes the place of the idle session asked for longest ago, as before
   ([claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md), [kimi.md](docs/frameworks/kimi.md)).
+* **A refused memory write says why.** Claude's transcripts of 57 and 51 calls (116 and 104
+  messages, one call a reply) were refused with a 422 on the comparison — more than one
+  `POST /v1/messages` takes, which the transcript writes of at most 100 already fixed — and
+  the log said only "Request validation failed". A failed write's warning event and log line
+  now carry the memory service's details: each field it refused and why.
 
 ### Fixed: three SDK features under the harness (real Haiku, the real stack)
 

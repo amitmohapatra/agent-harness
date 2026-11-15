@@ -252,6 +252,33 @@ async def test_a_refusal_is_not_tried_again_nor_spooled(tmp_path: Path) -> None:
     await writes.aclose()
 
 
+async def test_a_refusal_says_what_the_service_refused(caplog: pytest.LogCaptureFixture) -> None:
+    """MEM-: four Claude transcripts were refused with a 422 on the comparison of 2026-11-15,
+    and the log said only "Request validation failed". The memory service's answer names each
+    field it refused and why (its problem's ``details``): the warning event and the log say so,
+    so the next refusal is diagnosed from the log alone."""
+    from trellis.memory.errors import error_from_problem
+
+    field = {"loc": ["body", "messages"], "msg": "List should have at most 100 items after "
+             "validation, not 116", "type": "too_long"}  # fmt: skip
+    answer = {"code": "VALIDATION", "detail": "Request validation failed", "retryable": False}
+    refusal = error_from_problem(422, answer | {"details": {"errors": [field]}})
+    writes = Writes()
+    events, seen = run_events()
+
+    async def refused() -> None:
+        raise refusal
+
+    with caplog.at_level(logging.WARNING, logger="trellis.writes"):
+        await writes.submit("memory.transcript", refused, events=events)
+        await writes.drain()
+    for said in (seen[0].data["message"], caplog.text):
+        assert "Request validation failed" in said
+        assert "List should have at most 100 items after validation, not 116" in said
+        assert '"loc": ["body", "messages"]' in said
+    await writes.aclose()
+
+
 def test_the_loop_shutting_down_drains_the_queue() -> None:
     done: list[int] = []
     writes = Writes()
