@@ -136,9 +136,8 @@ SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.mod
 #: What a run keeps of its own choices in its record's metadata (``Agent._metadata``): a run
 #: rewound from it takes them (:meth:`Agent.rewind`).
 CHOICES: Final = (WITHOUT, FRAMEWORK_OPTIONS, DOCUMENTS, BUDGET)
-#: The metadata key of a run rewound from another: the run and the checkpoint it continues,
-#: who rewound it and when.
-REWOUND: Final = "rewound"
+#: The metadata key of a run rewound from another (``pipeline.REWOUND``).
+REWOUND: Final = pipeline.REWOUND
 #: What an agent whose runs keep no checkpoint history answers :meth:`Agent.checkpoints` and
 #: :meth:`Agent.rewind`.
 NO_HISTORY: Final = (

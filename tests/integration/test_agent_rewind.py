@@ -351,3 +351,22 @@ async def test_an_agent_with_no_checkpoint_history_says_so(harness: Harness, tar
         await history(agent, "run_1")
     with pytest.raises(ConfigurationError, match=unsupported):
         await agent.rewind("run_1", "any", reviewer="u")
+
+
+async def test_a_rewound_run_records_its_question_once_in_memory(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    """The rewound run's question is the run's it continues: recorded under that run's question
+    id, so memory holds it once — the conversation does not gain a turn asked twice."""
+    agent, _, run_id = await paused_after_a_refund(memory_harness, [REFUND, "refunded twice"])
+    after = [s for s in await history(agent, run_id) if said(s)[-1:] == ["refunded o1"]][-1]
+    result = await agent.rewind(run_id, id_of(after), reviewer="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    await memory_harness.writes.drain()
+    asked = [
+        m
+        for kept in memory_service.threads.values()
+        for m in kept
+        if m["role"] == "USER" and "refund and close o1" in str(m.get("content"))
+    ]
+    assert len(asked) == 1, asked

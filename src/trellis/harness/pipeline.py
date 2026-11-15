@@ -118,6 +118,9 @@ log = logging.getLogger("trellis.run")
 #: The adapters whose target has no model of its own: what it returns is its answer, none
 #: included (a function).
 NO_MODEL: Final = frozenset({"function"})
+#: The metadata key of a run rewound from another (``Agent.rewind``): the run and the
+#: checkpoint it continues, who rewound it and when.
+REWOUND: Final = "rewound"
 #: What a run that ended with no answer says its model's last reply did (:func:`_unanswered`).
 UNANSWERED_CUT: Final = (
     "the model's last reply reached its output limit (its max_tokens) before it gave an answer"
@@ -431,6 +434,7 @@ async def _attempt(
         running_in=asyncio.current_task(),
         continued=continued,
         frontend=Frontend.of(record.metadata),
+        rewound_from=(record.metadata.get(REWOUND) or {}).get("run_id"),
         scheduled=None if parent is not None else Fired.of(record.metadata),
         notification=(
             notification_in(input)
@@ -1502,7 +1506,10 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
     # the question as the framework kept it (a graph's middleware may have redacted it)
     task = (extracted.asked if extracted is not None else None) or runtime.task
-    asked = [Said(Speaker.USER, task)] if runtime.task else []
+    # a rewound run's question is the one its run was asked: recorded once, under that id
+    first = runtime.rewound_from
+    ident = None if first is None else question_id(runtime.conversation, first)
+    asked = [Said(Speaker.USER, task, id=ident)] if runtime.task else []
     if not asked and runtime.notification is not None:  # a notification it was given to say
         asked = [runtime.notification]
     # a message steered into the run that its framework does not report: after the question

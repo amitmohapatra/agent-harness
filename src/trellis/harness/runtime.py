@@ -324,6 +324,9 @@ class Runtime:
     #: the run is a turn of a chat's own for a background task's outcome
     #: (``background.notify``): its input, the notification it gives the model
     notification: Said | None = None
+    #: the run this one was rewound from (``Agent.rewind``): its question is that run's,
+    #: recorded under that run's id — one question in memory, not a new turn
+    rewound_from: str | None = None
     #: the background tasks this attempt started (``background.start``: their ids), counted
     #: with the conversation's unfinished ones before its task list says them
     tasks_started: set[str] = field(default_factory=set, repr=False)
