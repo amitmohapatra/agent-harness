@@ -706,6 +706,51 @@ async def test_a_run_cancelled_while_it_waits_its_turn_never_runs(
     assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
 
 
+@pytest.mark.parametrize("ending", ["written_here", "ended_elsewhere_meanwhile"])
+async def test_a_held_waiting_run_the_store_only_asked_to_stop_is_ended_cancelled_here(
+    servers: tuple[Harness, Harness], monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    """A run waiting its turn is held in the run store; a store that holds runs (agent-runs)
+    answers a cancel of a held run by asking its holder to stop, the run still ``RUNNING``.
+    The waiting run then stops here and ends itself ``CANCELLED`` with the reason, writing
+    that ending — or, when the store ended it meanwhile (its ending write refused), leaving
+    the store's — and never runs."""
+    runs = servers[0].runs
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a = chat(servers[0], log, gates)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+    waiting = await thread_run(runs, "two")
+
+    async def asked_to_stop(run_id: str, **_: Any) -> Any:
+        """The store's answer for a held run: still running, its holder asked to stop."""
+        found = await runs.get(run_id)
+        assert found is not None and not found.status.final
+        return found
+
+    monkeypatch.setattr(runs, "cancel", asked_to_stop)
+    if ending == "ended_elsewhere_meanwhile":
+        finish = runs.finish
+
+        async def ended_first(run_id: str, status: RunStatus, **kwargs: Any) -> Any:
+            if run_id == waiting:  # another holder's ending lands first: this write is refused
+                await finish(run_id, RunStatus.CANCELLED)
+                raise ConflictError(f"run {run_id} has ended", code="CONFLICT", status=409)
+            return await finish(run_id, status, **kwargs)
+
+        monkeypatch.setattr(runs, "finish", ended_first)
+    await a.cancel(waiting, reason="not needed")
+    ended = await asyncio.wait_for(second, 5)  # at once, not when the turn ahead ends
+    assert ended.status is RunStatus.CANCELLED and ended.run_id == waiting
+    record = await runs.get(waiting)
+    assert record is not None and record.status is RunStatus.CANCELLED  # written here
+    gates["one"].set()
+    assert (await first).status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+
+
 @pytest.mark.parametrize("how", ["run", "stream"])
 async def test_a_waiting_run_the_store_ended_reports_the_stores_status_and_writes_nothing(
     servers: tuple[Harness, Harness], how: str
