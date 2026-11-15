@@ -103,10 +103,11 @@ ADAPTERS: Final = (
     "claude_agent_sdk",
     "kimi",
 )
-#: the adapters whose framework takes a steered message at its next step (``Adapter.steers``)
-STEERS: Final = frozenset(
-    {"react", "react_da", "middleware", "openai_agents", "claude_agent_sdk", "deepagents"}
-)
+#: the adapters whose framework takes a steered message at its next step (``Adapter.steers``).
+#: Not ``deepagents``: a ``create_deep_agent`` graph without the harness's middleware has no
+#: step the harness can add a message at, so a steer waits as ``mode="queue"`` does, said once
+#: (docs/frameworks/deepagents.md, "Conversations"; ``LangGraphAdapter.steers``)
+STEERS: Final = frozenset({"react", "react_da", "middleware", "openai_agents", "claude_agent_sdk"})
 
 
 def token(chat: str, n: int) -> str:

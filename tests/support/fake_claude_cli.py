@@ -49,7 +49,8 @@ steps, with the real CLI's ``error_max_turns`` result. A resumed session sent a 
 (not the harness's "This task was paused" — the conversation's next turn) runs the script anew as
 the session's next turn; the record's ``earlier`` is the prompts its transcript holds. The
 ``additionalContext`` the ``PostToolUse`` hooks answer is appended to ``<record>.added`` (one
-JSON string a line): what the "model" is told after a call.
+JSON string a line): what the "model" is told after a call — and heard, as the real CLI gives
+it to the model after the call's result.
 
 One process, many turns (the SDK's ``ClaudeSDKClient``: stdin stays open). Every prompt a
 process is sent after its first is its session's next turn, in the same session:
@@ -698,8 +699,12 @@ class Cli:
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         for _, answer in self.controls(asked):
             said = (answer or {}).get("hookSpecificOutput") or {}
-            if said.get("additionalContext") and record:
-                appended(f"{record}.added", said["additionalContext"])
+            if said.get("additionalContext"):
+                # what the "model" is told after the call's result, as the real CLI gives it
+                # (a message steered into the turn): heard, as its prompts are
+                self.heard.append(said["additionalContext"])
+                if record:
+                    appended(f"{record}.added", said["additionalContext"])
             if "updatedToolOutput" in said and error is None:
                 content = said["updatedToolOutput"]  # what the model reads instead
         return content
