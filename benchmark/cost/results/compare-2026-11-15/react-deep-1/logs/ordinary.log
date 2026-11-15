@@ -1,0 +1,57 @@
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+multihop-01      tier 1 [True] $0.0006
+multihop-02      tier 2 [True] $0.0014
+multihop-03      tier 1 [True] $0.0019
+multihop-06      tier 2 [True] $0.0027
+multihop-07      tier 2 [True] $0.0048
+multihop-09      tier 2 [True] $0.0054
+aggregate-01     tier 1 [True] $0.0058
+aggregate-02     tier 2 [True] $0.0068
+aggregate-05     tier 2 [True] $0.0075
+aggregate-06     tier 2 [True] $0.0099
+aggregate-08     tier 2 [True] $0.0156
+formula-01       tier 1 [True] $0.0160
+formula-02       tier 2 [True] $0.0172
+formula-03       tier 2 [True] $0.0178
+formula-05       tier 2 [True] $0.0183
+stats-01         tier 2 [True] $0.0194
+stats-02         tier 2 [True] $0.0201
+stats-05         tier 2 [True] $0.0212
+stats-06         tier 1 [True] $0.0222
+stats-08         tier 2 [True] $0.0230
+conversation-02  tier 1 [True, True] $0.0239
+conversation-06  tier 1 [True, True] $0.0254
+explain-01       tier 1 [True, None] $0.0265
+freshness-01     tier 1 [True, True] $0.0277
+ambiguity-04     tier 1 [True] $0.0285
+nodata-01        tier 1 [True] $0.0289
+nodata-02        tier 1 [True] $0.0298
+conflict-03      tier 1 [True] $0.0303
+edge-01          tier 1 [True] $0.0307
+edge-03          tier 1 [True] $0.0313
+edge-04          tier 1 [True] $0.0318
+cantdo-01        tier 1 [True] $0.0330
+cantdo-02        tier 1 [True] $0.0377
+cantdo-03        tier 1 [True] $0.0395
+cantdo-04        tier 1 [True] $0.0475
+# complex: claude-haiku-5-5 (react, memory history)
+
+Spend: $0.0475 (cap $0.25)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 35 | 39 | 1.00 ± 0.00 | 1 | 0 | 0 | 0 of 39 |
+| multihop | 6 | 6 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 6 |
+| aggregate | 5 | 5 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 5 |
+| formula | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| stats | 5 | 5 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 5 |
+| conversation | 2 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| explain | 1 | 2 | 1.00 | 1 | 0 | 0 | 0 of 2 |
+| freshness | 1 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| ambiguity | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| nodata | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| conflict | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| edge | 3 | 3 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 3 |
+| cantdo | 4 | 4 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 4 |
+| tier 1 | 20 | 24 | 1.00 ± 0.00 | 1 | 0 | 0 | 0 of 24 |
+| tier 2 | 15 | 15 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 15 |

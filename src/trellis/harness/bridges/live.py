@@ -558,12 +558,16 @@ class Keeper[K: Kept]:
         self._timer: asyncio.TimerHandle | None = None
         self._rested = 0.0
         self._aside: set[asyncio.Task[Any]] = set()
+        #: where the conversation's session is kept for a turn with no live one
+        #: (``Agent.sessions``), once a turn was served
+        self.kept_in: LRU[str, Any] | None = None
 
     # ------------------------------------------------------------------ its turns
     def _attach(self, turn: Turn) -> None:
         """``turn`` is served now: the session's timer stops, and the run is told of the calls
         refused since the last turn."""
         self.turn = turn
+        self.kept_in = turn.runtime.agent.sessions
         self.due = False  # a turn is served: what is due is handed to it
         if self._timer is not None:
             self._timer.cancel()
@@ -683,7 +687,7 @@ class Keeper[K: Kept]:
     def _expired(self) -> None:
         self._timer = None  # the one of a session that serves no turn and is not closed
         why = "it was kept as long as a session is" if self.working else "it was idle"
-        self._aside_run(self.sessions.close(self.key, why))
+        self._aside_run(self.sessions.lapse(self, why))
 
     def _aside_run(self, work: Coroutine[Any, Any, Any]) -> None:
         task = asyncio.get_running_loop().create_task(work, context=contextvars.Context())
@@ -695,6 +699,12 @@ class Keeper[K: Kept]:
 
     #: the process ended, and what reads it (the framework's)
     async def _disconnect(self) -> None: ...
+
+    async def released(self) -> None:
+        """The conversation let go of the session for good (its time is up, its place given,
+        the harness closing): the process ended (:meth:`close`). A framework that keeps files
+        of the session for the conversation's later turns removes them too."""
+        await self.close()
 
     async def close(self) -> None:
         """The process ended (:meth:`_disconnect`) and its background runs with it, each
@@ -776,7 +786,7 @@ class LiveSessions:
         try:
             if yielding is not None:
                 why = "another conversation needed its place"
-                await yielding.sessions.close(yielding.key, why)
+                await yielding.sessions.lapse(yielding, why)
             yield True
         finally:
             self.starting[owner] -= 1
@@ -809,11 +819,21 @@ class LiveSessions:
             self.forget(session, why)
             await session.close()
 
+    async def lapse(self, session: Keeper[Any], why: str) -> None:
+        """``session`` let go of for good (its time is up, its place given), while it is its
+        conversation's: closed as :meth:`close` closes it, and what the framework keeps of it
+        for the conversation's later turns removed (``Keeper.released``). One its
+        conversation no longer has is another's to close (whoever forgot it)."""
+        if self._open.get(session.key) is session:
+            self.forget(session, why)
+            await session.released()
+
     async def aclose(self) -> None:
-        """Every session closed: the harness is closing. Each is closed whatever another's
-        close meets; the first error is raised once all are."""
+        """Every session let go of for good (``Keeper.released``): the harness is closing.
+        Each is closed whatever another's close meets; the first error is raised once all
+        are."""
         sessions, self._open = list(self._open.values()), {}
-        closed = await asyncio.gather(*(s.close() for s in sessions), return_exceptions=True)
+        closed = await asyncio.gather(*(s.released() for s in sessions), return_exceptions=True)
         failed = next((e for e in closed if isinstance(e, BaseException)), None)
         if failed is not None:
             raise failed

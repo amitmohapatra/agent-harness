@@ -286,6 +286,16 @@ client), or as an AG-UI or A2A answer.
 `False` to the tool, which raises to make it an error the model reads
 (`raise ToolError("the signature was refused", source="tools")`); a `cancel` ends the run.
 
+**Code before the `ask` runs again.** A run that resumes without a checkpoint to continue in
+place (every target but a checkpointed graph resumed where its checkpointer holds the pause:
+[How a run continues](#how-a-run-continues)) runs the tool again from its start. The journal
+answers its `ask`, so the person is not asked twice, but whatever the tool did before the `ask`
+is done again. LangGraph's own `interrupt()` does the same: the node runs again from its start.
+So ask first and act on the answer, or make what comes before the `ask` idempotent (keyed by
+what it does, such as the contract it sends), as
+`test_a_tool_resumed_by_running_again_runs_the_code_before_its_ask_again`
+(`tests/integration/test_approvals.py`) shows.
+
 ## Telling people
 
 **What.** When a run pauses for a person, whoever waits is told — the question, whose it is,

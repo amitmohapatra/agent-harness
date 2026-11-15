@@ -1,0 +1,24 @@
+{
+ "sdk": "openai_agents",
+ "feature": "model_settings",
+ "arm": "bare",
+ "error": null,
+ "seconds": 0.7,
+ "spend": {
+  "requests": 1,
+  "in": 27,
+  "out": 16,
+  "usd": 1.1e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "words": 1,
+ "answers": [
+  null
+ ],
+ "errors": [
+  "ModelBehaviorError: Chat Completions response terminated with finish_reason='length' but produced no assistant text, tool call, or refusal."
+ ]
+}

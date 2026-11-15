@@ -30,8 +30,11 @@ from claude_agent_sdk import (
     ProcessError,
     ResultMessage,
     StreamEvent,
+    create_sdk_mcp_server,
 )
+from claude_agent_sdk import tool as sdk_tool
 from claude_agent_sdk.types import PermissionRuleValue
+from mcp.types import ToolAnnotations
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
@@ -44,6 +47,7 @@ from trellis.harness.adapters.claude import (
     UNHELD_AGENTS,
     ClaudeAdapter,
 )
+from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import DELIVERS_HERE
@@ -569,6 +573,59 @@ async def test_claudes_reasoning_and_the_tools_the_api_ran_are_on_the_stream_and
 
 
 @pytest.mark.parametrize("path", PATHS)
+async def test_a_subagents_reasoning_and_the_tools_the_api_ran_for_it_are_its_runs(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    path: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CLAUDE-SUB-1. What the provider did inside a subagent's model step is the subagent's:
+    its reasoning on the run's stream naming the subagent's child run (its text only: the
+    signature nowhere, none of it in memory), and a tool the API ran for it (web search, the
+    advisor) recorded as a read under the child run — never put to a person. The main agent's
+    stay the run's own."""
+    thought = {"type": "thinking", "thinking": "Weighing sources.", "signature": "SIG-SUB"}
+    searched = {"type": "server_tool_use", "id": "srv_9", "name": "web_search"}
+    advised = {"type": "server_tool_use", "id": "srv_8", "name": "advisor", "input": {}}
+    advice = {"type": "advisor_tool_result", "tool_use_id": "srv_8", "content": {"text": "go"}}
+    blocks = [thought, {**searched, "input": {"query": "refund law"}}, advised, advice]
+    mine = {"type": "thinking", "thinking": "Delegating.", "signature": "SIG-MAIN"}
+    said = {"id": "msg_main", "role": "assistant", "model": "fake", "content": [mine]}
+    script = [
+        {"frame": {"type": "assistant", "message": said, "parent_tool_use_id": None}},
+        {"agent": "researcher", "prompt": "find it", "steps": [{"blocks": blocks}, {"text": "x"}]},
+        {"text": "done"},
+    ]
+    researcher = AgentDefinition(description="Researches.", prompt="Research.")
+    target = options(tmp_path, script, agents={"researcher": researcher})
+    agent = memory_harness.wrap(target, id="sub-thinks")
+    with caplog.at_level("DEBUG"):
+        events = [e async for e in agent.stream("go", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "done", events[-1].data
+    [child] = [e.data for e in events if e.data.get("name") == "helper_started"]
+    reasoned = [e.data for e in events if e.data.get("name") == "reasoning"]
+    by_child = {"run_id": child["run_id"], "name": "researcher"}
+    assert reasoned == [
+        {"name": "reasoning", "text": "Delegating."},
+        {"name": "reasoning", "text": "Weighing sources.", HELPER: by_child},
+    ]
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert [(r["tool"], r["status"]) for r in results if r["tool"] != "Agent"] == [
+        ("advisor", "ok"),
+        ("web_search", "ok"),
+    ]
+    assert not [e for e in events if e.type is RunEventType.INTERRUPT]
+    await memory_harness.writes.drain()
+    made = {c.body["tool"]: c.scope["agent_run_id"] for c in memory_service.named("record_tool")}
+    assert made["advisor"] == made["web_search"] == child["run_id"]
+    kept = repr(memory_service.calls)
+    everywhere = kept + repr([e.model_dump() for e in events]) + caplog.text
+    assert "SIG-SUB" not in everywhere and "SIG-MAIN" not in everywhere
+    assert "Weighing sources." not in kept + caplog.text
+
+
+@pytest.mark.parametrize("path", PATHS)
 async def test_the_teams_hook_answers_before_governance_decides_what_it_left(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:
@@ -890,6 +947,58 @@ async def test_partial_messages_and_other_kinds_of_message_leave_the_answer_as_i
     assert "".join(deltas) == "the tide is out"
     [result] = [m for m in seen if isinstance(m, ResultMessage)]
     assert result.usage == {"input_tokens": 10, "output_tokens": 5}
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_partial_messages_stream_the_runs_text_as_the_model_writes_it(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """With ``include_partial_messages`` the SDK's own stream gives the model's text delta by
+    delta (``StreamEvent``); the run's stream does the same — each delta a text event as it
+    comes, the message's whole text not sent again — on the query and the live way (seen on
+    Haiku: one event a message, docs/research/sdk-full-stack-2026-11-15)."""
+    target = options(tmp_path, [{"text": "the tide is out"}], include_partial_messages=True)
+    agent = harness.wrap(target, id="partial-deltas")
+    events = [e async for e in agent.stream("tide?", user="u1", thread=conversation(path))]
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert said == ["the", " tide", " is", " out"]
+    assert events[-1].data["result"] == "the tide is out"
+
+
+async def test_without_partial_messages_the_runs_text_is_each_message_once(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Without ``include_partial_messages`` the CLI sends no deltas: each assistant message's
+    text is one text event."""
+    agent = harness.wrap(options(tmp_path, [{"text": "the tide is out"}]), id="whole")
+    events = [e async for e in agent.stream("tide?", user="u1")]
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert said == ["the tide is out"]
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["allowed", "unnamed"])
+async def test_an_in_process_tools_annotations_decide_it_when_allowed_tools_names_it(
+    harness: Harness, tmp_path: Path, named: bool
+) -> None:
+    """An in-process server's tool is governed by its annotations (``readOnlyHint``: a read,
+    which runs unasked) — also when ``allowed_tools`` names it, as the SDK's docs pre-approve
+    an MCP tool: naming it there said nothing of its risk, and each call asked a person (seen
+    on Haiku, docs/research/sdk-full-stack-2026-11-15). APR-01"""
+    ran: list[str] = []
+
+    @sdk_tool("stock", "Units of a SKU.", {"sku": str},
+              annotations=ToolAnnotations(read_only_hint=True))  # fmt: skip
+    async def stock(args: dict[str, Any]) -> dict[str, Any]:
+        ran.append(args["sku"])
+        return {"content": [{"type": "text", "text": "7 units"}]}
+
+    shop = create_sdk_mcp_server("shop", tools=[stock])
+    script = [{"tool": "stock", "server": "shop", "args": {"sku": "S1"}}, {"text": "{last}"}]
+    allowed = {"allowed_tools": ["mcp__shop__stock"]} if named else {}
+    target = options(tmp_path, script, mcp_servers={"shop": shop}, **allowed)
+    result = await harness.wrap(target, id="annotated").run("stock of S1?", user="u1")
+    assert result.interrupt is None and result.status is RunStatus.SUCCESS, result.error
+    assert ran == ["S1"] and result.answer == "7 units"
 
 
 # --------------------------------------------------------------------------- sessions

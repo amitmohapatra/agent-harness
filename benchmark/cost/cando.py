@@ -6,10 +6,10 @@ with the right content.
 Each case asks for a figure every variant can compute (the query over the kept result), so it
 runs without a sandbox too; what needs code (a chart, a script) is checked only where code runs
 (``Probe.coding``); a case that is nothing without code (:attr:`Case.coding`) would apply only
-there, and none is: the clustering from fixed starting points has one right answer, which the
-query's own statements reach without a sandbox. No case sets its window: ``--window`` runs each
-at any size, on any variant (``--variant sandbox``, ``main``, ...), which is how the two are
-compared (:mod:`benchmark.cost.parity`).
+there, and none is: a clustering from fixed starting points (the catalogue's, the stores') has
+one right answer, which the query's own statements reach without a sandbox. No case sets its
+window: ``--window`` runs each at any size, on any variant (``--variant sandbox``, ``main``,
+...), which is how the two are compared (:mod:`benchmark.cost.parity`).
 
 The scripted model replays the gold calls: the fetch, the query, and — without a sandbox — the
 query saving its result as a file (``save_as``). It cannot write the code a sandbox runs (a fake
@@ -28,17 +28,25 @@ SEP: Final = {"start": "2026-09-01", "end": "2026-09-30"}
 YTD: Final = {"start": "2026-01-01", "end": "2026-09-30"}
 #: The clustering's starting centres (prices in GBP) — fixed, so the result is one.
 CENTRES: Final = (20.0, 60.0, 120.0)
+#: The stores' clustering's starting centres (2026 revenue to date, GBP).
+STORE_CENTRES: Final = (300_000.0, 400_000.0, 1_500_000.0)
 
 
 def kmeans(values: list[float], centres: tuple[float, ...]) -> tuple[list[int], list[float]]:
     """Lloyd's algorithm in one dimension from ``centres``, until no value changes cluster (a
     value as near to two centres goes to the lower): each cluster's size and final centre."""
+    assigned, now = clusters(values, centres)
+    return [assigned.count(k) for k in range(len(now))], now
+
+
+def clusters(values: list[float], centres: tuple[float, ...]) -> tuple[list[int], list[float]]:
+    """:func:`kmeans`'s cluster of each value (its index, the lowest centre's 0) and the final
+    centres."""
     now, assigned = list(centres), [-1] * len(values)
     while True:
         nearest = [min(range(len(now)), key=lambda k: (abs(v - now[k]), k)) for v in values]
         if nearest == assigned:
-            sizes = [nearest.count(k) for k in range(len(now))]
-            return sizes, now
+            return nearest, now
         assigned = nearest
         for k in range(len(now)):
             members = [v for v, a in zip(values, assigned, strict=True) if a == k]
@@ -184,6 +192,36 @@ def cases() -> list[Any]:
             ),
             ("a file saved in one chat, read back in the next",),
             keyed=True,
+        )
+    )  # fmt: skip
+
+    # 6. the stores clustered by their revenue, from fixed starting points: a k-means this
+    # deployment computes with the query's own statements, as it does the catalogue's (4)
+    revenue = r.grouped(r.selected(w, **YTD), w, "store", "revenue")
+    stores = sorted(revenue)
+    assigned, centres = clusters([revenue[s] for s in stores], STORE_CENTRES)
+    fields = {f"cluster_{n + 1}_stores": assigned.count(n) for n in range(len(centres))}
+    highest = [s for s, a in zip(stores, assigned, strict=True) if a == len(centres) - 1]
+    fields |= {f"highest_cluster_store_{n + 1}": s for n, s in enumerate(highest)}
+    fields |= {f"centre_{n + 1}": round(c, 2) for n, c in enumerate(centres)}
+    by_store = {"group_by": "store", "metric": "revenue", **YTD}
+    out.append(
+        cx.Case(
+            "cando-06", "cando", 3,
+            (
+                cx.Turn(
+                    "Cluster our 40 stores into 3 groups with k-means by their 2026 revenue to "
+                    "date (1 January to 30 September), starting from the centres £300,000, "
+                    "£400,000 and £1,500,000 and repeating until no store changes group (a "
+                    "store equally near two centres goes to the lower one). How many stores end "
+                    "in each group, lowest centre first, which stores are in the highest group, "
+                    "and what are the three final centres (in pounds, 2 decimals)?",
+                    ((("sales_summary", by_store),),),
+                    cx.record(fields, tol={k: 0.006 if k.startswith("centre") else 0
+                                           for k in fields}),
+                ),
+            ),
+            ("clustering with fixed starting points", "a custom algorithm without code"),
         )
     )  # fmt: skip
     return out

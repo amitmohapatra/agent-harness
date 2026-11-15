@@ -18,7 +18,8 @@
   else a call whose approval a person already answered in the hook runs (one call, one
   question), a call that only reads (a read tool, or a shell command
   ``governance.shell.read_only`` reads as read-only) runs, and any other asks a person
-  (``bridge.asked``);
+  (``bridge.asked``) with the choices of its risk, as a harness call — what Claude Code would
+  keep for its session ("don't ask again"), the run keeps: for this conversation, or always;
 * records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
   calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
   it took — through the SDK's own ``PostToolUse`` / ``PostToolUseFailure`` hooks
@@ -45,14 +46,14 @@
   run, and a turn with no live session (another server, a restart, one closed) run as below:
   one process for the query, resuming the conversation's session;
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
-  ends — a conversation's live one stays, its turn ended, and the resumed attempt is
-  sent into it). The session the CLI kept (``ResultMessage.session_id``) is in the run's
-  journal, and the next attempt resumes it (``resume=``): Claude goes on from where it was —
-  its built-in tools are not run again — and, told which call a person answered about, calls
-  that tool
-  again, which the journal answers (a call a question was asked in runs as it was, whatever
-  words Claude makes it again with: ``Replay.made``). The session is kept in the run's journal
-  too, as the SDK's
+  ends, once read to its turn's result, which the run is charged: the model's billed reply
+  to the pause's placeholder is in it — a conversation's live one stays, its turn ended, and
+  the resumed attempt is sent into it). The session the CLI kept
+  (``ResultMessage.session_id``) is in the run's journal, and the next attempt resumes it
+  (``resume=``): Claude goes on from where it was — its built-in tools are not run again —
+  and, told which call a person answered about, calls that tool again, which the journal
+  answers (a call a question was asked in runs as it was, whatever words Claude makes it
+  again with: ``Replay.made``). The session is kept in the run's journal too, as the SDK's
   ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
   any machine. A session the CLI cannot continue (options keeping their own store, a transcript
   it refuses) is a warning, and the query runs again from its prompt against the journal;
@@ -73,6 +74,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import functools
@@ -81,7 +84,6 @@ import logging
 import os
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping, Sequence
-from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
 
@@ -131,7 +133,7 @@ from trellis.harness.bridges.claude_live import (
     LiveSession,
     opened,
 )
-from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
+from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, naming
 from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
@@ -168,8 +170,10 @@ if TYPE_CHECKING:
 #: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
 #: or an ``approve_when``, in the tool catalog. What Claude Code asks its user about although
 #: it only reads — leaving plan mode with a plan, the network, a skill (:data:`CLAUDE_ASKS`)
-#: — a person answers. Any other tool says nothing of what it does: a person approves each
-#: call (its risk in the catalog says more).
+#: — a person answers. Any other tool says nothing of what it does: a person approves its
+#: calls (its risk in the catalog says more). A person asked about a call Claude runs picks
+#: as for a harness tool's — once, for this conversation, always (with a memory service), deny;
+#: once or deny for an irreversible one: Claude Code's own "don't ask again", kept by the run.
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     **dict.fromkeys(
         (
@@ -245,7 +249,7 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: The tools Claude Code asks its user about although they only read: leaving plan mode with a
 #: plan (``ExitPlanMode``), the network (``WebFetch``, ``WebSearch``), a skill (``Skill``). A
 #: person answers when it asks, as for a write — unless the tool catalog has a rule for the
-#: tool that lets it run.
+#: tool that lets it run (``tools.bridge.asked``).
 CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "WebFetch", "WebSearch", "Skill"})
 #: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
 #: ends a recommended option's label with.
@@ -309,6 +313,9 @@ FAILED_EVENT: Final = "PostToolUseFailure"
 STEERED_SAYS: Final = "The user adds, while you work: "
 #: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "claude_agent_sdk"
+#: How long a paused query's own process is read for its turn's result, the model's billed
+#: reply to the pause's placeholder in it (``_settled``), in seconds.
+SETTLE_SECONDS: Final = 30.0
 #: The result a query that reached its ``max_turns`` ends with (no answer).
 MAX_TURNS: Final = "error_max_turns"
 #: The ``stop_reason`` of a query's result whose last reply reached the model's output limit
@@ -467,17 +474,24 @@ class ClaudeAdapter:
         return [m async for m in self._helped(target, native_input, run)]
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        from claude_agent_sdk import AssistantMessage, TextBlock
+        from claude_agent_sdk import AssistantMessage, StreamEvent, TextBlock
 
         messages: list[Any] = []
+        streamed = False  # the message's text came as deltas (``include_partial_messages``)
         async for message in self._helped(target, native_input, run):
             messages.append(message)
             # the main agent's text: a subagent's (forwarded naming its ``Agent`` call) is
             # its own run's, as in the answer and the transcript
-            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        yield block.text
+            if isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
+                if (said := _text_delta(message.event)) is not None:
+                    streamed = True
+                    yield said
+            elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                if not streamed:
+                    for block in message.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            yield block.text
+                streamed = False
         yield Output(messages)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -583,7 +597,7 @@ class ClaudeAdapter:
             else self._attended(target, run, found)
         )
         try:
-            async with aclosing(source) as messages:
+            async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     await _subagents(helpers, message)
                     yield message
@@ -607,7 +621,7 @@ class ClaudeAdapter:
         options = _options(target, None, run, None, steps, kept=True)
         steps.waiting()
         try:
-            async with aclosing(found.served(_turn(run, options))) as messages:
+            async with contextlib.aclosing(found.served(_turn(run, options))) as messages:
                 async for message in messages:
                     steps.waiting()
                     yield message
@@ -629,7 +643,7 @@ class ClaudeAdapter:
         runtime = run.runtime
         limited = False
         try:
-            async with aclosing(self._attempted(target, native_input, run)) as messages:
+            async with contextlib.aclosing(self._attempted(target, native_input, run)) as messages:
                 async for message in messages:
                     if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
                         limited = True
@@ -660,7 +674,7 @@ class ClaudeAdapter:
         journal = runtime.replay.journal
         resumed, answered = journal.session, False
         # closed as it is left (``aclosing``): its CLI process ends here, in this loop
-        async with aclosing(self._query(target, native_input, run, resumed)) as messages:
+        async with contextlib.aclosing(self._query(target, native_input, run, resumed)) as messages:
             async for message in messages:
                 if (
                     resumed is not None
@@ -679,7 +693,7 @@ class ClaudeAdapter:
                 yield message
             else:
                 return
-        async with aclosing(self._query(target, native_input, run, None)) as again:
+        async with contextlib.aclosing(self._query(target, native_input, run, None)) as again:
             async for message in again:
                 yield message
 
@@ -734,7 +748,7 @@ class ClaudeAdapter:
             # closed as it is left (``aclosing``): a process of its own ends here, in this
             # loop; a live session's turn is interrupted when left before its result
             source = _queried(prompt, options) if live is None else live.served(turn, prompt)
-            async with aclosing(source) as messages:
+            async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     steps.waiting()  # the next message is the next step's
                     found = getattr(message, "session_id", None)
@@ -747,7 +761,10 @@ class ClaudeAdapter:
                     await _provided(steps, message)
                     yield message
                     if runtime.pending is not None:
-                        # the run paused: stop here; a process of its own goes with it
+                        # the run paused: stop here; a process of its own goes with it, once
+                        # its turn's result says what the attempt was billed
+                        if live is None:
+                            await _settled(messages, steps, spending)
                         return
         finally:
             steps.closed = True
@@ -816,6 +833,27 @@ class ClaudeAdapter:
         if found is not None and unsent:
             await found.asks(runtime)
         return found
+
+
+async def _settled(messages: AsyncIterator[Any], steps: Steps, spending: Spending) -> None:
+    """The rest of a paused query's own process, to its turn's result, which the run is
+    charged (``Spending.ended``): Claude Code sends the pause's placeholder to the model as the
+    paused call's result, and the model's reply to it is billed — 51-83% of a paused attempt's
+    cost with the bundled CLI on Haiku — while only a result says what the attempt cost, and
+    the reply's final token count. Nothing in it is the run's: its messages are not the run's
+    steps, and a call made in it is refused, ending the turn (``Steps.settling``). The CLI is
+    waited on no longer than :data:`SETTLE_SECONDS` (then what its replies said is charged)."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+
+    steps.settling = True
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(SETTLE_SECONDS):
+            async for message in messages:
+                if isinstance(message, ResultMessage):
+                    spending.ended(message, None)
+                    return
+                if isinstance(message, AssistantMessage):
+                    spending.replied(message)
 
 
 def _dated(context: str | None, run: Invocation, *, kept: bool) -> str | None:
@@ -982,12 +1020,15 @@ async def _tasks(helpers: Helpers, message: Any) -> None:
 
 
 async def _provided(steps: Steps, message: Any) -> None:
-    """What the provider did inside the main agent's model step, in ``message``. Its reasoning
-    (a ``thinking`` block) is on the run's stream as a ``reasoning`` event — the text only:
-    the block's signature goes nowhere, and none of it to memory or a log. A tool the API
-    ran itself (``server_tool_use``: web search, code execution, the advisor) is a call of
-    the run (:func:`_served`): recorded with its result where the stream carries one (the
-    SDK parses the advisor's), and with none at the turn's result."""
+    """What the provider did inside a model step, in ``message`` — the main agent's, or a
+    subagent's (its messages name the ``Agent`` call that runs it: its helper's run is whose
+    record it is, ``Helpers.working``). Its reasoning (a ``thinking`` block) is on the run's
+    stream as a ``reasoning`` event — the text only, a subagent's naming its run
+    (``helpers.naming``): the block's signature goes nowhere, and none of it to memory or a
+    log. A tool the API ran itself (``server_tool_use``: web search, code execution, the
+    advisor) is a call of the run, or of the subagent's (:func:`_served`): recorded with its
+    result where the stream carries one (the SDK parses the advisor's), and with none at the
+    turn's result."""
     from claude_agent_sdk import (
         AssistantMessage,
         ResultMessage,
@@ -999,21 +1040,27 @@ async def _provided(steps: Steps, message: Any) -> None:
     if isinstance(message, ResultMessage):
         for ref in list(steps.served):
             await _served(steps, ref, None)
-    elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+    elif isinstance(message, AssistantMessage):
+        helpers = steps.runtime.helpers
+        assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
+        parent = message.parent_tool_use_id
+        helper = None if parent is None else helpers.of_key(parent)
         for block in message.content:
             if isinstance(block, ThinkingBlock) and block.thinking:
-                steps.runtime.events.custom("reasoning", text=block.thinking)
+                whose = naming(helper) or {}
+                steps.runtime.events.custom("reasoning", text=block.thinking, **whose)
             elif isinstance(block, ServerToolUseBlock):
-                steps.served[block.id] = (block.name, dict(block.input), time.time())
+                steps.served[block.id] = (block.name, dict(block.input), time.time(), helper)
             elif isinstance(block, ServerToolResultBlock) and block.tool_use_id in steps.served:
                 await _served(steps, block.tool_use_id, block.content)
 
 
 async def _served(steps: Steps, ref: str, content: Mapping[str, Any] | None) -> None:
-    """A tool the API ran itself for the model (its use ``ref``), recorded as the run's call
-    (``bridge.observed``) with what it returned (``content``; ``None``: not on the SDK's
-    stream): a read, and nobody's to approve — the provider already ran it."""
-    name, args, started = steps.served.pop(ref)
+    """A tool the API ran itself for the model (its use ``ref``), recorded as the call of the
+    run — or of the subagent whose step it was — (``bridge.observed``) with what it returned
+    (``content``; ``None``: not on the SDK's stream): a read, and nobody's to approve — the
+    provider already ran it."""
+    name, args, started, helper = steps.served.pop(ref)
     failed = content is not None and "error_code" in content
     outcome = ToolOutcome(
         tool=name,
@@ -1022,7 +1069,10 @@ async def _served(steps: Steps, ref: str, content: Mapping[str, Any] | None) -> 
         error_class="ServerToolError" if failed else None,
     )
     spec = ToolSpec(name=name, side_effects="read")
-    await bridge.observed(steps.runtime, spec, args, outcome, ref=ref, started=started)
+    helpers = steps.runtime.helpers
+    assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
+    with helpers.working(helper):
+        await bridge.observed(steps.runtime, spec, args, outcome, ref=ref, started=started)
 
 
 def _noticed(runtime: Runtime, message: Any) -> None:
@@ -1047,6 +1097,15 @@ def _noticed(runtime: Runtime, message: Any) -> None:
         runtime.events.warning(NOTICES[message.subtype], said)
     elif isinstance(message, AssistantMessage) and message.error:
         runtime.events.warning("model_error", f"Claude's reply failed: {message.error}")
+
+
+def _text_delta(event: Mapping[str, Any]) -> str | None:
+    """The text of one raw event of the model's stream (a ``StreamEvent``'s), if it is a
+    text delta: what the SDK's own stream gives as the model writes it."""
+    delta = event.get("delta") if event.get("type") == "content_block_delta" else None
+    if isinstance(delta, Mapping) and delta.get("type") == "text_delta":
+        return str(delta.get("text") or "")
+    return None
 
 
 def _transcript(messages: Sequence[Any]) -> list[Said]:
@@ -1244,7 +1303,16 @@ class Steps:
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
     the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime", "served")
+    __slots__ = (
+        "adapter",
+        "answered",
+        "calls",
+        "closed",
+        "helped",
+        "runtime",
+        "served",
+        "settling",
+    )
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -1256,9 +1324,13 @@ class Steps:
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
+        #: the run paused, and its query's own process is read to its result (``_settled``):
+        #: a call the model makes then is refused, ending the turn
+        self.settling = False
         #: the tools the API ran itself whose result has not come, by Claude's id of the use:
-        #: their name, arguments and when they were seen (:func:`_provided`)
-        self.served: dict[str, tuple[str, dict[str, Any], float]] = {}
+        #: their name, arguments, when they were seen and the subagent whose step it was
+        #: (``None``: the main agent's) (:func:`_provided`)
+        self.served: dict[str, tuple[str, dict[str, Any], float, Helper | None]] = {}
         #: whose query it is: the MCP tools it is seen calling join its tool set
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
@@ -1508,7 +1580,11 @@ def _governance(steps: Steps) -> Any:
     is refused, saying why; were the refusal to fail too, Claude Code blocks the call (the
     matcher's ``on_failure``)."""
 
+    from trellis.harness.tools.convert.claude import WAITING
+
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        if steps.settling:  # the run paused: the model's reply to the pause takes no step
+            return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         try:
             return await _decide(steps, given, tool_use_id)
         except Exception as exc:
@@ -1543,7 +1619,7 @@ async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHook
     try:
         # a subagent's call is decided as its helper's work: an approval names the helper
         with approvals_read() as approved, runtime.helpers.working(helper):
-            decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
+            decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id, kept=True)
     except Paused:  # the run pauses: Claude stops here, and the resume goes on
         steps.helped.pop(call_id, None)
         return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
@@ -1618,7 +1694,6 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             steps.carries(getattr(context, "tool_use_id", None))
             or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())
-            or (name in CLAUDE_ASKS and await _catalog_allows(runtime, name, args))
         ):  # a person approved this call (``PreToolUse``)
             verdict = PermissionResultAllow()
         else:
@@ -1627,7 +1702,7 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             try:
                 # the same helper's work as the call's PreToolUse said (``Steps.helped``)
                 with helpers.working(steps.helped.get(this)):
-                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this)
+                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this, kept=True)
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 decided = None
             if decided is None:
@@ -1641,18 +1716,6 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         return verdict
 
     return can_use_tool
-
-
-async def _catalog_allows(runtime: Runtime, name: str, args: dict[str, Any]) -> bool:
-    """Whether the tool catalog has a rule for ``name`` that lets this call run without a
-    person (:data:`CLAUDE_ASKS`: Claude Code asks about it otherwise)."""
-    governance = runtime.agent.harness._governance(runtime.tenant)
-    rules = await governance.rules([name], agent_id=runtime.agent_id)
-    if rules.get(name) is None:
-        return False
-    risk = BUILTIN_SIDE_EFFECTS[name]
-    decision = await governance.check(name, args, side_effects=risk, agent_id=runtime.agent_id)
-    return not decision.asks
 
 
 async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
@@ -1735,22 +1798,25 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
 
 async def _declared(target: Any) -> list[ToolSpec]:
     """The tools ``ClaudeAgentOptions`` declare (:meth:`ClaudeAdapter.native`, less what the
-    agent was seen calling)."""
+    agent was seen calling). An in-process server's own listing comes first: a tool it lists
+    is the one with its annotations (its risk), which ``allowed_tools`` naming it does not
+    replace (:func:`unique` keeps the first)."""
     from trellis.harness.tools.convert.claude import SERVER, bare
 
-    given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
+    found: list[ToolSpec] = []
     denied = set(target.disallowed_tools or ())
-    found = [native_spec(name) for name in given if name not in denied]
-    found.extend(
-        native_spec(name)
-        for name in target.allowed_tools or ()
-        if name.startswith("mcp__") and bare(name) is None and name not in denied
-    )
     for server, config in configured_servers(target.mcp_servers).items():
         instance = config.get("instance") if isinstance(config, Mapping) else None
         if server != SERVER and config.get("type") == "sdk" and instance is not None:
             listed = await _sdk_tools(server, instance)
             found.extend(s for s in listed if s.name not in denied)
+    given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
+    found.extend(native_spec(name) for name in given if name not in denied)
+    found.extend(
+        native_spec(name)
+        for name in target.allowed_tools or ()
+        if name.startswith("mcp__") and bare(name) is None and name not in denied
+    )
     return found
 
 

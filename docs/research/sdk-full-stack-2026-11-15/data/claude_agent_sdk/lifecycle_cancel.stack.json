@@ -1,0 +1,64 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "lifecycle_cancel",
+ "arm": "stack",
+ "error": null,
+ "seconds": 11.2,
+ "spend": {
+  "requests": 3,
+  "in": 54802,
+  "out": 287,
+  "usd": 0.001217,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "CANCELLED",
+ "gate": "started-claude_agent_sdk",
+ "cancel_returned": "CANCELLED",
+ "last_event": "RUN_FINISHED",
+ "last_data": "{\"spent\": {\"tokens\": 18060, \"cached_tokens\": 13874, \"cost\": 0.0, \"model_calls\": 1, \"tool_calls\": 0}, \"reason\": \"enough\"}",
+ "records": {
+  "run": {
+   "run_id": "run_525421ea6f834c9da107237588d7e092",
+   "status": "CANCELLED",
+   "parent_run_id": null,
+   "thread_id": "e90fed0f",
+   "user_id": "life-78a5e739",
+   "agent_id": "lc-claude_agent_sdk-cancel",
+   "attempt": 1,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_525421ea6f834c9da107237588d7e092": {
+    "RUN_STARTED": 1,
+    "CONTEXT_LOADED": 1,
+    "TOOL_CALL_START": 1,
+    "TOOL_CALL_ARGS": 1,
+    "TOOL_CALL_END": 1,
+    "TOOL_CALL_RESULT": 1
+   }
+  },
+  "messages": {
+   "run_525421ea6f834c9da107237588d7e092": [
+    {
+     "role": "USER",
+     "content": "Call the slow_report tool for region north, then tell me its result."
+    }
+   ]
+  },
+  "tools": {
+   "run_525421ea6f834c9da107237588d7e092": [
+    {
+     "tool_name": "ToolSearch",
+     "status": "ok",
+     "output": "{\"matches\": [\"mcp__pay__slow_report\"], \"query\": \"select:mcp__pay__slow_report\", \"total_deferred_tools\": 11}"
+    }
+   ]
+  },
+  "feedback": []
+ }
+}

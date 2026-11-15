@@ -1,0 +1,32 @@
+{
+ "sdk": "kimi",
+ "feature": "agents_md",
+ "arm": "off",
+ "error": null,
+ "seconds": 6.5,
+ "spend": {
+  "requests": 1,
+  "in": 22687,
+  "out": 118,
+  "usd": 0.000697,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "3 + 4 = 7\n\n-- KIMI-OK"
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_1ca880d91e5c43fe8fad3e04c4ec4fa5"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "ki-agentsmd-87caf3a4",
+ "records": null
+}

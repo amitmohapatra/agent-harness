@@ -1,0 +1,56 @@
+{
+ "turns": 139,
+ "runs_unique": 139,
+ "runs_found": 139,
+ "runs_ended": 138,
+ "runs_with_started_and_finished": 139,
+ "events": 3329,
+ "cases_with_fewer_runs_than_turns": [],
+ "spend_token_mismatches": [
+  "long57:long-flow-04: agent-runs 6973 vs rows 14771"
+ ],
+ "problems": [
+  "run_f9dd678a93294e579925caf943dad192: {'found': True, 'status': 'QUEUED', 'started': True, 'finished': True, 'events': 57, 'tokens': 6973}"
+ ],
+ "memory_requests": 3647,
+ "memory_per_turn": 26.24,
+ "memory_reads": 2609,
+ "memory_writes": 1038,
+ "memory_failed": [
+  "long57:multihop-04 PUT /v1/agents/model-key ValidationError",
+  "long57:aggregate-07 GET /v1/messages/msg_units NotFoundError",
+  "long57:stats-07 GET /v1/messages/result NotFoundError",
+  "long57:long-data-02 GET /v1/messages/msg_units NotFoundError",
+  "long57:long-multi-02 GET /v1/messages/result NotFoundError",
+  "long57md:long-flow-05 PUT /v1/agents/model-key ValidationError",
+  "long57rerun:long-flow-02 PUT /v1/agents/model-key ValidationError",
+  "ordinary:multihop-01 PUT /v1/agents/model-key ValidationError",
+  "ordinary:aggregate-08 GET /v1/messages/{id} NotFoundError",
+  "sw16:advdata-02 PUT /v1/agents/model-key ValidationError",
+  "sw8:long-data-03 PUT /v1/agents/model-key ValidationError",
+  "swown:advconv-05 PUT /v1/agents/model-key ValidationError"
+ ],
+ "cases_without_memory_read": [],
+ "cases_without_memory_write": [],
+ "turns_with_context_read": 139,
+ "turns_with_transcript_write": 139,
+ "context_reads": 148,
+ "transcript_writes": 164,
+ "memory_paths": {
+  "GET /v1/tools/approval-suggestions": 2222,
+  "POST /v1/tools/invocations": 703,
+  "GET /v1/tools": 208,
+  "POST /v1/messages": 164,
+  "POST /v1/context": 148,
+  "POST /v1/feedback": 147,
+  "PUT /v1/tools/catalog": 12,
+  "GET /v1/tool-permissions": 12,
+  "GET /v1/keys/self": 7,
+  "PUT /v1/agents/model-key": 7,
+  "GET /v1/agent-tools": 7,
+  "POST /v1/verify": 5,
+  "GET /v1/messages/msg_units": 2,
+  "GET /v1/messages/result": 2,
+  "GET /v1/messages/{id}": 1
+ }
+}

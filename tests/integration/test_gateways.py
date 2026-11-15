@@ -25,7 +25,7 @@ from tests.support.gateway import URL, FakeGateway
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Settings
-from trellis.contracts import ConfigurationError
+from trellis.contracts import ConfigurationError, RunEventType
 from trellis.harness import doctor, gateways
 from trellis.harness.adapters.claude import routed_env
 from trellis.harness.evals import EvalServices, OpenAICompatibleJudge, llm_judge
@@ -275,6 +275,44 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
     assert headers["x-bf-dim-agent"] == "named"  # whose run, read per request
 
 
+async def test_an_openai_agent_named_in_bifrosts_provider_form_goes_through_bifrost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model named in Bifrost's ``provider/model`` form whose prefix the SDK's
+    ``MultiProvider`` gives no provider of its own (it would refuse it: ``Unknown prefix``) is
+    the gateway's to route: the turn goes to Bifrost under that name."""
+    fake = FakeGateway(turns=["routed"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="anthropic/claude-x"), id="prefixed")
+        result = await agent.run("x", user="u")
+    assert result.answer == "routed", result.error
+    [asked] = fake.responses.requests
+    assert asked["model"] == "anthropic/claude-x"
+
+
+async def test_an_application_that_chose_chat_completions_is_served_there_on_bifrost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``set_default_openai_api("chat_completions")`` is the application's own choice of API:
+    a model name on Bifrost is asked on chat completions alone, never tried on Responses
+    first."""
+    from agents import set_default_openai_api
+    from agents.models import _openai_shared
+
+    monkeypatch.setattr(_openai_shared, "_use_responses_by_default", True)  # put back after
+    set_default_openai_api("chat_completions")
+    fake = FakeGateway(turns=["routed"])
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        result = await h.wrap(Agent(name="a", model="gpt-x"), id="chat").run("x", user="u")
+    assert result.answer == "routed", result.error
+    assert fake.responses.requests == []  # never asked on Responses
+    [asked] = fake.completions
+    assert json.loads(asked.content)["model"] == "openai/gpt-x"
+
+
 def behind_bifrost() -> Settings:
     """The settings of a harness behind a Bifrost gateway."""
     return Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
@@ -299,6 +337,42 @@ async def test_a_gateway_without_a_responses_route_answers_on_chat_completions(
     assert json.loads(fake.completions[0].content)["model"] == "openai/gpt-x"
     told = "does not serve 'openai/gpt-x' on /v1/responses"
     assert len([r for r in caplog.records if told in r.getMessage()]) == 1
+
+
+async def test_a_streamed_turn_on_a_gateway_without_a_responses_route_streams_from_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streamed, the same: the gateway refuses the Responses stream before its first event
+    (nothing was said), so the turn streams from chat completions, its answer whole; the next
+    streamed turn goes there at once."""
+    fake = FakeGateway(turns=["routed", "again"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
+        first = [e async for e in agent.stream("x", user="u")]
+        second = [e async for e in agent.stream("x", user="u")]
+    for events, said in ((first, "routed"), (second, "again")):
+        text = "".join(
+            e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT
+        )
+        assert text == said and events[-1].data["result"] == said
+    assert len(fake.refused) == 1 and len(fake.completions) == 2  # one fallback
+
+
+async def test_a_streamed_turn_of_a_model_known_on_responses_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model that has streamed on Responses: a later refusal of the route is the run's
+    error, never the turn streamed again from chat completions."""
+    fake = FakeGateway(turns=["streamed", "never"], serves_responses=1)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
+        first = [e async for e in agent.stream("x", user="u")]
+        second = [e async for e in agent.stream("x", user="u")]
+    assert first[-1].data["result"] == "streamed"
+    assert second[-1].type is RunEventType.RUN_FINISHED and second[-1].error is not None
+    assert len(fake.refused) == 1 and fake.completions == []
 
 
 async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_name(
@@ -331,6 +405,22 @@ async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_
     assert threaded.error is not None
     assert "conversation_id (a server thread)" in threaded.error.message
     assert len(fake.completions) == 1  # refused before any model call
+
+
+async def test_a_server_thread_at_the_first_fallback_is_refused_before_chat_completions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model's first call on a gateway that does not serve it on Responses carries a server
+    thread (``conversation_id``): chat completions cannot, so the call is refused at the
+    fallback, the thread named — nothing is asked on chat completions."""
+    fake = FakeGateway(turns=["never asked"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="plain", model="gpt-x"), id="plain")
+        threaded = await agent.run("x", user="u", framework_options={"conversation_id": "c1"})
+    assert threaded.error is not None
+    assert "conversation_id (a server thread)" in threaded.error.message
+    assert len(fake.refused) == 1 and fake.completions == []
 
 
 async def test_a_model_known_to_answer_on_responses_never_falls_back(
@@ -545,6 +635,37 @@ async def test_a_langchain_model_object_is_said_once_as_not_routed(
             await agent.run("x", user="u")
     said = [r for r in caplog.records if "calls its provider directly" in r.getMessage()]
     assert len(said) == 1 and "objects" in said[0].getMessage()
+
+
+async def test_a_routed_model_a_runs_own_code_asks_is_never_said_as_not_routed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A model name the harness routes (``gateways.routed_chat_model``), asked directly by the
+    run's own code — a tool of the team's here, a LangChain middleware's own model call — goes
+    through Bifrost (the chat model it makes per call points at the gateway): LangChain names
+    the call by the routed model, whose constructor names no endpoint, and it is not said to
+    call its provider directly, as a model object of the team's is."""
+    from trellis import tool
+    from trellis.harness import accounting
+    from trellis.harness.gateways import routed_chat_model
+
+    @tool(side_effects="read")
+    async def summarise(text: str) -> str:
+        """Summarise a text."""
+        reply = await routed_chat_model("openai/gpt-s").ainvoke(f"summarise: {text}")
+        return str(reply.content)
+
+    accounting._unrouted.cache_clear()
+    fake = FakeGateway(turns=[("summarise", {"text": "a long text"}), "the summary", "{last}"])
+    fake.serve_models(monkeypatch)
+    graph = ReAct(system_prompt="s", model="openai/gpt-m", tools=[summarise])
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            result = await h.wrap(graph, id="named").run("x", user="u")
+    assert result.status.value == "SUCCESS", result.error
+    asked = [json.loads(r.content)["model"] for r in fake.completions]
+    assert asked == ["openai/gpt-m", "openai/gpt-s", "openai/gpt-m"]
+    assert "calls its provider directly" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -932,7 +1053,8 @@ def test_a_request_is_fitted_to_what_the_provider_accepts_beside_the_reply(
     send (a name's reply is its resolved chat model's: read from the name itself there was
     none, so 950,000 tokens were sent where the provider accepts 872,000), and a window the
     caller gives is not eaten by a reply that fits the model's own (a 32,000 window given for
-    a model replying up to 64,000 was left no input at all)."""
+    a model replying up to 64,000 was left no input at all — and so was a graph's own model
+    beside ``middleware(context_window=8_000)``, its profile the model's own window)."""
     import random
     from types import SimpleNamespace
 
@@ -956,17 +1078,19 @@ def test_a_request_is_fitted_to_what_the_provider_accepts_beside_the_reply(
         model = ChatAnthropic(model_name=name, max_tokens=reply, api_key="sk-ant")  # type: ignore[call-arg,arg-type]
         model = model.model_copy(update={"profile": {"max_input_tokens": own}})
         sends = reply
-    request = SimpleNamespace(model=_profiled(model, given), model_settings={})
-    budget = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
     window = given or own
-    assert budget is not None and 0 < budget <= int(window * FIT_SHARE)
-    assert budget + sends <= int(own * FIT_SHARE)  # the provider takes input and reply
-    if int(window * FIT_SHARE) + sends <= int(own * FIT_SHARE):
-        assert budget == int(window * FIT_SHARE)  # room for the reply: the window's whole share
-    # a reply asked for on this call alone is the one reserved
-    request.model_settings = {"max_tokens": 1_000}
-    less = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
-    assert less == min(int(window * FIT_SHARE), int(own * FIT_SHARE) - 1_000)
+    # ReAct's model, its profile the window given; a graph's own beside middleware(), as it is
+    for sent in (_profiled(model, given), model):
+        request = SimpleNamespace(model=sent, model_settings={})
+        budget = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
+        assert budget is not None and 0 < budget <= int(window * FIT_SHARE)
+        assert budget + sends <= int(own * FIT_SHARE)  # the provider takes input and reply
+        if int(window * FIT_SHARE) + sends <= int(own * FIT_SHARE):
+            assert budget == int(window * FIT_SHARE)  # room for the reply: the window's share
+        # a reply asked for on this call alone is the one reserved
+        request.model_settings = {"max_tokens": 1_000}
+        less = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
+        assert less == min(int(window * FIT_SHARE), int(own * FIT_SHARE) - 1_000)
 
 
 def test_a_name_no_route_can_make_reserves_nothing_and_the_call_says_why() -> None:

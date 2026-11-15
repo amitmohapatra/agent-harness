@@ -1,0 +1,47 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "stdio_mcp",
+ "arm": "off",
+ "error": null,
+ "seconds": 5.0,
+ "spend": {
+  "requests": 4,
+  "in": 65909,
+  "out": 361,
+  "usd": 0.001361,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "There are 12 units of SKU-7 in the central warehouse, at location W2."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve mcp__warehouse__warehouse_stock? mcp__warehouse__warehouse_stock has not declared its side effects.",
+   "tool_call": {
+    "tool": "mcp__warehouse__warehouse_stock",
+    "args": {
+     "sku": "SKU-7"
+    },
+    "task": "How many units of SKU-7 are in the central warehouse?",
+    "step": null,
+    "idempotency_key": "90277183cf72b161ae9c10fc"
+   },
+   "options": []
+  }
+ ],
+ "run_ids": [
+  "run_5edf281c1a484421a8c048ac3058ca00"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "cl-mcp-84fb7d01",
+ "records": null
+}

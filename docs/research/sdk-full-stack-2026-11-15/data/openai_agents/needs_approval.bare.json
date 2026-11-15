@@ -1,0 +1,29 @@
+{
+ "sdk": "openai_agents",
+ "feature": "needs_approval",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.5,
+ "spend": {
+  "requests": 2,
+  "in": 897,
+  "out": 67,
+  "usd": 0.000123,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "U-12"
+ ],
+ "answers": [
+  "The user account U-12 has been deleted."
+ ],
+ "errors": [
+  null
+ ],
+ "asked": [
+  "delete_user"
+ ]
+}

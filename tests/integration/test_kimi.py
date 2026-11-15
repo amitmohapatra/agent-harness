@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
+from tests.support.invariants import descendants
 from tests.support.kimi import (
     KIMI_BIN,
     PlannedEndpoint,
@@ -31,11 +33,14 @@ from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness import compat
-from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAdapter
 from trellis.harness.adapters.claude import RESUMED_CALL
+from trellis.harness.bridges import live
+from trellis.harness.bridges.acp_live import ACPSession
 from trellis.harness.budget import Budget
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.identity import conversation_key
 from trellis.harness.sandbox import sandbox
 from trellis.harness.tools import bridge
 from trellis.harness.tools.bridge import TURN_STALLED
@@ -190,6 +195,44 @@ async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
     assert any("say it" in text_of(m.get("content")) for m in last)
 
 
+async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_call(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pause answers Kimi's permission request (dismissed) and stops the turn
+    (``session/cancel``); Kimi may take the cancel first — on a loaded machine it does — and
+    its ``Bash`` then ends the waiting call itself, its result ``Aborted before command
+    started`` instead of "not run because the approval request was cancelled". Either way the
+    command did not run: the resume tells Kimi to call it again, and it runs once approved."""
+    from trellis.harness.adapters import acp
+
+    stop = acp.Attempt._stop
+
+    async def cancelled_first(self: Any) -> None:
+        """The turn stopped before the answer goes out: the answer waits until Kimi has ended
+        the call itself (its log says so)."""
+        await self.cancel()
+        async with asyncio.timeout(30):
+            while not any(  # noqa: ASYNC110 - a file Kimi writes
+                "Aborted before command started" in line
+                for log in kimi_home_of("u1").glob("sessions/*/*/agents/main/wire.jsonl")
+                for line in log.read_text().splitlines()
+                if '"tool.result"' in line
+            ):
+                await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(acp.Attempt, "_stop", cancelled_first)
+    endpoint.plan = [("Bash", {"command": WRITES})]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash-cancelled-first")
+    paused = await agent.run("say it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    monkeypatch.setattr(acp.Attempt, "_stop", stop)
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == "Done. resumed"
+    assert (tmp_path / "kimi-work" / "made.txt").exists()
+
+
 @pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
 async def test_a_command_that_only_reads_runs_without_asking_a_person(
     harness: Harness, tmp_path: Path, streamed: bool
@@ -239,23 +282,77 @@ async def test_a_call_kimis_own_config_allows_is_still_asked_about_once(
     assert own.startswith("default_thinking = false\n" + rules) and 'decision = "ask"' in own
 
 
-async def test_a_config_whose_allow_rules_cannot_be_asked_over_stops_the_run_before_its_prompt(
+async def test_a_config_whose_rules_are_inline_is_still_asked_about(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    """APR-01. A team's config that writes its ``[permission]`` rules inline takes no rule
-    after them (TOML): its ``allow`` rule would let the call run unasked, so the run gets no
-    prompt and fails naming the rule."""
+    """APR-01. A team's config that writes its ``[permission]`` rules inline takes no
+    ``[[permission.rules]]`` after them (TOML), but it takes Kimi's other form of an ``ask``
+    rule (``[[permission.ask]]``, which Kimi reads too): its ``allow`` rule is asked over —
+    Kimi asks, and a person is asked before the call runs."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
     inline = '[permission]\nrules = [{ decision = "allow", pattern = "Bash(touch *)" }]\n'
     (home / "config.toml").write_text(inline)
     endpoint.plan = [("Bash", {"command": "touch made.txt"})]
-    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline").run(
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline")
+    paused = await agent.run("make it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    call = paused.interrupt.tool_call
+    assert call is not None and call.args == {"command": "touch made.txt"}
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    own = (kimi_home_of("u1") / "config.toml").read_text()
+    assert own.startswith(inline) and '[[permission.ask]]\npattern = "Bash(touch *)"' in own
+
+
+async def test_a_config_whose_whole_permission_is_inline_stops_the_run_before_its_prompt(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """APR-01. A ``permission`` written as one inline table takes no rule after it in any form
+    (TOML): its ``allow`` rule would let the call run unasked, so the run gets no prompt and
+    fails naming the rule."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    inline = 'permission = { rules = [{ decision = "allow", pattern = "Bash(touch *)" }] }\n'
+    (home / "config.toml").write_text(inline)
+    endpoint.plan = [("Bash", {"command": "touch made.txt"})]
+    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline-all").run(
         "make it", user="u1"
     )
     assert done.status is RunStatus.ERROR and done.error is not None
     assert "Bash(touch *)" in done.error.message and "config.toml" in done.error.message
     assert not endpoint.requests and not (tmp_path / "kimi-work" / "made.txt").exists()
+
+
+@pytest.mark.parametrize("asks", [False, True], ids=["a-read", "the-catalog-asks"])
+async def test_a_skill_kimi_loads_is_decided_by_governance(
+    endpoint: PlannedEndpoint, tmp_path: Path, asks: bool
+) -> None:
+    """KIMI-SKILL-1. Kimi runs its ``Skill`` tool unasked by default; a run's Kimi asks about
+    it (an ``ask`` rule in its user's config), so governance decides the call: a read runs at
+    once and is the run's call; a catalog that says more has a person asked first."""
+    from tests.support.skills import SkillStore
+    from trellis.skills import combine
+
+    store = SkillStore()
+    store.put("sql-review", "Check every JOIN.", description="Reviews SQL queries for joins.")
+    endpoint.plan = [("Skill", {"skill": "sql-review"})]
+    rules = {"Skill": Rule(risk="irreversible")} if asks else {}
+    async with with_governance(Harness(), Governance(FakeCatalog(rules))) as h:
+        target = kimi_target(endpoint, tmp_path, **combine(store).kimi())
+        agent = h.wrap(target, id=f"kimi-skill-{asks}")
+        events = [e async for e in agent.stream("review my SQL", user="u1")]
+        finished = events[-1]
+        if asks:
+            interrupt = finished.data.get("interrupt") or {}
+            call = interrupt.get("tool_call") or {}
+            assert call.get("tool") == "Skill", finished.data
+            assert call.get("args") == {"skill": "sql-review"}
+        else:
+            assert finished.data.get("interrupt") is None, finished.data
+            assert finished.error is None, finished.error
+            ended = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+            assert [(r["tool"], r["status"]) for r in ended] == [("Skill", "ok")]
+    assert 'pattern = "Skill"' in (kimi_home_of("u1") / "config.toml").read_text()
 
 
 async def test_two_users_never_share_a_kimi_home(
@@ -1029,6 +1126,40 @@ async def test_a_command_kimi_runs_in_the_background_finishes_after_its_turn(
     async with asyncio.timeout(20):
         while not made.exists():  # noqa: ASYNC110 - a file the command writes
             await asyncio.sleep(0.1)
+
+
+async def test_a_kept_kimi_whose_hold_lapses_ends_with_its_command_and_its_sessions_files(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KIMI-LIVE-1, real Kimi: the process kept for a command it runs in the background ends
+    when the conversation's hold of it lapses (kept as long as a session is) — and the command
+    with it, no process of the test's left — no run is left ``RUNNING``, and the session's own
+    folder leaves its user's Kimi home, whose config stays."""
+    monkeypatch.setattr(live, "WORKING_SECONDS", 1.0)
+    command = {
+        "command": "sleep 60 && touch late.txt",
+        "run_in_background": True,
+        "description": "wait",
+    }
+    endpoint.plan = [("Bash", command)]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-lapse")
+    before = set(descendants(os.getpid()))
+    paused = await agent.run("wait a minute", user="u1", thread="t1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    adapter = agent.adapter
+    assert isinstance(adapter, ACPAdapter)
+    session = adapter.live.get(conversation_key("default", "u1", "t1"))
+    assert isinstance(session, ACPSession) and session.working  # kept: the command works
+    home = kimi_home_of("u1")
+    [folder] = home.glob(f"sessions/*/{session.session_id}")
+    async with asyncio.timeout(30):
+        while not session.closed or folder.exists() or set(descendants(os.getpid())) - before:  # noqa: ASYNC110 - processes and files
+            await asyncio.sleep(0.1)
+    assert not [s async for s in harness.runs.iterate() if s.status is RunStatus.RUNNING]
+    assert (home / "config.toml").is_file() and (home / "sessions").is_dir()
+    assert not (tmp_path / "kimi-work" / "late.txt").exists()
 
 
 async def test_kimis_answer_streams(

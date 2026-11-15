@@ -1,0 +1,13 @@
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+advconv-05       tier 3 [True, True] $0.0254
+long-flow-02     tier 3 [] $0.0254
+# complex: claude-haiku-5-5 (claude, memory history)
+
+Spend: $0.0254 (cap $0.15)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 14 |
+| adv_conversation | 1 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 14 |
+| long_flow | 1 | 0 | — | 0 | 0 | 0 | 0 of 0 |
+| tier 3 | 2 | 2 | 1.00 ± 0.00 | 0 | 0 | 0 | 0 of 14 |

@@ -155,7 +155,7 @@ def named(runtime: Runtime) -> dict[str, Any] | None:
     """What an approval asked while a helper of ``runtime``'s run works carries in its
     payload: the helper (``{HELPER: {"run_id", "name"}}``) — the run its call is recorded
     under, which the person's decision is feedback on (:func:`asked_inside`)."""
-    return _naming(inside(runtime))
+    return naming(inside(runtime))
 
 
 def held(runtime: Runtime) -> dict[str, Any] | None:
@@ -163,10 +163,13 @@ def held(runtime: Runtime) -> dict[str, Any] | None:
     work holds it (``Helpers.held``: an OpenAI agent tool whose own tool waits on the SDK's
     approval): the helper, whose run records the call."""
     helpers = runtime.helpers
-    return _naming(None if helpers is None else helpers.held)
+    return naming(None if helpers is None else helpers.held)
 
 
-def _naming(helper: Helper | None) -> dict[str, Any] | None:
+def naming(helper: Helper | None) -> dict[str, Any] | None:
+    """What names ``helper`` beside what it did — an approval's payload, a subagent's
+    reasoning on its parent's stream: ``{HELPER: {"run_id", "name"}}``, the run that records
+    it; ``None``: the run's own."""
     return None if helper is None else {HELPER: {"run_id": helper.run_id, "name": helper.name}}
 
 
@@ -243,7 +246,7 @@ class Helpers:
         run_id: str | None,
         about: Mapping[str, str],
     ) -> Helper:
-        found = self._open.get(key) or self._detached.get(key)
+        found = self.of_key(key)
         if found is not None:
             return found
         parent = self.runtime
@@ -319,6 +322,11 @@ class Helpers:
             # whoever keeps it going holds it (``claude_live.Background``)
             self.runtime.agent.harness.holds.let_go(helper.run_id)
         return helper
+
+    def of_key(self, key: str) -> Helper | None:
+        """The helper ``key`` started, open or handed on (:meth:`detached`); ``None``: none
+        of this attempt's."""
+        return self._open.get(key) or self._detached.get(key)
 
     def named(self, name: str) -> Helper | None:
         """The open helper called ``name`` started last (a framework that names the helper

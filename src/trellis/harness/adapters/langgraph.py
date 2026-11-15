@@ -799,7 +799,9 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     # a new turn's state starts with what its conversation carries (:data:`CARRIED`)
     carried = getattr(runtime, "carried", None)
     started = (
-        {**native_input, **carried} if carried and isinstance(native_input, dict) else native_input
+        _carrying(target, native_input, carried)
+        if carried and isinstance(native_input, dict)
+        else native_input
     )
     if carried and ACTIVE_AGENT in carried:  # whose turn it is, on the run's stream
         runtime.events.custom(ACTIVE_AGENT, agent=carried[ACTIVE_AGENT])
@@ -822,6 +824,21 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     latest = configurable.get("checkpoint_id")
     replay.resumed = latest if isinstance(latest, str) else None
     return native_input if resumed else None
+
+
+def _carrying(target: Any, native_input: dict[str, Any], carried: Mapping[str, Any]) -> Any:
+    """A new turn's input with what its conversation carries: merged into it — or, when the
+    graph's input leaves a carried channel out (LangChain's ``OmitFromInput``:
+    ``TodoListMiddleware``'s ``todos``, which an input would drop), written to the graph's
+    state as the turn starts (``Command(update=)``), what is not a channel of the graph left
+    out as an input leaves it."""
+    from langgraph.types import Command
+
+    started = {**native_input, **carried}
+    taken = target.get_input_jsonschema().get("properties") or {}
+    if all(name in taken for name in carried):
+        return started
+    return Command(update={k: v for k, v in started.items() if k in target.channels})
 
 
 def _answered(target: Any, native_input: Any, values: Any) -> Any:
@@ -975,8 +992,7 @@ def hitl_approved(
 ) -> list[tuple[str, Any]]:
     """The calls a ``HumanInTheLoopMiddleware`` request's resume runs as a person decided —
     each call its decision approves, as the model made it, or edits, as edited
-    (:func:`hitl_response`); a rejected or answered call runs nothing, and a cancel decides
-    none."""
+    (:func:`hitl_response`); a rejected or answered call runs nothing."""
     approved: list[tuple[str, Any]] = []
     for (name, args), decision in _hitl_decided(request, resolution):
         if decision.get("type") == "approve":
@@ -1003,9 +1019,8 @@ def _hitl_decided(
     request: Mapping[str, Any], resolution: InterruptResolution
 ) -> list[tuple[tuple[str, dict[str, Any]], dict[str, Any]]]:
     """Each call a ``HumanInTheLoopMiddleware`` request holds, with the decision its resume
-    sends for it (:func:`hitl_response`); none on a cancel, which decides none."""
-    if resolution.decision is InterruptDecision.CANCEL:
-        return []
+    sends for it (:func:`hitl_response`). Never a cancel: a cancelled run takes no attempt
+    (``Agent._continue``), so no resume is sent."""
     sent = hitl_response(dict(request), resolution)
     decisions = [sent] if request.get("type") == TOOL_APPROVAL else sent["decisions"]
     return list(zip(hitl_calls(request), decisions, strict=False))

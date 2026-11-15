@@ -1,0 +1,58 @@
+{
+ "sdk": "swarm",
+ "feature": "s_handoff",
+ "arm": "on",
+ "error": null,
+ "seconds": 6.1,
+ "spend": {
+  "requests": 4,
+  "in": 2472,
+  "out": 459,
+  "usd": 0.000381,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "O-9"
+ ],
+ "answers": [
+  "billing here\n\nOrder O-9 has been refunded.",
+  "billing here\n\nYou're talking to the billing assistant. I handle refunds, and I've just refunded order O-9. If you need help with something outside billing, I can transfer you to the desk."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve refund? refund is write. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "refund",
+    "args": {
+     "order": "O-9"
+    },
+    "task": "Please refund order O-9.",
+    "step": 2,
+    "idempotency_key": "toolu_01AQtyQ7JqKGa6EA5u8sTVSC"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_becdbb5207c34dfab36b054f49afdb0e",
+  "run_4ae0e62eac284e10996d83730da81c05"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "sw-handoff-e0bc0779",
+ "records": null
+}

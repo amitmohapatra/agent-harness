@@ -1,0 +1,152 @@
+{
+ "sdk": "langgraph",
+ "feature": "store",
+ "arm": "stack",
+ "error": null,
+ "seconds": 9.1,
+ "spend": {
+  "requests": 5,
+  "in": 5223,
+  "out": 296,
+  "usd": 0.00067,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "You're allergic to peanuts. That's the only allergy in your saved facts.",
+ "in_own_store": true,
+ "asked": true,
+ "status": "SUCCESS",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_cb3797980d854e8a8c61e2b889b5b137",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "299eff60",
+    "user_id": "lc-687a86bb",
+    "agent_id": "lc-store",
+    "attempt": 2,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_cb3797980d854e8a8c61e2b889b5b137": {
+     "RUN_STARTED": 2,
+     "CONTEXT_LOADED": 2,
+     "INTERRUPT": 1,
+     "RUN_FINISHED": 2,
+     "CUSTOM": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1
+    }
+   },
+   "messages": {
+    "run_cb3797980d854e8a8c61e2b889b5b137": [
+     {
+      "role": "USER",
+      "content": "Save this fact about me: I am allergic to peanuts."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "saved"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "I've saved that you're allergic to peanuts."
+     }
+    ]
+   },
+   "tools": {
+    "run_cb3797980d854e8a8c61e2b889b5b137": [
+     {
+      "tool_name": "save_fact",
+      "status": "ok",
+      "output": "saved"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "tool_call",
+     "verdict": "approve",
+     "source": "interrupt"
+    },
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  },
+  {
+   "run": {
+    "run_id": "run_6f69cdfc676e48589fad8f131a0f8667",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "c9ce55f4",
+    "user_id": "lc-687a86bb",
+    "agent_id": "lc-store",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_6f69cdfc676e48589fad8f131a0f8667": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_6f69cdfc676e48589fad8f131a0f8667": [
+     {
+      "role": "USER",
+      "content": "Read my saved facts and tell me what I am allergic to."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "The user is allergic to peanuts."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "You're allergic to peanuts. That's the only allergy in your saved facts."
+     }
+    ]
+   },
+   "tools": {
+    "run_6f69cdfc676e48589fad8f131a0f8667": [
+     {
+      "tool_name": "read_facts",
+      "status": "ok",
+      "output": "The user is allergic to peanuts."
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

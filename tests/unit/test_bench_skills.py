@@ -336,7 +336,8 @@ async def test_a_scripted_run_that_reads_the_skill_and_answers_by_it_passes(offl
     assert row["passed"], row["problems"]
     assert row["read"] == [[["supplier-scorecard", None]]]
     assert set(row["pinned"][0]) == {s.name for s in b.LIBRARY}
-    assert row["calls"][0] == [["supplier_info", {"supplier": "SUP-07"}]]
+    read = ["read_file", {"file_path": f"{SKILLS_ROOT}supplier-scorecard/SKILL.md"}]
+    assert row["calls"][0] == [read, ["supplier_info", {"supplier": "SUP-07"}]]  # both the run's
     assert row["model_calls"] == 3 and row["input_tokens"] == 3000 and row["category"] == "pick"
     system = str(model.seen[0][0].content)
     assert "supplier-scorecard" in system and "supplier-lead-time" in system  # Deep Agents' listing

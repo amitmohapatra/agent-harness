@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -314,6 +315,46 @@ async def test_an_outcome_a_turn_already_told_is_quiet_when_a_turn_of_its_own_te
     assert found is not None and background.NOTIFIED in found.metadata
     assert (found.status, found.output) == (RunStatus.SUCCESS, schedules.NO_REPORT)
     assert len(model.seen) == calls  # no model call
+
+
+async def test_one_outcome_told_by_two_servers_at_once_is_one_turn_run_by_one(
+    workers: tuple[Harness, Harness], gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two servers sharing the run store tell a task's outcome to the idle chat at the same
+    moment: both find no turn for it and start one — the run store answers the second start
+    with the first's run, which names the server that made it — so one server runs the turn
+    and the other leaves it: one turn for the outcome."""
+    monkeypatch.setattr(background, "idle", _busy)
+    first_h, second_h = workers
+    model = Model(turns=[START, "Started.", "Back: success."])
+    here, there = (chat(h, gate, model) for h in workers)
+    first = await chatted(here, "research lighthouses")
+    task = await task_run(first_h, first.run_id)
+    gate.opened.set()
+    await until(lambda: _final(first_h, task.run_id))
+    assert (await chatted(here, "anything new?")).answer == "Back: success."
+    ended = await first_h.runs.get(task.run_id)
+    assert ended is not None
+    update = background.update_of({"task_id": task.thread_id, "agent_name": "research"}, ended)
+    assert update is not None
+    origin = ended.metadata[background.BACKGROUND]
+    store = first_h.runs
+    read = store.get
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:  # a store across the network: both read
+        found = await read(*args, **kwargs)
+        await asyncio.sleep(0.01)  # before either starts it
+        return found
+
+    monkeypatch.setattr(store, "get", slow)
+    await asyncio.gather(
+        background.notify(here, ended, update, user=USER, thread=THREAD, origin=origin),
+        background.notify(there, ended, update, user=USER, thread=THREAD, origin=origin),
+    )
+    monkeypatch.setattr(store, "get", read)
+    await until(lambda: _all_final(first_h))
+    assert await _own_turns(first_h) == 1
+    assert not second_h.background._at_work and not first_h.background._at_work
 
 
 async def _own_turns(harness: Harness) -> int:
@@ -736,6 +777,27 @@ async def test_an_approval_inside_the_task_is_asked_through_the_chat(
     assert statuses == ["waiting", "success"]
 
 
+async def test_an_answer_reaching_a_server_with_no_room_leaves_the_question_the_tasks(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The answer to a task's question, asked through the chat, reaching a server with no
+    room for more background work: the task does not go on there — said in the log — and its
+    run still waits on the question, for the conversation's next turn to ask."""
+    model = Model(turns=[PUBLISH, "Started.", *["Noted."] * 6])
+    agent = publishing(harness, model)
+    first = await chatted(agent, "publish the tides report")
+    task = await task_run(harness, first.run_id)
+    asking = await asked_in_the_chat(harness)
+    asked = asking.awaiting
+    monkeypatch.setattr(background, "AT_WORK", 0)  # no room left here
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        await agent.resume(asked.interrupt_id, "approve", reviewer=USER)
+    assert f"background task {task.run_id}: no room here to go on with" in caplog.text
+    waiting = await harness.runs.get(task.run_id)
+    assert waiting is not None and waiting.status is RunStatus.PAUSED
+    monkeypatch.undo()
+
+
 async def test_an_answer_reaching_another_worker_resumes_the_task_there(
     workers: tuple[Harness, Harness],
 ) -> None:
@@ -1084,6 +1146,49 @@ async def test_sec_r_2_a_tasks_result_starting_a_task_stops_at_the_third_in_a_ro
 
 async def _told(harness: Harness, count: int) -> bool:
     return await _own_turns(harness) >= count
+
+
+async def test_a_server_with_no_room_refuses_a_start_and_a_follow_up_with_the_reason(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background attempts a server keeps at work are bounded (``background.AT_WORK``):
+    at the bound, a task is not started and a follow-up to one at work is not sent — each
+    refused with the reason the model reads, nothing left half begun."""
+    monkeypatch.setattr(background, "AT_WORK", 1)
+    release = asyncio.Event()
+    heard: list[str] = []
+
+    async def writer(input: str, agent: Runtime) -> str:
+        """Write on a topic."""
+        heard.append(input)
+        await release.wait()
+        return f"WROTE: {input}"
+
+    model = Model(
+        turns=[
+            ("start_async_task", {"description": "lighthouses", "subagent_type": "writer"}),
+            reports_the_task,
+            ("start_async_task", {"description": "tides", "subagent_type": "writer"}),
+            says_what_the_tool_said,
+            with_task("update_async_task", message="shorter, please"),
+            says_what_the_tool_said,
+        ]
+    )
+    wrapped = harness.wrap(writer, id="writer")
+    agent = harness.wrap(ReAct("You help.", model, subagents=[wrapped]), id="chat")
+    first = await chatted(agent, "write about lighthouses")
+    assert first.status is RunStatus.SUCCESS, first.error
+    assert results(model.seen[1])[0].startswith("Launched async subagent.")
+    await until(lambda: heard == ["lighthouses"])
+    second = await chatted(agent, "and about tides")
+    assert second.status is RunStatus.SUCCESS, second.error
+    assert results(model.seen[3]) == [background.NO_ROOM]
+    assert [r async for r in harness.runs.iterate(parent_run_id=second.run_id)] == []
+    updated = await chatted(agent, "make it shorter")
+    assert updated.status is RunStatus.SUCCESS, updated.error
+    assert results(model.seen[5]) == [background.NO_ROOM]
+    assert heard == ["lighthouses"]  # the task at work goes on, not interrupted
+    release.set()
 
 
 async def test_sec_r_2_fifty_starts_in_one_turn_start_at_most_the_admission_limit(

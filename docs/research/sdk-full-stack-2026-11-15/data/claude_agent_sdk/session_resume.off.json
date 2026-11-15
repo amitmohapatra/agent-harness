@@ -1,0 +1,36 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "session_resume",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.5,
+ "spend": {
+  "requests": 2,
+  "in": 32114,
+  "out": 85,
+  "usd": 0.000803,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Noted.",
+  "Teal. You told me earlier."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_522e5609cfea4ee7a288686dadd55df0",
+  "run_bf3919030c0e48bead16b1985f91dbf0"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "cl-resume-ad4b07df",
+ "records": null
+}

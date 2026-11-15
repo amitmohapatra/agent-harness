@@ -1,0 +1,23 @@
+{
+ "sdk": "openai_agents",
+ "feature": "tool_use_behavior",
+ "arm": "bare",
+ "error": null,
+ "seconds": 1.5,
+ "spend": {
+  "requests": 1,
+  "in": 413,
+  "out": 51,
+  "usd": 6.7e-05,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "SKU-5: 7 units in stock"
+ ],
+ "errors": [
+  null
+ ]
+}

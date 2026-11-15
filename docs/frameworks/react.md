@@ -290,7 +290,7 @@ the run's history ([below](#checkpoint-history-langgraphs-time-travel)).
 
 | Middleware | What it does |
 |---|---|
-| `TodoListMiddleware` (LangChain), `LongTaskTools` | `ReAct` alone: a long task — a conversation past half the window (counted as LangChain's context editing counts it; where old results start being cleared), on a known window of at least 32,000 tokens — is offered planning (`write_todos`), Deep Agents' scratch file tools and its general-purpose helper, for the rest of the thread; a shorter task is sent none of them (together about 2,600 tokens a call), whatever its wording or the calls it made. `ReAct` asked for a Deep Agents capability offers them from the first call. On your own graph, `middleware()` offers planning the same way |
+| `TodoListMiddleware` (LangChain), `LongTaskTools` | `ReAct` alone: a long task — a conversation past half the window (counted as LangChain's context editing counts it; where old results start being cleared), on a known window of at least 32,000 tokens — is offered planning (`write_todos`), Deep Agents' scratch file tools and its general-purpose helper, for the rest of the thread; a shorter task is sent none of them (together about 2,600 tokens a call), whatever its wording or the calls it made. `ReAct` asked for a Deep Agents capability offers them from the first call. On a `create_agent` graph of your own, `middleware()` offers planning the same way; in a `create_deep_agent` graph it steps aside for Deep Agents' own (the `TodoListMiddleware` you add, offered at every window: [deepagents.md](deepagents.md#planning)) |
 | `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order. With no `read_file` of the graph's own (no backend), a result over 80,000 characters is kept in the run and previewed, and `read_file` and `query_result` (read-only SQL over its rows) are offered once one is ([tools.md](../tools.md#large-results)); with a backend, `query_result` runs over the result Deep Agents saved in the state |
 | `GovernTools` | the graph's own tools — your LangChain tools, Deep Agents' `task`, its file tools on a backend outside the state, a sub-agent's tools — governed as the harness's are (catalog, approval, journal, records) |
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed and a failure was met again (the same tool, the same error): the model is told so and called once more with no tool (`tool_choice="none"`), so the user is told what went wrong; no answer then stops the run with a `ModelError`. Failures that each differ are a model correcting itself, bounded by `max_steps` |
@@ -400,10 +400,10 @@ smaller, step by step, only as far as it must, in this order:
 
 | Step | What goes | Kept |
 |---|---|---|
-| `tools` | the offered tools narrowed to the most relevant; one not kept is still offered by its signature (its name and arguments, the description left out) while that fits, and always when the tool hints chose it | those the run used, the graph's own state tools and `tool_search`; then the hinted ones; then by the words they share with the request; 8 of them at least besides |
+| `tools` | the offered tools narrowed to the most relevant; one not kept is still offered by its signature (its name and arguments, the description left out) while that fits, and always when the tool hints chose it | those the run used, the graph's own state tools and `tool_search` (by their first sentence where whole they would leave the others no room: `write_todos` alone is 1,100 tokens); then the hinted ones; then by the words they share with the request; 8 of them at least besides |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
 | `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone; on Deep Agents, none: its summarization offloads them whole to its backend), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
-| `turns` | the older turns, in layers: their tool calls and results, the oldest turn's first, then the turns whole (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`); then the tools past the first step's 8, only as far as the latest turn leaves no room | the older turns' questions and answers while they fit; the latest turn whole, from the user's question (not a note the step limit or the budget appends); the tools it must keep, and the first 8 besides by their signature whatever the room (only a request the model's server itself refused gives those up) |
+| `turns` | the older turns, in layers: their tool calls and results, the oldest turn's first, then the turns whole (a todo list whose `write_todos` call went with them opens the turn's question) (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`); then the tools past the first step's 8, only as far as the latest turn leaves no room | the older turns' questions and answers while they fit; the latest turn whole, from the user's question (not a note the step limit or the budget appends); the tools it must keep, and the first 8 besides by their signature whatever the room (only a request the model's server itself refused gives those up) |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
 No tool is held back in silence: a tool the request no longer offers at all is named after the
@@ -458,7 +458,12 @@ default, and the harness has no fallback to it; a team adds it through `middlewa
 ## Approvals, streaming, durable runs, surfaces, evaluation
 
 A tool that asks pauses the run; `agent.resume(...)` continues the graph from its checkpoint
-and the approved call runs once. `agent.stream(...)` yields each step's text and the tool
+and the approved call runs once. Whether it asks, and what the person may pick, is one rule for
+every tool a `ReAct` (or a langgraph-swarm of them) is given — a function, `mcp(...)`, the
+gateway's MCP tools, a LangChain or `langchain.mcp` tool: a read runs; a write and a tool that
+says nothing (an MCP tool with no annotations among them) ask with allow once, for this
+conversation, always (with memory), deny; an irreversible one asks every call
+([governance.md](../governance.md#one-rule-every-adapter-and-every-way-a-tool-arrives)). `agent.stream(...)` yields each step's text and the tool
 events. `start` + workers, `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` tools and
 `h.evaluate` work as for every target. `llm_judge` asks its own `model=`, else the gateway's
 judge alias — never the agent's own model ([evaluation.md](../evaluation.md#the-judges-model)).
@@ -625,13 +630,16 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   less and less often, up to every two minutes, never two servers in step —: ended, its run ends
   and the chat is told by a turn of its own, as a harness task's outcome is
   ([above](#a-task-in-the-background)). `update_async_task` and `cancel_async_task` reach it by
-  its id.
+  its id. Such outcomes may start or update a task three times in a row with no message from
+  the user between, as a harness task's may; the fourth start or update fails saying so, and
+  its server is sent nothing.
 * **Approvals** — a check or the list is a read; a start, an update and a cancel are writes of
   Deep Agents' own tools, announced on the stream and not asked about. To have a person
   approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
 * **Its own run** — each task is a child run of the turn that started it, as a `task`
   sub-agent is ([above](#sub-agents-and-child-runs)), and outlives that turn as the task does: its input
-  the task's text, its metadata (`native_helper`) the task's id, the server's `url` and the
+  the task's text, its metadata (`native_helper`) the task's id, the chat's `thread`, how many
+  outcomes in a row led to the turn that started it (`depth`), the server's `url` and the
   `graph_id` (never your `headers`), `helper_started` on the turn's stream. While the task
   runs, the run is `RUNNING` and held in the run store from the server that started it: a
   server that dies leaves a run the store ends (cut off). It ends when the task's end is

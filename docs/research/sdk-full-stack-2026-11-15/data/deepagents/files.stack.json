@@ -1,0 +1,151 @@
+{
+ "sdk": "deepagents",
+ "feature": "files",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.3,
+ "spend": {
+  "requests": 5,
+  "in": 23941,
+  "out": 644,
+  "usd": 0.001269,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Done. I wrote `launch code: ORCHID-42` to /notes.md.",
+  "The launch code in /notes.md is **ORCHID-42**."
+ ],
+ "statuses": [
+  "SUCCESS",
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_2c2b0533a990457ab8901fff23ec7a0a",
+  "run_b66823d6df8f495980a48be9ae9d2520"
+ ],
+ "errors": [
+  null,
+  null
+ ],
+ "user": "da-files-c204b3ab",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_2c2b0533a990457ab8901fff23ec7a0a",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "79e5402a",
+    "user_id": "da-files-c204b3ab",
+    "agent_id": "da-files",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_2c2b0533a990457ab8901fff23ec7a0a": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_2c2b0533a990457ab8901fff23ec7a0a": [
+     {
+      "role": "USER",
+      "content": "Write the text 'launch code: ORCHID-42' to the file /notes.md. Then say done."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "No files found"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "Updated file /notes.md\nThis file is in this run's own scratch space: the user cannot open or download it, so never offer it to them as a file; give them its content instead."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "Done. I wrote `launch code: ORCHID-42` to /notes.md."
+     }
+    ]
+   },
+   "tools": {
+    "run_2c2b0533a990457ab8901fff23ec7a0a": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  },
+  {
+   "run": {
+    "run_id": "run_b66823d6df8f495980a48be9ae9d2520",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "79e5402a",
+    "user_id": "da-files-c204b3ab",
+    "agent_id": "da-files",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_b66823d6df8f495980a48be9ae9d2520": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_b66823d6df8f495980a48be9ae9d2520": [
+     {
+      "role": "USER",
+      "content": "Read /notes.md and tell me the launch code in it."
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "@@ lines 1-1 of 1 @@\nlaunch code: ORCHID-42"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "The launch code in /notes.md is **ORCHID-42**."
+     }
+    ]
+   },
+   "tools": {
+    "run_b66823d6df8f495980a48be9ae9d2520": []
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ],
+ "todos": null,
+ "files": [
+  "/notes.md"
+ ]
+}

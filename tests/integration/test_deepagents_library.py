@@ -32,7 +32,7 @@ from deepagents.middleware import create_summarization_tool_middleware
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.structured_output import ToolStrategy
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import ToolRuntime
@@ -41,8 +41,9 @@ from pydantic import BaseModel
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
-from trellis import Harness
+from trellis import Harness, middleware
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.middleware import RunCheckpointer
 
 ran: list[str] = []
@@ -176,6 +177,9 @@ async def test_a_sub_agent_that_forks_the_conversation_reads_it_and_answers_thro
 
 
 # -------------------------------------------------------------------------------- backends
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_files_on_a_store_of_the_graphs_own_are_kept_past_the_thread(
     harness: Harness,
 ) -> None:
@@ -204,6 +208,9 @@ async def test_files_on_a_store_of_the_graphs_own_are_kept_past_the_thread(
     assert "ship friday" in str(model.seen[-1][-1].content)
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_files_on_a_store_go_to_the_memory_service_when_the_graph_has_no_store(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -238,6 +245,9 @@ def routed(tmp_path: Path) -> CompositeBackend:
     )
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_a_composite_backend_routes_each_path_to_its_backend(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -270,6 +280,9 @@ async def test_a_composite_backend_routes_each_path_to_its_backend(
     assert set(files) == {"/scratch.md"}
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 @pytest.mark.parametrize(
     ("call", "governed"),
     [
@@ -283,6 +296,8 @@ async def test_a_composite_backend_routes_each_path_to_its_backend(
             True,
         ),
         (("edit_file", {"file_path": "/s.md", "old_string": "a", "new_string": "b"}), False),
+        # a path Deep Agents refuses cannot be placed: governed, it fails closed
+        (("read_file", {"file_path": "../kept/final.md"}), True),
     ],
 )
 async def test_a_composite_backends_call_is_governed_when_it_reaches_past_the_state(
@@ -324,6 +339,15 @@ async def test_a_composite_backends_write_past_the_state_waits_for_its_approval(
     assert set((await state_of(memory_harness, graph, "t"))["files"]) == {"/scratch.md"}
 
 
+@lc_tool
+def todo_count(runtime: ToolRuntime[Any, Any]) -> str:
+    """How many todos the plan in the graph's state holds."""
+    return f"{len(runtime.state.get('todos') or [])} todos"
+
+
+todo_count.metadata = {"side_effects": "read"}
+
+
 @pytest.mark.parametrize("kept", ["no thread", "the run"])
 async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
     harness: Harness, kept: str
@@ -339,7 +363,11 @@ async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
             ("write_todos", {"todos": [{"content": "check tides", "status": "pending"}]}),
         ],
         "noted",
-        [("read_file", {"file_path": "/notes.md"}), ("delete", {"file_path": "/draft.md"})],
+        [
+            ("read_file", {"file_path": "/notes.md"}),
+            ("delete", {"file_path": "/draft.md"}),
+            ("todo_count", {}),
+        ],
         "read",
         [("read_file", {"file_path": "/notes.md"}), ("read_file", {"file_path": "/draft.md"})],
         "again",
@@ -348,7 +376,9 @@ async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
     ]
     model = ScriptedChatModel(turns=turns)
     saver = RunCheckpointer() if kept == "the run" else None
-    graph = create_deep_agent(model=model, middleware=[TodoListMiddleware()], checkpointer=saver)
+    graph = create_deep_agent(
+        model=model, tools=[todo_count], middleware=[TodoListMiddleware()], checkpointer=saver
+    )
     agent = harness.wrap(graph, id="deep")
 
     def read(n: int) -> list[str]:
@@ -357,11 +387,90 @@ async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
 
     for said in ("note it", "read it", "read both"):
         assert (await agent.run(said, user="u", thread="t")).status is RunStatus.SUCCESS
-    assert "tides at six" in read(3)[-2]  # the second turn read the first turn's file
+    assert "tides at six" in read(3)[-3]  # the second turn read the first turn's file
+    assert read(3)[-1] == "1 todos"  # and has its todos, which LangChain omits from an input
     third = read(5)
     assert "tides at six" in third[-2] and "not found" in third[-1]  # deleted stays deleted
     assert (await agent.run("read it", user="u", thread="other")).answer == "elsewhere"
     assert "not found" in read(7)[-1]  # another conversation's files are its own
+
+
+#: Window sizes from small to the model's whole, and unknown (``None``).
+WINDOWS = [8_000, 16_000, 32_000, 128_000, None]
+
+
+@pytest.mark.parametrize("window", WINDOWS)
+async def test_deep_agents_planning_is_its_own_beside_the_harness_middleware(
+    harness: Harness, window: int | None
+) -> None:
+    """PLAN: Deep Agents' planning is LangChain's ``TodoListMiddleware``, which a team adds.
+    Beside ``middleware()`` it is the library's own at every window, small, large or unknown:
+    ``write_todos`` offered from the first call with its own guidance, the plan in the graph's
+    state. The harness's ``Planning`` stays out of a Deep Agents graph, so one without it has no
+    ``write_todos``, as Deep Agents alone; ``create_agent`` keeps the harness's planning."""
+    todos = [{"content": "check tides", "status": "in_progress"}]
+    model = ScriptedChatModel(turns=[("write_todos", {"todos": todos}), "planned"])
+    stack = [TodoListMiddleware(), *middleware(context_window=window)]
+    graph = create_deep_agent(model=model, middleware=stack, checkpointer=InMemorySaver())
+    result = await harness.wrap(graph, id="deep").run("plan it", user="u", thread="t")
+    assert result.answer == "planned"
+    assert all("write_todos" in request["tools"] for request in model.requests)
+    assert "write_todos" in str(model.seen[0][0].content)  # the library's own guidance
+    assert (await state_of(harness, graph, "t"))["todos"] == todos
+    alone = ScriptedChatModel(turns=["hello"])
+    bare = create_deep_agent(model=alone, middleware=middleware(context_window=window))
+    assert (await harness.wrap(bare, id="bare").run("hi", user="u")).answer == "hello"
+    assert "write_todos" not in alone.requests[0]["tools"]
+    held = create_agent(alone, tools=[], middleware=middleware(context_window=window))
+    assert "write_todos" in {t.name for t in graph_tools(held)}  # held for a long task
+
+
+@lc_tool
+def tides(day: str) -> str:
+    """The tide table of a day."""
+    return f"{day}: " + "high water at six, low water at noon. " * 400
+
+
+tides.metadata = {"side_effects": "read"}
+
+
+@pytest.mark.parametrize("kept", ["a small window", "no thread"])
+async def test_the_todo_list_stays_in_view_when_the_turns_that_wrote_it_do_not(
+    harness: Harness, kept: str
+) -> None:
+    """PLAN: the todo list is the graph's state, and the model reads it in the ``write_todos``
+    call that wrote it. When no such call is in a request — the older turns' calls left out to
+    fit a small window, or the earlier turns given as text (a graph with no thread of its own)
+    — the list as last written is shown after the instructions: a later turn knows its plan."""
+    todos = [
+        {"content": "check monday tides", "status": "completed"},
+        {"content": "check sunday tides", "status": "pending"},
+    ]
+    turns: list[Any] = [("write_todos", {"todos": todos}), "planned"]
+    small = kept == "a small window"
+    asks = [f"read tides {n}" for n in range(8)] if small else ["what is pending?"]
+    for n in range(len(asks)):
+        turns += [("tides", {"day": f"a{n}"}), ("tides", {"day": f"b{n}"})] if small else []
+        turns.append(f"read {n}")
+    model = ScriptedChatModel(turns=turns)
+    stack = [TodoListMiddleware(), *middleware(context_window=8_000 if small else None)]
+    saver = InMemorySaver() if small else None
+    graph = create_deep_agent(model=model, tools=[tides], middleware=stack, checkpointer=saver)
+    agent = harness.wrap(graph, id="deep")
+    for said in ["plan it", *asks]:
+        assert (await agent.run(said, user="u", thread="t")).status is RunStatus.SUCCESS
+    unseen = [
+        seen
+        for seen in model.seen[2:]
+        if not any(isinstance(m, AIMessage) and m.tool_calls[:1] for m in seen[:3])
+    ]  # the call that wrote the list is not in these requests
+    assert len(unseen) >= (8 if small else 1)
+    for seen in unseen:  # said at the start of the turn's question, the instructions as ever
+        shown = [m.text for m in seen if isinstance(m, HumanMessage)][-1]
+        assert shown.startswith("Your todo list (write_todos), as you last wrote it:")
+        assert "- [completed] check monday tides\n- [pending] check sunday tides" in shown
+        assert "check sunday" not in seen[0].text
+    assert "Your todo list" not in model.seen[1][-3].text  # the call shows it: said once
 
 
 async def test_a_local_shell_backends_execute_runs_the_command_as_a_write_of_the_run(
