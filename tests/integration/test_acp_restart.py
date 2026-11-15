@@ -51,7 +51,9 @@ def note(text: str) -> str:
 @pytest.fixture
 async def workers() -> AsyncIterator[tuple[Harness, Harness]]:
     store = LocalRuns()
-    pair = (Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store))
+    # Kimi Code runs its shell in a folder of this machine: this deployment allows it
+    here = Settings(host_execution="allow")
+    pair = (Harness(config=here, runs=store), Harness(config=here, runs=store))
     yield pair
     for h in pair:
         await h.aclose()

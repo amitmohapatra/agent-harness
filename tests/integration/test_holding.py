@@ -149,7 +149,7 @@ async def test_a_helper_whose_run_waits_for_a_person_is_let_go_of_not_left_to_la
     }
     researcher = AgentDefinition(description="Researches.", prompt="Research it.")
     options = ClaudeAgentOptions(cli_path=CLI, env=env, agents={"researcher": researcher})
-    async with Harness(config=Settings(), runs=store) as h:
+    async with Harness(config=Settings(host_execution="allow"), runs=store) as h:
         agent = arm(h.wrap(options, id="helped"), [refund])
         paused = await agent.run("refund o1", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
