@@ -45,7 +45,7 @@ restore it. Each run keeps its README (the summary and tables) and the scripts t
 | [FOLD_LEDGER.md](handoff/FOLD_LEDGER.md) | the running record: what merged when, each job's report |
 | [inventory/](handoff/inventory/) | what each library can do; the collision and `ReAct`-parity design |
 
-Retired: the notes `STOP_NOTE.txt`, `CONTINUE_NOTE.txt`, `ROUND3_NOTE.txt` and the older
+Retired (listed with their sha256 in [handoff/MANIFEST.md](handoff/MANIFEST.md)): the notes `STOP_NOTE.txt`, `CONTINUE_NOTE.txt`, `ROUND3_NOTE.txt` and the older
 material of `handoff/earlier/` (two reports of 31 Oct and 1 Nov, the Confluence documentation
 set, memory-experiment notes) are on `data/research-archive`; what still applied is in
 REMAINING.md (sections 12 and 13) and DECISIONS.md.
