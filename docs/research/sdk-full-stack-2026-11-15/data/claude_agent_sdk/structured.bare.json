@@ -1,0 +1,30 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "structured",
+ "arm": "bare",
+ "error": null,
+ "seconds": 3.5,
+ "spend": {
+  "requests": 2,
+  "in": 29448,
+  "out": 306,
+  "usd": 0.002156,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  {
+   "city": "Oslo",
+   "population_millions": 0.7
+  }
+ ],
+ "tools_used": [
+  "StructuredOutput"
+ ],
+ "subtypes": [
+  "success"
+ ],
+ "deltas": null
+}

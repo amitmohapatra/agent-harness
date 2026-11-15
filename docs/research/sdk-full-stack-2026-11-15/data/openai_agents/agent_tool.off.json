@@ -1,0 +1,54 @@
+{
+ "sdk": "openai_agents",
+ "feature": "agent_tool",
+ "arm": "off",
+ "error": null,
+ "seconds": 8.1,
+ "spend": {
+  "requests": 6,
+  "in": 7192,
+  "out": 242,
+  "usd": 0.00084,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "calls": [
+  "SKU-4"
+ ],
+ "answers": [
+  "SKU-4 has 7 units in stock."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve stock? stock has not declared its side effects. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "stock",
+    "args": {
+     "sku": "SKU-4"
+    },
+    "task": "How many units of SKU-4 are in stock?",
+    "step": null,
+    "idempotency_key": "cc7bc1506a070be4e519e0ff"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_23f5a34b470e41c9b964709ff92042cb"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-agenttool-a7965df3",
+ "records": null
+}

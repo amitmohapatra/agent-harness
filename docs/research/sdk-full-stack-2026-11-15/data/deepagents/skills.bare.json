@@ -1,0 +1,23 @@
+{
+ "sdk": "deepagents",
+ "feature": "skills",
+ "arm": "bare",
+ "error": null,
+ "seconds": 5.8,
+ "spend": {
+  "requests": 2,
+  "in": 9401,
+  "out": 903,
+  "usd": 0.000667,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answers": [
+  "Cold drops tap the glass,\nmaple gold drifts to the drain,\nwet earth scents the air.\n-- SKILL:HAIKU"
+ ],
+ "asked": [],
+ "todos": null,
+ "files": []
+}

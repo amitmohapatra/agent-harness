@@ -1,0 +1,46 @@
+{
+ "sdk": "langgraph",
+ "feature": "custom_stream",
+ "arm": "off",
+ "error": null,
+ "seconds": 1.4,
+ "spend": {
+  "requests": 2,
+  "in": 874,
+  "out": 71,
+  "usd": 0.000123,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "progress": [
+  1,
+  2,
+  3
+ ],
+ "customs": [
+  {
+   "name": "custom",
+   "value": {
+    "progress": 1,
+    "of": 3
+   }
+  },
+  {
+   "name": "custom",
+   "value": {
+    "progress": 2,
+    "of": 3
+   }
+  },
+  {
+   "name": "custom",
+   "value": {
+    "progress": 3,
+    "of": 3
+   }
+  }
+ ],
+ "note": "harness CUSTOM events"
+}

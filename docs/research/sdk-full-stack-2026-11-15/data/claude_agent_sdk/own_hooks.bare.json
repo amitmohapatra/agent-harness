@@ -1,0 +1,31 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "own_hooks",
+ "arm": "bare",
+ "error": null,
+ "seconds": 2.5,
+ "spend": {
+  "requests": 2,
+  "in": 29050,
+  "out": 109,
+  "usd": 0.000772,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "hooks_seen": [
+  "pre:Read",
+  "post:Read"
+ ],
+ "answers": [
+  "The word in `a.txt` is **alpha**."
+ ],
+ "tools_used": [
+  "Read"
+ ],
+ "subtypes": [
+  "success"
+ ],
+ "deltas": null
+}

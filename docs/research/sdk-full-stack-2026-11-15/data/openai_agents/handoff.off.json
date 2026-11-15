@@ -1,0 +1,54 @@
+{
+ "sdk": "openai_agents",
+ "feature": "handoff",
+ "arm": "off",
+ "error": null,
+ "seconds": 2.6,
+ "spend": {
+  "requests": 3,
+  "in": 2886,
+  "out": 213,
+  "usd": 0.000395,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "made": [
+  "O-9"
+ ],
+ "answers": [
+  "Order O-9 has been refunded."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve refund? refund has not declared its side effects. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "refund",
+    "args": {
+     "order": "O-9"
+    },
+    "task": "Please refund order O-9.",
+    "step": null,
+    "idempotency_key": "477c9e4d2c47837ed2b482f8"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_c96c8b33194d4e3d93d55f374dfb5c3e"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-handoff-82b5339e",
+ "records": null
+}

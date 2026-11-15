@@ -1,0 +1,24 @@
+{
+ "sdk": "kimi",
+ "feature": "bash_write",
+ "arm": "bare",
+ "error": null,
+ "seconds": 3.8,
+ "spend": {
+  "requests": 2,
+  "in": 40915,
+  "out": 160,
+  "usd": 0.000895,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "file": "built",
+ "answers": [
+  "I ran `echo built > status.txt` in the working directory. The file `status.txt` now contains `built`."
+ ],
+ "tools_used": [
+  "Bash"
+ ]
+}

@@ -1,0 +1,21 @@
+{
+ "sdk": "langgraph",
+ "feature": "store",
+ "arm": "off",
+ "error": null,
+ "seconds": 4.5,
+ "spend": {
+  "requests": 5,
+  "in": 2479,
+  "out": 208,
+  "usd": 0.000352,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "answer": "Your saved facts say you are allergic to peanuts. That's the only fact on file, so if you have other allergies, they aren't saved.",
+ "in_own_store": true,
+ "asked": true,
+ "status": "SUCCESS"
+}

@@ -1,0 +1,52 @@
+{
+ "sdk": "kimi",
+ "feature": "bash_write",
+ "arm": "off",
+ "error": null,
+ "seconds": 14.0,
+ "spend": {
+  "requests": 3,
+  "in": 67978,
+  "out": 320,
+  "usd": 0.003846,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "file": "built",
+ "answers": [
+  "I ran `echo built > status.txt` in the working directory, and it completed successfully. The file `status.txt` now contains `built`."
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [
+  {
+   "reason": "APPROVAL",
+   "question": "Approve Bash? Kimi Code asks before it runs this call. Allow once, allow for this conversation, or deny.",
+   "tool_call": {
+    "tool": "Bash",
+    "args": {
+     "command": "echo built > status.txt"
+    },
+    "task": "Run the shell command `echo built > status.txt`.",
+    "step": null,
+    "idempotency_key": "f2c21243fbf8d8376658026a"
+   },
+   "options": [
+    "value='once' label='Allow once' description=None recommended=None",
+    "value='run' label='Allow for this conversation' description=None recommended=None",
+    "value='reject' label='Deny' description=None recommended=None"
+   ]
+  }
+ ],
+ "run_ids": [
+  "run_611db71b45394a0d838b3923e80c30ec"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "ki-bash-417ab64b",
+ "records": null
+}

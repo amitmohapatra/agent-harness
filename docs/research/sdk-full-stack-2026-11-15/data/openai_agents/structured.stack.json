@@ -1,0 +1,95 @@
+{
+ "sdk": "openai_agents",
+ "feature": "structured",
+ "arm": "stack",
+ "error": null,
+ "seconds": 8.9,
+ "spend": {
+  "requests": 2,
+  "in": 8268,
+  "out": 72,
+  "usd": 0.000863,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "type": "Weather",
+ "answers": [
+  "city='Oslo' celsius=21.5"
+ ],
+ "statuses": [
+  "SUCCESS"
+ ],
+ "asked": [],
+ "run_ids": [
+  "run_62b628fa529e4a13b044beca8c851eb7"
+ ],
+ "errors": [
+  null
+ ],
+ "user": "oa-structured-0b8cb690",
+ "records": [
+  {
+   "run": {
+    "run_id": "run_62b628fa529e4a13b044beca8c851eb7",
+    "status": "SUCCESS",
+    "parent_run_id": null,
+    "thread_id": "ffd5cd1d",
+    "user_id": "oa-structured-0b8cb690",
+    "agent_id": "oa-structured",
+    "attempt": 1,
+    "error": null,
+    "awaiting": false
+   },
+   "children": [],
+   "events": {
+    "run_62b628fa529e4a13b044beca8c851eb7": {
+     "RUN_STARTED": 1,
+     "CONTEXT_LOADED": 1,
+     "TOOL_CALL_START": 1,
+     "TOOL_CALL_ARGS": 1,
+     "TOOL_CALL_END": 1,
+     "TOOL_CALL_RESULT": 1,
+     "RUN_FINISHED": 1
+    }
+   },
+   "messages": {
+    "run_62b628fa529e4a13b044beca8c851eb7": [
+     {
+      "role": "USER",
+      "content": "What is the temperature in Oslo?"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": ""
+     },
+     {
+      "role": "TOOL",
+      "content": "21.5"
+     },
+     {
+      "role": "ASSISTANT",
+      "content": "{\"city\": \"Oslo\", \"celsius\": 21.5}"
+     }
+    ]
+   },
+   "tools": {
+    "run_62b628fa529e4a13b044beca8c851eb7": [
+     {
+      "tool_name": "temperature",
+      "status": "ok",
+      "output": "21.5"
+     }
+    ]
+   },
+   "feedback": [
+    {
+     "target_kind": "run",
+     "verdict": "confirm",
+     "source": "system"
+    }
+   ]
+  }
+ ]
+}

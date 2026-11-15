@@ -1,0 +1,21 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "lifecycle_pause",
+ "arm": "stack",
+ "error": null,
+ "seconds": 10.6,
+ "spend": {
+  "requests": 2,
+  "in": 36172,
+  "out": 258,
+  "usd": 0.000994,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "PAUSED",
+ "run_id": "run_525d2cc05bc24226ac61935e976f96c3",
+ "asked": "Approve mcp__pay__wire? mcp__pay__wire is irreversible.",
+ "wired": []
+}

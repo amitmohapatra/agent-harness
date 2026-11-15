@@ -1,0 +1,109 @@
+{
+ "sdk": "claude_agent_sdk",
+ "feature": "lifecycle_resume",
+ "arm": "stack",
+ "error": null,
+ "seconds": 11.0,
+ "spend": {
+  "requests": 2,
+  "in": 37962,
+  "out": 275,
+  "usd": 0.000616,
+  "models": [
+   "claude-haiku-5-5"
+  ]
+ },
+ "ok": true,
+ "status": "SUCCESS",
+ "answer": "The wire of 300 to ACME-1 went through. The tool returned \"wire-claude_agent_sdk done for ACME-1\". That result doesn't include a transaction ID or confirmed amount, so I can't independently verify the settled amount beyond that message.",
+ "calls_made": 1,
+ "records": {
+  "run": {
+   "run_id": "run_525d2cc05bc24226ac61935e976f96c3",
+   "status": "SUCCESS",
+   "parent_run_id": null,
+   "thread_id": "5135170b",
+   "user_id": "life-9b066a30",
+   "agent_id": "lc-claude_agent_sdk-restart",
+   "attempt": 2,
+   "error": null,
+   "awaiting": false
+  },
+  "children": [],
+  "events": {
+   "run_525d2cc05bc24226ac61935e976f96c3": {
+    "RUN_STARTED": 2,
+    "CONTEXT_LOADED": 2,
+    "TOOL_CALL_START": 2,
+    "TOOL_CALL_ARGS": 2,
+    "TOOL_CALL_END": 2,
+    "TOOL_CALL_RESULT": 2,
+    "INTERRUPT": 1,
+    "RUN_FINISHED": 2,
+    "CUSTOM": 1
+   }
+  },
+  "messages": {
+   "run_525d2cc05bc24226ac61935e976f96c3": [
+    {
+     "role": "USER",
+     "content": "Wire 300 to account ACME-1 now: call the wire tool, do not ask me first."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": ""
+    },
+    {
+     "role": "TOOL",
+     "content": ""
+    },
+    {
+     "role": "ASSISTANT",
+     "content": ""
+    },
+    {
+     "role": "TOOL",
+     "content": "PreToolUse:mcp__pay__wire hook error: Waiting for a person's approval."
+    },
+    {
+     "role": "ASSISTANT",
+     "content": ""
+    },
+    {
+     "role": "TOOL",
+     "content": "wire-claude_agent_sdk done for ACME-1"
+    },
+    {
+     "role": "ASSISTANT",
+     "content": "The wire of 300 to ACME-1 went through. The tool returned \"wire-claude_agent_sdk done for ACME-1\". That result doesn't include a transaction ID or confirmed amount, so I can't independently verify the settled amount beyond that message."
+    }
+   ]
+  },
+  "tools": {
+   "run_525d2cc05bc24226ac61935e976f96c3": [
+    {
+     "tool_name": "ToolSearch",
+     "status": "ok",
+     "output": "{\"matches\": [\"mcp__pay__wire\"], \"query\": \"select:mcp__pay__wire\", \"total_deferred_tools\": 11}"
+    },
+    {
+     "tool_name": "mcp__pay__wire",
+     "status": "ok",
+     "output": "wire-claude_agent_sdk done for ACME-1"
+    }
+   ]
+  },
+  "feedback": [
+   {
+    "target_kind": "tool_call",
+    "verdict": "approve",
+    "source": "interrupt"
+   },
+   {
+    "target_kind": "run",
+    "verdict": "confirm",
+    "source": "system"
+   }
+  ]
+ }
+}
