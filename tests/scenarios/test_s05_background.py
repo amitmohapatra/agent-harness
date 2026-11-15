@@ -41,7 +41,8 @@ from trellis import Harness, ReAct
 from trellis.contracts import RunStatus
 
 pytestmark = [pytest.mark.timeout(600)]
-UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+#: what a started background task says its id is (``background``: ``task_`` and 32 hex digits)
+TASK_STARTED = re.compile(r"task_id: task_[0-9a-f]{32}")
 
 
 def plan(*ids: str) -> pytest.MarkDecorator:
@@ -182,7 +183,7 @@ async def test_react_own_subagent_in_the_background_over_agui(h: Harness, uid: s
         )
         events = decode(sent.text)
         assert events[-1][1]["outcome"] == {"type": "success"}, events[-1]
-        assert UUID.search(json.dumps(events)), "no task was started"
+        assert TASK_STARTED.search(json.dumps(events)), "no task was started"
 
 
 @plan("BG-10", "WF-08")
