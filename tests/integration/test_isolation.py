@@ -16,6 +16,7 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final
 
@@ -23,7 +24,7 @@ import pytest
 
 from tests.support.isolation import as_root, fresh_root, processes_of, root_helper
 from trellis import Harness, Runtime, Settings
-from trellis.contracts import ConfigurationError, RunEventType, ToolError
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolError
 from trellis.harness.sandbox import ExecResult, SandboxLost, SandboxRef, SandboxSpec, reap
 from trellis.harness.sandbox.base import RUN, TENANT
 from trellis.harness.sandbox.isolation import (
@@ -159,7 +160,9 @@ async def test_the_network_is_off_by_default_and_a_list_of_hosts_is_refused(
     with pytest.raises(ConfigurationError, match="the administrator's network is none"):
         await listed.create(ref, SandboxSpec(network="open"))
     opened = HostSandbox(root, helper=helper, network="open")
-    assert (await opened.create(ref, SandboxSpec(network="open"))).ref.id == name_of("r2")
+    made = await opened.create(ref, SandboxSpec(network="open", files={"a.txt": "given"}))
+    assert made.ref.id == name_of("r2") and await made.read("a.txt") == b"given"
+    assert (await opened.attach(made.ref)).uid == made.uid  # a later attempt finds it
 
 
 async def test_tenants_have_base_directories_and_uid_ranges_of_their_own(
@@ -329,6 +332,7 @@ async def test_every_command_is_audited_in_the_log_and_on_its_runs_stream(
 
     async def work(input: str, agent: Runtime) -> Any:
         said = await isolated_run(agent.tenant, agent.user, agent.run_id, "echo hi", layer=layer)
+        await isolated_run(agent.tenant, agent.user, agent.run_id, "true", layer=layer)
         return said.stdout
 
     async with Harness(config=Settings()) as harness:
@@ -338,7 +342,7 @@ async def test_every_command_is_audited_in_the_log_and_on_its_runs_stream(
         await harness.writes.drain()
     finished = events[-1]
     assert finished.data["result"] == "hi\n"
-    [audited] = [
+    audited, _ = [
         e.data
         for e in events
         if e.type is RunEventType.CUSTOM and e.data.get("name") == "sandbox_command"
@@ -370,3 +374,66 @@ async def test_the_layers_own_failures_are_errors_that_say_so(
     with pytest.raises(ToolError, match="the workspace was not made"):
         await blocked.workspace("acme", "ada", "r1")
     assert as_root(helper, "test", "-f", f"{root}/file").returncode == 0
+
+
+async def test_kimi_in_a_host_workspace_works_in_its_folder_as_the_runs_uid(
+    helper: tuple[str, ...], root: str, tmp_path: Path
+) -> None:
+    """Kimi names its files by the folder it works in on this machine: in a workspace of the
+    layer's that folder is the run's workspace, and where its commands start."""
+    from tests.integration.test_acp import fake, recorded
+    from trellis.harness.sandbox import sandbox
+
+    layer = HostSandbox(root, helper=helper)
+    script = [
+        {"builtin": "Write", "args": {"path": "notes.txt", "content": "from kimi"}},
+        {"builtin": "Bash", "args": {"command": "pwd; id -u; cat notes.txt"}},
+        {"text": "{last}"},
+    ]
+    target = fake(tmp_path, script, sandbox=sandbox(layer), env={"FAKE_ACP_RAW": "1"})
+    async with Harness(config=Settings()) as harness:
+        done = await harness.wrap(target, id="kimi-host").run("work", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    work = recorded(tmp_path)["started"][0]["cwd"]
+    [ran] = [t for t in recorded(tmp_path)["terminal"] if "exit" in t]
+    folder, uid, said = ran["output"].split("\n")[:3]
+    assert folder == work and int(uid) >= layer.isolation.uid_base and said == "from kimi"
+    assert await layer.labelled({}) == []  # its end removed the workspace
+
+
+def test_the_host_layer_is_one_given_or_one_with_every_default(
+    helper: tuple[str, ...], root: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trellis.harness.sandbox import isolation
+
+    given = HostSandbox(root, helper=helper)
+    before = isolation.use_host(given)
+    try:
+        assert isolation.host_layer() is given
+        unlabelled = SandboxRef(provider="host", id="trellis-x", labels={TENANT: "acme"})
+        assert isolation.layer_of(unlabelled) is given
+        assert isolation.use_host(None) is given
+        default = isolation.host_layer()
+        assert default.isolation.root == isolation.HOST_ROOT and default is not given
+    finally:
+        isolation.use_host(before)
+    # a helper that runs a command as root: isolated through it (env: this process is root)
+    through = HostSandbox(root, helper=helper or ("env",))
+    assert through.cannot_isolate() is None and through.cannot_isolate() is None
+    assert "cannot run a command as root" in (
+        HostSandbox(root, helper=("/nonexistent/helper",)).cannot_isolate() or ""
+    )
+    monkeypatch.setattr(isolation.os, "geteuid", lambda: 0)
+    assert HostSandbox(root).cannot_isolate() is None
+
+
+async def test_names_and_paths_a_shell_would_split_are_refused(layer: HostSandbox) -> None:
+    with pytest.raises(ConfigurationError, match="not /"):
+        HostSandbox("/")
+    with pytest.raises(ConfigurationError, match="characters a shell would split"):
+        HostSandbox("/var/lib/my workspaces")
+    with pytest.raises(ToolError, match="is not a workspace name"):
+        await layer.isolation.release("bad name")
+    ws = await layer.workspace("acme", "ada", "r1")
+    with pytest.raises(ConfigurationError, match="characters a shell would split"):
+        ws.alias("/a folder")

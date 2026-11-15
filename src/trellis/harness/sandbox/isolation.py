@@ -365,7 +365,7 @@ class Isolation:
             if _within(self.root, _safe(path, "a hidden path")):
                 raise ConfigurationError(f"the hidden path {path} hides the workspaces ({root})")
         self.hidden = tuple(hidden)
-        self.network = network
+        self.network: Literal["none", "open"] = network
         self.uid_base, self.tenant_uids, self.tenants = uid_base, tenant_uids, tenants
 
     @property
@@ -487,7 +487,7 @@ class Workspace:
         self.uid = uid
         self.home = home
         self.limits = limits
-        self.network = network
+        self.network: Literal["none", "open"] = network
         #: paths a command finds its own folders at (the path → its folder): the run's kept
         #: results at theirs, and what :meth:`alias` adds
         self.aliases: dict[str, str] = {RESULTS_PATH: f"{home}/.results"}

@@ -72,7 +72,7 @@ async def test_the_boundaries_hold_in_a_real_shared_container(
     )
     said = seen.stdout
     assert "private" not in said and "sleep 30" not in said and SECRET not in said
-    assert re.findall(r"rc=(\d+)", said) == ["1", "2", "2", "0", "1", "2", "2", "1"], seen
+    assert re.findall(r"rc=(\d+)", said) == ["1", "2", "2", "1", "1", "2", "2", "1"], seen
     assert not sleeper.done()  # its kill reached its own processes only
     processes = [line for line in said.splitlines() if re.match(r"^\d+ ", line)]
     assert {line.split()[0] for line in processes} <= {"0", str(two.uid)}, processes
