@@ -1,0 +1,159 @@
+the graph complex is wrapped without the harness's middleware: its tools are governed and narrowed, and their results are the library's as they are (none kept for read_file or query_result), but it has no memory or gateway MCP tools, no step limit or stall guard, no model spans, call_timeout or budget stop, and no checkpoint in the run — build it with middleware=trellis.middleware() (its checkpoint is then kept in the run)
+the memory service refused https://api.anthropic.com/v1/ (The memory service cannot reach https://api.anthropic.com/v1/models (ConnectError). Register an address the service can reach: one only the harness's machine resolves (its loopback address, a name in its own network) does not work from here.): its LLM work for these agents runs on its own settings
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+run run_35f1c1a0af0a45d1ba056cc3ee27479f failed: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 1565095 tokens > 1000000 maximum'}, 'request_id': 'req_011Ch4ddi6ZK7Qh2Bmfsgnqq'}
+Traceback (most recent call last):
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_anthropic/chat_models.py", line 2632, in _agenerate
+    raw_response = await self._acreate(payload)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_anthropic/chat_models.py", line 2193, in _acreate
+    return await self._async_client.messages.with_raw_response.create(**payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anthropic/_response.py", line 814, in wrapped
+    return cast(AsyncAPIResponse[R], await func(*args, **kwargs))
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anthropic/resources/messages/messages.py", line 2440, in create
+    return await self._post(
+           ^^^^^^^^^^^^^^^^^
+    ...<24 lines>...
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anthropic/_base_client.py", line 2258, in post
+    return await self.request(cast_to, opts, stream=stream, stream_cls=stream_cls)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/anthropic/_base_client.py", line 1930, in request
+    raise self._make_status_error_from_response(response) from None
+anthropic.BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 1565095 tokens > 1000000 maximum'}, 'request_id': 'req_011Ch4ddi6ZK7Qh2Bmfsgnqq'}
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/pipeline.py", line 461, in _attempt
+    extracted, pushed = await _worked(
+                        ^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/pipeline.py", line 813, in _worked
+    extracted = await _invoked(
+                ^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/pipeline.py", line 1231, in _invoked
+    produced = await _execute(agent, native_input, invocation, streaming=streaming)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/pipeline.py", line 1243, in _execute
+    return await adapter.invoke(target, native_input, invocation)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/adapters/langgraph.py", line 270, in invoke
+    values, interrupts[:] = await _asked_again(graph, config, exc)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/adapters/langgraph.py", line 583, in _asked_again
+    raise error
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/adapters/langgraph.py", line 257, in invoke
+    async for part in graph.astream(
+    ...<10 lines>...
+            interrupts.extend(part["interrupts"])
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langgraph/pregel/main.py", line 3553, in astream
+    async for _ in runner.atick(
+    ...<16 lines>...
+            yield o
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langgraph/pregel/_runner.py", line 566, in atick
+    _panic_or_proceed(
+    ~~~~~~~~~~~~~~~~~^
+        futures.done.union(f for f, t in futures.items() if t is not None),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        handled_futures=handled_futures,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langgraph/pregel/_runner.py", line 702, in _panic_or_proceed
+    raise exc
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langgraph/pregel/_retry.py", line 758, in arun_with_retry
+    return await task.proc.ainvoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langgraph/_internal/_runnable.py", line 836, in ainvoke
+    input = await asyncio.create_task(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+        step.ainvoke(input, config, **kwargs), context=context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langgraph/_internal/_runnable.py", line 554, in ainvoke
+    ret = await self.afunc(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain/agents/factory.py", line 1605, in amodel_node
+    result = await awrap_model_call_handler(request, _execute_model_async)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain/agents/factory.py", line 451, in composed
+    outer_result = await outer(request, inner_handler)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/middleware.py", line 2464, in answered_in_full
+    reply = await handler(request)
+            ^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain/agents/factory.py", line 441, in inner_handler
+    inner_result = await inner(req, handler)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/compare/agent-harness/src/trellis/harness/middleware.py", line 1755, in _narrow
+    return await handler(_dated(asked, runtime))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain/agents/factory.py", line 1568, in _execute_model_async
+    output = await model_.ainvoke(messages)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_core/runnables/base.py", line 6014, in ainvoke
+    return await self.bound.ainvoke(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_core/language_models/chat_models.py", line 552, in ainvoke
+    llm_result = await self.agenerate_prompt(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_core/language_models/chat_models.py", line 1931, in agenerate_prompt
+    return await self.agenerate(
+           ^^^^^^^^^^^^^^^^^^^^^
+        prompt_messages, stop=stop, callbacks=callbacks, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_core/language_models/chat_models.py", line 1889, in agenerate
+    raise exceptions[0]
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_core/language_models/chat_models.py", line 2222, in _agenerate_with_cache
+    result = await self._agenerate(
+             ^^^^^^^^^^^^^^^^^^^^^^
+        messages, stop=stop, run_manager=run_manager, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_anthropic/chat_models.py", line 2634, in _agenerate
+    _handle_anthropic_bad_request(e)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/var/tmp/cons/full/agent-harness/.venv/lib/python3.13/site-packages/langchain_anthropic/chat_models.py", line 1278, in _handle_anthropic_bad_request
+    raise AnthropicContextOverflowError(
+        message=e.message, response=e.response, body=e.body
+    ) from e
+langchain_anthropic.chat_models.AnthropicContextOverflowError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 1565095 tokens > 1000000 maximum'}, 'request_id': 'req_011Ch4ddi6ZK7Qh2Bmfsgnqq'}
+During task with name 'model' and id '5adc8156-31e8-9b5e-0c34-5e2db5362900'
+advdata-02       tier 3 [False] $0.0005
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-chain-04    tier 3 [True] $0.0042
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-01     tier 3 [False] $0.0197
+the framework's thread store keeps the conversation in this process's memory only, lost when the worker restarts: memory's window keeps the history instead; give it a durable store (a LangGraph PostgresSaver, a SQLiteSession on a file) to keep it there
+long-data-02     tier 3 [False] $0.0704
+# complex: claude-haiku-5-5 (graph, memory history)
+
+Spend: $0.0704 (cap $0.15)
+
+| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |
+|---|---|---|---|---|---|---|---|
+| all | 4 | 4 | 0.25 ± 0.80 | 0 | 0 | 1 | 3 of 7 |
+| adv_data | 1 | 1 | 0.00 | 0 | 0 | 1 | 3 of 4 |
+| long_chain | 1 | 1 | 1.00 | 0 | 0 | 0 | 0 of 1 |
+| long_data | 2 | 2 | 0.00 ± 0.00 | 0 | 0 | 0 | 0 of 2 |
+| tier 3 | 4 | 4 | 0.25 ± 0.80 | 0 | 0 | 1 | 3 of 7 |

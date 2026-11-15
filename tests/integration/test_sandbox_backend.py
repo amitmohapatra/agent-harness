@@ -290,6 +290,9 @@ async def test_a_command_naming_outputs_is_told_what_the_user_gets(harness: Harn
     assert then["outputs"] == "In /workspace/outputs/ for the user: report.csv (4 bytes).", then
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be_the_users(
     harness: Harness,
 ) -> None:
@@ -354,6 +357,9 @@ PLACES = {
 }
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 @pytest.mark.parametrize("path", list(PLACES))
 @pytest.mark.parametrize("writer", list(WRITERS))
 async def test_whichever_tool_wrote_a_file_the_model_knows_whether_the_user_has_it(
@@ -386,6 +392,9 @@ async def test_whichever_tool_wrote_a_file_the_model_knows_whether_the_user_has_
     assert (given, not_given) == (PLACES[path], not PLACES[path]), said
 
 
+@pytest.mark.usefixtures(
+    "writes_unasked"
+)  # not about the write's approval (it asks: test_approval_rule)
 async def test_a_write_that_failed_is_told_its_error_and_nothing_of_the_users_files(
     harness: Harness,
 ) -> None:

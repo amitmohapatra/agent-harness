@@ -1,0 +1,297 @@
+{
+  "suite": "complex",
+  "model": "claude-haiku-5-5",
+  "history": "memory",
+  "adapter": "graph",
+  "variant": "main",
+  "window": null,
+  "date": "2026-11-15",
+  "usd": 0.480471,
+  "max_usd": 0.6,
+  "stopped": null,
+  "cases_total": 267,
+  "summary": {
+    "all": {
+      "cases": 57,
+      "scored_turns": 72,
+      "strict": {
+        "mean": 0.8873239436619719,
+        "ci95": 0.07536943814703517,
+        "n": 71
+      },
+      "judge_only": 1,
+      "unverified": 0,
+      "not_success": 1,
+      "checks": 108,
+      "checks_failed": 4,
+      "not_applicable": 1
+    },
+    "by_category": {
+      "multihop": {
+        "cases": 4,
+        "scored_turns": 4,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 4
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 4,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "aggregate": {
+        "cases": 3,
+        "scored_turns": 3,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 3
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 3,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "formula": {
+        "cases": 2,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "stats": {
+        "cases": 3,
+        "scored_turns": 3,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 3
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 3,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "whatif": {
+        "cases": 2,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "conversation": {
+        "cases": 2,
+        "scored_turns": 4,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 4
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 10,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "explain": {
+        "cases": 1,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 1,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "freshness": {
+        "cases": 1,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 0.5,
+          "ci95": 6.353,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "conflict": {
+        "cases": 1,
+        "scored_turns": 1,
+        "strict": {
+          "mean": 1.0,
+          "ci95": null,
+          "n": 1
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 1,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "edge": {
+        "cases": 2,
+        "scored_turns": 2,
+        "strict": {
+          "mean": 0.5,
+          "ci95": 6.353,
+          "n": 2
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 2,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "planning": {
+        "cases": 3,
+        "scored_turns": 3,
+        "strict": {
+          "mean": 0.6666666666666666,
+          "ci95": 1.4343333333333332,
+          "n": 3
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 3,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_chain": {
+        "cases": 7,
+        "scored_turns": 7,
+        "strict": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 7
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 7,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_data": {
+        "cases": 9,
+        "scored_turns": 9,
+        "strict": {
+          "mean": 0.6666666666666666,
+          "ci95": 0.38433333333333336,
+          "n": 9
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 9,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_multi": {
+        "cases": 8,
+        "scored_turns": 9,
+        "strict": {
+          "mean": 0.8888888888888888,
+          "ci95": 0.2562222222222222,
+          "n": 9
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 0,
+        "checks": 9,
+        "checks_failed": 0,
+        "not_applicable": 0
+      },
+      "long_flow": {
+        "cases": 9,
+        "scored_turns": 19,
+        "strict": {
+          "mean": 0.9473684210526315,
+          "ci95": 0.11057894736842104,
+          "n": 19
+        },
+        "judge_only": 0,
+        "unverified": 0,
+        "not_success": 1,
+        "checks": 49,
+        "checks_failed": 4,
+        "not_applicable": 1
+      }
+    },
+    "by_tier": {
+      "3": {
+        "cases": 57,
+        "scored_turns": 72,
+        "strict": {
+          "mean": 0.8873239436619719,
+          "ci95": 0.07536943814703517,
+          "n": 71
+        },
+        "judge_only": 1,
+        "unverified": 0,
+        "not_success": 1,
+        "checks": 108,
+        "checks_failed": 4,
+        "not_applicable": 1
+      }
+    },
+    "cost": {
+      "input_tokens": {
+        "mean": 48165.10526315789,
+        "ci95": 17867.930722679997,
+        "n": 57
+      },
+      "output_tokens": {
+        "mean": 7225.596491228071,
+        "ci95": 5006.785824049515,
+        "n": 57
+      },
+      "model_calls": {
+        "mean": 3.6315789473684212,
+        "ci95": 0.7446760160038691,
+        "n": 57
+      },
+      "seconds": {
+        "mean": 50.476789473684214,
+        "ci95": 28.693436721545932,
+        "n": 57
+      }
+    },
+    "turns": 78
+  }
+}

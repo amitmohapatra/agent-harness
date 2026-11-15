@@ -18,7 +18,8 @@
   else a call whose approval a person already answered in the hook runs (one call, one
   question), a call that only reads (a read tool, or a shell command
   ``governance.shell.read_only`` reads as read-only) runs, and any other asks a person
-  (``bridge.asked``);
+  (``bridge.asked``) with the choices of its risk, as a harness call — what Claude Code would
+  keep for its session ("don't ask again"), the run keeps: for this conversation, or always;
 * records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
   calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
   it took — through the SDK's own ``PostToolUse`` / ``PostToolUseFailure`` hooks
@@ -169,8 +170,10 @@ if TYPE_CHECKING:
 #: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
 #: or an ``approve_when``, in the tool catalog. What Claude Code asks its user about although
 #: it only reads — leaving plan mode with a plan, the network, a skill (:data:`CLAUDE_ASKS`)
-#: — a person answers. Any other tool says nothing of what it does: a person approves each
-#: call (its risk in the catalog says more).
+#: — a person answers. Any other tool says nothing of what it does: a person approves its
+#: calls (its risk in the catalog says more). A person asked about a call Claude runs picks
+#: as for a harness tool's — once, for this conversation, always (with a memory service), deny;
+#: once or deny for an irreversible one: Claude Code's own "don't ask again", kept by the run.
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     **dict.fromkeys(
         (
@@ -246,7 +249,7 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: The tools Claude Code asks its user about although they only read: leaving plan mode with a
 #: plan (``ExitPlanMode``), the network (``WebFetch``, ``WebSearch``), a skill (``Skill``). A
 #: person answers when it asks, as for a write — unless the tool catalog has a rule for the
-#: tool that lets it run.
+#: tool that lets it run (``tools.bridge.asked``).
 CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "WebFetch", "WebSearch", "Skill"})
 #: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
 #: ends a recommended option's label with.
@@ -1616,7 +1619,7 @@ async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHook
     try:
         # a subagent's call is decided as its helper's work: an approval names the helper
         with approvals_read() as approved, runtime.helpers.working(helper):
-            decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
+            decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id, kept=True)
     except Paused:  # the run pauses: Claude stops here, and the resume goes on
         steps.helped.pop(call_id, None)
         return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
@@ -1691,7 +1694,6 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             steps.carries(getattr(context, "tool_use_id", None))
             or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())
-            or (name in CLAUDE_ASKS and await _catalog_allows(runtime, name, args))
         ):  # a person approved this call (``PreToolUse``)
             verdict = PermissionResultAllow()
         else:
@@ -1700,7 +1702,7 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             try:
                 # the same helper's work as the call's PreToolUse said (``Steps.helped``)
                 with helpers.working(steps.helped.get(this)):
-                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this)
+                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this, kept=True)
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 decided = None
             if decided is None:
@@ -1714,18 +1716,6 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         return verdict
 
     return can_use_tool
-
-
-async def _catalog_allows(runtime: Runtime, name: str, args: dict[str, Any]) -> bool:
-    """Whether the tool catalog has a rule for ``name`` that lets this call run without a
-    person (:data:`CLAUDE_ASKS`: Claude Code asks about it otherwise)."""
-    governance = runtime.agent.harness._governance(runtime.tenant)
-    rules = await governance.rules([name], agent_id=runtime.agent_id)
-    if rules.get(name) is None:
-        return False
-    risk = BUILTIN_SIDE_EFFECTS[name]
-    decision = await governance.check(name, args, side_effects=risk, agent_id=runtime.agent_id)
-    return not decision.asks
 
 
 async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:

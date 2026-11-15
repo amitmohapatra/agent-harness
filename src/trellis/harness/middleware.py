@@ -293,7 +293,12 @@ def confined(tool: Any) -> bool:
     """Whether a write of the graph's own ``tool`` keeps to what the run owns, so it is
     announced rather than asked (``Tool.confined``): a framework's own tool, under its own
     permission flow, or one the harness made for the graph (:data:`HARNESS_CODE`: a
-    sub-agent's task, whose own calls are governed in its run) — never a tool of the agent's."""
+    sub-agent's task, whose own calls are governed in its run) — never a tool of the agent's,
+    and never a Deep Agents file tool that changes real files (:data:`FILE_WRITES` on a disk, a
+    store or a sandbox: :data:`OUTSIDE_STATE`): a write is a write, and asks as any does. One
+    that only changes the graph's state is its scratch, not governed at all (:func:`scratch`)."""
+    if getattr(tool, "name", None) in FILE_WRITES and (tool.metadata or {}).get(OUTSIDE_STATE):
+        return False
     return framework_made(tool) or _code_of(tool).startswith(HARNESS_CODE)
 
 
@@ -1460,8 +1465,9 @@ def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     """A framework tool's risk as it declares it: ``side_effects`` (``read``, ``write``,
     ``irreversible``), else MCP-style annotations — ``annotations``, or as ``langchain.mcp``
     keeps a server's (``mcp.tool.annotations``) — read as an MCP tool's
-    (``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves each call
-    until the tool, or the catalog, says what it does)."""
+    (``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves its calls —
+    and may allow it for the conversation or always — until the tool, or the catalog, says what
+    it does). A ``langchain.mcp`` tool whose server gave no annotations says nothing too."""
     found = dict(metadata or {})
     declared = found.get("side_effects")
     if declared in get_args(SideEffects):
@@ -2985,7 +2991,9 @@ class FitWindow(AgentMiddleware):
             value = request.model_settings.get(key, getattr(sends, key, None))
             if isinstance(value, int) and not isinstance(value, bool):
                 reply = max(reply, value)
-        own = said.get(OWN_WINDOW) or said.get("max_input_tokens") or window
+        # the model's own window: kept beside the given one by ReAct, the profile's where the
+        # window was given here (``middleware(context_window=)``), else the one in use
+        own = said.get(OWN_WINDOW) or said.get("max_input_tokens") or learned or window
         return max(0, min(int(window * FIT_SHARE), int(own * FIT_SHARE) - reply))
 
     def _results(

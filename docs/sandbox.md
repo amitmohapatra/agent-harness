@@ -35,8 +35,9 @@ result = await agent.run("How many units did we sell?", user="ada")
 
 As a backend (`backend=sandbox()`, `sandbox().deep_agent()`), Deep Agents' `BaseSandbox` builds every file tool on three
 operations the run's sandbox does — a command, a file written, a file read — and `execute` is a
-command: governed as a write (the file tools that change files write, the others read; the
-catalog may say more), its output read by the model. The harness runs the graph
+command: governed as a write, announced as the harness's own `sandbox_exec` is (the file tools
+that change files are writes that ask, as on any real backend, the others read; the catalog may
+say more), its output read by the model. The harness runs the graph
 asynchronously: the backend has no synchronous operations.
 
 As tools (`sandbox().tools()`), all three taking and returning text:
