@@ -626,6 +626,11 @@ class Shell:
             return _judged(tool, args, _Folders(None, None, self.reads, self.env))
         return all(_judged(tool, args, _Folders(at, None, self.reads, self.env)) for at in places)
 
+    def reaches(self, path: str) -> bool:
+        """Whether a file tool's ``path`` (relative: to the run's folder), its ``..`` and links
+        followed, is in one of the folders the run may read."""
+        return _Folders(self.cwd, None, self.reads, self.env).readable(path)
+
     def ran(self, args: Mapping[str, Any]) -> None:
         """A command of this shell ran (``args``: the call's): the folders it may have left it
         in, besides those it was in (whether it ended well is not known: its ``cd`` holds only

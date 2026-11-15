@@ -8,12 +8,14 @@ fails here. CI installs the pinned ``@moonshot-ai/kimi-code``; without it they a
 from __future__ import annotations
 
 import asyncio
+import http.server
 import json
 import os
 import re
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -1348,6 +1350,57 @@ async def test_a_sandboxed_kimi_runs_bash_and_writes_in_the_sandbox(
     assert any("echo boxed" in c for c in sandboxes.commands)
     assert not (tmp_path / "kimi-work" / "notes.txt").exists()  # not on this machine
     assert recorded["Bash"] and str(recorded["Bash"]).strip() in str(done.answer)
+
+
+class Internal(http.server.BaseHTTPRequestHandler):
+    """An address inside the deployment (a metadata server, an internal API): who reached it."""
+
+    reached: ClassVar[list[str]] = []
+
+    def do_GET(self) -> None:
+        Internal.reached.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"internal")
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+async def test_a_sandboxed_kimis_fetch_is_closed_as_any_kimis(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's ``FetchURL`` runs in its own process, on this machine's network, whether or not
+    the run has a sandbox: with ``sandbox=`` too, the tool catalog's closed default holds — no
+    request to an address inside the deployment."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Internal)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/latest/meta-data/"
+    Internal.reached.clear()
+    endpoint.plan = [("FetchURL", {"url": url})]
+    try:
+        target = kimi_target(endpoint, tmp_path, sandbox=sandbox(FakeSandboxes()))
+        result = await harness.wrap(target, id="kimi-fetch").run("go", user="u1")
+    finally:
+        server.shutdown()
+    assert Internal.reached == [], result.answer
+    assert "the tool catalog does not allow it" in str(result.answer)
+
+
+async def test_a_sandboxed_kimis_own_searches_reach_no_file_of_the_service(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A sandboxed Kimi's ``Grep`` (and ``Glob``, ``ReadMediaFile``) run in its own process on
+    this machine, as the service's user — not in the sandbox, where its commands and ``Read``
+    go: a path outside the run's folders is refused, its files never read."""
+    secret = tmp_path / "service" / "secret.env"
+    secret.parent.mkdir()
+    secret.write_text("sk-service-kimi-0123456789")
+    endpoint.plan = [("Grep", {"pattern": "sk-service", "path": str(secret.parent)})]
+    target = kimi_target(endpoint, tmp_path, sandbox=sandbox(FakeSandboxes()))
+    result = await harness.wrap(target, id="kimi-grep").run("go", user="u1")
+    assert "sk-service-kimi" not in str(result.answer), result.answer
+    assert "outside the folders this run works in" in str(result.answer)
 
 
 async def test_kimi_reads_the_runs_skills(

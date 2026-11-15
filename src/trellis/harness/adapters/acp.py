@@ -586,7 +586,17 @@ KIMI_SHARED: Final = ("credentials", "skills", "agents", "plugins", "AGENTS.md",
 #: Kimi asks about all the same, so governance decides each call (a read, unless the catalog
 #: says more): a skill loaded (``Skill``) is a call of the run, as Claude's is. An ``ask`` rule
 #: of Kimi's config comes before that policy (its ``user-configured-ask``).
-KIMI_ASKED: Final = ("Skill", *sorted(KIMI_NETWORK))
+KIMI_ASKED: Final = ("Skill", *sorted(KIMI_NETWORK), "Glob", "Grep", "ReadMediaFile")
+#: Kimi Code's tools that read files on this machine in its own process, as the service's user
+#: (a sandboxed run's ``Read`` goes to its sandbox over ACP: ``Sandboxed``), and the argument
+#: naming the folder or file: one outside the folders the run may read is refused
+#: (:data:`OUTSIDE`).
+KIMI_FILE_PATHS: Final = {"Glob": "path", "Grep": "path", "ReadMediaFile": "path"}
+#: Why such a call was not run.
+OUTSIDE: Final = (
+    "{path} is outside the folders this run works in, and {tool} reads it as this service: "
+    "its files are not the run's."
+)
 #: The forms an ``ask`` rule of Kimi's config takes after the team's config (``pattern``: its
 #: pattern, as TOML): a ``[[permission.rules]]`` entry, else — the team's ``rules`` written
 #: inline, which no table extends — a ``[[permission.ask]]`` one; Kimi reads both.
@@ -617,7 +627,14 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
             (home / name).symlink_to(team / name)
     config = team / "config.toml"
     given = config.read_text() if config.exists() else ""
-    patterns = [*kimi_allows(env, cwd), *KIMI_ASKED]
+    asked_config(home, given, [*kimi_allows(env, cwd), *KIMI_ASKED])
+    return str(home)
+
+
+def asked_config(home: Path, given: str, patterns: list[str]) -> None:
+    """``home``'s ``config.toml``: ``given`` (a Kimi configuration) with an ``ask`` rule after it
+    for each of ``patterns``, in the first of :data:`KIMI_ASK_FORMS` it takes after it (one that
+    takes none, as it is)."""
     asks = ""
     for form in KIMI_ASK_FORMS:
         added = "".join(form.format(pattern=json.dumps(p)) for p in patterns)
@@ -628,7 +645,6 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
     part = home / "config.toml.part"
     part.write_text(given + asks)
     part.replace(home / "config.toml")
-    return str(home)
 
 
 #: Why a run of an agent whose own configuration lets it run calls without asking got no
@@ -1763,6 +1779,9 @@ class Attempt:
         runtime.model_ended(STEP)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
         refused = await bridge.outbound(spec) if name in KIMI_NETWORK else None
+        path = args.get(KIMI_FILE_PATHS.get(name, ""))
+        if isinstance(path, str) and path and not self.shell.reaches(path):
+            refused = OUTSIDE.format(path=path, tool=name)
         if refused is not None:
             self._refused(known)
             self.followup = REJECTED.format(tool=name, why=refused)
@@ -1930,6 +1949,9 @@ class RunHome:
         if self.target.sandbox is not None:
             env = {k: os.environ[k] for k in SANDBOXED_ENV if k in os.environ}
             env = {**env, **self.target.env, "HOME": str(self.home)}
+            # a configuration of its own, none of the team's: asking about the network, skills
+            # and the searches Kimi runs in its process on this machine (:data:`KIMI_ASKED`)
+            asked_config(self.agent_home, "", list(KIMI_ASKED))
         else:
             env = {**os.environ, **self.target.env}
             if variable is not None:
