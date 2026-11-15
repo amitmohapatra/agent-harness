@@ -184,7 +184,7 @@ planned endpoint)) unless said.
 | HAR-FILE | files and the file store | X13 | — | `test_fs.py` | pass |
 | HAR-SKILL | skills | F41s | yes | — | prior |
 | HAR-SBX | sandbox | F73 | skipped (Docker) | skipped (Docker) | skip |
-| BG | background work | integration `test_background_by_adapter.py` | — | `test_har_more.py::test_background_work_of_an_unmerged_branch[3]` | **xfail(strict): pending on react-background, bg-kimi, bg-claude-da** |
+| BG | background work | integration `test_background_by_adapter.py` | — | scenario suite's (`test_s05_background.py`, `test_s13_long_running.py`, `test_s17_background_more.py`) | owner: scenarios |
 | HAR-STREAM | streamed text, events (F02, F60) | all | yes | INV-10 at every teardown | prior |
 | HAR-JRN | journal, segments, progress checkpoints (F23, F12) | all | `test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause` | `test_con.py` (segments through a worker) | prior + pass |
 | HAR-CONV | conversations, mode, busy chats | X01, X02 | yes | scenario suite's (CONV) | owner: scenarios |
