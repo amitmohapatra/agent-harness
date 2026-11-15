@@ -96,7 +96,7 @@ def _async_spec(server: StandIn) -> dict[str, Any]:
 async def test_deep_agents_async_task_while_the_user_chats(
     h: Harness, adapter: str, uid: str, tmp_path: Path
 ) -> None:
-    server = StandIn(seconds=3600)
+    server = StandIn()  # its task works until released
     server.start()
     try:
         if adapter == "react":
