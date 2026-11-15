@@ -474,6 +474,10 @@ class _Surface:
 
         def listen(event: RunEvent) -> None:
             nonlocal ended
+            if ended:
+                # the protocol has no event of a run after its end: one it emits later (its
+                # end hooks', a write that failed after the answer) is not on its stream
+                return
             shown = self.agent.hooks.event(event)
             translated = translate(shown)
             number = number_of(event)  # the same on every replica (``hub.number_of``)
