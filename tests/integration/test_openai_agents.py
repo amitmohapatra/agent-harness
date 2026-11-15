@@ -163,6 +163,37 @@ async def test_a_write_allowed_for_the_conversation_runs_its_other_calls_of_the_
     assert finished.answer == "both" and sorted(done) == ["o1", "o2"] and len(model.inputs) == 2
 
 
+async def test_a_held_call_allowed_always_while_its_run_waited_runs_unasked(
+    memory_harness: Harness,
+) -> None:
+    """Calls made at once wait at the SDK's gate together, and the SDK keeps the others'
+    pending approvals on the resume without asking its gate again. One whose tool the person
+    allowed always meanwhile — answering another conversation's question — is decided again
+    on the resume: governance lets it run, the SDK's state approves it, no second question."""
+    done.clear()
+    shipping = [tool(ship.fn, side_effects="write")]
+    replies: list[Any] = [
+        [("ship", {"order": "o1"}), ("ship", {"order": "o2"})],
+        ("ship", {"order": "o3"}),
+        "elsewhere",
+        "both",
+    ]
+    model = ScriptedModel(replies)
+    agent = arm(memory_harness.wrap(Agent(name="shipper", model=model), id="shipper"), shipping)
+    waiting = await agent.run("ship o1 and o2", user="u1", thread="a")
+    assert waiting.interrupt is not None and done == []
+    other = await agent.run("ship o3", user="u1", thread="b")
+    assert other.interrupt is not None
+    allowed = await agent.resume(
+        other.interrupt.interrupt_id, "approve", reviewer="u1", remember="always"
+    )
+    assert allowed.status is RunStatus.SUCCESS and done == ["o3"], allowed.error
+    finished = await agent.resume(waiting.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS, finished.interrupt
+    assert finished.interrupt is None and finished.answer == "both"
+    assert sorted(done) == ["o1", "o2", "o3"]
+
+
 async def test_a_streamed_reply_allowed_for_the_conversation_does_not_ask_again(
     harness: Harness,
 ) -> None:

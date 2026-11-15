@@ -3863,11 +3863,15 @@ def _configurable(config: RunnableConfig) -> dict[str, Any]:
     return dict(config.get("configurable") or {})
 
 
-def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfig:
-    configurable: dict[str, Any] = {"thread_id": thread_id, "checkpoint_ns": ns}
-    if checkpoint_id is not None:
-        configurable["checkpoint_id"] = checkpoint_id
-    return {"configurable": configurable}
+def _config(thread_id: str, ns: str, checkpoint_id: str) -> RunnableConfig:
+    """A kept checkpoint's config: every caller names the checkpoint."""
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": ns,
+            "checkpoint_id": checkpoint_id,
+        }
+    }
 
 
 __all__ = [

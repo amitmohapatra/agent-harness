@@ -783,6 +783,25 @@ async def test_a_nodes_retry_policy_alone_retries_an_error_the_harness_would_ret
 
 
 @pytest.mark.usefixtures("_quick_retries")
+async def test_a_langgraph_whose_internals_moved_leaves_a_nodes_read_to_the_harnesss_tries(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside a graph's node, whether the node's own policy runs a failed read again is read
+    from LangGraph's internals; where they moved, the harness cannot tell, so it does not
+    hand the error to the node: its own tries of an error that may pass go on, as with no
+    policy — never a node failing on a read the harness would have tried again."""
+    shelf.clear()
+    refused(10)
+    tools = {t.name: t for t in await native_tools(harness, shelf_count, framework="langgraph")}
+    policy = RetryPolicy(max_attempts=3, initial_interval=0.0, jitter=False, retry_on=Exception)
+    monkeypatch.setitem(sys.modules, "langgraph.pregel._retry", types.ModuleType("gone"))
+    agent = arm(harness.wrap(_fetching(tools, policy), id="internals-moved"), [shelf_count])
+    result = await agent.run("count a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert len(shelf) == base.READ_RETRIES + 1  # the harness's tries, once each
+
+
+@pytest.mark.usefixtures("_quick_retries")
 async def test_without_a_node_policy_a_failed_harness_read_is_the_nodes_text(
     harness: Harness,
 ) -> None:

@@ -18,7 +18,14 @@ from tests.support.kimi import kimi_home_of
 from tests.support.memory import FakeMemoryService
 from tests.support.sandbox import FakeSandboxes
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
-from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus, ToolCall
+from trellis.contracts import (
+    ConfigurationError,
+    Option,
+    RunEventType,
+    RunOutcome,
+    RunStatus,
+    ToolCall,
+)
 from trellis.harness import admission, compat
 from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
@@ -1231,17 +1238,34 @@ async def test_a_process_already_gone_when_a_failed_attempt_stops_it_keeps_the_f
     assert "out of memory" in result.error.message and "exit 3" in result.error.message
 
 
-async def test_a_turn_ended_at_the_step_limit_is_asked_once_more(
-    harness: Harness, tmp_path: Path
+@pytest.mark.parametrize("said", ["Half of it so far.", None])
+async def test_a_turn_ended_at_the_step_limit_ends_partial_with_what_the_agent_said(
+    harness: Harness, tmp_path: Path, said: str | None
 ) -> None:
-    """Kimi ends a turn at its step limit with no answer, the reason only in its log: the run
-    asks once more in the same session, and says so on the stream."""
-    script = [{"step_limit": 1}, {"text": "the answer at the limit"}]
+    """Kimi ends a turn at its step limit with no answer, the reason only in its log. As
+    Claude's turn limit does (decision D1), the run ends ``PARTIAL`` with what the agent said
+    before the limit (nothing: no answer), its error ``BUDGET_EXCEEDED`` naming the limit and
+    a ``step_limit`` warning on the stream — and nothing more is asked of the agent: no paid
+    last answer, so the step its script holds after the limit is never reached."""
+    from trellis.harness.budget import BUDGET_EXCEEDED
+
+    script = [
+        *([{"text": said}] if said else []),
+        {"step_limit": 1},
+        {"text": "an answer it is never asked for"},
+    ]
     agent = harness.wrap(fake(tmp_path, script), id="limited")
     events = [e async for e in agent.stream("work", user="u1")]
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
     assert warned == ["stopped: the step limit (1) was reached"]
-    assert events[-1].data.get("result") == "the answer at the limit"
+    done = events[-1]
+    assert done.type is RunEventType.RUN_FINISHED and done.outcome is RunOutcome.PARTIAL
+    assert done.data["result"] == said
+    assert len(recorded(tmp_path)["prompts"]) == 1  # the one turn: no last answer asked
+    result = await agent.run("work", user="u1")
+    assert result.status is RunStatus.PARTIAL and result.answer == said
+    assert result.error is not None and result.error.code == BUDGET_EXCEEDED
+    assert "step limit (1)" in result.error.message
 
 
 async def test_a_turn_the_agent_could_not_finish_fails_the_run_with_the_agents_reason(

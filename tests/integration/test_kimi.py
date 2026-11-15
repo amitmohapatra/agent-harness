@@ -195,6 +195,44 @@ async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
     assert any("say it" in text_of(m.get("content")) for m in last)
 
 
+async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_call(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pause answers Kimi's permission request (dismissed) and stops the turn
+    (``session/cancel``); Kimi may take the cancel first — on a loaded machine it does — and
+    its ``Bash`` then ends the waiting call itself, its result ``Aborted before command
+    started`` instead of "not run because the approval request was cancelled". Either way the
+    command did not run: the resume tells Kimi to call it again, and it runs once approved."""
+    from trellis.harness.adapters import acp
+
+    stop = acp.Attempt._stop
+
+    async def cancelled_first(self: Any) -> None:
+        """The turn stopped before the answer goes out: the answer waits until Kimi has ended
+        the call itself (its log says so)."""
+        await self.cancel()
+        async with asyncio.timeout(30):
+            while not any(  # noqa: ASYNC110 - a file Kimi writes
+                "Aborted before command started" in line
+                for log in kimi_home_of("u1").glob("sessions/*/*/agents/main/wire.jsonl")
+                for line in log.read_text().splitlines()
+                if '"tool.result"' in line
+            ):
+                await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(acp.Attempt, "_stop", cancelled_first)
+    endpoint.plan = [("Bash", {"command": WRITES})]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash-cancelled-first")
+    paused = await agent.run("say it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    monkeypatch.setattr(acp.Attempt, "_stop", stop)
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == "Done. resumed"
+    assert (tmp_path / "kimi-work" / "made.txt").exists()
+
+
 @pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
 async def test_a_command_that_only_reads_runs_without_asking_a_person(
     harness: Harness, tmp_path: Path, streamed: bool

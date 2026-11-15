@@ -49,6 +49,25 @@ async def test_a_500_turn_conversation_is_checked_for_a_turn_served_elsewhere_in
         assert await pipeline._served_elsewhere(agent, now, mine)
 
 
+async def test_a_page_of_another_users_turns_on_a_thread_named_alike_is_not_served_elsewhere() -> (
+    None
+):
+    """The listing is the thread name's, every user's: a whole page of another user's turns
+    on a thread named alike, since this one's last, is read and passed over — none is a turn
+    of this conversation, so none was served elsewhere — though the page ends before the last
+    turn served here is reached."""
+    from trellis.harness.runs import PAGE_LIMIT
+
+    store = LocalRuns()
+    async with Harness(config=Settings(), runs=store) as h:
+        agent = h.wrap(echo, id="long")
+        mine = (await agent.run("mine", user="ada", thread="t1")).run_id
+        for n in range(PAGE_LIMIT):
+            await agent.run(f"bob {n}", user="bob", thread="t1")
+        now = Identity(tenant="default", user="ada", agent_id="long", run_id="run_now", thread="t1")
+        assert not await pipeline._served_elsewhere(agent, now, mine)
+
+
 async def test_200_observed_calls_of_10_kb_keep_the_journal_under_half_a_megabyte() -> None:
     """PERF-8: a call its framework ran itself (Claude Code's ``Read``) is journaled so that
     made again it is not run twice — as the stream previews its result (2,000 characters),

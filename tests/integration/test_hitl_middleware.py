@@ -289,3 +289,40 @@ async def test_a_per_call_decision_the_tool_does_not_take_is_refused_before_resu
         )
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="l")
     assert done.status is RunStatus.SUCCESS and sent == [{"to": "ada", "body": "hi"}]
+
+
+async def test_a_graphs_own_per_call_approval_with_no_decision_schema_takes_each_decision(
+    harness: Harness,
+) -> None:
+    """A node of the graph's own that pauses with LangChain's per-call request
+    (``{"type": "tool_approval", "name", "args"}``) and no ``response_schema`` is an approval of
+    that call as the middleware's is: the resume hands it LangChain's decision for the
+    harness's — with no schema to check the decision against, it is sent as it is."""
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import interrupt
+    from typing_extensions import TypedDict
+
+    class Asked(TypedDict, total=False):
+        decided: Any
+
+    def ask(state: Asked) -> dict[str, Any]:
+        request = {"type": "tool_approval", "name": "email", "args": {"to": "a@x.test"}}
+        return {"decided": interrupt(request)}
+
+    graph = StateGraph(Asked)
+    graph.add_node("ask", ask)
+    graph.add_edge(START, "ask")
+    graph.add_edge("ask", END)
+    agent = harness.wrap(graph.compile(checkpointer=InMemorySaver()), id="own-approval")
+    for decision, answer, sent in (
+        ("approve", None, {"type": "approve"}),
+        ("reject", "not now", {"type": "reject", "message": "not now"}),
+    ):
+        paused = await agent.run({}, user="u")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+        assert paused.interrupt.question == "Approve email?"
+        done = await agent.resume(
+            paused.interrupt.interrupt_id, decision, reviewer="u", answer=answer
+        )
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert done.answer is not None and done.answer["decided"] == sent
