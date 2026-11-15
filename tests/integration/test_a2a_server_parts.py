@@ -516,6 +516,8 @@ class Queue:
 async def waiter(input: Any, agent: Runtime) -> Any:
     if input == "ask":
         return await agent.ask("Which region?")
+    if input == "ops":
+        return await agent.ask("Which region?", assignee="role:ops")
     await asyncio.Event().wait()
     return "never"
 
@@ -609,6 +611,23 @@ async def test_an_answer_to_someone_elses_question_keeps_the_task_waiting(
     assert again.states() == [TaskState.TASK_STATE_INPUT_REQUIRED]
     assert again.texts() == ["this task is not yours to answer"]
     record = await agent.harness.runs.get("run_q")
+    assert record is not None and record.status is RunStatus.PAUSED
+
+
+async def test_a_question_assigned_to_someone_else_is_not_the_callers_to_answer(
+    executor: tuple[RunExecutor, Agent],
+) -> None:
+    """A question the agent assigned to someone else (``role:ops``) is theirs, answered
+    through the inbox: the task's own caller answering it keeps it waiting."""
+    run, agent = executor
+    await run.execute(request("run_ops", text="ops"), Queue())  # type: ignore[arg-type]
+    again = Queue()
+    await run.execute(
+        request("run_ops", state=TaskState.TASK_STATE_INPUT_REQUIRED, text="eu"),
+        again,  # type: ignore[arg-type]
+    )
+    assert again.texts() == ["this task is not yours to answer"]
+    record = await agent.harness.runs.get("run_ops")
     assert record is not None and record.status is RunStatus.PAUSED
 
 
