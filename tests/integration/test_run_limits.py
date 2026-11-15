@@ -331,6 +331,36 @@ async def test_a_run_in_this_process_is_cancelled_with_its_reason(harness: Harne
     assert events[-1].data["spent"]["model_calls"] == 0  # a function: no model
 
 
+async def test_a_run_stopped_twice_ends_once_with_the_first_reason(harness: Harness) -> None:
+    """Two stops of a run at work here before it has ended (a cancel, and its hold refused
+    meanwhile): one cancellation of its attempt — the second waits on the same end — and the
+    run ends ``CANCELLED`` with the first one's reason."""
+    started = asyncio.Event()
+    runs: list[str] = []
+
+    async def waits(input: str, agent: Runtime) -> str:
+        runs.append(agent.run_id)
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    agent = harness.wrap(waits, id="waits")
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("x", user="u"):
+            events.append(event)
+
+    streaming = asyncio.create_task(watch())
+    await started.wait()
+    first = agent.stop(runs[0], "the first reason")
+    second = agent.stop(runs[0], "the second reason")
+    assert first is not None and second is first  # the same end
+    await streaming
+    assert events[-1].outcome is RunOutcome.CANCELLED
+    assert events[-1].data["reason"] == "the first reason"
+
+
 async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(
     harness: Harness,
 ) -> None:
