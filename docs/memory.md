@@ -129,7 +129,10 @@ said:
   the run store's record of it — its question and answer — after the window (a framework that
   replays messages: LangGraph's graphs, `ReAct`), matched by message id so that a turn memory
   holds is never given twice — with nothing in the window, the run store's newest turns (at
-  most 10), within the conversation's budget;
+  most 10), within the conversation's budget. A framework that takes the window as text (a
+  function, OpenAI Agents, Claude with no session of its own, an ACP agent) gets no message
+  ids to match by: the turns its process wrote whose writes are still on their way are said
+  after the window ("The latest turns of this conversation"), once each, until memory has them;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
   Mode's nested calls from Bifrost's log — their arguments and outputs as they are
   ([observability.md](observability.md#redaction)), in the order the log has them, each at

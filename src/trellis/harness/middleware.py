@@ -53,6 +53,7 @@ import contextlib
 import copy
 import functools
 import itertools
+import json
 import logging
 import re
 import sys
@@ -2669,7 +2670,7 @@ _HELD_SIZE: Final = len(FIT_HELD.format(how=FIT_FOUND, names="")) / 4 + 1
 CUT_MARKER: Final = 192
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
 #: how often each fired in this process (a bounded counter: these keys only).
-FIT_STEPS: Final = ("tools", "descriptions", "results", "turns", "memory")
+FIT_STEPS: Final = ("tools", "descriptions", "results", "turns", "steps", "memory")
 #: ``refit``: a request the model's server refused as over its window, fitted again with the
 #: server's own count (:data:`_RATIOS`) and sent once more.
 FITTED: Final[collections.Counter[str]] = collections.Counter()
@@ -2882,7 +2883,11 @@ class FitWindow(AgentMiddleware):
        them); only then the tools narrowed past :data:`FIT_KEEP`, as far as the latest turn
        leaves no room, those :data:`FIT_KEEP` staying by their signature: the tools the
        question needs are never dropped for older turns, nor for the latest turn's own bulk;
-    5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
+    5. ``steps`` — the latest turn's older steps (a call and its results), the oldest first,
+       never the latest :data:`KEEP_STEPS`: said in one note after the question, a line each
+       (the call and the start of its result) — a turn of many small steps is over a small
+       window by itself (``turns=False`` leaves them to the summarization after it);
+    6. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
        profile), the summary, the recent turns or the learned plan (its skills and tools).
@@ -3058,6 +3063,7 @@ class FitWindow(AgentMiddleware):
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
             lambda r, b: self._results(r, b, refit=refit),
             lambda r, b: self._turns(r, b, runtime, before, given, refit=refit),
+            lambda r, b: _steps_said(r, b) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
         for name, step in zip(FIT_STEPS, steps, strict=True):
@@ -3305,19 +3311,27 @@ def _compact(tool: BaseTool | dict[str, Any], said: str | None = None) -> BaseTo
 
 
 def _asked(request: ModelRequest[Any]) -> int | None:
-    """Where the request's latest turn starts: the user's latest message in the conversation —
-    a note appended to this call alone, as the step limit's and the budget's are, is not one:
-    the turn starts at the question before it — or ``None`` when no turn is before it."""
-    messages = request.messages
-    lead = _lead(messages)
+    """Where the request's latest turn starts (:func:`_question`) — or ``None`` when no turn is
+    before it."""
+    asked = _question(request)
+    return None if asked is None or asked <= _lead(request.messages) else asked
+
+
+def _question(request: ModelRequest[Any]) -> int | None:
+    """Where the user's latest message in the conversation is — a note appended to this call
+    alone, as the step limit's and the budget's are, is not one: the turn starts at the
+    question before it — or ``None`` when the request holds none."""
     state = request.state.get("messages") or []
     said = {id(m) for m in state}
     named = {m.id for m in state if m.id is not None}
-    asked = max(
-        (n for n, m in enumerate(messages) if typed(m) and (id(m) in said or m.id in named)),
+    return max(
+        (
+            n
+            for n, m in enumerate(request.messages)
+            if typed(m) and (id(m) in said or m.id in named)
+        ),
         default=None,
     )
-    return None if asked is None or asked <= lead else asked
 
 
 def _lead(messages: Sequence[AnyMessage]) -> int:
@@ -3359,6 +3373,103 @@ def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
     if not gone:
         return request
     return request.override(messages=[m for n, m in enumerate(messages) if n not in gone])
+
+
+#: The latest turn's steps (a call and its results) :func:`_steps_said` always keeps whole.
+KEEP_STEPS: Final = 3
+#: What the note in the place of the latest turn's older steps says (:func:`_steps_said`),
+#: then a line of each step's calls: ``- name(arguments) -> the start of its result``, each part
+#: at most :data:`STEP_LINE` characters.
+STEPS_LEFT: Final = (
+    "The {count} earliest steps of this turn, left out to fit the window: each call made and "
+    "the start of its result (the latest steps follow whole){unlisted}:"
+)
+STEPS_UNLISTED: Final = "; the first {count} of them not listed"
+#: How many steps a note of :func:`_steps_said` stands for (its first group).
+STEPS_LEFT_COUNT: Final = re.compile(r"The (\d+) earliest steps of this turn, left out to fit")
+STEP_LINE: Final = 100
+#: The source of the note's notification metadata: no message of the user's (:func:`typed`).
+STEPS_SOURCE: Final = "trellis_fit_window"
+
+
+def _steps_said(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+    """The request with its latest turn's older steps — each a model's call and its results —
+    left out until it fits, the oldest first, never the latest :data:`KEEP_STEPS`, and said in
+    one note in their place after the question (:data:`STEPS_LEFT`): a line for each call, its
+    name and arguments and the start of its result, the earliest lines left out too when the
+    lines alone do not fit. A turn of many small steps (200 lookups) is over a small window by
+    itself, where no result is long enough to cut and no older turn is there to leave out: it
+    was sent whole, over the window. The note is a notification (no question of the user's),
+    so the turn still starts at the question."""
+    from langchain_core.messages import add_notification_metadata  # noqa: PLC0415
+
+    asked = _question(request)
+    if asked is None:
+        return request
+    messages = list(request.messages)
+    groups: list[list[int]] = []
+    n = asked + 1
+    while n < len(messages) and _calls_tools(messages[n]):
+        group = [n]
+        n += 1
+        while n < len(messages) and isinstance(messages[n], ToolMessage):
+            group.append(n)
+            n += 1
+        groups.append(group)
+    # the note's own head, its role and what a message adds besides (Deep Agents' count)
+    over = _size(request) - budget + _tokens_of([STEPS_LEFT, STEPS_UNLISTED, "user"]) + 3
+    lines: list[str] = []
+    gone: set[int] = set()
+    left = 0
+    for group in groups[:-KEEP_STEPS]:
+        if over <= 0:
+            break
+        said = _step_lines(messages, group)
+        lines += said
+        gone.update(group)
+        left += 1
+        over -= count_tokens_approximately([messages[i] for i in group]) - _tokens_of(said)
+    if not left:
+        return request
+    unlisted = 0
+    while over > 0 and unlisted < len(lines):  # the lines alone do not fit: the earliest go
+        over -= _tokens_of(lines[unlisted : unlisted + 1])
+        unlisted += 1
+    head = STEPS_LEFT.format(
+        count=left,
+        unlisted=STEPS_UNLISTED.format(count=unlisted) if unlisted else "",
+    )
+    note = add_notification_metadata(
+        HumanMessage(content="\n".join([head, *lines[unlisted:]])), source=STEPS_SOURCE
+    )
+    kept = [m for i, m in enumerate(messages) if i not in gone]
+    return request.override(messages=[*kept[: asked + 1], note, *kept[asked + 1 :]])
+
+
+def _calls_tools(message: AnyMessage) -> bool:
+    return isinstance(message, AIMessage) and bool(message.tool_calls)
+
+
+def _step_lines(messages: Sequence[AnyMessage], group: Sequence[int]) -> list[str]:
+    """A step's calls, a line each: its name and arguments, and the start of its result."""
+    call_message = cast(AIMessage, messages[group[0]])
+    results = {cast(ToolMessage, messages[i]).tool_call_id: messages[i].text for i in group[1:]}
+    lines = []
+    for call in call_message.tool_calls:
+        args = _clipped(json.dumps(call["args"], separators=(",", ":"), default=str))
+        lines.append(f"- {call['name']}({args}) -> {_clipped(results.get(call['id'] or '', ''))}")
+    return lines
+
+
+def _clipped(text: str) -> str:
+    """``text`` on one line, at most :data:`STEP_LINE` characters."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= STEP_LINE else f"{flat[: STEP_LINE - 1]}…"
+
+
+def _tokens_of(lines: Sequence[str]) -> int:
+    """What ``lines`` add to a request, counted as :func:`_size` counts it."""
+    return sum(len(line) + 1 for line in lines) // 4 + 1
 
 
 def todos_shown(request: ModelRequest[Any]) -> ModelRequest[Any]:

@@ -6,7 +6,10 @@ failure may pass (the service unavailable, a timeout; not a refusal the same req
 again). While the memory client's circuit is open (``CircuitOpenError``: the service down, the
 call refused at once, nothing sent) a write spends no attempt: it waits the circuit's cool-down,
 queued, and is tried again with its attempts whole — however long the outage lasts, bounded by
-the queue (:data:`MAX_PENDING`; past it, a write is given up as a full queue's always is). A
+the queue (:data:`MAX_PENDING`; past it, a write is given up as a full queue's always is). Its
+calls the service answered past their time (its own ``TIMEOUT``, a 504: the service is up, the
+call is what takes too long — they open the circuit too) are counted across the cool-downs: a
+write whose every call times out is given up after its attempts, not tried forever. A
 write that still fails is never raised into the run, and never only a warning:
 
 * counted (``trellis.writes.failed``, and ``trellis.writes.undelivered`` by outcome: kept in the
@@ -63,6 +66,7 @@ from trellis.harness.telemetry import metrics
 from trellis.memory.breaker import FAILURE_THRESHOLD
 from trellis.memory.errors import CircuitOpenError
 from trellis.memory.errors import MemoryError as MemoryServiceError
+from trellis.memory.errors import TimeoutError as MemoryTimeout
 
 log = logging.getLogger("trellis.writes")
 
@@ -230,11 +234,21 @@ class Writes:
         def wait(state: RetryCallState) -> float:  # full jitter, not a secret
             return random.uniform(0, WRITE_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
 
+        # its calls the service answered past their time: counted across the circuit's
+        # cool-downs (the service is up, and the call is what takes too long), where a call
+        # that never reached it is not
+        late = 0
+
+        def tried(exc: BaseException) -> bool:
+            nonlocal late
+            late += isinstance(exc, MemoryTimeout)
+            return _passing_now(exc) and late < WRITE_ATTEMPTS
+
         while True:
             try:
                 async for attempt in AsyncRetrying(
                     stop=stop_after_attempt(WRITE_ATTEMPTS),
-                    retry=retry_if_exception(_passing_now),
+                    retry=retry_if_exception(tried),
                     wait=wait,
                     sleep=asyncio.sleep,
                     reraise=True,

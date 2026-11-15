@@ -57,7 +57,8 @@ class RunBuffer:
 
     def publish(self, event: AGUIEvent, number: int, *, final: bool = False) -> None:
         """Append an event under ``number`` (:func:`number_of`, the harness event's it is
-        translated or derived from) — also after the run finished: a late warning is kept."""
+        translated or derived from). Nothing of the run's own comes after its end (its
+        ``RUN_FINISHED``): the surface publishes none (``_Surface._launch``)."""
         self.events.append((number, event))
         self.appended += 1
         self.last = max(self.last, number)
