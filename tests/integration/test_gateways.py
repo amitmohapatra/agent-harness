@@ -547,6 +547,37 @@ async def test_a_langchain_model_object_is_said_once_as_not_routed(
     assert len(said) == 1 and "objects" in said[0].getMessage()
 
 
+async def test_a_routed_model_a_runs_own_code_asks_is_never_said_as_not_routed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A model name the harness routes (``gateways.routed_chat_model``), asked directly by the
+    run's own code — a tool of the team's here, a LangChain middleware's own model call — goes
+    through Bifrost (the chat model it makes per call points at the gateway): LangChain names
+    the call by the routed model, whose constructor names no endpoint, and it is not said to
+    call its provider directly, as a model object of the team's is."""
+    from trellis import tool
+    from trellis.harness import accounting
+    from trellis.harness.gateways import routed_chat_model
+
+    @tool(side_effects="read")
+    async def summarise(text: str) -> str:
+        """Summarise a text."""
+        reply = await routed_chat_model("openai/gpt-s").ainvoke(f"summarise: {text}")
+        return str(reply.content)
+
+    accounting._unrouted.cache_clear()
+    fake = FakeGateway(turns=[("summarise", {"text": "a long text"}), "the summary", "{last}"])
+    fake.serve_models(monkeypatch)
+    graph = ReAct(system_prompt="s", model="openai/gpt-m", tools=[summarise])
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            result = await h.wrap(graph, id="named").run("x", user="u")
+    assert result.status.value == "SUCCESS", result.error
+    asked = [json.loads(r.content)["model"] for r in fake.completions]
+    assert asked == ["openai/gpt-m", "openai/gpt-s", "openai/gpt-m"]
+    assert "calls its provider directly" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "argument", ["openai_api_base", "base_url", "anthropic_api_url", "api_base"]
 )
