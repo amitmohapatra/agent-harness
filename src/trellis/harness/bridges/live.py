@@ -56,10 +56,10 @@ from collections.abc import (
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from trellis.contracts import Interrupt, InterruptResolution, RunStatus
+from trellis.harness import stopping
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges.helpers import ended
-from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.journal import Pending
@@ -376,10 +376,9 @@ class Kept:
             self.turn.queue.put_nowait(None)
         elif self._answer is not None and not self._answer.done():
             try:
-                with contextlib.suppress(ConflictError):  # it ended meanwhile
-                    await self.agent.harness.runs.cancel(
-                        self.run_id, reason=why, tenant=self.tenant
-                    )
+                await stopping.unless_ended(  # (or it ended meanwhile)
+                    self.agent.harness.runs.cancel(self.run_id, reason=why, tenant=self.tenant)
+                )
             finally:  # it waits no more, whether or not the run store took the cancel
                 if self._answer is not None and not self._answer.done():
                     self._answer.set_result(None)

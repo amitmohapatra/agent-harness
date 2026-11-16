@@ -64,14 +64,13 @@ from trellis.contracts import (
     safe_id,
     stable_id,
 )
-from trellis.harness import admission, task_tools
+from trellis.harness import admission, stopping, task_tools
 from trellis.harness.adapters.langgraph import ASKED
 from trellis.harness.bounded import LRU, MAXSIZE
 from trellis.harness.conversation import INTERRUPTED, Mode
 from trellis.harness.frontend import FRONTEND
 from trellis.harness.identity import conversation_key, queued_with
 from trellis.harness.journal import Journal
-from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -429,10 +428,11 @@ class Tasks:
             agent = self._agents[run_id]
             runtime = agent.running.get(run_id)
             if runtime is not None:
-                with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
-                    await agent.harness.runs.finish(
+                await stopping.unless_ended(  # (or it ended meanwhile)
+                    agent.harness.runs.finish(
                         run_id, RunStatus.ERROR, error=error, tenant=runtime.tenant
                     )
+                )
             task.cancel()
         await asyncio.gather(*self._at_work.values(), return_exceptions=True)
 
@@ -523,8 +523,9 @@ async def follow_up(
             raise Refused(NO_ROOM)
         if mode is Mode.INTERRUPT and not latest.final and not tasks.at_work(latest.run_id):
             # at work on another replica, or waiting for a person: stopped there
-            with contextlib.suppress(ConflictError):  # it ended meanwhile
-                await agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
+            await stopping.unless_ended(  # (or it ended meanwhile)
+                agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
+            )
         record = await _started(
             runtime, agent, message, run_id=run_id, thread=task["task_id"], origin=origin
         )
@@ -583,12 +584,13 @@ async def stop(runtime: Runtime, agent: Agent, task: Mapping[str, Any], latest: 
     for record in [latest, *[await owned(runtime, t) for t in earlier]]:
         if record is None:
             continue
-        with contextlib.suppress(ConflictError):  # it ended already
-            await agent.cancel(
+        await stopping.unless_ended(  # (or it ended already)
+            agent.cancel(
                 record.run_id,
                 reason="cancelled by the agent that started it",
                 tenant=runtime.tenant,
             )
+        )
 
 
 # --------------------------------------------------------------------------- whose it is
@@ -878,8 +880,9 @@ async def abandoned(parent: Agent, asked: Interrupt | None, reason: str | None) 
     if asked is None or not named or not named.get("background"):
         return
     run_id = str(named["run_id"])
-    with contextlib.suppress(ConflictError):  # it ended meanwhile
-        await parent.harness.runs.cancel(run_id, reason=reason, tenant=asked.tenant_id)
+    await stopping.unless_ended(  # (or it ended meanwhile)
+        parent.harness.runs.cancel(run_id, reason=reason, tenant=asked.tenant_id)
+    )
     parent.harness.background.stop(run_id, reason or "its question was cancelled")
 
 

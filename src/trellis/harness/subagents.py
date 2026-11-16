@@ -39,7 +39,6 @@ id, its description the agent's (``h.wrap(description=)``, else its function's d
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
@@ -54,7 +53,7 @@ from trellis.contracts import (
     ToolSpec,
     stable_id,
 )
-from trellis.harness import admission, pipeline
+from trellis.harness import admission, pipeline, stopping
 from trellis.harness.adapters.langgraph import bound_tools
 from trellis.harness.admission import Branch
 from trellis.harness.journal import Journal, content_key
@@ -63,7 +62,6 @@ from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import SideEffects, Tool
 from trellis.harness.tools.mcp import side_effects_of
 from trellis.harness.tools.toolbox import listed
-from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -328,8 +326,8 @@ async def cancel_children(agent: Agent, run_id: str, *, reason: str | None, tena
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
         if child.status.final:
             continue
-        with contextlib.suppress(ConflictError):  # it ended meanwhile
-            await runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        # (or it ended meanwhile)
+        await stopping.unless_ended(runs.cancel(child.run_id, reason=reason, tenant=tenant))
         await agent.adapter.child_cancelled(child.run_id, reason)
         agent.harness.background.stop(child.run_id, reason or "its parent was cancelled")
         await cancel_children(agent, child.run_id, reason=reason, tenant=tenant)

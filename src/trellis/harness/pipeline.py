@@ -322,8 +322,9 @@ async def _arrived(
     waits its turn, said once), and once ``live`` ends with an answer having taken it, that
     answer is this run's (:func:`_answered_by`). ``None``: the run takes its own turn."""
     if mode is Mode.INTERRUPT:
-        with contextlib.suppress(ConflictError):  # it ended meanwhile
-            await agent.cancel(live.run_id, reason=INTERRUPTED, tenant=record.tenant_id)
+        await stopping.unless_ended(  # (or it ended meanwhile)
+            agent.cancel(live.run_id, reason=INTERRUPTED, tenant=record.tenant_id)
+        )
         return None
     if not live.steers:
         steering(agent.id, agent.adapter.name)
@@ -910,11 +911,11 @@ async def _children_ended(
     async for child in runs.iterate(parent_run_id=run_id, status=RunStatus.RUNNING, tenant=tenant):
         if child.run_id in kept:
             continue
-        with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
-            if error is not None:
-                await runs.finish(child.run_id, status, error=error, tenant=tenant)
-            else:
-                await runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        await stopping.unless_ended(  # (or it ended meanwhile)
+            runs.finish(child.run_id, status, error=error, tenant=tenant)
+            if error is not None
+            else runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        )
         # a background task at work here, apart from the run's call, stops with it
         agent.harness.background.stop(child.run_id, reason or "its parent ended")
         await _children_ended(agent, child.run_id, tenant, status, error=error, reason=reason)
@@ -1724,12 +1725,10 @@ async def _settle_cancelled(
         await finish()
 
     async def write() -> bool:
-        try:
-            await end()
-        except (LeaseLostError, ConflictError):
+        written = await stopping.unless_ended(end())
+        if not written:
             log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
-            return False
-        return True
+        return written
 
     if reason is not None:
         log.info("run %s was cancelled: %s", identity.run_id, reason)

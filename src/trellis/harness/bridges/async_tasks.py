@@ -45,12 +45,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import AgentError, RunRecord, RunStatus, ToolError, stable_id
+from trellis.harness import stopping
 from trellis.harness.bounded import MAXSIZE
 from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
 from trellis.harness.outbound import checked
 from trellis.harness.task_tools import CANCEL, CHECK, START, UPDATE
-from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -280,15 +280,15 @@ class AsyncTasks:
         self._kept.pop(run_id, None)
         self._released(kept)
         runs, tenant = kept.agent.harness.runs, kept.tenant
-        with contextlib.suppress(ConflictError, LeaseLostError):  # ended meanwhile
-            if status is RunStatus.CANCELLED:
-                await runs.cancel(run_id, reason=said or None, tenant=tenant)
-            elif status is RunStatus.SUCCESS:
-                await runs.finish(run_id, status, output=said or None, tenant=tenant)
-            else:
-                why = said or ENDED_THERE.format(status=status.value.lower())
-                error = AgentError(code=UNFINISHED, message=why)
-                await runs.finish(run_id, status, error=error, tenant=tenant)
+        if status is RunStatus.CANCELLED:
+            write = runs.cancel(run_id, reason=said or None, tenant=tenant)
+        elif status is RunStatus.SUCCESS:
+            write = runs.finish(run_id, status, output=said or None, tenant=tenant)
+        else:
+            why = said or ENDED_THERE.format(status=status.value.lower())
+            error = AgentError(code=UNFINISHED, message=why)
+            write = runs.finish(run_id, status, error=error, tenant=tenant)
+        await stopping.unless_ended(write)  # (or it ended meanwhile)
 
     async def _ended(
         self, runtime: Runtime, run_id: str, status: RunStatus, told: str, record: RunRecord | None
@@ -336,10 +336,9 @@ class AsyncTasks:
         )
         if isinstance(said, str):  # Deep Agents' word of a cancel that failed
             log.warning("async task %s not cancelled on its server: %s", task_id, said)
-        with contextlib.suppress(ConflictError):  # cancelled already, with its parent
-            await agent.harness.runs.cancel(
-                run_id, reason=reason or CANCELLED_WITH, tenant=kept.tenant
-            )
+        await stopping.unless_ended(  # (or cancelled already, with its parent)
+            agent.harness.runs.cancel(run_id, reason=reason or CANCELLED_WITH, tenant=kept.tenant)
+        )
 
 
 def _tool_runtime(task: Mapping[str, Any], tool: str) -> Any:
