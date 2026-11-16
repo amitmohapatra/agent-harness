@@ -80,7 +80,7 @@ from trellis.harness.adapters.base import (
     unique,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE
-from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.bridges.helpers import Helpers, helping
 from trellis.harness.bridges.resumed import resumed_call
 from trellis.harness.bridges.session import MemorySession, input_items
 from trellis.harness.conversation import remembered
@@ -251,53 +251,51 @@ class OpenAIAgentsAdapter(Keeps):
         from agents import Runner
         from agents.exceptions import MaxTurnsExceeded
 
-        helpers, agent, hooks, options = await self._prepared(target, native_input, run)
-        try:
-            given = await self._input(agent, native_input)
-            result = await Runner.run(agent, given, hooks=hooks, **options)
-            resumed = native_input
-            while (state := await _continued(result, resumed, run.runtime)) is not None:
-                resumed = None  # an edited call is approved once
-                result = await Runner.run(agent, state, hooks=hooks, **options)
-        except MaxTurnsExceeded as exc:
-            result = _at_turn_limit(run.runtime, exc, options)
-        except BaseException as exc:
-            await helpers.closed(exc)
-            raise
-        await _closed(helpers, result)
+        gated, hooks, options = await self._prepared(target, native_input, run)
+        async with helping(run.runtime, self.name) as helpers:
+            agent = self._agent(target, run, helpers, gated)
+            try:
+                given = await self._input(agent, native_input)
+                result = await Runner.run(agent, given, hooks=hooks, **options)
+                resumed = native_input
+                while (state := await _continued(result, resumed, run.runtime)) is not None:
+                    resumed = None  # an edited call is approved once
+                    result = await Runner.run(agent, state, hooks=hooks, **options)
+            except MaxTurnsExceeded as exc:
+                result = _at_turn_limit(run.runtime, exc, options)
+            # paused on an approval of the SDK's own (its ``interruptions``), an agent tool
+            # waiting on one inside it (``tools.convert.openai_agents.waits_inside``) stays
+            # open: the resume, which makes its call again, ends it
+            helpers.left_open = bool(result.interruptions)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
         from agents.exceptions import MaxTurnsExceeded
 
-        helpers, agent, hooks, options = await self._prepared(target, native_input, run)
-        given = await self._input(agent, native_input)
-        result = Runner.run_streamed(agent, given, hooks=hooks, **options)
-        streamed = result
-        error: BaseException | None = None
-        try:
-            async for delta in _deltas(result):
-                yield delta
-            resumed = native_input
-            while (state := await _continued(result, resumed, run.runtime)) is not None:
-                resumed = None
-                result = streamed = Runner.run_streamed(agent, state, hooks=hooks, **options)
+        gated, hooks, options = await self._prepared(target, native_input, run)
+        async with helping(run.runtime, self.name) as helpers:
+            agent = self._agent(target, run, helpers, gated)
+            given = await self._input(agent, native_input)
+            result = Runner.run_streamed(agent, given, hooks=hooks, **options)
+            streamed = result
+            try:
                 async for delta in _deltas(result):
                     yield delta
-        except MaxTurnsExceeded as exc:
-            result = _at_turn_limit(run.runtime, exc, options)
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            # cut short (cancelled, out of time), the SDK stops its run without waiting for
-            # it: its tool calls end (on the run's stream too) before the run does
-            assert streamed.run_loop_task is not None  # set by run_streamed
-            await asyncio.wait({streamed.run_loop_task})
-            if error is not None:
-                await helpers.closed(error)
-        await _closed(helpers, result)
+                resumed = native_input
+                while (state := await _continued(result, resumed, run.runtime)) is not None:
+                    resumed = None
+                    result = streamed = Runner.run_streamed(agent, state, hooks=hooks, **options)
+                    async for delta in _deltas(result):
+                        yield delta
+            except MaxTurnsExceeded as exc:
+                result = _at_turn_limit(run.runtime, exc, options)
+            finally:
+                # cut short (cancelled, out of time), the SDK stops its run without waiting for
+                # it: its tool calls end (on the run's stream too) before the helpers close
+                assert streamed.run_loop_task is not None  # set by run_streamed
+                await asyncio.wait({streamed.run_loop_task})
+            helpers.left_open = bool(result.interruptions)  # as :meth:`invoke` leaves them
         yield Output(result)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -391,13 +389,12 @@ class OpenAIAgentsAdapter(Keeps):
     # ------------------------------------------------------------------ internals
     async def _prepared(
         self, target: Any, native_input: Any, run: Invocation
-    ) -> tuple[Helpers, Any, Any, dict[str, Any]]:
-        """What an attempt runs with, streamed or not: its helpers, the governed copy of its
-        agent, the harness's ``RunHooks`` around the run's own, and ``Runner.run``'s options."""
-        helpers = Helpers(run.runtime, self.name)
+    ) -> tuple[Mapping[str, ToolSpec], Any, dict[str, Any]]:
+        """What an attempt runs with, streamed or not, made before its helpers open (options
+        the SDK does not take fail the attempt before any helper work): the tools the catalog
+        gates, the harness's ``RunHooks`` around the run's own, and ``Runner.run``'s options."""
         options = _options(run.runtime, target, native_input)
-        agent = self._agent(target, run, helpers, await _gated(run))
-        return helpers, agent, _hooks(options.pop("hooks", None)), options
+        return await _gated(run), _hooks(options.pop("hooks", None)), options
 
     @staticmethod
     def _agent(
@@ -440,15 +437,6 @@ class OpenAIAgentsAdapter(Keeps):
                     item, always_reject=native_input.always, rejection_message=native_input.message
                 )
         return state
-
-
-async def _closed(helpers: Helpers, result: Any) -> None:
-    """The attempt's helpers ended with the SDK's run (``Helpers.closed``) — unless the run
-    paused on an approval of the SDK's own (its ``interruptions``): an agent tool waiting on
-    one inside it (``tools.convert.openai_agents.waits_inside``) stays open, and the resume,
-    which makes its call again, ends it."""
-    if not result.interruptions:
-        await helpers.closed(None)
 
 
 def governed_agents(
