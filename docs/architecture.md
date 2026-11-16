@@ -156,6 +156,41 @@ src/trellis/
     agent.py           Agent: run, stream, start, execute (a claimed run), resume, cancel, events,
                        schedule, serve_*; RunHandle; memory push and records
     pipeline.py        one attempt of one run, from its record: the fixed pipeline below
+    stopping.py        the one owner of stopping an attempt, and of "the run store ended it
+                       while this process worked on it"
+    children.py        the one cascade that ends a run's children when the run ends
+    holding.py         the runs this process executes, held in the run store (a heartbeat), so
+                       a process that dies leaves runs the store ends
+    line.py            a conversation's line: its runs answered one at a time, in arrival order,
+                       on whichever process each arrives (ADR 0005)
+    conversation.py    a conversation across runs: its earlier turns, a message sent while it
+                       is busy, the id each message keeps
+    history.py         who owns a conversation's history across runs: one policy for every adapter
+    background.py      background tasks with no server to host: a sub-agent's run that goes on
+                       after its turn replied, its outcome brought back to the chat
+    task_tools.py      the five background-task tools in one table, governed one way
+    admission.py       how many child runs a run has working at once; its live task tree
+    budget.py          a run's budget (tokens, dollars, tool calls), kept in its journal
+    accounting.py      every LangChain chat model call of a run: budget, stall watch, cut replies
+    schedules.py       schedules a user sets in chat: four built-in tools on agent-runs' schedules
+    frontend.py        what a run's front end gives it (AG-UI tools, context, state), kept with the run
+    files.py           the files a run makes for its user, in one store on fsspec
+    snapshots.py       tool results as snapshots: what a value was when it was fetched
+    credentials.py     credentials for the tools the harness calls out to, per run
+    outbound.py        the check every URL the harness is given to reach out to passes
+    host.py            shell commands on this machine: allowed, denied, isolated
+    gateways.py        where a model name is served: one route strategy, one adapter per route
+    provider_tools.py  a provider's own tools in ReAct (web search, web fetch, code execution)
+    plan_mode.py       plan mode for ReAct: read-only exploration, an approved plan, then the work
+    skills_openai.py   skills into the OpenAI Agents SDK's own Skills capability
+    bounded.py         bounded containers for the harness's own client-side state
+    removed.py         arguments the public API no longer takes, refused by name
+    doctor.py          trellis doctor: the effective settings and where each came from
+    bridges/           native slots, the platform's services behind them: helpers (the runs a
+                       framework's own sub-agents get; helping()), live, claude_live, acp_live
+                       (kept sessions), async_tasks and background_tasks (Deep Agents' and the
+                       harness's background work), resumed (what a resumed call is answered),
+                       session, store, rewind, claude
     runtime.py         Runtime (trellis.current()): ask, approve, the pause, interrupt ids,
                        progress checkpoints, tools.call
     asking.py          Question: what ask, an approval and a graph's interrupt() build (Way 2 too)
@@ -191,8 +226,9 @@ src/trellis/
     runs.py            RunStore (the part of trellis.runs.RunsClient the harness calls) and
                        LocalRuns (the same store in process, when RUNS_URL is unset)
     worker/            Worker: trellis.runs.Worker running wrapped agents; __main__: the CLI
-    adapters/          detect(target) and one adapter per framework (base, langgraph,
-                       openai_agents, claude, function)
+    adapters/          detect(target) and one adapter per framework (base: the Adapter
+                       protocol and its defaults, Keeps; langgraph, openai_agents with its
+                       SDK subclasses in openai_sdk, claude, acp, function)
     governance/        the run / announce / ask decision, usable without Harness: decision,
                        catalog (the rules, kept fresh, failing closed, publishing), Governance, governed
     tools/             base (Tool, execute), sources (tool, a2a, openapi), toolbox (MCP tools,

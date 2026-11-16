@@ -5,6 +5,33 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a run's children end with it, each on its own
+
+* **Children:** every place a run ends — answered, failed, out of time, cancelled, its hold
+  lost — ends its children through one cascade (`children.end_children`). A child whose
+  ending fails (the run store's error, a Deep Agents server that fails its cancel) is said in
+  the log and no longer leaves the run's other children working; the first such error is
+  raised once every child was tried. A child the store ended first, or another worker holds,
+  is left to whoever ended or holds it, its own children too.
+* **Sub-agents:** an ACP agent wrapped as a tool (`tools=[h.wrap(ACPAgent(...))]`) is `write`
+  unless `side_effects=` says otherwise: it runs its own tools in its own process. It was
+  `read` when the harness tools it declared only read. An adapter says whether its framework
+  has tools of its own (`Adapter.own_tools`); one that does not say is taken to have them.
+* **Cancel:** a run stopped for a reason (`agent.cancel(reason=)`, a newer message) ends with
+  that reason on its `RUN_FINISHED` event when its framework's session then reports a cancel
+  of its own; the session's wording replaced it.
+
+### Changed: one owner each for stopping, children and helpers (no behaviour change)
+
+* Stopping an attempt and reading "the run store ended it" live in `stopping.py`; the
+  adapters' six copies of opening and closing an attempt's helpers are
+  `bridges.helpers.helping()`; what an adapter may leave undefined has its default in
+  `adapters.base.Keeps`.
+* The unit suite holds three budgets at what the source has today: the highest and mean
+  function complexity, duplicate blocks, and packages that import each other
+  (`tests/unit/test_complexity_budget.py`, `test_duplication_budget.py`,
+  `test_import_budget.py`).
+
 ### Fixed: security audit — scope, approvals and what reaches the service's own files
 
 * **AG-UI:** the data a paused run's question carries (`GET .../runs/{run_id}/artifacts/{id}`)
