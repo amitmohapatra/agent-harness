@@ -1,9 +1,9 @@
 """A ratchet on copied code, not a style opinion.
 
-Measured at the time of writing (2026-11-16): 41 duplicate blocks in ``src/trellis``. Most are
-keyword pass-throughs (``Agent.run``/``stream``/``start``) and the legacy ``skills`` re-export;
-six are the adapters' copies of opening and closing an attempt's helpers, which
-``bridges.helpers.helping`` replaces.
+Measured on 2026-11-16: 35 duplicate blocks in ``src/trellis``, most of them keyword
+pass-throughs (``Agent.run``/``stream``/``start``) and the legacy ``skills`` re-export. There
+were 41: six were the adapters' copies of opening and closing an attempt's helpers, which
+``bridges.helpers.helping`` replaced.
 
 The budget is set at *today's* count, so no copy may be added and every fold tightens it.
 Lowering the number here is the point; raising it needs a reason in the commit message.
@@ -26,7 +26,7 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "trellis"
 #: a block is more than this many kept lines in a row
 MIN_LINES = 4
 #: how many duplicate blocks there are today
-MAX_DUPLICATE_BLOCKS = 41
+MAX_DUPLICATE_BLOCKS = 35
 
 
 def _dropped(tree: ast.Module) -> set[int]:
