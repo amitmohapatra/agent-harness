@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.scenarios.brains import SYSTEM, BrainChat, command, parse, token, wrapped
+from tests.scenarios.brains import SYSTEM, BrainChat, command, parse, token, usage_of, wrapped
 from tests.scenarios.kit import TOOLS, answered, eventually, history, user_scope
 from tests.support.arm import arm
 from trellis import Harness, ReAct
@@ -19,7 +19,7 @@ from trellis.contracts import RunEventType, RunStatus
 
 pytestmark = [pytest.mark.timeout(1800), pytest.mark.plan("LR-06", "LR-02")]
 TURNS = 55
-#: what every scripted reply reports (``tests/support/models.py``, ``tests/support/kimi.py``)
+#: what every reply of Kimi's scripted model reports (``tests/support/kimi.py``)
 REPLY_TOKENS = 15
 
 
@@ -77,7 +77,8 @@ async def test_fifty_five_turns(h: Harness, adapter: str, uid: str, tmp_path: Pa
     if adapter in ("react", "react_fitted"):
         requests = built_model.requests
         assert spent_calls == len(requests), (spent_calls, len(requests))
-        assert spent_tokens == REPLY_TOKENS * len(requests), (spent_tokens, len(requests))
+        reported = sum(usage_of(request)["total_tokens"] for request in requests)
+        assert spent_tokens == reported, (spent_tokens, reported, len(requests))
     if adapter == "kimi":
         assert spent_tokens == REPLY_TOKENS * len(built_model.requests), (
             spent_tokens,

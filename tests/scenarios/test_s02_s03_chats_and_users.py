@@ -77,14 +77,13 @@ async def test_three_chats_at_once_stay_apart(
     assert overlapped({f"t-{c}" for c in chats}), "the chats did not run in parallel"
 
 
-@pytest.mark.parametrize("adapter", ADAPTERS)
+# not "function": a function target has no model to call memory_search (matrix F42, reason 31)
+@pytest.mark.parametrize("adapter", [a for a in ADAPTERS if a != "function"])
 async def test_recall_across_chats_is_user_level(
     h: Harness, adapter: str, uid: str, tmp_path: Path
 ) -> None:
     """A fact told in chat 1 is in the user's memory, which a search from chat 2 finds (the
     memory tools are the user's); chat 2's own history does not hold chat 1's turns."""
-    if adapter == "function":
-        pytest.skip("a function target has no model to call memory_search (matrix F42, reason 31)")
     agent, _ = await wrapped(
         h,
         adapter,
