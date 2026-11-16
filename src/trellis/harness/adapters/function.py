@@ -18,6 +18,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     Output,
     ToolFormat,
@@ -27,7 +28,7 @@ from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 
 
-class FunctionAdapter:
+class FunctionAdapter(Keeps):
     name: ClassVar[str] = "function"
     tool_format: ToolFormat = "none"
     fixed_tools: bool = False

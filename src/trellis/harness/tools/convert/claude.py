@@ -40,11 +40,9 @@ from claude_agent_sdk import tool as sdk_tool
 from trellis.harness.runtime import Paused, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import Tool
+from trellis.harness.tools.convert import MCP_PREFIX as PREFIX
+from trellis.harness.tools.convert import SERVER
 
-#: The in-process server's name, and so the prefix Claude sees.
-SERVER: Final = "trellis"
-#: How Claude names a tool of that server: this before the tool's own name.
-PREFIX: Final = f"mcp__{SERVER}__"
 #: The server config's key (the CLI's ``--mcp-config``, which the SDK passes on with all but the
 #: server's instance) that loads its tools from the first step instead of deferring them.
 ALWAYS_LOAD: Final = "alwaysLoad"

@@ -387,9 +387,7 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
-        wrapped = getattr(self.adapter, "wrapped", None)  # what the framework checks of its own
-        if wrapped is not None:
-            wrapped(target, self.framework_options, harness.model_gateway)
+        self.adapter.wrapped(target, self.framework_options, harness.model_gateway)
         #: the model's window when it is known, and the pushed context's token budget: a share
         #: of it
         self.model_window = context_window(target)
@@ -450,17 +448,13 @@ class Agent:
         """End what the agent's framework keeps running between runs in this process (the
         Claude Agent SDK's live sessions: ``bridges.claude_live``; an ACP agent's, and the
         files of the sessions kept for a conversation's next turn), where it keeps any."""
-        close = getattr(self.adapter, "aclose", None)
-        if close is not None:
-            await close()
+        await self.adapter.aclose()
 
     def _session_gone(self, _conversation: str, kept: tuple[str, Any]) -> None:
         """The session ``kept`` for a conversation's next turn is kept no more (its place
         given to another conversation's, or dropped): the framework lets go of what it keeps
         of it, where it keeps any (an ACP agent's files: ``ACPAdapter.session_gone``)."""
-        gone = getattr(self.adapter, "session_gone", None)
-        if gone is not None:
-            gone(kept[0])
+        self.adapter.session_gone(kept[0])
 
     @property
     def evals(self) -> EvalServices:

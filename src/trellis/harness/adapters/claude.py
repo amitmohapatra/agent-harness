@@ -106,6 +106,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     Output,
     ToolFormat,
@@ -405,7 +406,7 @@ class ClaudeRunError(RuntimeError):
     """The CLI reported the run as failed."""
 
 
-class ClaudeAdapter:
+class ClaudeAdapter(Keeps):
     name: ClassVar[str] = "claude_agent_sdk"
     tool_format: ToolFormat = "claude"
     fixed_tools: bool = False

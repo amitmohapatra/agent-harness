@@ -531,7 +531,7 @@ async def _remote_tasks(runtime: Runtime, call: Any, own: Any, args: Mapping[str
     the chain of outcomes, or a webhook that leads somewhere private, fails the call, and its
     server is sent nothing.
     ``None`` for any other call."""
-    tasks = getattr(runtime.agent.adapter, "tasks", None)
+    tasks = runtime.agent.adapter.tasks
     if tasks is None or call["name"] not in task_tools.TOOLS or not framework_made(own):
         return None
     try:

@@ -100,7 +100,7 @@ STATUS: Final[Mapping[RunStatus, str]] = {
     RunStatus.REJECTED: "error",  # refused (its policy, a rule): it failed, as Deep Agents says
 }
 #: The statuses that can still change: what a pull reads again.
-UNFINISHED: Final = frozenset({"pending", "running", "waiting"})
+UNFINISHED: Final = frozenset(task_tools.UNFINISHED)
 #: What every notification says first (Deep Agents' words): not the user's message.
 NOTE: Final = (
     "An async subagent task you started has an update. This is not a message from the user: "
@@ -401,18 +401,16 @@ class Tasks:
             )
         except Exception:
             log.exception("background task %s", record.run_id)
-        found = None if then is None else await runs.get(record.run_id, tenant=tenant)
-        if found is not None and found.final:
-            self._ended[record.run_id] = found
-        if (
-            then is not None
-            and found is not None
-            and (found.final or found.status is RunStatus.PAUSED)
-        ):
-            try:
+        if then is None:
+            return
+        try:  # the read too: a run store that fails here must not end this task unheard
+            found = await runs.get(record.run_id, tenant=tenant)
+            if found is not None and found.final:
+                self._ended[record.run_id] = found
+            if found is not None and (found.final or found.status is RunStatus.PAUSED):
                 await then(found)
-            except Exception:
-                log.exception("background task %s: its outcome not delivered", record.run_id)
+        except Exception:
+            log.exception("background task %s: its outcome not delivered", record.run_id)
 
     def stop(self, run_id: str, reason: str) -> None:
         """The attempt of ``run_id`` at work here stopped, when one is, as ``Agent.cancel``

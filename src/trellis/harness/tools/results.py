@@ -30,6 +30,7 @@ from trellis.harness import snapshots
 from trellis.harness.history import Said
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import current
+from trellis.harness.task_tools import UNFINISHED
 from trellis.harness.tools import query
 from trellis.harness.tools.base import arguments_problem, not_run
 from trellis.harness.tools.convert import text_of
@@ -404,7 +405,7 @@ def merged(kept: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: A task's statuses by how far along they are: at the same second, the further one stands.
-_FURTHER: Final = {"pending": 0, "running": 1, "waiting": 2}
+_FURTHER: Final = {status: n for n, status in enumerate(UNFINISHED)}
 #: The most ended tasks a conversation's list keeps: those updated last. A task's record says
 #: it ended once the conversation was told so, and an older one is known to nobody's next
 #: step — without this the list would hold every task the conversation ever started.

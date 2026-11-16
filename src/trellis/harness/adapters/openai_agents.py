@@ -71,6 +71,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     NativePause,
     Output,
@@ -179,7 +180,7 @@ _PROVIDERS: weakref.WeakKeyDictionary[Any, LRU[Any, Any]] = weakref.WeakKeyDicti
 PROVIDERS_KEPT: Final = 8
 
 
-class OpenAIAgentsAdapter:
+class OpenAIAgentsAdapter(Keeps):
     name: ClassVar[str] = "openai_agents"
     tool_format: ToolFormat = "openai_agents"
     fixed_tools: bool = False

@@ -88,6 +88,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     NativePause,
     Output,
@@ -159,7 +160,7 @@ ACTIVE_AGENT: Final = "active_agent"  # langgraph-swarm's ``SwarmState.active_ag
 CARRIED: Final = ("async_tasks", "files", "todos", ACTIVE_AGENT)
 
 
-class LangGraphAdapter:
+class LangGraphAdapter(Keeps):
     name: ClassVar[str] = "langgraph"
 
     replays_history = True
@@ -193,7 +194,11 @@ class LangGraphAdapter:
         self._native: list[ToolSpec] | None = None
         #: the async tasks (Deep Agents' ``start_async_task``) its runs started that this
         #: process holds the runs of (``bridges.async_tasks``)
-        self.tasks = AsyncTasks()
+        self._tasks = AsyncTasks()
+
+    @property
+    def tasks(self) -> AsyncTasks:
+        return self._tasks
 
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` was cancelled with the run that started it: an async task's

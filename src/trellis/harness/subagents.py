@@ -325,14 +325,12 @@ async def cancel_children(agent: Agent, run_id: str, *, reason: str | None, tena
     a Deep Agents async task, ``bridges.async_tasks``; a harness background task at work in this
     process, ``background.Tasks.stop``)."""
     runs = agent.harness.runs
-    stop = getattr(agent.adapter, "child_cancelled", None)
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
         if child.status.final:
             continue
         with contextlib.suppress(ConflictError):  # it ended meanwhile
             await runs.cancel(child.run_id, reason=reason, tenant=tenant)
-        if stop is not None:
-            await stop(child.run_id, reason)
+        await agent.adapter.child_cancelled(child.run_id, reason)
         agent.harness.background.stop(child.run_id, reason or "its parent was cancelled")
         await cancel_children(agent, child.run_id, reason=reason, tenant=tenant)
 

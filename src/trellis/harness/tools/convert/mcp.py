@@ -30,9 +30,8 @@ from mcp.server.lowlevel import Server
 from trellis.harness.runtime import Paused
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import Tool
+from trellis.harness.tools.convert import SERVER
 
-#: The server's name, and so the prefix an agent names its tools with (``mcp__trellis__``).
-SERVER: Final = "trellis"
 #: What the agent is told about a call that paused the run.
 WAITING: Final = "Waiting for a person's approval."
 #: Where the server answers, under its origin.

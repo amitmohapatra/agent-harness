@@ -63,6 +63,7 @@ from trellis.harness.bridges.live import (
     Turn,
     apart,
 )
+from trellis.harness.tools.convert import MCP_PREFIX
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -92,10 +93,8 @@ QUEUED: Final = (
     "prompt reached it: it queued the prompt behind that turn and runs it out of the "
     "harness's sight, so this turn cannot be followed"
 )
-#: The harness's MCP server, as the agent names its tools (``tools.convert.mcp.SERVER``: that
-#: module needs the MCP SDK, which only a run of an ACP agent imports).
-SERVER: Final = "trellis"
-HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
+#: The harness's MCP server, as the agent names its tools.
+HARNESS_PREFIX: Final = MCP_PREFIX
 #: How often the agent's usage log is read while a turn runs (and the budget checked).
 USAGE_SECONDS: Final = 0.5
 #: The first wait between two reads of Kimi's log for a line it is about to write.

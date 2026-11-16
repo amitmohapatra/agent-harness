@@ -103,6 +103,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     Output,
     ToolFormat,
@@ -119,7 +120,6 @@ from trellis.harness.bridges.acp_live import (
     GONE_SAID,
     HARNESS_PREFIX,
     QUEUED,
-    SERVER,
     USAGE_SECONDS,
     WAITS,
     ACPRunError,
@@ -143,6 +143,7 @@ from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
+from trellis.harness.tools.convert import SERVER
 from trellis.harness.tools.elicit import elicited
 
 log = logging.getLogger("trellis.harness")
@@ -788,7 +789,7 @@ class _Ended:
 
 
 # --------------------------------------------------------------------------- the adapter
-class ACPAdapter:
+class ACPAdapter(Keeps):
     name: ClassVar[str] = "acp"
     tool_format: ToolFormat = "mcp"
     fixed_tools: bool = False
