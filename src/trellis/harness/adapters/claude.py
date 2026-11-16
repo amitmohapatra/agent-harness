@@ -438,6 +438,9 @@ class ClaudeAdapter(Keeps):
         subagent's a live session keeps here, it stops (``LiveSessions.cancel``)."""
         self.live.cancel(run_id, reason or children.PARENT_ENDED)
 
+    def kept_children(self, run_id: str) -> list[str]:
+        return self.live.kept_for(run_id)
+
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
 

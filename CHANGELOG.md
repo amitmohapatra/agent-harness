@@ -11,8 +11,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   lost — ends its children through one cascade (`children.end_children`). A child whose
   ending fails (the run store's error, a Deep Agents server that fails its cancel) is said in
   the log and no longer leaves the run's other children working; the first such error is
-  raised once every child was tried. A child the store ended first, or another worker holds,
-  is left to whoever ended or holds it, its own children too.
+  raised once every child was tried; a cancel (`agent.cancel`, a cancelled resume) and a run's
+  own end only log it. A child the store ended first, or another worker holds, is left to
+  whoever ended or holds it, its own children too. What this process keeps for a child (its
+  background task, its live session's background subagent, its Deep Agents task) stops
+  whether or not the store took the child's end, and through the keepers of the child's own
+  agent; what the adapter keeps for a run stops even when the store cannot list its children.
+* **A paused child of a failed run** ends: cancelled with the parent's error message (a paused
+  run cannot fail), where it was left waiting for an answer that went nowhere. A child that
+  fails with its parent's error is never put back on the queue for a retry.
+* **A run whose caller went away** (a closed stream) leaves the children it queued for a
+  worker to work; only a cancel ends those. A run's end lists only its open children.
 * **Sub-agents:** an ACP agent wrapped as a tool (`tools=[h.wrap(ACPAgent(...))]`) is `write`
   unless `side_effects=` says otherwise: it runs its own tools in its own process. It was
   `read` when the harness tools it declared only read. An adapter says whether its framework

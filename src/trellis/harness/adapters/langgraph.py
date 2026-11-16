@@ -205,6 +205,9 @@ class LangGraphAdapter(Keeps):
         process holds is cancelled on its server (``children.stop_kept``)."""
         await self.tasks.stopped(run_id, reason)
 
+    def kept_children(self, run_id: str) -> list[str]:
+        return self.tasks.kept_for(run_id)
+
     def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
         """A graph's own tools; a ``ReAct``'s are only the harness's own read tools."""
         from trellis.harness.middleware import STATE_TOOLS

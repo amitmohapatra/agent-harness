@@ -186,6 +186,9 @@ class Keeps:
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
         return None
 
+    def kept_children(self, run_id: str) -> list[str]:
+        return []
+
     def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
         return True  # Claude's built-in tools, an ACP agent's own: the safe answer
 
@@ -234,6 +237,12 @@ class Adapter(Protocol):
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` ended with the run that started it: what the framework keeps
         going for it outside any attempt stops (``children.stop_kept``)."""
+        ...
+
+    def kept_children(self, run_id: str) -> list[str]:
+        """The children of run ``run_id`` the framework keeps at work in this process (a live
+        session's background subagents, Deep Agents' async tasks): what stops with the run
+        even when the run store cannot list its children (``children.end_children``)."""
         ...
 
     def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:

@@ -829,6 +829,9 @@ class ACPAdapter(Keeps):
         subagent's a live session keeps here, it stops (``LiveSessions.cancel``)."""
         self.live.cancel(run_id, reason or children.PARENT_ENDED)
 
+    def kept_children(self, run_id: str) -> list[str]:
+        return self.live.kept_for(run_id)
+
     def session_gone(self, session: str) -> None:
         """The agent keeps the session ``session`` for no conversation's next turn any more
         (``Agent.sessions``): its files leave its user's Kimi home (``UsageLog.removed``) — one

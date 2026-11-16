@@ -311,6 +311,10 @@ class AsyncTasks:
         else:
             await helpers.finished(helper, error=why, cancelled=status is RunStatus.CANCELLED)
 
+    def kept_for(self, parent_run_id: str) -> list[str]:
+        """The tasks' runs this process holds that ``parent_run_id`` started."""
+        return [r for r, kept in self._kept.items() if kept.helper.parent_run_id == parent_run_id]
+
     async def stopped(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` was cancelled with the run that started it (``reason``: why):
         when it is a task's this process holds, the task is cancelled on its server with Deep

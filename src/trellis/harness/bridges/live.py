@@ -387,7 +387,7 @@ class Kept:
         """The run cancelled with the run that started it: its attempt under way stops as any
         run's does (``Agent.stop``: the first reason given stands), and one that has not begun
         to serve it does not (:meth:`served` reads why)."""
-        self.stopped = reason
+        self.stopped = self.stopped or reason
         self.agent.stop(self.run_id, reason)
 
     # ------------------------------------------------------------------ an attempt
@@ -779,6 +779,10 @@ class LiveSessions:
     def keep(self, session: Keeper[Any]) -> None:
         """``session`` is its conversation's (:meth:`place` took a place for it)."""
         self._open[session.key] = session
+
+    def kept_for(self, parent_run_id: str) -> list[str]:
+        """The background subagents' runs kept here that ``parent_run_id`` started."""
+        return [r for r, kept in self.attended.items() if kept.parent_run_id == parent_run_id]
 
     def cancel(self, run_id: str, reason: str) -> None:
         """The run ``run_id`` ended with the run that started it (``children.stop_kept``):

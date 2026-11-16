@@ -932,20 +932,21 @@ async def _ended_with_children(
             # it there ends its children in the store; what this process keeps at work for
             # the helpers it handed on stops here
             for child in journal.handed_on:
-                await children.stop_kept(agent, child, cancelled)
+                try:
+                    await children.stop_kept(agent, child, cancelled)
+                except Exception as exc:  # the others stop all the same; the run's end stands
+                    log.warning("run %s: %s not stopped: %s", runtime.run_id, child, exc)
         return
-    try:
-        await children.end_children(
-            agent,
-            runtime.run_id,
-            runtime.tenant,
-            status=status,
-            reason=cancelled or (None if cut_off else ENDED_FIRST),
-            error=error,
-            kept=_children_kept(runtime, journal, cut_off=cut_off),
-        )
-    except Exception as exc:
-        log.warning("run %s: its open children could not be ended: %s", runtime.run_id, exc)
+    await children.children_ended(
+        agent,
+        runtime.run_id,
+        runtime.tenant,
+        status=status,
+        reason=cancelled or (None if cut_off else ENDED_FIRST),
+        error=error,
+        kept=_children_kept(runtime, journal, cut_off=cut_off),
+        cancelled=cancelled is not None,
+    )
 
 
 def _stalled(runtime: Runtime) -> Exception | None:

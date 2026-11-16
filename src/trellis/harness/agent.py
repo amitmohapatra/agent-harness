@@ -672,7 +672,10 @@ class Agent:
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
-        await children.end_children(self, run_id, tenant, status=RunStatus.CANCELLED, reason=reason)
+        # the run is cancelled whatever its children's endings: one that fails is in the log
+        await children.children_ended(
+            self, run_id, tenant, status=RunStatus.CANCELLED, reason=reason
+        )
         return record
 
     async def _stopped(self, run_id: str, reason: str | None) -> asyncio.Future[Any] | None:
@@ -991,7 +994,7 @@ class Agent:
         (a surface's resume: the front end's current state)."""
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
-            await children.end_children(
+            await children.children_ended(
                 self,
                 record.run_id,
                 record.tenant_id,
