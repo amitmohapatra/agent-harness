@@ -499,7 +499,7 @@ class Helpers:
         (``Runtime.pending``), or ``error`` is the pause's signal — or it was stopped from
         outside (its task cancelled: a cancel, the run's clock, a stalled model call, its
         worker letting it go), where the pipeline ends the run's open children as it ends the
-        run, whatever its final status (``pipeline._children_ended``), or the next attempt
+        run, whatever its final status (``children.end_children``), or the next attempt
         takes them up."""
         return self.runtime.pending is not None or (
             error is not None and (not isinstance(error, Exception) or is_pause_signal(error))

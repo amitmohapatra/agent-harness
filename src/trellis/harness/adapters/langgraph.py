@@ -201,8 +201,8 @@ class LangGraphAdapter(Keeps):
         return self._tasks
 
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
-        """The run ``run_id`` was cancelled with the run that started it: an async task's
-        that this process holds is cancelled on its server (``subagents.cancel_children``)."""
+        """The run ``run_id`` ended with the run that started it: an async task's that this
+        process holds is cancelled on its server (``children.stop_kept``)."""
         await self.tasks.stopped(run_id, reason)
 
     def steers(self, target: Any) -> bool:

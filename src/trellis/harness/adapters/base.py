@@ -228,8 +228,8 @@ class Adapter(Protocol):
         ...
 
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
-        """The run ``run_id`` was cancelled with the run that started it: what the framework
-        keeps going for it outside any attempt stops (``subagents.cancel_children``)."""
+        """The run ``run_id`` ended with the run that started it: what the framework keeps
+        going for it outside any attempt stops (``children.stop_kept``)."""
         ...
 
     def steers(self, target: Any) -> bool:

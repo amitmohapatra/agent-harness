@@ -1,7 +1,8 @@
 """A ratchet on complexity, not a style opinion.
 
-Measured at the time of writing (2026-11-16): 3,117 functions in 129 files, mean cyclomatic
-complexity 4.08 - the code base is not generally complex. The tail is: 63 functions above 15,
+Measured on 2026-11-16, once stopping and the children's cascade had one owner each
+(``stopping``, ``children``): 3,124 functions in 131 files, mean cyclomatic complexity 4.07 -
+the code base is not generally complex. The tail is: 63 functions above 15,
 the worst being ``Agent.remembered`` and ``ACPAdapter._attempt`` at 34; the longest is ``ReAct``
 at 198 lines.
 
@@ -26,8 +27,8 @@ MAX_COMPLEXITY = 34
 MAX_FUNCTION_LINES = 198
 #: how many functions may exceed a complexity of 15
 MAX_OVER_15 = 63
-#: the mean (4.0831 today) must not drift upwards
-MAX_MEAN_COMPLEXITY = 4.09
+#: the mean (4.0723 today) must not drift upwards
+MAX_MEAN_COMPLEXITY = 4.08
 
 _BRANCHING = (
     ast.If,

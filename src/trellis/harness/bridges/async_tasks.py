@@ -23,12 +23,12 @@ turn, as the task does — kept as a Claude subagent working in the background i
   model cancels it (``cancel_async_task``) — or a read of it, above. Its run ends ``SUCCESS``
   with the task's result, ``ERROR`` saying why it failed, or ``CANCELLED``, on the stream of the
   run that learned it;
-* **cancelled with its turn** — as a cancelled run's other children are: the turn's attempt
-  cancelled while it runs (``Runtime.cancelled``: :meth:`AsyncTasks.cancelled`), or the turn
-  cancelled where it waits for a person (``subagents.cancel_children``:
-  :meth:`AsyncTasks.stopped`). The task is cancelled on its server by Deep Agents' own
-  ``cancel_async_task`` (the Agent Protocol's cancel of the task's run of now), and its run
-  ends ``CANCELLED``.
+* **cancelled with its turn** — as a cancelled run's other children are, by the one cascade
+  (``children.end_children``): the turn cancelled while it runs, or where it waits for a
+  person, stops what this process keeps for the task's run (``children.stop_kept`` → the
+  adapter's ``child_cancelled`` → :meth:`AsyncTasks.stopped`). The task is cancelled on its
+  server by Deep Agents' own ``cancel_async_task`` (the Agent Protocol's cancel of the task's
+  run of now), and its run ends ``CANCELLED``.
 """
 
 from __future__ import annotations

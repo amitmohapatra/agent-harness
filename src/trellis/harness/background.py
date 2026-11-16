@@ -13,8 +13,8 @@ a server (``AsyncSubAgent``) or here.
   pipeline as any run's — its tool calls governed, recorded under its run, its budget and time
   its agent's — and held in the run store meanwhile (``holding``): a server killed with it
   leaves a run the store ends (``holder_lost``), the harness closing cuts it off
-  (:data:`CUT_OFF`), and cancelling the turn cancels it (``pipeline._children_ended``,
-  ``subagents.cancel_children``: :meth:`Tasks.stop` ends its attempt here); cancelled on
+  (:data:`CUT_OFF`), and cancelling the turn cancels it (``children.end_children``:
+  :meth:`Tasks.stop` ends its attempt here); cancelled on
   another replica, its hold here is refused and its attempt stops (``Harness._lost``). Its
   record is the run store's, so a check, the list, an update or a cancel reads it from any
   replica.
