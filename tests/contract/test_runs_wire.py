@@ -51,7 +51,7 @@ from trellis.runs import (
     RunsError,
     RunSummary,
 )
-from trellis.runs.payloads import FRAMED_MEDIA_TYPE, SEGMENTS, key_of
+from trellis.runs.payloads import FRAMED_MEDIA_TYPE, MEDIA_TYPE, SEGMENTS, key_of
 
 TENANT = "default"
 #: the header a call names its tenant with (a platform key's only way to)
@@ -176,15 +176,16 @@ class RunsService:
         if (method, path) == ("POST", "/v1/schedules"):
             made = await store.schedules.create(ScheduleSpec.model_validate(body))
             return 201, made.model_dump(mode="json"), {}
-        if (method, path) == ("POST", "/v1/payloads/read"):  # the tenant's objects, framed
+        if path.startswith("/v1/payloads/"):  # the tenant's objects: one as stored, or framed
             tenant = self._tenant(request) or ""
-            files = [store._payload_root / key_of(tenant, sha) for sha in body["sha256"]]
+            one = method == "GET"
+            asked = [path.removeprefix("/v1/payloads/")] if one else body["sha256"]
+            files = [store._payload_root / key_of(tenant, sha) for sha in asked]
             if not all(f.exists() for f in files):
                 raise NotFoundError("no such payload object", code="NOT_FOUND", status=404)
-            framed = b"".join(
-                len(d).to_bytes(8, "big") + d for d in (f.read_bytes() for f in files)
-            )
-            return 200, framed, {}
+            stored = [f.read_bytes() for f in files]
+            framed = b"".join(len(d).to_bytes(8, "big") + d for d in stored)
+            return 200, stored[0] if one else framed, {}
         artifact_id = path.removeprefix("/v1/artifacts/")
         data = await store.artifacts.download(artifact_id, tenant=self._tenant(request))
         if data is None:
@@ -305,8 +306,13 @@ def _response(
     if body is None:
         return httpx.Response(status, request=request)
     if isinstance(body, bytes):  # an artifact (JSON here) or a payload object, as stored
+        path = request.url.path
         stored = (
-            FRAMED_MEDIA_TYPE if request.url.path == "/v1/payloads/read" else "application/json"
+            FRAMED_MEDIA_TYPE
+            if path == "/v1/payloads/read"
+            else MEDIA_TYPE
+            if path.startswith("/v1/payloads/")
+            else "application/json"
         )
         return httpx.Response(
             status, content=body, headers={"content-type": stored}, request=request
@@ -412,6 +418,7 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
         ("POST", "/v1/runs/{id}/finish"),
         ("POST", "/v1/runs/{id}/artifacts"),
         ("GET", "/v1/artifacts/{id}"),
+        ("GET", "/v1/payloads/{id}"),
         ("GET", "/v1/runs"),
         ("GET", "/v1/runs/{id}"),
         ("POST", "/v1/runs/claim"),
