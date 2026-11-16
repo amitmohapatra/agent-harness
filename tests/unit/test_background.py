@@ -586,6 +586,58 @@ async def test_arch_7_an_attempt_that_ended_forgets_only_itself(
     await tasks.aclose()
 
 
+async def test_an_attempt_that_left_its_run_working_hands_nothing_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt that ended with its run neither over nor waiting on a person (another
+    process works on it) has no outcome to hand on."""
+    runs = LocalRuns()
+    record = await stored(runs)  # RUNNING after the attempt, too
+    handed: list[RunRecord] = []
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def then(found: RunRecord) -> None:
+        handed.append(found)  # pragma: no cover - the point is that it is never called
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    agent = runtime(runs).agent
+    agent.running = {}
+    tasks = agent.harness.background
+    tasks.run(agent, record, then=then)
+    await tasks._at_work["run_1"]
+    assert handed == [] and not tasks.at_work("run_1")
+
+
+async def test_a_run_store_that_fails_as_the_outcome_is_read_is_said_not_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The read of the run after its attempt is the task's own: a store that fails there is
+    logged, and the task ends with no exception nobody retrieves."""
+    runs = LocalRuns()
+    record = await stored(runs, RunStatus.SUCCESS)
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        async def down(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("the run store is down")
+
+        monkeypatch.setattr(runs, "get", down)
+
+    async def then(found: RunRecord) -> None:
+        raise AssertionError("nothing was read to hand on")  # pragma: no cover
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    agent = runtime(runs).agent
+    agent.running = {}
+    tasks = agent.harness.background
+    tasks.run(agent, record, then=then)
+    task = tasks._at_work["run_1"]
+    await task
+    assert task.exception() is None
+    assert "its outcome not delivered" in caplog.text
+
+
 # --------------------------------------------------------------------------- SEC-R-2: admission
 def unfinished(count: int) -> dict[str, Any]:
     return {f"task_{n}": {**TASK, "task_id": f"task_{n}"} for n in range(count)}

@@ -527,7 +527,6 @@ async def test_the_sdks_session_backends_keep_the_conversation(
     harness: Harness, tmp_path: Path, kind: str
 ) -> None:
     if kind == "async_sqlite":
-        pytest.importorskip("aiosqlite")
         from agents.extensions.memory import AsyncSQLiteSession
 
         session: Any = AsyncSQLiteSession("s", tmp_path / "a.db")
@@ -538,7 +537,6 @@ async def test_the_sdks_session_backends_keep_the_conversation(
             session_id="s", db_path=tmp_path / "b.db", create_tables=True
         )
     else:
-        pytest.importorskip("aiosqlite")
         from agents.extensions.memory import SQLAlchemySession
 
         session = SQLAlchemySession.from_url(

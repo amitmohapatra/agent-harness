@@ -818,3 +818,14 @@ async def test_a_sandbox_capabilitys_own_tools_carry_their_risk() -> None:
     assert own_spec(runtime, loads).side_effects == "read"  # type: ignore[arg-type]
     assert own_spec(runtime, runs).side_effects == "write"  # type: ignore[arg-type]
     assert own_spec(runtime, mine).side_effects == UNDECLARED  # type: ignore[arg-type]
+
+
+async def test_an_adapter_that_keeps_nothing_answers_every_capability_with_nothing() -> None:
+    """``adapters.base.Keeps``: what the pipeline asks of every adapter, answered by one whose
+    framework keeps no tasks, no process and no session of its own."""
+    adapter = FunctionAdapter()
+    assert adapter.tasks is None
+    assert adapter.wrapped(None, {}, None) is None
+    assert adapter.session_gone("s") is None
+    assert await adapter.aclose() is None
+    assert await adapter.child_cancelled("run_1", None) is None
