@@ -54,6 +54,7 @@ from trellis.harness import (
     pipeline,
     sandbox,
     snapshots,
+    stopping,
     telemetry,
 )
 from trellis.harness.adapters import detect
@@ -694,11 +695,7 @@ class Agent:
         runtime = self.running.get(run_id)
         if runtime is None:
             return self.turns.cancel(run_id, reason)
-        assert runtime.running_in is not None
-        if runtime.cancelled is None:
-            runtime.cancelled = reason
-            runtime.running_in.cancel()
-        return runtime.running_in
+        return stopping.stop_attempt(runtime, reason)
 
     async def resume(
         self,

@@ -27,7 +27,7 @@ from trellis.contracts import (
     ToolCall,
     ToolSpec,
 )
-from trellis.harness import host, telemetry
+from trellis.harness import host, stopping, telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
@@ -80,11 +80,6 @@ _Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
 
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
-#: The reason a run cancelled from another process ends with here (the store keeps the one
-#: it was cancelled with).
-CANCELLED_ELSEWHERE: Final = "cancelled from another process"
-#: Why a run the run store ended meanwhile (its hold lapsed: ``holder_lost``) stops here.
-ENDED_ELSEWHERE: Final = "ended in the run store while it worked here"
 #: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
 #: again; while the service cannot be reached the last answer is kept (asked again after the
 #: retry interval).
@@ -503,8 +498,8 @@ class Harness:
         except RunsError as exc:
             log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
             return
-        if record is not None and record.status.final:
-            why = CANCELLED_ELSEWHERE if record.status is RunStatus.CANCELLED else ENDED_ELSEWHERE
+        why = stopping.ended_elsewhere(record)
+        if why is not None:
             for agent in self.agents.values():
                 agent.stop(run_id, why)
 
