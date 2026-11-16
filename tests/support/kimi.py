@@ -43,7 +43,7 @@ from starlette.routing import Route
 from tests.support.planned import CUT, CUT_REPLY, FINAL, Call, worded
 from trellis.contracts import stable_id
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
-from trellis.harness.adapters.claude import RESUMED
+from trellis.harness.bridges.resumed import RESUMED
 from trellis.harness.tools.bridge import STALLED, TURN_STALLED
 from trellis.harness.tools.convert.mcp import STOPPED
 
@@ -399,7 +399,7 @@ _STALLED: Final = re.compile(
 
 
 def _remade(messages: list[dict[str, Any]]) -> bool:
-    """Whether the harness's resumed prompt (``adapters.claude.RESUMED``) is among
+    """Whether the harness's resumed prompt (``bridges.resumed.RESUMED``) is among
     ``messages``: told to make again a call whose result says the run ended before it
     finished (``tools.convert.mcp.STOPPED``), the model makes it again."""
     return any(m.get("role") == "user" and RESUMED in text_of(m.get("content")) for m in messages)

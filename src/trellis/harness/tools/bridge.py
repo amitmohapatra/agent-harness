@@ -490,7 +490,7 @@ async def _called(
         budget.count_tool_call(runtime)
         _started(runtime, ref, tool.name, tool_call.args)
         if decision.risk != "read":  # what a rewind past this step would make again
-            runtime.replay.effected(content_key("call", tool.name, tool_call.args))
+            runtime.replay.effected(call_key(tool.name, tool_call.args))
     try:
         outcome, owed = await _ran(
             runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
@@ -873,7 +873,7 @@ def _rewound_past(
     decision asks a person whatever was allowed for the run or the conversation — with the
     call's key there; any other call: its decision as it is, and no key."""
     repeats = runtime.replay.journal.repeats
-    key = content_key("call", spec.name, call.args) if repeats else None
+    key = call_key(spec.name, call.args) if repeats else None
     if decision.risk == "read" or key not in repeats:
         return decision, None
     return decision.asking(REWOUND_PAST.format(tool=spec.name)), key

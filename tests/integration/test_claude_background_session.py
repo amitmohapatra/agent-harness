@@ -48,7 +48,6 @@ from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
-    RESUMED_CALL,
     UNHELD_AGENTS,
     ClaudeAdapter,
 )
@@ -58,6 +57,7 @@ from trellis.harness.bridges import live as shared
 from trellis.harness.bridges.claude_live import SHARED, SHARED_SAID, LiveSession
 from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.bridges.live import UNATTENDED
+from trellis.harness.bridges.resumed import RESUMED_CALL
 from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule

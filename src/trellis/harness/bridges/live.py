@@ -59,7 +59,6 @@ from trellis.contracts import Interrupt, InterruptResolution, RunStatus
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges.helpers import ended
-from trellis.harness.journal import content_key
 from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
@@ -614,7 +613,7 @@ class Keeper[K: Kept]:
         run — a turn of the conversation, before its prompt is sent — as a sub-agent's
         question is asked through its parent (``subagents.child_run``): the turn pauses with
         each, and its answer is handed to the run that asked."""
-        from trellis.harness.subagents import ASKED, SUBAGENT
+        from trellis.harness.subagents import asked_for_background
 
         for found in list(self.background.values()):
             asked = found.question
@@ -623,22 +622,10 @@ class Keeper[K: Kept]:
             record = await found.agent.harness.runs.get(asked.run_id, tenant=found.tenant)
             if record is None or record.status is not RunStatus.PAUSED:
                 continue  # cancelled where it waited: nothing to ask any more
-            named = {
-                "agent_id": found.name,
-                "run_id": asked.run_id,
-                "interrupt_id": asked.interrupt_id,
-                "background": True,
-            }
-            answered = await runtime.interrupt(
-                content_key("subagent", asked.run_id, asked.interrupt_id),
-                payload={**(asked.payload or {}), SUBAGENT: named},
-                **{name: getattr(asked, name) for name in ASKED},
+            answered = await asked_for_background(
+                runtime, asked, agent_id=found.name, run_id=asked.run_id
             )
-            found.answered(
-                answered.model_copy(
-                    update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
-                )
-            )
+            found.answered(answered)
 
     # ------------------------------------------------------------------ its background
     def _of(self, call_id: Any) -> K | None:

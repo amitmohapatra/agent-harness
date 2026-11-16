@@ -21,7 +21,7 @@
   governed copy of its agent; where the SDK's agent tool cannot be pointed at it, its own tools'
   calls are not governed, which is said once;
 * pause: ``trellis.current().ask`` stops the run and a resume re-runs it against the journal,
-  its model told which call the person answered about (``adapters.claude.RESUMED_ASKED``, as a
+  its model told which call the person answered about (``bridges.resumed.RESUMED_ASKED``, as a
   resumed Claude session is: a model run again from the same input may decide otherwise);
   that call, made again in other words, runs as it was (``Replay.made``);
   a call governance asks about is held at the SDK's own gate (:func:`_gated`: a
@@ -78,9 +78,9 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.adapters.claude import resumed_call
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.bridges.resumed import resumed_call
 from trellis.harness.bridges.session import MemorySession, input_items
 from trellis.harness.conversation import remembered
 from trellis.harness.features import MEMORY_TOOLS
@@ -261,7 +261,7 @@ class OpenAIAgentsAdapter:
         except MaxTurnsExceeded as exc:
             result = _at_turn_limit(run.runtime, exc, options)
         except BaseException as exc:
-            await helpers.closed(exc, paused=helpers.suspended(exc))
+            await helpers.closed(exc)
             raise
         await _closed(helpers, result)
         return result
@@ -295,7 +295,7 @@ class OpenAIAgentsAdapter:
             assert streamed.run_loop_task is not None  # set by run_streamed
             await asyncio.wait({streamed.run_loop_task})
             if error is not None:
-                await helpers.closed(error, paused=helpers.suspended(error))
+                await helpers.closed(error)
         await _closed(helpers, result)
         yield Output(result)
 
@@ -447,7 +447,7 @@ async def _closed(helpers: Helpers, result: Any) -> None:
     one inside it (``tools.convert.openai_agents.waits_inside``) stays open, and the resume,
     which makes its call again, ends it."""
     if not result.interruptions:
-        await helpers.closed(None, paused=helpers.suspended(None))
+        await helpers.closed(None)
 
 
 def governed_agents(

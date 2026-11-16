@@ -38,9 +38,9 @@ from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness import compat
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAdapter
-from trellis.harness.adapters.claude import RESUMED_CALL
 from trellis.harness.bridges import live
 from trellis.harness.bridges.acp_live import ACPSession
+from trellis.harness.bridges.resumed import RESUMED_CALL
 from trellis.harness.budget import Budget
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule

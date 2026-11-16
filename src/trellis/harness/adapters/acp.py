@@ -110,7 +110,6 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.adapters.claude import RESUMED, resumed_call
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges import live as shared
 from trellis.harness.bridges.acp_live import (
@@ -135,6 +134,7 @@ from trellis.harness.bridges.acp_live import (
 )
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.bridges.live import LiveSessions, Turn
+from trellis.harness.bridges.resumed import RESUMED, resumed_call
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
@@ -973,7 +973,7 @@ class ACPAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
+            await helpers.closed(error)
 
     async def _attended(self, run: Invocation, found: Background) -> AsyncGenerator[Any, None]:
         """One attempt of a background sub-agent's run: what its sub-agent asks permission for

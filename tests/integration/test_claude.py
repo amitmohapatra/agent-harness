@@ -34,12 +34,10 @@ from trellis.contracts import (
 from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
-    RESUMED_ASKED,
-    RESUMED_CALL,
-    RESUMED_DENIED,
     native_spec,
 )
 from trellis.harness.agent import NARROW_FROM
+from trellis.harness.bridges.resumed import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key

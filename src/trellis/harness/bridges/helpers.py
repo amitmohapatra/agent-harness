@@ -492,7 +492,7 @@ class Helpers:
 
     def suspended(self, error: BaseException | None) -> bool:
         """Whether the attempt that ended with ``error`` did not end its run itself (what
-        :meth:`closed` is told as ``paused``): it asked a person — a question waits
+        :meth:`closed` goes by): it asked a person — a question waits
         (``Runtime.pending``), or ``error`` is the pause's signal — or it was stopped from
         outside (its task cancelled: a cancel, the run's clock, a stalled model call, its
         worker letting it go), where the pipeline ends the run's open children as it ends the
@@ -502,13 +502,13 @@ class Helpers:
             error is not None and (not isinstance(error, Exception) or is_pause_signal(error))
         )
 
-    async def closed(self, error: BaseException | None, *, paused: bool) -> None:
+    async def closed(self, error: BaseException | None) -> None:
         """The attempt ended (``error``: how, ``None`` with its answer): the helpers still open
-        end with it — except when it is ``paused`` (:meth:`suspended`: they wait with the run,
-        for the next attempt or for the pipeline, which ends them with the run); and, after an
-        earlier attempt, the helpers it left open that this one did not take up again (the
-        framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
-        if paused:  # they wait with the run: let go of in the store, not left to lapse
+        end with it — except when it did not end its run itself (:meth:`suspended`: they wait
+        with the run, for the next attempt or for the pipeline, which ends them with the run);
+        and, after an earlier attempt, the helpers it left open that this one did not take up
+        again (the framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
+        if self.suspended(error):  # they wait with the run: let go of in the store, not lapsed
             for helper in self._open.values():
                 _span_ended(helper, RunStatus.PAUSED.value, error="it waits with its run")
                 await self.runtime.agent.harness.holds.release(helper.run_id, self.runtime.tenant)

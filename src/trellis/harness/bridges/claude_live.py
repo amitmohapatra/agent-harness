@@ -86,6 +86,7 @@ from trellis.harness.bridges.claude import (
     SessionCost,
     TaskEnded,
     TaskStarted,
+    caller_sent,
     ours,
     task_said,
 )
@@ -604,8 +605,7 @@ class LiveSession(Keeper[Background]):
             whose.took(message)
             return
         result = isinstance(message, ResultMessage)
-        origin = getattr(message, "origin", None)
-        own = origin is None or origin.get("kind") == "human"
+        own = caller_sent(message)
         # a turn of the session's own (a task's notification) began: a message that names it
         # (a CLI that sends its prompt), or the main agent at work with no prompt owed — a
         # turn's ``init``, its reply (the bundled CLI sends no prompt for such a turn)

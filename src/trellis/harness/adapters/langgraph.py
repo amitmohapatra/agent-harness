@@ -274,7 +274,7 @@ class LangGraphAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
+            await helpers.closed(error)
             await self.tasks.cancelled(run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
@@ -315,7 +315,7 @@ class LangGraphAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
+            await helpers.closed(error)
             await self.tasks.cancelled(run.runtime)
         _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))

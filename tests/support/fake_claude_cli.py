@@ -133,7 +133,7 @@ BLOCKED = {"permissionDecision": "deny", "permissionDecisionReason": "PreToolUse
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
-#: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
+#: How the harness begins a paused task's resumed prompt (``bridges.resumed.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
 #: The tool the "model" hands a structured answer to (``--json-schema``): the CLI runs it
 #: without asking, and the turn's result carries what it was given (``structured_output``).

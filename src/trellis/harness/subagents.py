@@ -209,19 +209,38 @@ async def child_run(
         while result.status is RunStatus.PAUSED:
             assert result.interrupt is not None
             asked = result.interrupt
-            named = {
-                "agent_id": agent.id,
-                "run_id": asked.run_id,
-                "interrupt_id": asked.interrupt_id,
-            }
-            answered = await parent.interrupt(
-                content_key("subagent", asked.run_id, asked.interrupt_id),
-                payload={**(asked.payload or {}), SUBAGENT: named},
-                **{name: getattr(asked, name) for name in ASKED},
-            )
+            answered = await asked_through(parent, asked, agent_id=agent.id, run_id=asked.run_id)
             result = await _answered(agent, parent, asked, answered, branch)
         branch.ended(result.status.value.lower(), error=_why(result))
         return result
+
+
+async def asked_through(
+    turn: Runtime, asked: Interrupt, *, agent_id: str, run_id: str, background: bool = False
+) -> InterruptResolution:
+    """``asked`` — the question the run ``run_id`` of ``agent_id`` waits on — asked in
+    ``turn``'s run, which pauses with it (``background``: the run is a background one's, not a
+    call of this turn's): the answer the turn is given."""
+    named: dict[str, Any] = {
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "interrupt_id": asked.interrupt_id,
+        **({"background": True} if background else {}),
+    }
+    return await turn.interrupt(
+        content_key("subagent", run_id, asked.interrupt_id),
+        payload={**(asked.payload or {}), SUBAGENT: named},
+        **{name: getattr(asked, name) for name in ASKED},
+    )
+
+
+async def asked_for_background(
+    turn: Runtime, asked: Interrupt, *, agent_id: str, run_id: str
+) -> InterruptResolution:
+    """A background run's question asked through ``turn`` (:func:`asked_through`), and its
+    answer as one to hand that run: addressed to its question, not to the turn's."""
+    answered = await asked_through(turn, asked, agent_id=agent_id, run_id=run_id, background=True)
+    return answered.model_copy(update={"interrupt_id": asked.interrupt_id, "run_id": run_id})
 
 
 def _why(result: Result) -> str | None:

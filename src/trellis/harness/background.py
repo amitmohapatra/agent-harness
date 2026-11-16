@@ -67,10 +67,10 @@ from trellis.contracts import (
 from trellis.harness import admission, task_tools
 from trellis.harness.adapters.langgraph import ASKED
 from trellis.harness.bounded import LRU, MAXSIZE
-from trellis.harness.conversation import Mode
+from trellis.harness.conversation import INTERRUPTED, Mode
 from trellis.harness.frontend import FRONTEND
 from trellis.harness.identity import conversation_key, queued_with
-from trellis.harness.journal import Journal, content_key
+from trellis.harness.journal import Journal
 from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
@@ -539,11 +539,6 @@ async def follow_up(
     return updated
 
 
-#: Why a task's run a follow-up replaced ended (``conversation``'s words for a run a newer
-#: message interrupted).
-INTERRUPTED: Final = "interrupted by a newer message of the conversation"
-
-
 async def _started(
     runtime: Runtime,
     agent: Agent,
@@ -867,24 +862,14 @@ async def ask(runtime: Runtime, record: RunRecord) -> InterruptResolution | None
     """The question ``record``'s task run waits on asked in ``runtime``'s turn — the chat's, as
     a sub-agent's question is asked through its parent: the turn pauses with it, and its
     answer, once given, is returned (``None``: the run waits on nothing now)."""
-    from trellis.harness.subagents import ASKED, SUBAGENT  # noqa: PLC0415 - it imports this
+    from trellis.harness.subagents import asked_for_background  # noqa: PLC0415 - it imports this
 
     asked: Interrupt | None = record.awaiting
     if record.status is not RunStatus.PAUSED or asked is None:
         return None
     origin = record.metadata.get(BACKGROUND) or {}
-    named = {
-        "agent_id": str(origin.get("name") or record.agent_id),
-        "run_id": record.run_id,
-        "interrupt_id": asked.interrupt_id,
-        "background": True,
-    }
-    answered = await runtime.interrupt(
-        content_key("subagent", record.run_id, asked.interrupt_id),
-        payload={**(asked.payload or {}), SUBAGENT: named},
-        **{name: getattr(asked, name) for name in ASKED},
-    )
-    return answered.model_copy(update={"interrupt_id": asked.interrupt_id, "run_id": record.run_id})
+    name = str(origin.get("name") or record.agent_id)
+    return await asked_for_background(runtime, asked, agent_id=name, run_id=record.run_id)
 
 
 async def abandoned(parent: Agent, asked: Interrupt | None, reason: str | None) -> None:

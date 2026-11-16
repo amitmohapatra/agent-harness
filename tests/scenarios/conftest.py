@@ -17,34 +17,20 @@ the real path, no stand-in in between: scenario 10 is every other scenario's tra
 
 from __future__ import annotations
 
-import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Final
 
-import httpx
 import pytest
 
+from tests.support.stack import env as _env
+from tests.support.stack import reachable as _reachable
 from trellis import Harness, Settings
 from trellis.memory import MemoryClient
 
 #: How long a memory call may take here (the services share one busy development machine).
 TIMEOUT: Final = 60.0
-
-
-def _env(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
-
-
-def _reachable(url: str | None) -> bool:
-    if url is None:
-        return False
-    try:
-        return httpx.get(url.rstrip("/") + "/health/live", timeout=3.0).status_code < 500
-    except httpx.HTTPError:
-        return False
 
 
 MEMORY_URL = _env("MEMORY_URL")

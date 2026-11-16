@@ -121,6 +121,7 @@ from trellis.harness.bridges.claude import (
     TaskEnded,
     TaskStarted,
     after_theirs,
+    caller_sent,
     deciding_matcher,
     harness_matcher,
     session_store,
@@ -139,6 +140,7 @@ from trellis.harness.bridges.claude_live import (
 )
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, naming
 from trellis.harness.bridges.live import LiveSessions, Turn
+from trellis.harness.bridges.resumed import RESUMED, resumed_call
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
@@ -378,43 +380,6 @@ OWN_PROCESS: Final = "this query runs in a process of its own"
 #: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
 #: would let a call whose hook failed through to its own permission check.
 UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
-#: What a resumed session is told: the run goes on, and the call it paused on is made again —
-#: or the call its process stopped in, which the session may hold with the harness's
-#: ``tools.convert.mcp.STOPPED`` as its result (the worker died while it ran, and the session
-#: was resumed on the same machine): a model told only "no result yet" read that error as the
-#: call's result and never made it.
-RESUMED: Final = (
-    "This task was paused (a person was asked, or the process stopped) and goes on now. If "
-    "your last tool call has no result yet, or its result says the run ended before it "
-    "finished, call that tool again with the same arguments: it runs once. Then carry on "
-    "with the task."
-)
-#: What a session resumed after a person answered about one tool call — its approval, or a
-#: question it asked while it ran — is told: that call, by the name Claude knows it by. The
-#: session holds the call's result as "waiting for a person's approval", which :data:`RESUMED`'s
-#: "no result yet" does not describe: a model told only that took the waiting call for a
-#: failure and tried other tools instead (or asked the person again itself).
-RESUMED_CALL: Final = (
-    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
-    "the person has answered. Call {tool} again now with the same arguments: it runs once and "
-    "returns its result. Then carry on with the task."
-)
-#: ... and after a person answered a question that call asked while it ran
-#: (``Pending.inside``): named with its arguments, which a session whose transcript ends
-#: before the call does not hold (told to repeat a call it had no record of, Claude made none).
-#: Whatever arguments it is made again with, it runs as it was (``Replay.made``).
-RESUMED_ASKED: Final = (
-    "This task was paused at your call to {tool} with the arguments {args}: it was waiting for "
-    "a person's answer, and the person has answered. Call {tool} again now with those "
-    "arguments: it runs once and returns its result. Then carry on with the task."
-)
-#: ... and after a person denied that call: it does not run, so it returns no result to wait
-#: for, and the session is told so instead of being told to expect one.
-RESUMED_DENIED: Final = (
-    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
-    "the person denied it. That call will not run; do not make it again. Carry on with the "
-    "task without it."
-)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -522,7 +487,7 @@ class ClaudeAdapter:
                 said = text or said
             # the result of the turn's own prompt: one of a turn the session injected (a
             # finished background task's notification) is not the user's answer
-            if isinstance(message, ResultMessage) and _own(message):
+            if isinstance(message, ResultMessage) and caller_sent(message):
                 if message.subtype == MAX_TURNS:  # what it said before the limit: PARTIAL
                     answer = said
                 elif message.is_error:
@@ -621,7 +586,7 @@ class ClaudeAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
+            await helpers.closed(error)
 
     async def _attended(
         self, target: Any, run: Invocation, found: Background
@@ -897,13 +862,6 @@ def _own_process(options: Any) -> bool:
         name != SERVER and isinstance(config, Mapping) and config.get("type") == "sdk"
         for name, config in configured_servers(options.mcp_servers).items()
     )
-
-
-def _own(result: Any) -> bool:
-    """Whether a ``ResultMessage`` ends a turn its caller submitted (the SDK's
-    ``MessageOrigin``: none, or ``human``) — not one the session injected by itself."""
-    origin = getattr(result, "origin", None)
-    return origin is None or origin.get("kind") == "human"
 
 
 def _turn(run: Invocation, options: Any) -> Turn:
@@ -1300,14 +1258,6 @@ def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     harness = any(t.name == call.tool for t in run.tools)
     name = named(call.tool) if harness else call.tool
     return resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
-
-
-def resumed_call(call: ToolCall, name: str, *, denied: bool, asked: bool) -> str:
-    """What a session resumed after a person answered about ``call`` is told (``name``: the
-    tool as its agent calls it): the call was denied, or asked them a question, or was
-    approved."""
-    told = RESUMED_DENIED if denied else RESUMED_ASKED if asked else RESUMED_CALL
-    return told.format(tool=name, args=json.dumps(call.args, default=str))
 
 
 class Steps:

@@ -70,6 +70,13 @@ def ours(matcher: Any) -> bool:
     return bool(matcher.hooks) and all(hook in _OURS for hook in matcher.hooks)
 
 
+def caller_sent(message: Any) -> bool:
+    """Whether ``message`` is of a turn its caller submitted (the SDK's ``MessageOrigin``:
+    none, or ``human``) — not one the session injected by itself."""
+    origin = getattr(message, "origin", None)
+    return origin is None or origin.get("kind") == "human"
+
+
 class SessionCost:
     """One Claude session's running cost, as the last of its results that was charged carried
     it. A result's ``total_cost_usd`` is its session's running total — its turns and the

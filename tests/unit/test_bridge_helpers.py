@@ -25,7 +25,7 @@ class GraphInterrupt(Exception):
 
 async def attempt_ended(helpers: Helpers, error: BaseException | None) -> None:
     """An attempt's end as every adapter reports it: paused when the attempt says so."""
-    await helpers.closed(error, paused=helpers.suspended(error))
+    await helpers.closed(error)
 
 
 def runtime(runs: LocalRuns, attempt: int = 1) -> Any:

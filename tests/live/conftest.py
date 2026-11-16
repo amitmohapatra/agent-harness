@@ -46,6 +46,7 @@ from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
 from tests.live import shards
+from tests.support.stack import env as _env
 from trellis import Harness, Settings
 from trellis.harness import agent as agent_module
 from trellis.harness import evals, telemetry
@@ -85,11 +86,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if dropped:
         config.hook.pytest_deselected(items=dropped)
         items[:] = [i for i in items if i not in dropped]
-
-
-def _env(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
 
 
 def _reachable(url: str | None, path: str) -> bool:

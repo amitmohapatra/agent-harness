@@ -40,9 +40,9 @@ from trellis.harness.adapters.acp import (
     kimi,
     native_spec,
 )
-from trellis.harness.adapters.claude import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.agent import NARROW_FROM
 from trellis.harness.bridges import acp_live, live
+from trellis.harness.bridges.resumed import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import DELIVERS_HERE, sandbox

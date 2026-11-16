@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import time
 import uuid
@@ -38,6 +37,8 @@ import pytest
 from tests.support.adapters import BUILDERS, SYSTEM
 from tests.support.invariants import invariants  # noqa: F401  (INV-1..10 at every teardown)
 from tests.support.planned import FINAL, Call, PlannedChat
+from tests.support.stack import env as _env
+from tests.support.stack import reachable as _reachable
 from trellis import Harness, ReAct, Runtime, Settings
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.tools.convert import text_of
@@ -45,20 +46,6 @@ from trellis.memory import MemoryClient, MemoryContext
 
 #: How long a service call may take here (the services share one busy machine).
 TIMEOUT: Final = 60.0
-
-
-def _env(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
-
-
-def _reachable(url: str | None) -> bool:
-    if url is None:
-        return False
-    try:
-        return httpx.get(url.rstrip("/") + "/health/live", timeout=3.0).status_code < 500
-    except httpx.HTTPError:
-        return False
 
 
 MEMORY_URL = _env("MEMORY_URL")

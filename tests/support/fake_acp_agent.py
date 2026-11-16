@@ -138,7 +138,7 @@ MODES = {
 }
 #: What a harness call the run's end cut short returns (``tools.convert.mcp.STOPPED``), and
 #: the words of a resumed prompt that tell the model to make such a call again
-#: (``adapters.claude.RESUMED``): told so, the step runs again, as a paused one does.
+#: (``bridges.resumed.RESUMED``): told so, the step runs again, as a paused one does.
 CUT_SHORT = "The run ended before this tool finished."
 REMAKE_CUT = "its result says the run ended before it finished"
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
