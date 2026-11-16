@@ -64,7 +64,7 @@ from trellis.contracts import (
     safe_id,
     stable_id,
 )
-from trellis.harness import admission, stopping, task_tools
+from trellis.harness import admission, children, stopping, task_tools
 from trellis.harness.adapters.langgraph import ASKED
 from trellis.harness.bounded import LRU, MAXSIZE
 from trellis.harness.conversation import INTERRUPTED, Mode
@@ -873,17 +873,17 @@ async def ask(runtime: Runtime, record: RunRecord) -> InterruptResolution | None
 async def abandoned(parent: Agent, asked: Interrupt | None, reason: str | None) -> None:
     """The question a chat's turn asked for a task (:func:`ask`, ``asked``) answered with a
     cancel: the task's run is cancelled with the turn, as a sub-agent's is when its question,
-    asked through its parent, is."""
+    asked through its parent, is — its attempt here stopped, and its own children ended with
+    it (``children.end_child``)."""
     from trellis.harness.subagents import asked_by  # noqa: PLC0415 - it imports this
 
     named = asked_by(asked) if asked is not None else None
     if asked is None or not named or not named.get("background"):
         return
     run_id = str(named["run_id"])
-    await stopping.unless_ended(  # (or it ended meanwhile)
-        parent.harness.runs.cancel(run_id, reason=reason, tenant=asked.tenant_id)
+    await children.end_child(
+        parent, run_id, asked.tenant_id, status=RunStatus.CANCELLED, reason=reason
     )
-    parent.harness.background.stop(run_id, reason or "its question was cancelled")
 
 
 async def answered(

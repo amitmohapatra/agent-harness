@@ -46,6 +46,7 @@ from trellis.contracts import (
 )
 from trellis.harness import (
     background,
+    children,
     compat,
     conversation,
     frontend,
@@ -113,7 +114,7 @@ from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, principal, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
-from trellis.harness.subagents import asked_by, cancel_children, child_run
+from trellis.harness.subagents import asked_by, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools import ask, query
 from trellis.harness.tools.ask import ASK_USER
@@ -671,7 +672,7 @@ class Agent:
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
-        await cancel_children(self, run_id, reason=reason, tenant=tenant)
+        await children.end_children(self, run_id, tenant, status=RunStatus.CANCELLED, reason=reason)
         return record
 
     async def _stopped(self, run_id: str, reason: str | None) -> asyncio.Future[Any] | None:
@@ -990,11 +991,12 @@ class Agent:
         (a surface's resume: the front end's current state)."""
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
-            await cancel_children(
+            await children.end_children(
                 self,
                 record.run_id,
+                record.tenant_id,
+                status=RunStatus.CANCELLED,
                 reason=reason_of(resolution),
-                tenant=record.tenant_id,
             )
             # a background task's question, cancelled: the task with it
             await background.abandoned(self, record.awaiting, reason_of(resolution))

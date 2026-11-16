@@ -25,7 +25,7 @@ to delegate at once. Calling the tool runs a *child run* of the sub-agent, insid
   one that failed is an error the parent's model reads; one that pauses pauses the parent with
   its question — the interrupt's payload names the child (:data:`SUBAGENT`) — and the parent's
   ``resume`` hands the answer to the child and continues both;
-* cancelling the parent cancels its children (:func:`cancel_children`).
+* cancelling the parent cancels its children (``children.end_children``).
 
 ``agent.run(...)`` called inside a run — from a tool, a node, a function target's code — is the
 same child run (:func:`child_run`): its id derived from where the parent called it (the tool
@@ -53,7 +53,7 @@ from trellis.contracts import (
     ToolSpec,
     stable_id,
 )
-from trellis.harness import admission, pipeline, stopping
+from trellis.harness import admission, pipeline
 from trellis.harness.adapters.langgraph import bound_tools
 from trellis.harness.admission import Branch
 from trellis.harness.journal import Journal, content_key
@@ -263,7 +263,7 @@ async def _answered(
 ) -> Result:
     """The parent's answer to the child's question, the child's own: resumed with it (in this
     process: a child is never queued, and a cancel never reaches it this way — the parent's
-    ends the parent, and :func:`cancel_children` the child)."""
+    ends the parent, and ``children.end_children`` the child)."""
     record = await agent.harness.runs.get(asked.run_id, tenant=parent.tenant)
     assert record is not None
     resolution = answer.model_copy(
@@ -314,23 +314,6 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
     """The child a parent's interrupt carries the question of, when it does."""
     named = (interrupt.payload or {}).get(SUBAGENT)
     return named if isinstance(named, dict) else None
-
-
-async def cancel_children(agent: Agent, run_id: str, *, reason: str | None, tenant: str) -> None:
-    """Cancel the children of ``agent``'s run ``run_id`` that have not ended, and theirs: a
-    child paused for a person waits on nobody once its parent is cancelled, and the work its
-    framework keeps going for one outside any attempt stops (the adapter's ``child_cancelled``:
-    a Deep Agents async task, ``bridges.async_tasks``; a harness background task at work in this
-    process, ``background.Tasks.stop``)."""
-    runs = agent.harness.runs
-    async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
-        if child.status.final:
-            continue
-        # (or it ended meanwhile)
-        await stopping.unless_ended(runs.cancel(child.run_id, reason=reason, tenant=tenant))
-        await agent.adapter.child_cancelled(child.run_id, reason)
-        agent.harness.background.stop(child.run_id, reason or "its parent was cancelled")
-        await cancel_children(agent, child.run_id, reason=reason, tenant=tenant)
 
 
 async def _side_effects(agent: Agent) -> SideEffects:
