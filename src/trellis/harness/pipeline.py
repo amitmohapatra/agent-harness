@@ -53,7 +53,16 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import background, budget, conversation, sandbox, schedules, skills, snapshots
+from trellis.harness import (
+    background,
+    budget,
+    conversation,
+    sandbox,
+    schedules,
+    skills,
+    snapshots,
+    stopping,
+)
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -345,7 +354,7 @@ async def _left_the_line(
     reason = agent.turns.cancelled(record.run_id)
     found = await agent.harness.runs.get(record.run_id, tenant=record.tenant_id)
     assert found is not None
-    if reason is not None and not found.status.final:
+    if reason is not None and stopping.ended_elsewhere(found) is None:
         if await _settle_cancelled(agent, identity, events, None, spent={}, reason=reason):
             await sandbox.ended(agent, journal.sandbox if journal else None, record.run_id)
         return Result(run_id=record.run_id, status=RunStatus.CANCELLED)

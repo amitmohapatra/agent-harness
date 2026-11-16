@@ -413,15 +413,13 @@ class Tasks:
             log.exception("background task %s: its outcome not delivered", record.run_id)
 
     def stop(self, run_id: str, reason: str) -> None:
-        """The attempt of ``run_id`` at work here stopped, when one is, as ``Agent.cancel``
-        stops one (its run is ended in the store already, or ends ``CANCELLED`` with
-        ``reason``)."""
+        """What this process does for the task's run ``run_id`` stopped, when it is at work
+        here, as any run's is (``Agent.stop``): its attempt under way stops (its run is ended
+        in the store already, or ends ``CANCELLED`` with ``reason``), and one waiting its turn
+        behind the task's earlier run leaves the line now, not once that run does."""
         agent = self._agents.get(run_id)
-        runtime = None if agent is None else agent.running.get(run_id)
-        if runtime is None or runtime.running_in is None:
-            return
-        runtime.cancelled = runtime.cancelled or reason
-        runtime.running_in.cancel()
+        if agent is not None:
+            agent.stop(run_id, reason)
 
     async def aclose(self) -> None:
         """The harness closes: each task still at work is cut off — its run ended ``ERROR``

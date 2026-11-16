@@ -385,13 +385,11 @@ class Kept:
                     self._answer.set_result(None)
 
     def cancel(self, reason: str) -> None:
-        """The run cancelled with the run that started it: its attempt under way as
-        ``Agent.cancel`` cancels a run's, and one that has not begun to serve it does not."""
+        """The run cancelled with the run that started it: its attempt under way stops as any
+        run's does (``Agent.stop``: the first reason given stands), and one that has not begun
+        to serve it does not (:meth:`served` reads why)."""
         self.stopped = reason
-        runtime = self.agent.running.get(self.run_id)
-        if runtime is not None and runtime.running_in is not None:
-            runtime.cancelled = reason
-            runtime.running_in.cancel()
+        self.agent.stop(self.run_id, reason)
 
     # ------------------------------------------------------------------ an attempt
     async def served(self, turn: Turn) -> AsyncGenerator[Any, None]:
