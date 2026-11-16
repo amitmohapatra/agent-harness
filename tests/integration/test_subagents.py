@@ -25,6 +25,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, tool
 from trellis.contracts import ConfigurationError, RunRecord, RunStatus
 from trellis.harness import telemetry
+from trellis.harness.adapters.acp import ACPAgent
 from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.features import WITHOUT
 from trellis.harness.identity import AGENT_GROUP
@@ -175,6 +176,9 @@ async def test_what_a_child_does_decides_whether_its_tool_reads(harness: Harness
 
     claude = harness.wrap(ClaudeAgentOptions(), id="claude")
     assert (await tool_of(claude)).side_effects == "write"
+    # an ACP agent runs its own tools (its shell, its file edits) in its own process
+    acp = harness.wrap(ACPAgent(command=("an-acp-agent",)), id="acp")
+    assert (await tool_of(acp)).side_effects == "write"
 
 
 def own_langchain(x: str) -> str:

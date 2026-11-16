@@ -9,8 +9,10 @@ from typing import Any, cast
 
 import pytest
 
+from trellis import Harness
 from trellis.contracts import RunRecord, RunStatus
 from trellis.harness import stopping
+from trellis.harness.asking import RunCancelled
 from trellis.harness.runtime import Runtime
 from trellis.runs import ConflictError, LeaseLostError, RunsError
 
@@ -82,3 +84,25 @@ async def test_an_attempt_stopped_twice_keeps_the_first_reason_and_is_cancelled_
     assert stopping.stop_attempt(runtime, "the second") is working
     assert runtime.cancelled == "the first" and cancels == ["cancelled"]
     await asyncio.sleep(0)
+
+
+async def test_a_cancel_raised_inside_a_stopped_attempt_keeps_the_stops_reason(
+    harness: Harness,
+) -> None:
+    """A run stopped for a reason whose framework then says its own generic cancel (a live
+    session's bridge: ``RunCancelled``) ends with the reason it was stopped for."""
+
+    async def stopped_then_cancelled(input: str, agent: Runtime) -> str:
+        agent.cancelled = "cancelled by Ada"
+        raise RunCancelled("the session stopped")
+
+    async def cancelled(input: str, agent: Runtime) -> str:
+        raise RunCancelled("the session stopped")
+
+    async def reason(target: Any, name: str) -> Any:
+        events = [e async for e in harness.wrap(target, id=name).stream("x", user="ada")]
+        assert events[-1].outcome == "cancelled"
+        return events[-1].data["reason"]
+
+    assert await reason(stopped_then_cancelled, "stopped") == "cancelled by Ada"
+    assert await reason(cancelled, "cancelled") == "the session stopped"

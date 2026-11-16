@@ -167,7 +167,8 @@ class Keeps:
     """What an adapter whose framework keeps nothing of the kind answers with: no background
     tasks of its own, nothing checked where it is wrapped, nothing running between runs,
     nothing kept of a session, nothing going for a cancelled child. An adapter that keeps
-    one of these says so by defining it."""
+    one of these says so by defining it. And what one that does not say otherwise is taken
+    to have: tools of its framework's own (:meth:`own_tools`)."""
 
     @property
     def tasks(self) -> AsyncTasks | None:
@@ -184,6 +185,9 @@ class Keeps:
 
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
         return None
+
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        return True  # Claude's built-in tools, an ACP agent's own: the safe answer
 
 
 class Adapter(Protocol):
@@ -230,6 +234,12 @@ class Adapter(Protocol):
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` ended with the run that started it: what the framework keeps
         going for it outside any attempt stops (``children.stop_kept``)."""
+        ...
+
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        """Whether ``target`` has tools of its framework's own, whose effects the harness does
+        not know (``sources``: the harness tools it declares): wrapped as a tool, the agent
+        then writes whatever its declared tools say (``subagents``)."""
         ...
 
     def steers(self, target: Any) -> bool:

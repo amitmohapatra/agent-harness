@@ -6,6 +6,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from trellis.contracts import AgentError, Interrupt, RunRecord, RunStart, RunStatus
 from trellis.harness import children
 from trellis.harness.adapters.base import Keeps
@@ -117,13 +119,56 @@ async def test_a_childs_own_children_end_with_it_none_kept() -> None:
 
 
 async def test_a_child_the_store_ended_first_is_left_as_it_ended_and_its_keeper_stops() -> None:
+    """Whoever ended it there ends its children: a second cascade over a child that ended
+    (``Agent.cancel`` after the attempt's own) cancels nothing of it again."""
     runs = LocalRuns()
     await started(runs, "child")
+    await started(runs, "grandchild", "child")
     await runs.finish("child", RunStatus.SUCCESS, output="found", tenant=TENANT)
     agent, stopped = agent_of(runs)
     await children.end_child(agent, "child", TENANT, status=RunStatus.CANCELLED, reason="late")
     assert (await found(runs, "child")).status is RunStatus.SUCCESS
+    assert (await found(runs, "grandchild")).status is RunStatus.RUNNING
     assert stopped == [("child", "late")]
+
+
+class Refusing(Keeps):
+    """An adapter whose framework fails to stop what it keeps for one child (a remote
+    server's cancel that raises)."""
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        if run_id == "first":
+            raise ConnectionError("the task's server is down")
+
+
+async def test_a_child_whose_keeper_fails_to_stop_leaves_no_other_child_working() -> None:
+    runs = LocalRuns()
+    await started(runs, "parent")
+    for child in ("first", "second"):
+        await started(runs, child, "parent")
+    await started(runs, "grandchild", "first")
+    agent, stopped = agent_of(runs, Refusing())
+    with pytest.raises(ConnectionError, match="server is down"):  # its caller's, at the end
+        await children.end_children(agent, "parent", TENANT, status=RunStatus.CANCELLED)
+    for run_id in ("first", "second", "grandchild"):
+        assert (await found(runs, run_id)).status is RunStatus.CANCELLED
+    # the background task of the child whose keeper failed was stopped all the same
+    assert sorted(stopped) == [
+        (r, children.PARENT_ENDED) for r in ("first", "grandchild", "second")
+    ]
+
+
+async def test_runs_that_name_each_other_as_parent_end_once_each() -> None:
+    """A loop in the parent links (bad data) ends: a run the cascade ended is final, and the
+    cascade passes over a final run."""
+    runs = LocalRuns()
+    await started(runs, "a", "b")
+    await started(runs, "b", "a")
+    agent, stopped = agent_of(runs)
+    await children.end_children(agent, "a", TENANT, status=RunStatus.CANCELLED)
+    assert (await found(runs, "a")).status is RunStatus.CANCELLED
+    assert (await found(runs, "b")).status is RunStatus.CANCELLED
+    assert sorted(stopped) == [("a", children.PARENT_ENDED), ("b", children.PARENT_ENDED)]
 
 
 def test_a_live_sessions_background_run_is_cancelled_and_any_other_run_is_no_change() -> None:

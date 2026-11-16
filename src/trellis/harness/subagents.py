@@ -54,7 +54,6 @@ from trellis.contracts import (
     stable_id,
 )
 from trellis.harness import admission, pipeline
-from trellis.harness.adapters.langgraph import bound_tools
 from trellis.harness.admission import Branch
 from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
@@ -318,31 +317,14 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
 
 async def _side_effects(agent: Agent) -> SideEffects:
     """``read`` when every tool ``agent`` declares (its own, and the MCP tools its key allows)
-    only reads and none escapes the harness; else ``write``."""
-    if _unseen(agent):
+    only reads and none escapes the harness (its framework's own tools, whose effects the
+    harness does not know: ``Adapter.own_tools``); else ``write``."""
+    if agent.adapter.own_tools(agent.target, agent.sources):
         return "write"
     listing = await listed(agent.sources, gateway=agent.harness.gateway)
     effects = [t.spec.side_effects for t in listing.local]
     effects.extend(side_effects_of(d.annotations) for d in listing.defs)
     return "read" if all(effect == "read" for effect in effects) else "write"
-
-
-def _unseen(agent: Agent) -> bool:
-    """Whether the target has tools of its framework's own, whose effects the harness does not
-    know: a function target's (its code's calls), Claude's built-in tools, an OpenAI Agents
-    agent's own tools or handoffs, a graph's own tools (a ``ReAct``'s are only the harness's
-    own read tools)."""
-    from trellis.harness.middleware import STATE_TOOLS  # noqa: PLC0415 - react
-
-    target, framework = agent.target, agent.adapter.name
-    if framework == "function":  # its code calls what it calls (``agent.tools.call``)
-        return not agent.sources
-    if framework == "claude_agent_sdk":
-        return True
-    if framework == "openai_agents":
-        return bool(target.tools or target.handoffs)
-    harness_own = STATE_TOOLS
-    return any(getattr(t, "name", None) not in harness_own for t in bound_tools(target))
 
 
 def described(agent: Agent) -> str:

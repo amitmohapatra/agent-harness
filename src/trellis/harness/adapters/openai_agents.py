@@ -228,6 +228,9 @@ class OpenAIAgentsAdapter(Keeps):
         (``bridges.session``)."""
         return _thread_store(options, keeps_thread(self.gateway, target, options))
 
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        return bool(target.tools or target.handoffs)
+
     def steers(self, target: Any) -> bool:
         """Every agent: a steered message joins the input of its next model call
         (``RunConfig.call_model_input_filter``, :func:`_steering`)."""

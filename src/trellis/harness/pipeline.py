@@ -487,7 +487,7 @@ async def _attempt(
                 )
             output(span, jsonable(extracted.answer))
         except RunCancelled as exc:
-            runtime.cancelled = str(exc)
+            runtime.cancelled = runtime.cancelled or str(exc)  # the first reason stands
         except asyncio.CancelledError as exc:
             stopped = await _cancelled(agent, runtime, journal, job, exc)
         except Exception as exc:

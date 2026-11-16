@@ -14,11 +14,17 @@ and, unless it was cancelled, those it queued for a worker (``agent.start`` insi
 * **in this process** what is kept at work for it outside any attempt of its caller stops
   (:func:`stop_kept`): a harness background task's attempt, and the adapter's keepers — a live
   session's background subagent, a Deep Agents async task;
-* **its own children** end with it, none kept.
+* **its own children** end with it, none kept — when it ended here: a child the store ended
+  first, or another holder has, is whoever ended or holds it's to end the children of.
+
+Each child ends on its own: one whose ending fails (the run store's error, a keeper's — a
+remote server's cancel) is said in the log and the others end all the same; the first such
+error is then its caller's (:func:`end_children` raises it once every child was tried).
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Final
 
@@ -27,6 +33,8 @@ from trellis.harness import stopping
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
+
+log = logging.getLogger("trellis.harness")
 
 #: Why a child's keeper stops when its parent's ending names no reason.
 PARENT_ENDED: Final = "its parent ended"
@@ -49,10 +57,17 @@ async def end_children(
     that queued it answered), unless the run was cancelled — a cancel ends them all."""
     runs = agent.harness.runs
     for_a_worker = () if status is RunStatus.CANCELLED else (RunStatus.QUEUED,)
+    failed: Exception | None = None
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
         if child.status.final or child.status in for_a_worker or child.run_id in kept:
             continue
-        await end_child(agent, child.run_id, tenant, status=status, reason=reason, error=error)
+        try:
+            await end_child(agent, child.run_id, tenant, status=status, reason=reason, error=error)
+        except Exception as exc:
+            log.warning("run %s not ended with its parent %s: %s", child.run_id, run_id, exc)
+            failed = failed or exc
+    if failed is not None:
+        raise failed
 
 
 async def end_child(
@@ -64,24 +79,31 @@ async def end_child(
     reason: str | None = None,
     error: AgentError | None = None,
 ) -> None:
-    """One child run ends — unless the store ended it first (``stopping.unless_ended``) — what
-    this process keeps at work for it stops (:func:`stop_kept`, with ``reason`` or
-    :data:`PARENT_ENDED`), and its own children end with it (:func:`end_children`, none
-    kept)."""
+    """One child run ends, what this process keeps at work for it stops (:func:`stop_kept`,
+    with ``reason`` or :data:`PARENT_ENDED`), and its own children end with it
+    (:func:`end_children`, none kept). One the store ended first, or another holder has
+    (``stopping.unless_ended``), is left as it is there, and so are its children — whoever
+    ended or holds it ends them; only what this process keeps for it stops."""
     runs = agent.harness.runs
-    await stopping.unless_ended(
+    ended = await stopping.unless_ended(
         runs.finish(run_id, status, error=error, tenant=tenant)
         if error is not None
         else runs.cancel(run_id, reason=reason, tenant=tenant)
     )
-    await stop_kept(agent, run_id, reason or PARENT_ENDED)
-    await end_children(agent, run_id, tenant, status=status, reason=reason, error=error)
+    try:
+        await stop_kept(agent, run_id, reason or PARENT_ENDED)
+    finally:
+        if ended:
+            await end_children(agent, run_id, tenant, status=status, reason=reason, error=error)
 
 
 async def stop_kept(agent: Agent, run_id: str, reason: str) -> None:
     """What this process keeps at work for run ``run_id`` outside any attempt of its caller
     stops: a harness background task's attempt (``background.Tasks.stop``) and the adapter's
     keepers (its ``child_cancelled``: a live session's background subagent, a Deep Agents async
-    task). A run nothing keeps here is no change."""
-    await agent.adapter.child_cancelled(run_id, reason)
-    agent.harness.background.stop(run_id, reason)
+    task). A run nothing keeps here is no change. A keeper whose stop fails (a remote
+    server's cancel) fails its caller once the background task was stopped too."""
+    try:
+        await agent.adapter.child_cancelled(run_id, reason)
+    finally:
+        agent.harness.background.stop(run_id, reason)
