@@ -62,8 +62,8 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    is_pause_signal,
 )
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget, snapshots
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.bounded import SAID_ONCE, LRUSet

@@ -129,8 +129,8 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    is_pause_signal,
 )
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # every model call accounted, and a reply cut at the output limit noted
     budget,

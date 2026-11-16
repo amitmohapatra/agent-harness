@@ -16,8 +16,7 @@ from agents.mcp import MCPServer
 from agents.models.interface import Model
 from mcp.types import CallToolResult, TextContent
 
-from trellis.contracts import ToolError, ToolOutcome, ToolSpec
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import ToolError, ToolOutcome, ToolSpec, is_pause_signal
 from trellis.harness.adapters.openai_agents import (
     NOT_SERVED,
     WORDED,

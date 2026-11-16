@@ -26,8 +26,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from trellis.contracts import Option, ToolError
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import Option, ToolError, is_pause_signal
 from trellis.harness.asking import RunCancelled
 from trellis.harness.runtime import current
 

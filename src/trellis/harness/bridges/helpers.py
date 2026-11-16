@@ -56,8 +56,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import AgentError, RunStart, RunStatus, stable_id
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import AgentError, RunStart, RunStatus, is_pause_signal, stable_id
 from trellis.harness import telemetry
 from trellis.harness.history import Said, Speaker, recorded
 from trellis.harness.identity import AGENT_GROUP

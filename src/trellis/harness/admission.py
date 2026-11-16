@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import is_pause_signal
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime

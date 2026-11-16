@@ -43,8 +43,8 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    is_pause_signal,
 )
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness.features import Feature
 from trellis.harness.tools import pages
 

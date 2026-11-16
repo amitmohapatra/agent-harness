@@ -47,8 +47,7 @@ from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
-from trellis.contracts import ConfigurationError, ToolError, ToolSpec
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import ConfigurationError, ToolError, ToolSpec, is_pause_signal
 from trellis.harness.asking import RunCancelled
 from trellis.harness.credentials import IDLE_SECONDS, Target, headers_for
 from trellis.harness.runtime import current

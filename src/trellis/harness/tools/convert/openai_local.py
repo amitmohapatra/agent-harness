@@ -31,8 +31,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Hashable, Sequence
 from typing import Any, Final, cast
 
-from trellis.contracts import ToolError, ToolSpec
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import ToolError, ToolSpec, is_pause_signal
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool, not_run
