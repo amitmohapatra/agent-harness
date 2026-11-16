@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,7 +12,14 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from trellis.contracts import AgentExecutionContext, RunEvent, RunStart, RunStatus
-from trellis.harness.bridges.helpers import HELPER, NOT_CONTINUED, Helpers, Kind, text_of
+from trellis.harness.bridges.helpers import (
+    HELPER,
+    NOT_CONTINUED,
+    Helpers,
+    Kind,
+    helping,
+    text_of,
+)
 from trellis.harness.events import RunEvents
 from trellis.harness.holding import Holds
 from trellis.harness.identity import Identity
@@ -133,6 +141,75 @@ async def test_a_helper_an_earlier_attempt_left_open_and_the_next_did_not_take_u
     record = await runs.get(run_id)
     assert status is RunStatus.ERROR and record is not None and record.error is not None
     assert record.error.message == NOT_CONTINUED
+
+
+async def test_an_attempts_helpers_are_open_while_it_runs_and_end_with_its_answer() -> None:
+    runs = LocalRuns()
+    attempt = runtime(runs)
+    async with helping(attempt, "langgraph") as helpers:
+        assert attempt.helpers is helpers and helpers.framework == "langgraph"
+        await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
+        assert await statuses(runs) == [RunStatus.RUNNING]
+    assert await statuses(runs) == [RunStatus.SUCCESS]
+
+
+async def test_an_attempt_that_fails_ends_its_helpers_as_errors_and_fails_all_the_same() -> None:
+    runs = LocalRuns()
+    with pytest.raises(ValueError, match="boom"):
+        async with helping(runtime(runs), "langgraph") as helpers:
+            await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
+            raise ValueError("boom")
+    [child] = [c async for c in runs.iterate(parent_run_id="run_p")]
+    record = await runs.get(child.run_id)
+    assert record is not None and record.status is RunStatus.ERROR and record.error is not None
+    assert record.error.message == "the run ended first: ValueError"
+
+
+async def test_an_attempt_that_is_stopped_leaves_its_helpers_to_the_next_one() -> None:
+    runs = LocalRuns()
+    attempt = runtime(runs)
+    holds = attempt.agent.harness.holds
+    held: list[bool] = []
+    with pytest.raises(asyncio.CancelledError):
+        async with helping(attempt, "langgraph") as helpers:
+            helper = await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
+            held.append(holds.holds(helper.run_id))
+            raise asyncio.CancelledError
+    [child] = [c async for c in runs.iterate(parent_run_id="run_p")]
+    assert child.status is RunStatus.RUNNING  # open, and let go of in the store
+    assert held == [True] and not holds.holds(child.run_id)
+
+
+async def test_a_stream_closed_early_leaves_its_helpers_to_the_next_attempt() -> None:
+    """An adapter's stream is an async generator: closed early, ``GeneratorExit`` reaches the
+    block as a stop does."""
+    runs = LocalRuns()
+
+    async def stream() -> AsyncGenerator[str, None]:
+        async with helping(runtime(runs), "langgraph") as helpers:
+            await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
+            yield "a step"
+
+    steps = stream()
+    assert await anext(steps) == "a step"
+    await steps.aclose()
+    assert await statuses(runs) == [RunStatus.RUNNING]
+
+
+async def test_helpers_an_answer_leaves_open_stay_open_and_end_with_an_error() -> None:
+    """The framework paused on an approval of its own that a helper waits on: the attempt
+    answered (its pause is in the answer), and the helper goes on in the next attempt."""
+    runs = LocalRuns()
+    async with helping(runtime(runs), "openai_agents") as helpers:
+        await helpers.start("k", kind=Kind.AGENT_TOOL, name="checker", task="check o1")
+        helpers.left_open = True
+    assert await statuses(runs) == [RunStatus.RUNNING]
+    with pytest.raises(ValueError, match="boom"):
+        async with helping(runtime(runs), "openai_agents") as helpers:
+            await helpers.start("k", kind=Kind.AGENT_TOOL, name="checker", task="check o1")
+            helpers.left_open = True
+            raise ValueError("boom")
+    assert await statuses(runs) == [RunStatus.ERROR]
 
 
 async def test_a_call_of_one_of_two_helpers_of_one_name_is_its_own_workers() -> None:

@@ -50,7 +50,7 @@ import contextlib
 import logging
 import time
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -215,6 +215,9 @@ class Helpers:
         self._learning: dict[str, asyncio.Event] = {}
         #: the helper whose work holds an approval of the framework's own (:func:`held`)
         self.held: Helper | None = None
+        #: the attempt's answer leaves the helpers open (:func:`helping`): the run pauses on an
+        #: approval of the framework's own that one of them waits on
+        self.left_open = False
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
     async def start(
@@ -625,6 +628,25 @@ class Helpers:
             events=parent.events,
             record=scoped.record("run_feedback", **feedback),
         )
+
+
+@contextlib.asynccontextmanager
+async def helping(runtime: Runtime, framework: str) -> AsyncIterator[Helpers]:
+    """The attempt's helpers, open while the block runs (``runtime.helpers``) and closed as it
+    ends (:meth:`Helpers.closed`): with the error it ended with — a pause or a stop leaves them
+    to the next attempt (:meth:`Helpers.suspended`) — or with none, unless the block left them
+    open (:attr:`Helpers.left_open`: the run pauses on an approval of the framework's own that
+    one of them waits on)."""
+    helpers = Helpers(runtime, framework)
+    error: BaseException | None = None
+    try:
+        yield helpers
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        if error is not None or not helpers.left_open:
+            await helpers.closed(error)
 
 
 def _span_ended(

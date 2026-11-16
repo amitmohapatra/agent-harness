@@ -132,7 +132,7 @@ from trellis.harness.bridges.acp_live import (
     shape,
     unfilled,
 )
-from trellis.harness.bridges.helpers import Helpers, Kind
+from trellis.harness.bridges.helpers import Kind, helping
 from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.bridges.resumed import RESUMED, resumed_call
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
@@ -958,23 +958,16 @@ class ACPAdapter(Keeps):
         """The attempt's items — the agent's session updates and each prompt's answer — with
         the attempt's helpers open while it runs. A background sub-agent's run has no prompt of
         its own: its attempt is its task's end (``acp_live.Background``)."""
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
-        found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
-        source = (
-            self._attempt(target, native_input, run)
-            if found is None
-            else self._attended(run, found)
-        )
-        try:
+        async with helping(run.runtime, self.name):
+            found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
+            source = (
+                self._attempt(target, native_input, run)
+                if found is None
+                else self._attended(run, found)
+            )
             async with contextlib.aclosing(source) as items:
                 async for item in items:
                     yield item
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error)
 
     async def _attended(self, run: Invocation, found: Background) -> AsyncGenerator[Any, None]:
         """One attempt of a background sub-agent's run: what its sub-agent asks permission for

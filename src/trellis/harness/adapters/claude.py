@@ -139,7 +139,7 @@ from trellis.harness.bridges.claude_live import (
     LiveSession,
     opened,
 )
-from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, naming
+from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, helping, naming
 from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.bridges.resumed import RESUMED, resumed_call
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
@@ -567,27 +567,20 @@ class ClaudeAdapter(Keeps):
     ) -> AsyncGenerator[Any, None]:
         """The query's messages (:meth:`_messages`), each subagent Claude runs a helper of the
         run (``bridges.helpers``) from its ``Agent`` call to that call's result."""
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
-        # a background subagent's run has no query of its own: its task works in a session
-        found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
-        if found is not None:  # the calls its subagent makes are this run's own
-            helpers.attribute(found.task_id, None)
-        source = (
-            self._messages(target, native_input, run)
-            if found is None
-            else self._attended(target, run, found)
-        )
-        try:
+        async with helping(run.runtime, self.name) as helpers:
+            # a background subagent's run has no query of its own: its task works in a session
+            found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
+            if found is not None:  # the calls its subagent makes are this run's own
+                helpers.attribute(found.task_id, None)
+            source = (
+                self._messages(target, native_input, run)
+                if found is None
+                else self._attended(target, run, found)
+            )
             async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     await _subagents(helpers, message)
                     yield message
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error)
 
     async def _attended(
         self, target: Any, run: Invocation, found: Background
