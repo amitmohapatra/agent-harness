@@ -251,31 +251,28 @@ class LangGraphAdapter(Keeps):
 
         values: Any = None
         interrupts: list[Any] = []
-        try:
-            async with helping(run.runtime, self.name):
-                given = await _continued(target, native_input, run)
-                graph, config = self._graph(target, run.runtime), self._config(target, run)
-                try:
-                    # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the
-                    # graph's nodes write to the stream is the run's (:func:`_written`)
-                    async for part in graph.astream(
-                        given,
-                        config,
-                        stream_mode=["values", "custom"],
-                        version="v2",
-                        **_run_arguments(run.runtime, target),
-                    ):
-                        if part["type"] == "custom":
-                            _written(run.runtime, part["data"])
-                        else:
-                            values = part["data"]
-                            interrupts.extend(part["interrupts"])
-                except Exception as exc:
-                    values, interrupts[:] = await _asked_again(graph, config, exc)
-                _ended_with(target, run.runtime, values)
-                return GraphOutput(value=values, interrupts=tuple(interrupts))
-        finally:  # however the attempt ended, after its helpers closed
-            await self.tasks.cancelled(run.runtime)
+        async with helping(run.runtime, self.name):
+            given = await _continued(target, native_input, run)
+            graph, config = self._graph(target, run.runtime), self._config(target, run)
+            try:
+                # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the
+                # graph's nodes write to the stream is the run's (:func:`_written`)
+                async for part in graph.astream(
+                    given,
+                    config,
+                    stream_mode=["values", "custom"],
+                    version="v2",
+                    **_run_arguments(run.runtime, target),
+                ):
+                    if part["type"] == "custom":
+                        _written(run.runtime, part["data"])
+                    else:
+                        values = part["data"]
+                        interrupts.extend(part["interrupts"])
+            except Exception as exc:
+                values, interrupts[:] = await _asked_again(graph, config, exc)
+            _ended_with(target, run.runtime, values)
+            return GraphOutput(value=values, interrupts=tuple(interrupts))
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         """The run streamed as LangGraph streams a graph to its consumers. A graph given
@@ -291,27 +288,24 @@ class LangGraphAdapter(Keeps):
         values: Any = None
         interrupts: tuple[Any, ...] = ()
         text = _Text()
-        try:
-            async with helping(run.runtime, self.name):
-                given = await _continued(target, native_input, run)
-                graph, config = self._graph(target, run.runtime), self._config(target, run)
-                source = _transformed if transforms(graph) else _streamed
-                try:
-                    async for kind, data, held in source(
-                        graph, given, config, _run_arguments(run.runtime, target)
-                    ):
-                        if kind == "messages":
-                            if said := text.of(*data):
-                                yield said
-                        elif kind == "custom":
-                            _written(run.runtime, data)
-                        else:  # "values"
-                            values, interrupts = data, tuple(held) or interrupts
-                except Exception as exc:
-                    values, again = await _asked_again(graph, config, exc)
-                    interrupts = tuple(again)
-        finally:  # however the attempt ended, after its helpers closed
-            await self.tasks.cancelled(run.runtime)
+        async with helping(run.runtime, self.name):
+            given = await _continued(target, native_input, run)
+            graph, config = self._graph(target, run.runtime), self._config(target, run)
+            source = _transformed if transforms(graph) else _streamed
+            try:
+                async for kind, data, held in source(
+                    graph, given, config, _run_arguments(run.runtime, target)
+                ):
+                    if kind == "messages":
+                        if said := text.of(*data):
+                            yield said
+                    elif kind == "custom":
+                        _written(run.runtime, data)
+                    else:  # "values"
+                        values, interrupts = data, tuple(held) or interrupts
+            except Exception as exc:
+                values, again = await _asked_again(graph, config, exc)
+                interrupts = tuple(again)
         _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 

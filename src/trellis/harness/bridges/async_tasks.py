@@ -311,15 +311,6 @@ class AsyncTasks:
         else:
             await helpers.finished(helper, error=why, cancelled=status is RunStatus.CANCELLED)
 
-    async def cancelled(self, runtime: Runtime) -> None:
-        """``runtime``'s attempt was cancelled (``Runtime.cancelled``): the tasks its run started
-        are stopped with it (:meth:`stopped`)."""
-        if runtime.cancelled is None:
-            return
-        for run_id, kept in list(self._kept.items()):
-            if kept.helper.parent_run_id == runtime.run_id:
-                await self.stopped(run_id, runtime.cancelled)
-
     async def stopped(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` was cancelled with the run that started it (``reason``: why):
         when it is a task's this process holds, the task is cancelled on its server with Deep

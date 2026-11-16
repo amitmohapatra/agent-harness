@@ -581,15 +581,11 @@ class Keeper[K: Kept]:
             )
 
     def _detach(self, turn: Turn) -> None:
-        """``turn`` is served no more: a cancelled run's background children are cancelled with
-        it, and the session rests."""
+        """``turn`` is served no more, and the session rests. (A cancelled run's background
+        children are cancelled with it by the run's own ending: ``children.stop_kept``.)"""
         for call in list(turn.calls):
             call.cancel()
         self.turn = None
-        for found in self.background.values():
-            cancelled: str | None = turn.runtime.cancelled
-            if cancelled is not None and found.parent_run_id == turn.runtime.run_id:
-                found.cancel(cancelled)
         if not self.closed:
             self._rested = asyncio.get_running_loop().time()
             self._rest()
@@ -783,6 +779,14 @@ class LiveSessions:
     def keep(self, session: Keeper[Any]) -> None:
         """``session`` is its conversation's (:meth:`place` took a place for it)."""
         self._open[session.key] = session
+
+    def cancel(self, run_id: str, reason: str) -> None:
+        """The run ``run_id`` ended with the run that started it (``children.stop_kept``):
+        when it is a background subagent's a session keeps here, it is cancelled for
+        ``reason`` (``Kept.cancel``); any other run is no change."""
+        found = self.attended.get(run_id)
+        if found is not None:
+            found.cancel(reason)
 
     def forget(self, session: Keeper[Any], why: str) -> None:
         """``session`` is no longer the conversation's; the work that ends with it is what

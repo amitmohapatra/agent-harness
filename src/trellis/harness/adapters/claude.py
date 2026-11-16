@@ -101,7 +101,7 @@ from trellis.contracts import (
     ToolStatus,
     stable_id,
 )
-from trellis.harness import budget, skills
+from trellis.harness import budget, children, skills
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -432,6 +432,11 @@ class ClaudeAdapter(Keeps):
     async def aclose(self) -> None:
         """The agent is closing: every conversation's live session ends."""
         await self.live.aclose()
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        """The run ``run_id`` ended with the run that started it: when it is a background
+        subagent's a live session keeps here, it stops (``LiveSessions.cancel``)."""
+        self.live.cancel(run_id, reason or children.PARENT_ENDED)
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None

@@ -98,7 +98,7 @@ from trellis.contracts import (
     ToolStatus,
     stable_id,
 )
-from trellis.harness import admission, budget, compat
+from trellis.harness import admission, budget, children, compat
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -823,6 +823,11 @@ class ACPAdapter(Keeps):
         finally:
             for session in self.idle:
                 self.idle.discard(session)
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        """The run ``run_id`` ended with the run that started it: when it is a background
+        subagent's a live session keeps here, it stops (``LiveSessions.cancel``)."""
+        self.live.cancel(run_id, reason or children.PARENT_ENDED)
 
     def session_gone(self, session: str) -> None:
         """The agent keeps the session ``session`` for no conversation's next turn any more

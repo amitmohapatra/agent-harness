@@ -9,6 +9,7 @@ from typing import Any
 from trellis.contracts import AgentError, Interrupt, RunRecord, RunStart, RunStatus
 from trellis.harness import children
 from trellis.harness.adapters.base import Keeps
+from trellis.harness.bridges.live import LiveSessions
 from trellis.harness.runs import LocalRuns
 
 TENANT = "t"
@@ -123,3 +124,16 @@ async def test_a_child_the_store_ended_first_is_left_as_it_ended_and_its_keeper_
     await children.end_child(agent, "child", TENANT, status=RunStatus.CANCELLED, reason="late")
     assert (await found(runs, "child")).status is RunStatus.SUCCESS
     assert stopped == [("child", "late")]
+
+
+def test_a_live_sessions_background_run_is_cancelled_and_any_other_run_is_no_change() -> None:
+    """The adapters that keep live sessions (Claude, ACP) stop a child through
+    ``LiveSessions.cancel``: the background subagent's run a session attends is cancelled
+    with the reason, a run no session attends is nobody's here."""
+    sessions = LiveSessions()
+    cancelled: list[str] = []
+    kept: Any = SimpleNamespace(cancel=cancelled.append)
+    sessions.attended["child"] = kept
+    sessions.cancel("child", "the turn was cancelled")
+    sessions.cancel("another", "the turn was cancelled")
+    assert cancelled == ["the turn was cancelled"]

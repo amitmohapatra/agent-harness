@@ -921,8 +921,18 @@ async def _ended_with_children(
     (:func:`_children_kept`). Out of time or failed (its ``error``: a stalled model call's
     too), they end with that status and error; cancelled, they are cancelled with its reason;
     answered without them, they are cancelled (:data:`ENDED_FIRST`). The run has ended
-    already: a run store that cannot be read now is logged, and the run's result stands."""
+    already: a run store that cannot be read now is logged, and the run's result stands.
+    A run stopped here that the store had ended first (not ``ended``, ``Runtime.cancelled``)
+    writes nothing: only the keepers of the helpers it handed on stop
+    (``children.stop_kept``)."""
+    cancelled = runtime.cancelled
     if not ended:
+        if cancelled is not None:
+            # stopped here for a run the store ended first (``Harness._lost``): whoever ended
+            # it there ends its children in the store; what this process keeps at work for
+            # the helpers it handed on stops here
+            for child in journal.handed_on:
+                await children.stop_kept(agent, child, cancelled)
         return
     try:
         await children.end_children(
@@ -930,7 +940,7 @@ async def _ended_with_children(
             runtime.run_id,
             runtime.tenant,
             status=status,
-            reason=runtime.cancelled or (None if cut_off else ENDED_FIRST),
+            reason=cancelled or (None if cut_off else ENDED_FIRST),
             error=error,
             kept=_children_kept(runtime, journal, cut_off=cut_off),
         )
