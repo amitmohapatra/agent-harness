@@ -15,7 +15,7 @@ agent's default, ``h.wrap(run_timeout=)``, when the run names none — less the 
 worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
 ``CANCELLED`` with the reason. Either way the children it still has open — a sub-agent's run
 inside one of its calls, a helper a framework spawned in the foreground — end with it, as it
-ended (:func:`_children_ended`).
+ended (:func:`_ended_with_children`: ``children.end_children``).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -56,6 +56,7 @@ from trellis.contracts import (
 from trellis.harness import (
     background,
     budget,
+    children,
     conversation,
     sandbox,
     schedules,
@@ -865,7 +866,7 @@ async def _cancelled(
     stopped = not stalled and _out_of_time(job, exc)
     if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
         # a sub-agent's run its parent's clock cut off ends with its parent, as it ends
-        # (``_children_ended``): out of time
+        # (``children.end_children``): out of time
         settles = (job is None and not _parent_out_of_time(runtime)) or (
             job is not None and job.cancel_requested and RELEASED not in exc.args
         )
@@ -873,10 +874,10 @@ async def _cancelled(
         ended = settles and await _settle_cancelled(
             agent, identity, events, runtime.worker_id, spent=budget.spent(runtime), runtime=runtime
         )
+        await _ended_with_children(
+            agent, runtime, journal, RunStatus.CANCELLED, ended=ended, cut_off=True
+        )
         if ended:
-            await _children_ended(
-                agent, identity.run_id, identity.tenant, RunStatus.CANCELLED, kept=journal.handed_on
-            )
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
@@ -889,36 +890,52 @@ def _parent_out_of_time(runtime: Runtime) -> bool:
     return parent is not None and parent.ends_at is not None and time.monotonic() >= parent.ends_at
 
 
-async def _children_ended(
+def _children_kept(runtime: Runtime, journal: Journal, *, cut_off: bool) -> list[str]:
+    """The children that do not end with ``runtime``'s run. None when someone cancelled it: a
+    cancelled run ends all its children. When its caller went away (``cut_off``: a closed
+    stream), the helpers it handed on past its attempt (``Journal.handed_on``: a Claude
+    subagent working in the background of its session, a Deep Agents async task), which are
+    their keepers' to end. However else it ended, its conversation's background tasks too:
+    the turn's end is not theirs (:func:`background.of_turn`)."""
+    if runtime.cancelled is not None:
+        return []
+    if cut_off:
+        return list(journal.handed_on)
+    return [*journal.handed_on, *background.of_turn(runtime)]
+
+
+async def _ended_with_children(
     agent: Agent,
-    run_id: str,
-    tenant: str,
+    runtime: Runtime,
+    journal: Journal,
     status: RunStatus,
     *,
-    kept: Collection[str] = (),
+    ended: bool,
+    cut_off: bool = False,
     error: AgentError | None = None,
-    reason: str | None = None,
 ) -> None:
-    """The run ended — whatever its final ``status`` — with children still open — a
-    sub-agent's run its call was working on, a helper a framework spawned in the foreground —
-    that nothing else will end: each ends as the run did, and so do theirs. Out of time or
-    failed (its ``error``: a stalled model call's too), they end with that status and error;
-    cancelled, they are cancelled with its ``reason``; answered without them, they are
-    cancelled (:data:`ENDED_FIRST`). A helper handed on past its attempt (``kept``: the run's
-    ``Journal.handed_on``, a Claude subagent working in the background of its session — only
-    a conversation's turn has one) is its keeper's to end, and goes on."""
-    runs = agent.harness.runs
-    async for child in runs.iterate(parent_run_id=run_id, status=RunStatus.RUNNING, tenant=tenant):
-        if child.run_id in kept:
-            continue
-        await stopping.unless_ended(  # (or it ended meanwhile)
-            runs.finish(child.run_id, status, error=error, tenant=tenant)
-            if error is not None
-            else runs.cancel(child.run_id, reason=reason, tenant=tenant)
+    """The attempt ended its run ``status`` (``ended``: here — not ended, or taken over,
+    elsewhere already): the children it still has open — a sub-agent's run its call was
+    working on, a helper a framework spawned in the foreground, one an earlier attempt left
+    paused — end with it, as it ended (``children.end_children``), but those it keeps
+    (:func:`_children_kept`). Out of time or failed (its ``error``: a stalled model call's
+    too), they end with that status and error; cancelled, they are cancelled with its reason;
+    answered without them, they are cancelled (:data:`ENDED_FIRST`). The run has ended
+    already: a run store that cannot be read now is logged, and the run's result stands."""
+    if not ended:
+        return
+    try:
+        await children.end_children(
+            agent,
+            runtime.run_id,
+            runtime.tenant,
+            status=status,
+            reason=runtime.cancelled or (None if cut_off else ENDED_FIRST),
+            error=error,
+            kept=_children_kept(runtime, journal, cut_off=cut_off),
         )
-        # a background task at work here, apart from the run's call, stops with it
-        agent.harness.background.stop(child.run_id, reason or "its parent ended")
-        await _children_ended(agent, child.run_id, tenant, status, error=error, reason=reason)
+    except Exception as exc:
+        log.warning("run %s: its open children could not be ended: %s", runtime.run_id, exc)
 
 
 def _stalled(runtime: Runtime) -> Exception | None:
@@ -1069,34 +1086,12 @@ async def _concluded(
         await sandbox.delivered(runtime)
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
-        if ended:  # the run's end is final: its open children end with it, as it ended
-            await _open_children_ended(agent, runtime, journal, result)
+        # the run's end is final: its open children end with it, as it ended
+        await _ended_with_children(
+            agent, runtime, journal, result.status, ended=ended, error=result.error
+        )
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
-
-
-async def _open_children_ended(
-    agent: Agent, runtime: Runtime, journal: Journal, result: Result
-) -> None:
-    """The children the run still has open end with it, as ``result`` says it ended
-    (:func:`_children_ended`), but those handed on and — unless it was cancelled — its
-    background tasks: the turn's end is not theirs (:func:`background.of_turn`). The run has
-    ended already: a run store that cannot be read now is logged, and the run's result stands."""
-    kept = journal.handed_on
-    if runtime.cancelled is None:
-        kept = [*kept, *background.of_turn(runtime)]
-    try:
-        await _children_ended(
-            agent,
-            runtime.run_id,
-            runtime.tenant,
-            result.status,
-            kept=kept,
-            error=result.error,
-            reason=ENDED_FIRST if runtime.cancelled is None else runtime.cancelled,
-        )
-    except Exception as exc:
-        log.warning("run %s: its open children could not be ended: %s", runtime.run_id, exc)
 
 
 def _settled(failure: AgentError, runtime: Runtime) -> AgentError:
@@ -1698,11 +1693,11 @@ async def _settle_cancelled(
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
     what it ``spent`` until then), and say whether it was ended here (not ended, or taken
-    over, elsewhere already): its open children then end with it (:func:`_children_ended`,
-    its caller's to call). A run ``agent.cancel`` stopped here (``Agent.cancelling``) is
-    cancelled in the store once its log has its last events — the store keeps why, and who
-    asked — and ended by its holder, this process, when the store only asked it to stop (a
-    store that holds runs answers so for a held run)."""
+    over, elsewhere already): its open children then end with it
+    (:func:`_ended_with_children`, its caller's to call). A run ``agent.cancel`` stopped here
+    (``Agent.cancelling``) is cancelled in the store once its log has its last events — the
+    store keeps why, and who asked — and ended by its holder, this process, when the store
+    only asked it to stop (a store that holds runs answers so for a held run)."""
     runs = agent.harness.runs
     journal, parent = (None, None) if runtime is None else (runtime.replay.journal, runtime.parent)
 

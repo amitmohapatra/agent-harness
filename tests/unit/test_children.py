@@ -34,11 +34,13 @@ def agent_of(runs: LocalRuns, adapter: Keeps | None = None) -> tuple[Any, list[t
     return SimpleNamespace(harness=harness, adapter=adapter or Keeps()), stopped
 
 
-async def started(runs: LocalRuns, run_id: str, parent: str | None = None) -> None:
+async def started(
+    runs: LocalRuns, run_id: str, parent: str | None = None, *, queue: bool = False
+) -> None:
     start = RunStart(
         run_id=run_id, tenant_id=TENANT, agent_id="chat", user_id="u", parent_run_id=parent
     )
-    await runs.start(start)
+    await runs.start(start, queue=queue)
 
 
 async def found(runs: LocalRuns, run_id: str) -> RunRecord:
@@ -81,6 +83,22 @@ async def test_a_failed_runs_children_end_as_it_did_with_its_error() -> None:
     ended = await found(runs, "child")
     assert ended.status is RunStatus.TIMEOUT and ended.error == error
     assert stopped == [("child", children.PARENT_ENDED)]  # the ending named no reason
+
+
+async def test_a_child_queued_for_a_worker_ends_only_with_a_cancelled_run() -> None:
+    """``agent.start`` inside a run queues a child that works on a worker in its own time: the
+    run that queued it answering, failing or running out of time is not its end; a cancel of
+    that run is."""
+    runs = LocalRuns()
+    await started(runs, "parent")
+    await started(runs, "queued", "parent", queue=True)
+    agent, stopped = agent_of(runs)
+    error = AgentError(code="RUN_TIMEOUT", message="out of time")
+    await children.end_children(agent, "parent", TENANT, status=RunStatus.SUCCESS)
+    await children.end_children(agent, "parent", TENANT, status=RunStatus.TIMEOUT, error=error)
+    assert (await found(runs, "queued")).status is RunStatus.QUEUED and stopped == []
+    await children.end_children(agent, "parent", TENANT, status=RunStatus.CANCELLED)
+    assert (await found(runs, "queued")).status is RunStatus.CANCELLED
 
 
 async def test_a_childs_own_children_end_with_it_none_kept() -> None:

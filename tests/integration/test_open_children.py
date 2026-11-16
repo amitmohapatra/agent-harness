@@ -16,7 +16,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 
 from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, current, tool
-from trellis.contracts import RunRecord, RunStatus
+from trellis.contracts import Interrupt, RunRecord, RunStart, RunStatus
 from trellis.harness.runs import LocalRuns
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -85,6 +85,34 @@ async def test_a_sub_agents_run_ends_out_of_time_with_the_run_whose_call_it_work
 
         async def boss(input: str, agent: Runtime) -> str:
             return str(await worker.run("dig", user="u1"))
+
+        ended = await h.wrap(boss, id="boss", run_timeout=0.5).run("go", user="u1")
+        assert ended.status is RunStatus.TIMEOUT and ended.error is not None
+        [child] = await children(store, ended.run_id)
+    assert child.status is RunStatus.TIMEOUT and child.error is not None
+    assert child.error.code == ended.error.code
+
+
+async def test_a_child_paused_for_a_person_ends_out_of_time_with_its_run() -> None:
+    """A child run that waits for a person while its parent works (one an earlier attempt
+    left behind: a sub-agent's question pauses its parent too) waits on nobody once the
+    parent ran out of time: it ends with it, as it ended, and is not left ``PAUSED``."""
+    store = LocalRuns()
+    async with Harness(config=Settings(), runs=store) as h:
+
+        async def boss(input: str, agent: Runtime) -> str:
+            left = RunStart(
+                run_id="run_left_paused",
+                tenant_id=agent.tenant,
+                agent_id="worker",
+                user_id="u1",
+                parent_run_id=agent.run_id,
+            )
+            await store.start(left)
+            asked = Interrupt(tenant_id=agent.tenant, run_id=left.run_id, question="Which?")
+            await store.pause(asked)
+            await asyncio.Event().wait()
+            return "never"
 
         ended = await h.wrap(boss, id="boss", run_timeout=0.5).run("go", user="u1")
         assert ended.status is RunStatus.TIMEOUT and ended.error is not None

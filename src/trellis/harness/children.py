@@ -4,7 +4,8 @@ A child is a run started for another's — a sub-agent's run inside one of its c
 framework spawned, a background task, a live session's background subagent, a Deep Agents
 async task. **Every child that has not ended ends with its parent** (:func:`end_children`),
 apart from those its caller names as kept (the helpers a run handed on past its attempt and
-its conversation's background tasks, when it was not cancelled: ``pipeline._children_kept``):
+its conversation's background tasks, when it was not cancelled: ``pipeline._children_kept``)
+and, unless it was cancelled, those it queued for a worker (``agent.start`` inside the run):
 
 * **in the run store** it ends as its parent did — failed with the parent's error when that
   failed or ran out of time, else cancelled with the parent's reason — unless the store ended
@@ -43,10 +44,13 @@ async def end_children(
 ) -> None:
     """The run ``run_id`` ended ``status``: each of its children but those in ``kept`` ends with
     it (:func:`end_child`) — failed with ``error`` when the run failed or ran out of time, else
-    cancelled with ``reason``. A child that ended already is left as it is."""
+    cancelled with ``reason``. A child that ended already is left as it is; so is one queued
+    for a worker (``agent.start`` inside the run: it works in its own time, whatever the run
+    that queued it answered), unless the run was cancelled — a cancel ends them all."""
     runs = agent.harness.runs
+    for_a_worker = () if status is RunStatus.CANCELLED else (RunStatus.QUEUED,)
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
-        if child.status.final or child.run_id in kept:
+        if child.status.final or child.status in for_a_worker or child.run_id in kept:
             continue
         await end_child(agent, child.run_id, tenant, status=status, reason=reason, error=error)
 
