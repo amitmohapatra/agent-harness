@@ -319,16 +319,6 @@ async def test_a_fired_run_of_a_user_who_left_ends_before_any_tool(
         await c.delete(f"/v1/schedules/{row['schedule_id']}")
 
 
-@pytest.mark.plan("SCH")
-@pytest.mark.skip(
-    reason="DST: the next fire across a daylight-saving change is computed from the service's "
-    "clock, which an end-to-end test cannot move; proven at unit level by agent-runs "
-    "tests/test_cadence.py (DST forward and back) and harness unit tests of schedule_task"
-)
-async def test_dst() -> None:  # pragma: no cover
-    ...
-
-
 @pytest.mark.plan("SCH", "RUN-12")
 async def test_schedules_are_upserted_listed_patched_and_deleted(tmp_path: Path, uid: str) -> None:
     """``agent.schedule`` from code: the same schedule again is the one that exists (a

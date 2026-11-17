@@ -29,8 +29,8 @@ agent-memory-service bdba1e2, agent-runs 7dfe8df, agent-contracts 27a818d), 2026
 |---|---|---|---|---|
 | Memory (MEM) | 24 | 9 (live) | 23 (about 90 test cases with the per-adapter ones) | 5 in the memory service (BUG-M1..M5; M2 and M5 fixed), F-504 (contract, fixed), SEC-R-10 (from the security review, fixed) |
 | Runs (RUN) | 13 | 6 (live) + every route in the service suite (in process) | 13 (17 tests) | — |
-| Schedules (SCH) | 9 | 3 (live) | 8 + DST skipped (9 tests) | — |
-| Files, query, sandbox (FS) | 6 | 1 (live) | 3 (+2 proven in process, the sandbox skipped: no Docker) | H-CSV (fixed) |
+| Schedules (SCH) | 9 | 3 (live) | 8 (8 tests; DST in process) | — |
+| Files, query, sandbox (FS) | 6 | 1 (live) | 4 (+2 proven in process) | H-CSV (fixed) |
 | Surfaces (SURF) | 6 | 4 (live) | 6 (6 tests) | H-DOC, H-A2A (fixed), H-AGUI |
 | Contracts (CON) | 3 | 2 (contract suite, in process) | 2 (+ INV-7 on every test) | — |
 | Harness inventory (HAR) | 29 | 15 (live; all 29 in process: matrix, integration) | 22 (on every applicable adapter: about 75 test cases) | F-DATE (agent-runs SDK), H-ID |
@@ -119,7 +119,7 @@ agent-memory-service bdba1e2, agent-runs 7dfe8df, agent-contracts 27a818d), 2026
 | Expiry: 90 days untouched asks "Still need this?" before working; Cancel deletes it | integration | `test_sch.py::test_a_schedule_untouched_for_90_days_asks_still_need_this` | pass |
 | A user who left: `on_run_start` ends the fired run before any tool | integration | `test_sch.py::test_a_fired_run_of_a_user_who_left_ends_before_any_tool` | pass |
 | `agent.schedule` from code: upsert, run options on every fired run, list/patch/delete | live `test_a_schedule_carries_the_agents_limit_and_version` | `test_sch.py::test_schedules_are_upserted_listed_patched_and_deleted` | pass |
-| DST forward and back | agent-runs `test_cadence.py`; harness unit | skipped: the service's clock cannot be moved end to end | skip |
+| DST forward and back | agent-runs `test_cadence.py`; harness unit | — (in process is the right level: the service's clock cannot be moved end to end) | prior |
 
 ## Files, query, sandbox (FS)
 
@@ -130,7 +130,7 @@ agent-memory-service bdba1e2, agent-runs 7dfe8df, agent-contracts 27a818d), 2026
 | Large results kept, paged to the last part (`read_file`), counted over every row (`query_result`) | matrix F26, F26r, F26q | `test_har_adapters.py::test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_row[5]` | pass |
 | query_result limits (200 rows, 20,000 chars, SQL 5,000), wide tables | unit `test_query*.py`, integration `test_query_safety.py` | — (in process is the right level: no service is involved) | prior |
 | Skills (sources, learned skills in the next context) | integration `test_skills.py`; matrix F41s | live `test_an_agent_learns_a_skill_from_its_runs_and_its_next_runs_are_offered_it` | prior |
-| Sandbox (per-run container, outputs, reaper) | integration `test_sandbox*.py`; matrix F73 | skipped: no Docker daemon on this machine (L20) | skip |
+| Sandbox (per-run container, outputs, reaper) | integration `test_sandbox*.py`; matrix F73 | `test_fs.py::test_a_runs_commands_run_in_a_container_of_its_own_deleted_at_its_end` (a real Docker daemon) | pass |
 
 ## Surfaces (SURF)
 
@@ -185,7 +185,7 @@ planned endpoint)) unless said.
 | HAR-REL | reliability: idempotent writes, retries, unknown outcomes | F21, F22, F24: all | `test_a_read_that_meets_a_busy_service_is_retried_and_a_write_sends_its_key` | `test_mem_resilience.py` (504 retries, writes once), `test_mem_records.py::test_a_turn_retried…` | pass |
 | HAR-FILE | files and the file store | X13 | — | `test_fs.py` | pass |
 | HAR-SKILL | skills | F41s | yes | — | prior |
-| HAR-SBX | sandbox | F73 | skipped (Docker) | skipped (Docker) | skip |
+| HAR-SBX | sandbox | F73 | — | `test_fs.py::test_a_runs_commands_run_in_a_container_of_its_own_deleted_at_its_end` | pass |
 | BG | background work | integration `test_background_by_adapter.py` | — | scenario suite's (`test_s05_background.py`, `test_s13_long_running.py`, `test_s17_background_more.py`) | owner: scenarios |
 | HAR-STREAM | streamed text, events (F02, F60) | all | yes | INV-10 at every teardown | prior |
 | HAR-JRN | journal, segments, progress checkpoints (F23, F12) | all | `test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause` | `test_con.py` (segments through a worker) | prior + pass |
@@ -198,7 +198,7 @@ planned endpoint)) unless said.
   demand, so their tests queue the job the way the worker's scheduler does (one row in
   Procrastinate's queue: `conftest.run_periodic_now`) and move a row's age back
   (`conftest.move_clock`): the only two writes the suite makes to a service's database.
-* **DST**: the service's clock. **Sandbox**: Docker. **Gateway features** (Code Mode, the key's
+* **DST**: the service's clock (proven in process). **Gateway features** (Code Mode, the key's
   MCP tools, stored prompts): no Bifrost gateway here (live suite's 30 skips).
 
 ## Findings
