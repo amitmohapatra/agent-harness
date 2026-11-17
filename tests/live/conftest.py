@@ -446,3 +446,13 @@ def ops_key(ops: str) -> Iterator[str]:
     yield from _virtual_key(
         "trellis-live-ops", [{"mcp_client_name": ops, "tools_to_execute": ["*"]}]
     )
+
+
+@pytest.fixture
+def engine(request: pytest.FixtureRequest) -> str:
+    """The engine a model-driven test runs on (``tests/live/engines.py``, parametrized
+    ``indirect``): Claude Code's is run as a deployment runs the CLI (:func:`cli_home`)."""
+    name = str(request.param)
+    if name == "claude_agent_sdk":
+        request.getfixturevalue("cli_home")
+    return name
