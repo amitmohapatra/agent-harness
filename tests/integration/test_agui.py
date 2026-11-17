@@ -630,6 +630,38 @@ async def test_a_run_id_must_be_new_and_well_formed(client: httpx.AsyncClient) -
     assert odd.status_code == 422
 
 
+async def test_the_same_run_id_sent_twice_at_once_opens_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both requests ask the run store before either has opened the run (a store over HTTP
+    answers after a moment): the second is refused all the same."""
+    harness, http = serve()
+    get = harness.runs.get
+
+    async def slow(run_id: str, **scope: Any) -> Any:
+        found = await get(run_id, **scope)
+        await asyncio.sleep(0.05)
+        return found
+
+    start = harness.runs.start
+    started: list[str] = []
+
+    async def counted(run: Any, **scope: Any) -> Any:
+        started.append(run.run_id)  # agent-runs answers a second start of a run_id with the run
+        return await start(run, **scope)
+
+    monkeypatch.setattr(harness.runs, "get", slow)
+    monkeypatch.setattr(harness.runs, "start", counted)
+    async with http:
+        sent = body("hello", runId="run-twice")
+        one, two = await asyncio.gather(
+            http.post(f"{PATH}/run", json=sent), http.post(f"{PATH}/run", json=sent)
+        )
+        assert sorted([one.status_code, two.status_code]) == [200, 422]
+    assert started == ["run-twice"]
+    await harness.aclose()
+
+
 async def test_a_blank_message_is_refused_before_a_run_opens(client: httpx.AsyncClient) -> None:
     refused = await client.post(f"{PATH}/run", json=body("  \n\t "))
     assert refused.status_code == 422 and "blank" in refused.json()["detail"]

@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: the same AG-UI `runId` sent twice at once opens one run
+
+`POST /agui/run` claimed a caller's `runId` only after asking the run store whether it was
+new, so two requests with the same `runId` arriving together both passed the check; against
+agent-runs, which answers a second start of a `run_id` with the run, both were answered 200
+and the run was attempted twice. The `runId` is now claimed before the store is asked: the
+second request is a 422.
+
 ### Changed: the in-process run store follows the contracts' rules (`LocalRuns`)
 
 Built on trellis-contracts' unreleased `main` (0.8.0 to be) and the agent-runs SDK beside it;
