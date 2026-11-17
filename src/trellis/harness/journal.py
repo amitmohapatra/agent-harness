@@ -289,6 +289,10 @@ class Journal(BaseModel):
     #: ``needs_approval`` tool), by content: governance counts that approval, once each, and
     #: does not ask again (``approved_in_framework``)
     approved: list[str] = Field(default_factory=list)
+    #: a run in its framework's plan mode (Claude Code's ``permission_mode="plan"``) whose plan
+    #: was let through (``ExitPlanMode`` ran: a person approved it, as Claude Code asks): its
+    #: calls are governed as ever from then on, in any attempt (``adapters.claude``)
+    plan_approved: bool = False
     #: the calls a person rejected at a framework's own approval gate (LangChain's
     #: ``HumanInTheLoopMiddleware``), by content: each is that person's decision — the failed
     #: message the gate answers it with is no failed call of the run (:meth:`rejected_by_person`)

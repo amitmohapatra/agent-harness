@@ -260,6 +260,23 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: person answers when it asks, as for a write — unless the tool catalog has a rule for the
 #: tool that lets it run (``tools.bridge.asked``).
 CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "Skill"})
+#: Claude Code's plan mode (``permission_mode="plan"``: the options', or a run's
+#: ``framework_options``), held by the harness's own hook: the hook's word on a harness tool
+#: is final for the CLI, so the CLI's plan mode alone would let a write of the harness's run.
+#: Until Claude presents its plan (:data:`PLAN_TOOL`) and it runs — a person approved it, as
+#: Claude Code asks — a call runs only if it reads (governance rates it a read, as
+#: ``plan_mode.PlanMode`` does for ``ReAct``; a command ``governance.shell`` reads as
+#: read-only) or writes Claude's plan in its own plans folder (:data:`PLANS`, in the run's
+#: config folder); any other is refused with :data:`PLAN_WAITS` and recorded so. Approved,
+#: the plan is in the run's journal (``Journal.plan_approved``): every attempt after governs
+#: its calls as ever.
+PLAN_MODE: Final = "plan"
+PLAN_TOOL: Final = "ExitPlanMode"
+PLANS: Final = "plans"
+PLAN_WAITS: Final = (
+    f"plan mode is on: present your plan with {PLAN_TOOL} and wait for its approval; until "
+    "then only a call that reads runs"
+)
 #: Claude Code's built-in tools that reach the network outside the deployment: the tool
 #: catalog decides them (``tools.bridge.outbound``: refused until an administrator gives them a
 #: risk or an ``approve_when``), never a question to the run's user; published with no risk of
@@ -1275,6 +1292,7 @@ class Steps:
         "calls",
         "closed",
         "helped",
+        "plans",
         "runtime",
         "served",
         "settling",
@@ -1305,6 +1323,9 @@ class Steps:
         #: CLI names the subagent in the ``PreToolUse`` hook by its task's id (``agent_id``),
         #: and its permission request (``can_use_tool``) for the same call is the same helper's
         self.helped: dict[str, Helper] = {}
+        #: the folder Claude keeps its plan in, when the query is in plan mode (``_options``:
+        #: :data:`PLAN_MODE`); ``None``: it is not
+        self.plans: Path | None = None
 
     async def helper_of(self, call_id: str, given: Mapping[str, Any]) -> Helper | None:
         """The helper whose work the call ``call_id`` is, from the ``PreToolUse`` hook's input
@@ -1384,6 +1405,8 @@ def _options(
     # word in the options' ``env`` stands)
     env.setdefault(CONFIG_ENV, config_folder(runtime.tenant, runtime.user))
     env.setdefault(AUTO_MEMORY_ENV, "1")
+    if options.permission_mode == PLAN_MODE:
+        steps.plans = Path(env[CONFIG_ENV]) / PLANS
     shell = _shell(options, env)
     hooks = _with_governance(options.hooks, steps, shell)
     prompt, context = _told(options.system_prompt, context)
@@ -1517,7 +1540,7 @@ def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps, shell: Shell
     (:func:`_recorded`) after theirs — registered after them, and answering after them
     (``after_theirs``)."""
     given = dict(hooks or {})
-    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps)]
+    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps, shell)]
     recorded = _recorded(steps, shell)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
@@ -1540,11 +1563,11 @@ def _steering() -> Any:
     return harness_matcher(steered)
 
 
-def _governance(steps: Steps) -> Any:
+def _governance(steps: Steps, shell: Shell) -> Any:
     """The ``PreToolUse`` hook every tool call goes through, in every permission mode
-    (:func:`_decide`). A call it cannot decide — the catalog or the run store out of reach —
-    is refused, saying why; were the refusal to fail too, Claude Code blocks the call (the
-    matcher's ``on_failure``)."""
+    (:func:`_decide`; in plan mode, :func:`_unplanned` first). A call it cannot decide — the
+    catalog or the run store out of reach — is refused, saying why; were the refusal to fail
+    too, Claude Code blocks the call (the matcher's ``on_failure``)."""
 
     from trellis.harness.tools.convert.claude import WAITING
 
@@ -1555,6 +1578,9 @@ def _governance(steps: Steps) -> Any:
             refused = await _offline(given["tool_name"])
             if refused is not None:  # the network the catalog does not allow
                 return _decided("deny", refused)
+            held = await _unplanned(steps, shell, given, tool_use_id)
+            if held is not None:  # plan mode, and no plan approved yet
+                return _decided("deny", held)
             return await _decide(steps, given, tool_use_id)
         except Exception as exc:
             log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
@@ -1573,6 +1599,41 @@ async def _offline(name: str) -> str | None:
     runtime = current()
     assert runtime is not None  # the CLI asks inside the run it works for
     return await bridge.outbound(_spec(runtime, name))
+
+
+async def _unplanned(steps: Steps, shell: Shell, given: Any, tool_use_id: str | None) -> str | None:
+    """What a call is refused with while the query is in plan mode with no plan approved
+    (:data:`PLAN_MODE`), recorded as the run's rejected call: one that does more than read,
+    other than presenting the plan and writing it in Claude's plans folder. ``None``: it is
+    decided as ever (:func:`_decide`)."""
+    from trellis.harness.adapters.base import HELPER
+    from trellis.harness.governance.shell import EDITORS, file_of
+    from trellis.harness.hooks import Deny, denied
+    from trellis.harness.tools.convert.claude import bare
+
+    runtime = steps.runtime
+    name, args = given["tool_name"], dict(given.get("tool_input") or {})
+    plans = steps.plans
+    if plans is None or runtime.replay.journal.plan_approved or name == PLAN_TOOL:
+        return None
+    written = Path(file_of(args))
+    if name in EDITORS and ".." not in written.parts and plans in written.parents:
+        return None  # its plan, where Claude keeps it (written out: no `..` climbs out)
+    if shell.read_only(name, args):
+        return None
+    tool = bare(name)
+    found = runtime.toolbox.get(tool) if tool is not None else None
+    spec = found.spec if found is not None else _spec(runtime, name)
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    decision = await governance.check(
+        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
+    if decision.risk == "read" and HELPER not in spec.tags:
+        return None
+    outcome = denied(ToolCall(tool=spec.name, args=args), Deny(PLAN_WAITS))
+    ref = tool_use_id or str(given.get("tool_use_id") or name)
+    await bridge.observed(runtime, spec, args, outcome, ref=ref, started=time.time())
+    return str(outcome.output)
 
 
 async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
@@ -1776,6 +1837,8 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         if name in SHELLS and "agent_id" not in given:
             shell.ran(args)
         failed = given.get("hook_event_name") == FAILED_EVENT
+        if name == PLAN_TOOL and not failed:  # the plan was let through: plan mode is over
+            steps.runtime.replay.journal.plan_approved = True
         # a workflow agent's call says who made it (several workflows at once: the run's own)
         agent = (
             {k: given[k] for k in AGENT_KEYS} if given.get("agent_type") == WORKFLOW_AGENT else {}
