@@ -1423,6 +1423,29 @@ async def test_a_plan_approved_ends_plan_mode_however_the_resumed_cli_presents_i
     assert closed == ["a1"] and done.answer == "said: closed a1"
 
 
+async def test_a_plan_approved_without_a_pause_ends_plan_mode_at_once(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan whose approval needs no pause (a person's approval remembered elsewhere) lets
+    the run go on at once, governed as ever."""
+    closed.clear()
+
+    async def approved(spec: Any, args: dict[str, Any], *_: Any, **__: Any) -> ToolCall:
+        return ToolCall(tool=spec.name, args=args)
+
+    monkeypatch.setattr(claude_adapter.bridge, "asked", approved)
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-at-once"), [close_account])
+    done = await agent.run("close a1", user="u1")
+    assert done.status is RunStatus.SUCCESS, done
+    assert closed == ["a1"] and done.answer == "said: closed a1"
+
+
 async def test_a_call_governance_cannot_decide_is_refused_never_let_through(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

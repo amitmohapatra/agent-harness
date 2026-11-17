@@ -148,7 +148,7 @@ from trellis.harness.governance.shell import EDITORS, SHELLS, Shell, file_of, mo
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.hooks import Deny, denied
 from trellis.harness.host import CLAUDE_SHELLS
-from trellis.harness.journal import Pending, approvals_read, call_key, content_key
+from trellis.harness.journal import Journal, Pending, approvals_read, call_key, content_key
 from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.telemetry import gateway_headers, lasting_headers
@@ -1657,38 +1657,39 @@ async def _presented(
     args = dict(given.get("tool_input") or {})
     call_id = tool_use_id or str(given.get("tool_use_id") or PLAN_TOOL)
     journal = runtime.replay.journal
-    filed = [a for key in journal.plans for a in journal.answers.get(key, [])]
-    if any(a.get("decision") in PLAN_APPROVALS for a in filed):
-        # a person approved a plan it presented when the run paused on it: the CLI, resumed,
-        # presents it again (another id, its plan worded again)
-        journal.plan_approved = True
-        steps.started(call_id, PLAN_TOOL, args)
-        return _decided("allow")
-    asked = content_key("approve", PLAN_TOOL, args)
-    if asked not in journal.plans:
-        journal.plans.append(asked)
-    assert runtime.helpers is not None  # the query runs with the attempt's helpers
-    try:
-        with runtime.helpers.working(await steps.helper_of(call_id, given)):
-            # always a person's: the catalog's word on the tool (it only reads) is no approval;
-            # the answer is the plan's, not one call id's: the CLI, resumed, presents it again
-            decided = await bridge.asked(
-                _spec(runtime, PLAN_TOOL), args, CLAUDE_CODE, kept=True, always=True
-            )
-    except Paused:  # the run pauses: Claude stops here, and the resume goes on
-        decided = None
-    if decided is None:
-        steps.helped.pop(call_id, None)
-        return {**_decided("deny", waiting), "continue_": False, "stopReason": waiting}
-    if isinstance(decided, ToolOutcome):
-        steps.helped.pop(call_id, None)
-        return _decided("deny", str(decided.output))
+    if not _plan_approved(journal):
+        # resumed, the CLI presents its plan again (another id, worded again): a person's
+        # approval of any plan the run presented lets it through (:func:`_plan_approved`)
+        if (asked := content_key("approve", PLAN_TOOL, args)) not in journal.plans:
+            journal.plans.append(asked)
+        assert runtime.helpers is not None  # the query runs with the attempt's helpers
+        try:
+            with runtime.helpers.working(await steps.helper_of(call_id, given)):
+                # always a person's: the catalog's word on the tool (it only reads) is no
+                # approval
+                decided = await bridge.asked(
+                    _spec(runtime, PLAN_TOOL), args, CLAUDE_CODE, kept=True, always=True
+                )
+        except Paused:  # the run pauses: Claude stops here, and the resume goes on
+            steps.helped.pop(call_id, None)
+            return {**_decided("deny", waiting), "continue_": False, "stopReason": waiting}
+        if isinstance(decided, ToolOutcome):
+            steps.helped.pop(call_id, None)
+            return _decided("deny", str(decided.output))
+    else:
+        decided = ToolCall(tool=PLAN_TOOL, args=args)
     # approved: plan mode is over, whatever the CLI then makes of the tool (driven by an SDK,
     # it may answer it as failed, and Claude presents it again)
     journal.plan_approved = True
     steps.approved(tool_use_id or given.get("tool_use_id"))
     steps.started(call_id, PLAN_TOOL, decided.args)
     return _decided("allow", updated=decided.args)
+
+
+def _plan_approved(journal: Journal) -> bool:
+    """Whether a person approved a plan the run presented (``Journal.plans``)."""
+    filed = (a for key in journal.plans for a in journal.answers.get(key, []))
+    return any(a.get("decision") in PLAN_APPROVALS for a in filed)
 
 
 async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
