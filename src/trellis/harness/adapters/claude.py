@@ -103,6 +103,7 @@ from trellis.contracts import (
 )
 from trellis.harness import budget, children, skills
 from trellis.harness.adapters.base import (
+    HELPER,
     Extracted,
     HistoryIn,
     Invocation,
@@ -143,8 +144,9 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, help
 from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.bridges.resumed import RESUMED, resumed_call
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.governance.shell import SHELLS, Shell, moves
+from trellis.harness.governance.shell import EDITORS, SHELLS, Shell, file_of, moves
 from trellis.harness.history import Called, Said, Speaker
+from trellis.harness.hooks import Deny, denied
 from trellis.harness.host import CLAUDE_SHELLS
 from trellis.harness.journal import Pending, approvals_read, call_key
 from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
@@ -1569,7 +1571,7 @@ def _governance(steps: Steps, shell: Shell) -> Any:
     catalog or the run store out of reach — is refused, saying why; were the refusal to fail
     too, Claude Code blocks the call (the matcher's ``on_failure``)."""
 
-    from trellis.harness.tools.convert.claude import WAITING
+    from trellis.harness.tools.convert.claude import WAITING, bare
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         if steps.settling:  # the run paused: the model's reply to the pause takes no step
@@ -1578,7 +1580,7 @@ def _governance(steps: Steps, shell: Shell) -> Any:
             refused = await _offline(given["tool_name"])
             if refused is not None:  # the network the catalog does not allow
                 return _decided("deny", refused)
-            held = await _unplanned(steps, shell, given, tool_use_id)
+            held = await _unplanned(steps, shell, given, tool_use_id, bare(given["tool_name"]))
             if held is not None:  # plan mode, and no plan approved yet
                 return _decided("deny", held)
             return await _decide(steps, given, tool_use_id)
@@ -1601,16 +1603,14 @@ async def _offline(name: str) -> str | None:
     return await bridge.outbound(_spec(runtime, name))
 
 
-async def _unplanned(steps: Steps, shell: Shell, given: Any, tool_use_id: str | None) -> str | None:
+async def _unplanned(
+    steps: Steps, shell: Shell, given: Any, tool_use_id: str | None, tool: str | None
+) -> str | None:
     """What a call is refused with while the query is in plan mode with no plan approved
     (:data:`PLAN_MODE`), recorded as the run's rejected call: one that does more than read,
     other than presenting the plan and writing it in Claude's plans folder. ``None``: it is
-    decided as ever (:func:`_decide`)."""
-    from trellis.harness.adapters.base import HELPER
-    from trellis.harness.governance.shell import EDITORS, file_of
-    from trellis.harness.hooks import Deny, denied
-    from trellis.harness.tools.convert.claude import bare
-
+    decided as ever (:func:`_decide`). ``tool``: the harness tool it calls, when it calls one
+    (``bare``)."""
     runtime = steps.runtime
     name, args = given["tool_name"], dict(given.get("tool_input") or {})
     plans = steps.plans
@@ -1621,7 +1621,6 @@ async def _unplanned(steps: Steps, shell: Shell, given: Any, tool_use_id: str | 
         return None  # its plan, where Claude keeps it (written out: no `..` climbs out)
     if shell.read_only(name, args):
         return None
-    tool = bare(name)
     found = runtime.toolbox.get(tool) if tool is not None else None
     spec = found.spec if found is not None else _spec(runtime, name)
     governance = runtime.agent.harness._governance(runtime.tenant)
