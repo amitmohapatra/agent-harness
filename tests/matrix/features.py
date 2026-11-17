@@ -888,7 +888,8 @@ async def credentials(w: World) -> None:
         router.get("http://erp.test/orders/7").mock(side_effect=answer)
         erp = openapi(ERP_DOC, headers={"Authorization": "Bearer fixed"})
         o = (await w.go([Desk().lookup(), erp], [("get_order", {"id": "7"})])).succeeded()
-    assert sent == [f"Bearer t-erp.test-{o.record.user_id}"], sent
+    user = o.record.user_id or o.record.on_behalf_of  # a fired run's user is who it acts for
+    assert sent == [f"Bearer t-erp.test-{user}"], sent
     assert "t-erp.test" not in json.dumps(o.record.model_dump(mode="json"))
 
 
