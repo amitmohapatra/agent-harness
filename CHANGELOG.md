@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: an OpenAI `SandboxAgent`'s shell runs unasked, as every framework's shell does
+
+A `SandboxAgent`'s `exec_command` and `write_stdin` asked a person as any write, while Claude
+Code's and Kimi Code's `Bash`, Deep Agents' `execute` and the harness's `sandbox_exec` run in
+the run's sandbox unasked and announced. On the skills benchmark the OpenAI agent's chats
+waited on a person to `cat` a skill file (5 of 30 cases right). They now run as the others do:
+announced, recorded, unasked — a command that reads and one that writes alike; on a host
+`TRELLIS_HOST_EXECUTION=deny` still refuses the SDK's local sandbox. The catalog's risk or an
+`approve_when` still asks (an `irreversible` shell is held at the SDK's own gate, its approved
+call continuing the paused run), and `apply_patch` asks as a write, as `Write` does.
+
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 
 In the accuracy run, a Kimi Code session now and then opened without its connection to the

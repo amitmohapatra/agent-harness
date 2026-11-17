@@ -562,6 +562,7 @@ def _governing(kind: type) -> type:
         governed,
         held,
         own_spec,
+        shell_of_sandbox,
     )
 
     class Governing(kind):  # type: ignore[misc,valid-type]
@@ -575,7 +576,9 @@ def _governing(kind: type) -> type:
             if runtime is None or runtime.agent.hooks:
                 return made
             return [
-                held(tool, own_spec(runtime, tool)) if isinstance(tool, FunctionTool) else tool
+                held(tool, own_spec(runtime, tool), confined=shell_of_sandbox(tool))
+                if isinstance(tool, FunctionTool)
+                else tool
                 for tool in made
             ]
 

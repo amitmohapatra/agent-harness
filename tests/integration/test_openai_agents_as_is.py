@@ -521,6 +521,33 @@ async def test_a_run_with_tool_hooks_governs_the_sandboxs_tools_through_them(
     assert "no shell here" in str(model.outputs()[-1])
 
 
+@pytest.mark.host_execution
+async def test_a_sandbox_shell_runs_unasked_and_announced_as_every_frameworks_shell(
+    harness: Harness,
+) -> None:
+    """A ``SandboxAgent``'s shell (``exec_command``) is the run's sandbox shell, as Claude
+    Code's and Kimi Code's ``Bash``, Deep Agents' ``execute`` and ``sandbox_exec`` are: a
+    command that reads and one that writes run without asking a person, each announced (the
+    skills suite's OpenAI chats waited on a person to read a skill file)."""
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    model = ScriptedModel(
+        [
+            ("exec_command", {"cmd": "echo kept > f.txt"}),
+            ("exec_command", {"cmd": "cat f.txt"}),
+            "done",
+        ]
+    )
+    target = SandboxAgent(name="box", instructions="Work.", model=model, capabilities=[Shell()])
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = harness.wrap(target, id="shell", framework_options={"run_config": config})
+    events = [e async for e in agent.stream("go", user="u")]
+    assert not [e for e in events if e.type is RunEventType.INTERRUPT]
+    assert events[-1].type is RunEventType.RUN_FINISHED and "kept" in str(model.outputs()[-1])
+
+
 # --------------------------------------------------------------------------- pass-throughs
 @pytest.mark.parametrize("kind", ["async_sqlite", "advanced_sqlite", "sqlalchemy"])
 async def test_the_sdks_session_backends_keep_the_conversation(
@@ -601,9 +628,9 @@ async def test_an_sse_server_and_a_server_managers_servers_are_governed_as_any_s
 async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_sandbox(
     harness: Harness,
 ) -> None:
-    """A ``SandboxAgent``'s shell, undeclared, asks a person at the SDK's own gate: the
-    approved call continues the SDK's paused run — the model is not asked again, and the file
-    the first command wrote is there for the second."""
+    """A ``SandboxAgent``'s shell the catalog says asks (``irreversible``) is held at the SDK's
+    own gate: the approved call continues the SDK's paused run — the model is not asked again,
+    and the file the first command wrote is there for the second."""
     from agents.sandbox import SandboxAgent, SandboxRunConfig
     from agents.sandbox.capabilities import Shell
     from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
@@ -617,7 +644,8 @@ async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_san
     )
     target = SandboxAgent(name="box", instructions="Work.", model=model, capabilities=[Shell()])
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(target, id="held", framework_options={"run_config": config})
+    governed = declaring(harness, exec_command="irreversible")
+    agent = governed.wrap(target, id="held", framework_options={"run_config": config})
     result = await agent.run("go", user="u")
     for command in ("echo kept > f.txt", "cat f.txt"):
         assert result.interrupt is not None and result.interrupt.tool_call is not None

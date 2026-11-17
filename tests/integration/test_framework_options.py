@@ -266,11 +266,8 @@ async def test_an_openai_sandbox_agent_runs_wrapped_with_its_run_config_as_an_op
     agent = arm(
         harness.wrap(target, id="boxed", framework_options={"run_config": config}), [lookup]
     )
-    # its shell is governed as the agent's own tools: undeclared, its call asks a person
-    asked = await agent.run("tides?", user="u")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "exec_command"
-    result = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u")
+    # its shell is the run's sandbox shell: it runs unasked, announced
+    result = await agent.run("tides?", user="u")
     assert result.status is RunStatus.SUCCESS and "boxed" in str(result.answer), result
 
 

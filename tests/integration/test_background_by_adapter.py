@@ -455,17 +455,16 @@ async def test_b_a_kept_sandbox_session_is_each_conversations_and_its_shell_is_g
 ) -> None:
     """A sandbox session on ``h.wrap`` would be one sandbox for every user: refused there. Kept
     per conversation and given per run, another user's sandbox has no such process. And the
-    SDK's shell tools — made inside ``Runner.run`` — are governed as the agent's own: undeclared,
-    a call asks a person; declared, it runs on the run's stream as a tool call."""
+    SDK's shell tools — made inside ``Runner.run`` — are the run's sandbox shell: undeclared, a
+    command runs unasked, announced; declared, it runs on the run's stream as a tool call."""
     with pytest.raises(ConfigurationError, match="one sandbox"):
         shell_chat(harness, Shelled([]), SandboxRunConfig(session=session))
     target = SandboxAgent(name="box", instructions="Work.", capabilities=[Shell()])
-    target.model = Shelled([("exec_command", {"cmd": "echo hi"})])
+    target.model = Shelled([("exec_command", {"cmd": "echo hi"}), "said hi"])
     undeclared = Harness(config=Settings())
     async with undeclared:
-        asked = await undeclared.wrap(target, id="ask").run("hi", user=USER, **kept(session))
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "exec_command"
+        ran = await undeclared.wrap(target, id="ask").run("hi", user=USER, **kept(session))
+    assert ran.status is RunStatus.SUCCESS and ran.interrupt is None
     gate = tmp_path / "gate"
     model = Shelled(shell_turns(gate)[:2])
     agent = shell_chat(harness, model)

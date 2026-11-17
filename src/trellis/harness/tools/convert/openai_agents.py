@@ -168,7 +168,9 @@ async def _invoked(
     carried = Carried(run)
     try:
         outcome = await bridge.call(
-            Tool(own_spec(runtime, tool), carried), args, call_id=context.tool_call_id
+            Tool(own_spec(runtime, tool), carried, confined=shell_of_sandbox(tool)),
+            args,
+            call_id=context.tool_call_id,
         )
     except WaitsInside as waiting:
         return waiting.answer
@@ -197,9 +199,10 @@ async def _handed_on(
 #: What a ``SandboxAgent`` capability's own tools do, as governance sees them (the tool
 #: catalog's word overrides it), for a tool the SDK's capability made (:data:`CAPABILITY_TOOL`;
 #: a function of the agent's own of the same name says nothing): loading a skill and viewing an
-#: image read; a command run, typed into, or a patch applied writes — asked once a
-#: conversation, as any write, not at every call. A team that wants every command approved
-#: gives ``exec_command`` the risk ``irreversible`` (or an ``approve_when``) in the catalog.
+#: image read; a command run, typed into, or a patch applied writes — a command announced
+#: (:data:`CAPABILITY_SHELLS`), a patch asked once a conversation, as any write. A team that
+#: wants every command approved gives ``exec_command`` the risk ``irreversible`` (or an
+#: ``approve_when``) in the catalog.
 CAPABILITY_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "load_skill": "read",
     "view_image": "read",
@@ -209,6 +212,17 @@ CAPABILITY_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 }
 #: The mark of a tool a sandbox capability made (``adapters.openai_agents._governing``).
 CAPABILITY_TOOL: Final = "_trellis_capability_tool"
+#: A sandbox capability's shell: its commands run in the run's sandbox, as Claude Code's and
+#: Kimi Code's ``Bash``, Deep Agents' ``execute`` and the harness's ``sandbox_exec`` do — run
+#: unasked and announced (``Tool.confined``), whatever they do; the catalog's risk or
+#: ``approve_when`` still asks. A patch it applies to files asks, as their ``Write`` does.
+CAPABILITY_SHELLS: Final = frozenset({"exec_command", "write_stdin"})
+
+
+def shell_of_sandbox(tool: Any) -> bool:
+    """Whether ``tool`` is a sandbox capability's shell (:data:`CAPABILITY_SHELLS`, made by the
+    capability: a function of the agent's own of the same name says what it does itself)."""
+    return getattr(tool, CAPABILITY_TOOL, False) and tool.name in CAPABILITY_SHELLS
 
 
 def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:
@@ -278,17 +292,19 @@ async def _told(
     return told if said is None else said
 
 
-def held(tool: Any, spec: ToolSpec) -> Any:
+def held(tool: Any, spec: ToolSpec, *, confined: bool = False) -> Any:
     """``tool`` (a ``FunctionTool``) held at the SDK's own approval gate (``needs_approval``)
     whenever governance asks a person about a call of it (``bridge.asks_first``: asked then,
     governance's question): the SDK pauses its run before the call and keeps its
     ``RunState``, and the resume continues it — the approved call runs, the model is not asked
-    again. A tool with a gate of its own keeps it; anything else is returned as it is."""
+    again. A tool with a gate of its own keeps it; anything else is returned as it is. A
+    ``confined`` one (a sandbox's shell) is held only where governance asks of it as it runs
+    (:func:`bridge.asks_first`)."""
     if not isinstance(tool, FunctionTool) or tool.needs_approval is not False:
         return tool
 
     async def asks(_context: Any, args: dict[str, Any], call_id: str) -> bool:
-        if not await bridge.asks_first(spec, args):
+        if not await bridge.asks_first(spec, args, confined=confined):
             return False
         runtime = current()
         assert runtime is not None and runtime.pending is not None  # it asked: the run's pause

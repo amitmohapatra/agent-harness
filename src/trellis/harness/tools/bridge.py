@@ -360,17 +360,20 @@ def remembered(runtime: Runtime, tool: str) -> bool:
     return reach(tool, None) in runtime.replay.journal.remembered
 
 
-async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
+async def asks_first(spec: ToolSpec, args: dict[str, Any], *, confined: bool = False) -> bool:
     """For a framework that holds a call at its own approval gate before it runs it (OpenAI
     Agents' ``needs_approval``): whether governance asks a person about this call, as it would
     when the call runs — and if so, asked now (the run's pause, governance's question), so the
     framework keeps its run where it paused and its resume runs the call, instead of a new
     attempt that asks the model again. Not for a call governance lets run, one allowed for the
     conversation (or its schedule), or one already approved or answered: the call decides those
-    as ever. Only a tool the harness runs is held (never a confined one: ``_gated``)."""
+    as ever. A ``confined`` tool (a sandbox's shell) asks only where its rule or its risk past
+    a write does, as when it runs (``Decision.unasked``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     decision = await _checked(runtime, spec, args)
+    if confined:
+        decision = decision.unasked()
     journal = runtime.replay.journal
     if (
         not decision.asks
