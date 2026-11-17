@@ -286,6 +286,8 @@ class ACPSession(Keeper[Background]):
         self.process: Any = None
         #: the harness's MCP server, as ACP hands it to the agent (none: the run has no tool)
         self.servers: list[Any] = []
+        #: set once the agent reached that server (``tools.convert.mcp.Served.reached``)
+        self.reached: asyncio.Event | None = None
         self.session_id: str | None = None
         #: the session holds what came before (one resumed, loaded or forked: :meth:`opened`)
         self.continued = False

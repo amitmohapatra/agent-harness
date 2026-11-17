@@ -157,6 +157,56 @@ async def test_the_harness_mcp_server_refuses_a_request_without_its_token() -> N
         assert refused.status_code == 401
 
 
+async def test_the_harness_mcp_server_says_when_a_client_reached_it() -> None:
+    """Only a request carrying its token counts as its client connecting."""
+    import httpx
+
+    from trellis.harness.tools.convert import mcp as convert
+
+    async with convert.served(convert.convert([])) as served, httpx.AsyncClient() as client:
+        await client.post(served.url, json={})
+        assert not served.reached.is_set()
+        await client.post(served.url, json={}, headers=served.headers)
+        assert served.reached.is_set()
+
+
+async def test_a_kimi_that_never_reached_the_harness_tools_is_started_again_then_fails(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Kimi whose connection to the harness's MCP server failed would answer without the
+    run's tools, as if it had none (the accuracy run's first Kimi session): its process is
+    started again, said on the run, and when the next one does not connect either the run
+    fails saying why, rather than answering without its data."""
+    monkeypatch.setattr(acp, "CONNECT_SECONDS", 0.2)
+    script = [{"text": "I have no sales data"}]
+    agent = arm(
+        harness.wrap(fake(tmp_path, script, env={"FAKE_ACP_CONNECT": "never"}), id="cut_off"),
+        [lookup],
+    )
+    events = [e async for e in agent.stream("how many sold?", user="u1")]
+    warnings = [e.data["message"] for e in events if e.data.get("code") == "acp_tools"]
+    assert warnings == ["Kimi Code did not connect to the harness's tools: started again"]
+    assert len(recorded(tmp_path)["sessions"]) == 2 and "prompts" not in recorded(tmp_path)
+    result = await agent.run("how many sold?", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "did not connect to the harness's tools (2 tries)" in result.error.message
+
+
+async def test_an_agent_that_connects_only_when_it_calls_is_not_waited_for(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Only an agent whose profile says it connects as a session opens is held to it: another
+    ACP agent may reach the server at its first call, or never in a turn with no call."""
+    from dataclasses import replace
+
+    lazy = replace(KIMI, connects=False)
+    script = [{"text": "hello"}]
+    target = fake(tmp_path, script, env={"FAKE_ACP_CONNECT": "never"}, profile=lazy)
+    agent = arm(harness.wrap(target, id="lazy"), [lookup])
+    result = await agent.run("hi", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "hello"
+
+
 async def test_an_approval_stops_the_turn_and_a_resume_continues_the_session(
     harness: Harness, tmp_path: Path
 ) -> None:

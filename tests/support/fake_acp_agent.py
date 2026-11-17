@@ -284,6 +284,7 @@ class FakeAgent:
             raise RequestError.auth_required({"why": "log in first"})
         session = f"session_{uuid.uuid4().hex[:8]}"
         self.servers[session] = list(mcp_servers or [])
+        await self.connected(session)
         save(session, state(session))
         if CONFIG.get("default_permission_mode"):
             mode = CONFIG["default_permission_mode"]
@@ -308,6 +309,7 @@ class FakeAgent:
         if not (session_dir(session_id) / "state.json").exists():
             raise RequestError.resource_not_found(session_id)
         self.servers[session_id] = list(mcp_servers or [])
+        await self.connected(session_id)
         record("sessions", {"how": "resume", "id": session_id})
         return ResumeSessionResponse(modes=modes())
 
@@ -318,6 +320,7 @@ class FakeAgent:
             raise RequestError.resource_not_found(session_id)
         forked = f"session_{uuid.uuid4().hex[:8]}"
         self.servers[forked] = list(mcp_servers or [])
+        await self.connected(forked)
         save(forked, state(session_id))
         record("sessions", {"how": "fork", "id": forked, "from": session_id})
         return ForkSessionResponse(session_id=forked, modes=modes())
@@ -328,6 +331,7 @@ class FakeAgent:
         if not (session_dir(session_id) / "state.json").exists():
             raise RequestError.resource_not_found(session_id)
         self.servers[session_id] = list(mcp_servers or [])
+        await self.connected(session_id)
         for said in state(session_id)["said"]:  # the history, replayed
             await self.conn.session_update(
                 session_id,
@@ -812,6 +816,21 @@ class FakeAgent:
         if text == CUT_SHORT:  # the run ended while it ran: the turn ends with it
             raise Stopped(text)
         return text
+
+    async def connected(self, session_id: str) -> None:
+        """The harness's MCP server reached as the session opens, as Kimi Code connects to its
+        servers before answering (nothing recorded); never with ``FAKE_ACP_CONNECT=never``, a
+        Kimi whose connection failed."""
+        from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        server = next((s for s in self.servers[session_id] if s.name == "trellis"), None)
+        if server is None or os.environ.get("FAKE_ACP_CONNECT") == "never":
+            return
+        http = create_mcp_http_client(headers={h.name: h.value for h in server.headers})
+        async with http, Client(streamable_http_client(server.url, http_client=http)):
+            pass
 
     async def called(
         self, session_id: str, tool: str, args: dict[str, Any], *, listed: bool = False

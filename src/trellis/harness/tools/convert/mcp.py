@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 import mcp_types as types
@@ -154,10 +154,12 @@ def _result(text: str, *, error: bool) -> types.CallToolResult:
 
 @dataclass(frozen=True, slots=True)
 class Served:
-    """Where an attempt's server answers, and the header every request must carry."""
+    """Where an attempt's server answers, the header every request must carry, and whether a
+    request carrying it came (``reached``: the client connected)."""
 
     url: str
     token: str
+    reached: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def headers(self) -> dict[str, str]:
@@ -195,11 +197,14 @@ async def served(server: Tools) -> AsyncIterator[Served]:
         streamable_http_path=PATH, stateless_http=True, json_response=True
     )
     expected = f"Bearer {token}".encode()
+    reached = asyncio.Event()
 
     async def guarded(scope: Any, receive: Any, send: Any) -> None:
-        if scope["type"] == "http" and dict(scope["headers"]).get(b"authorization") != expected:
-            await Response(status_code=401)(scope, receive, send)
-            return
+        if scope["type"] == "http":
+            if dict(scope["headers"]).get(b"authorization") != expected:
+                await Response(status_code=401)(scope, receive, send)
+                return
+            reached.set()
         await app(scope, receive, send)
 
     config = uvicorn.Config(
@@ -219,7 +224,7 @@ async def served(server: Tools) -> AsyncIterator[Served]:
             while not web.started:  # noqa: ASYNC110 - uvicorn says so with a flag only
                 await asyncio.sleep(0.01)
         port = web.servers[0].sockets[0].getsockname()[1]
-        yield Served(f"http://127.0.0.1:{port}{PATH}", token)
+        yield Served(f"http://127.0.0.1:{port}{PATH}", token, reached)
     finally:
         await server.stopped()
         web.should_exit = True

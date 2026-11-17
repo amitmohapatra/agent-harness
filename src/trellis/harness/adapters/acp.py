@@ -156,6 +156,11 @@ ACP_MODEL: Final = "acp"
 #: how often.
 SETTLE_SECONDS: Final = 2.0
 SETTLE_STEP: Final = 0.1
+#: How long, once its session opened, an agent that connects to its MCP servers as a session
+#: opens (``Profile.connects``) has to have reached the harness's; and how many processes are
+#: started for a turn before one that never does fails it.
+CONNECT_SECONDS: Final = 10.0
+CONNECT_TRIES: Final = 2
 #: The most MCP tools the agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
 #: The most terminals of a sandboxed run whose output is kept past their release.
@@ -367,6 +372,10 @@ class Profile:
     #: user's own, never one shared with another user's (sessions, caches)
     homed: Callable[[Mapping[str, str], str, tuple[str, str]], str] | None = None
     label: str = THE_AGENT
+    #: it connects to the MCP servers a session is given while it opens the session (Kimi Code
+    #: waits for them before its first model request): one that did not reach the harness's
+    #: would answer without the run's tools, so it is started again (:data:`CONNECT_TRIES`)
+    connects: bool = False
 
 
 def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> None:
@@ -672,6 +681,7 @@ KIMI: Final = Profile(
     allows=kimi_allows,
     homed=kimi_home,
     label=KIMI_CODE,
+    connects=True,
 )
 
 
@@ -1079,10 +1089,35 @@ class ACPAdapter(Keeps):
                 found = None
         resumed = found is not None
         if found is None:
-            found = await self._started(key, form, started, run)
+            found = await self._connected(key, form, started, run)
             resumed = found.continued
         shared.said(self.live, runtime, CODE)
         return found, resumed
+
+    async def _connected(
+        self, key: str | None, form: str, started: Started, run: Invocation
+    ) -> ACPSession:
+        """A new process for the turn (:meth:`_started`) whose agent reached the harness's
+        tools. An agent that connects to its MCP servers as a session opens
+        (``Profile.connects``) and did not reach the harness's in :data:`CONNECT_SECONDS` would
+        answer without them, as if the run had no tools: its process ends, said on the run,
+        and another starts; at :data:`CONNECT_TRIES` the attempt fails instead."""
+        profile = started.target.profile
+        label = profile.label if profile is not None else THE_AGENT
+        for tried in range(CONNECT_TRIES):
+            if tried:
+                run.runtime.events.warning(
+                    "acp_tools", f"{label} did not connect to the harness's tools: started again"
+                )
+            session = await self._started(key, form, started, run)
+            if session.reached is None or profile is None or not profile.connects:
+                return session
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(CONNECT_SECONDS):
+                    await session.reached.wait()
+                return session
+            await session.close()
+        raise ACPRunError(f"{label} did not connect to the harness's tools ({CONNECT_TRIES} tries)")
 
     async def _started(
         self, key: str | None, form: str, started: Started, run: Invocation
@@ -1118,7 +1153,7 @@ class ACPAdapter(Keeps):
         def served(relay: ACPSession) -> Any:
             from trellis.harness.tools.convert import mcp
 
-            return _harness_server(mcp.relayed(tools, relay.call))
+            return _harness_server(mcp.relayed(tools, relay.call), relay)
 
         await session.start(spawned, served if tools is not None else None)
         try:
@@ -1261,13 +1296,15 @@ def _server(config: Mapping[str, Any]) -> Any:
 
 
 @contextlib.asynccontextmanager
-async def _harness_server(server: Any) -> AsyncIterator[Any]:
-    """The harness's tools as an MCP server for the attempt, as ACP hands it to the agent."""
+async def _harness_server(server: Any, relay: ACPSession) -> AsyncIterator[Any]:
+    """The harness's tools as an MCP server for the attempt, as ACP hands it to the agent
+    (``relay.reached``: set when the agent reaches it)."""
     from acp.schema import HttpHeader, HttpMcpServer
 
     from trellis.harness.tools.convert import mcp as convert
 
     async with convert.served(server) as served:
+        relay.reached = served.reached
         headers = [HttpHeader(name=k, value=v) for k, v in served.headers.items()]
         yield HttpMcpServer(type="http", name=SERVER, url=served.url, headers=headers)
 

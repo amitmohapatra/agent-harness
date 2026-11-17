@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a Kimi that never reached the harness's tools no longer answers without them
+
+In the accuracy run, a Kimi Code session now and then opened without its connection to the
+harness's MCP server: its model was offered none of the run's tools, searched the machine with
+its own shell, and answered wrong as if the data did not exist. The harness's server now says
+when Kimi reached it (`Served.reached`), and an agent that connects to its MCP servers as a
+session opens (`Profile.connects`, Kimi's) has 10 seconds after that to have done so
+(`CONNECT_SECONDS`). One that did not is started again, said on the run as an `acp_tools`
+warning; when the next one does not connect either the run fails saying why
+(`CONNECT_TRIES`). An ACP agent that connects only at its first call is not held to it.
+
 ### Fixed: a run's end no longer scans every run the in-process store keeps
 
 Ending a run asks the store for its open children, once for each open status. `LocalRuns`
