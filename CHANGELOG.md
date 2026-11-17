@@ -5,6 +5,34 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: the in-process run store follows the contracts' rules (`LocalRuns`)
+
+Built on trellis-contracts' unreleased `main` (0.8.0 to be) and the agent-runs SDK beside it;
+each rule below was a copy in `runs.py` and is now read from the contracts.
+
+* **A schedule fired in process queues the run agent-runs queues** (`Schedule.run_start`).
+  Three things change on such a run's record: `user_id` is `None`, where it was
+  `on_behalf_of` (the run still acts for `on_behalf_of`: `Runtime.user`, its memory and its
+  files are that person's, as on agent-runs); it carries the fire's `idempotency_key`
+  (`<schedule_id>@<fire_time in UTC>`, the key `FireResult.idempotency_key` already gave);
+  and its `metadata` gains `schedule_name`, `fire_time` (UTC) and `created_by` beside
+  `schedule_id`. Code that read `record.user_id` of a scheduled run reads
+  `record.on_behalf_of`.
+* **A run moves as `RunRecord.moved` moves it**, the rule agent-runs follows. A status never
+  becomes itself: a repeated `finish` to the status the run already ended in is a
+  `ConflictError` (`a SUCCESS run cannot become SUCCESS`) and changes nothing, where
+  `LocalRuns` took it and wrote the second output over the first. The pipeline already reads
+  such a refusal back and goes on with the run as recorded. A checkpoint an attempt saves (a
+  heartbeat's, a release's) is kept without a move. The refusal's message is the contracts'
+  (`run <id>: a <STATUS> run cannot become <STATUS>`).
+* `is_pause_signal` is imported from `trellis.contracts`.
+* Nothing to change for the dependencies' other changes: the harness emits an `error` only
+  on `RUN_ERROR` and a failed `RUN_FINISHED`, its deadlines are timezone-aware, and it reads
+  no stored record itself (the SDK reads agent-runs' with `RunRecord.read` and
+  `Schedule.read`). `agent.resume(..., remember="always")` on an interrupt with no tool call
+  is refused (`ConfigurationError`: `only an approval of a tool call is remembered beyond its
+  call`), as `remember="run"` was, by the SDK's `answer_problem`.
+
 ### Fixed: a run's children end with it, each on its own
 
 * **Children:** every place a run ends — answered, failed, out of time, cancelled, its hold

@@ -27,8 +27,8 @@ MAX_COMPLEXITY = 34
 MAX_FUNCTION_LINES = 198
 #: how many functions may exceed a complexity of 15
 MAX_OVER_15 = 63
-#: the mean (4.0723 today) must not drift upwards
-MAX_MEAN_COMPLEXITY = 4.08
+#: the mean (4.0637 today) must not drift upwards
+MAX_MEAN_COMPLEXITY = 4.07
 
 _BRANCHING = (
     ast.If,

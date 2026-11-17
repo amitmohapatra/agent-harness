@@ -65,6 +65,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
+from pydantic import ValidationError
 
 from trellis.contracts import (
     AgentError,
@@ -79,7 +80,6 @@ from trellis.contracts import (
     RunStatus,
     Schedule,
     ScheduleSpec,
-    new_id,
 )
 from trellis.contracts.ids import now
 from trellis.runs import (
@@ -452,8 +452,7 @@ class LocalRuns:
         if self._in_callers_process(found):
             return self._hold(found, worker_id, lease_seconds, checkpoint)
         record = self._fenced(run_id, worker_id, tenant)
-        if checkpoint is not None:
-            record = self._move(record, record.status, checkpoint=checkpoint)
+        record = self._saved(record, checkpoint)
         if run_id in self._cancelling:  # asked to stop: the lease is not extended
             return self._leased(record, worker_id, self._leases[run_id][1])
         return self._lease(run_id, worker_id, lease_seconds)
@@ -474,14 +473,10 @@ class LocalRuns:
                     f"{worker_id} does not hold {run_id}", code="LEASE_LOST", status=409
                 )
             del self._holds[run_id]
-            if checkpoint is not None:
-                found = self._move(found, found.status, checkpoint=checkpoint)
-            return found
+            return self._saved(found, checkpoint)
         record = self._fenced(run_id, worker_id, tenant)
         del self._leases[run_id]
-        if checkpoint is not None:
-            record = self._move(record, record.status, checkpoint=checkpoint)
-        return self._requeued(record)
+        return self._requeued(self._saved(record, checkpoint))
 
     async def cancel(
         self,
@@ -537,7 +532,6 @@ class LocalRuns:
         moved = self._move(
             record,
             RunStatus.QUEUED if requeue else RunStatus.RUNNING,
-            awaiting=None,
             last_resolution=resolution,
             attempt=record.attempt + 1,
             **placed,
@@ -665,8 +659,7 @@ class LocalRuns:
             raise LeaseLostError(
                 f"{record.run_id} is held by another process", code="LEASE_LOST", status=409
             )
-        if checkpoint is not None:
-            record = self._move(record, record.status, checkpoint=checkpoint)
+        record = self._saved(record, checkpoint)
         until = moment + timedelta(seconds=min(lease_seconds, MAX_HOLD_SECONDS))
         self._holds[record.run_id] = (holder, until)
         return self._leased(record, holder, until)
@@ -705,33 +698,46 @@ class LocalRuns:
         self._queue.append(run_id)
         self._queued.add(run_id)
 
+    def _saved(self, record: RunRecord, checkpoint: dict[str, Any] | None) -> RunRecord:
+        """The run with the ``checkpoint`` its attempt saved (as it is with none): no move,
+        its status and its working time as they were."""
+        if checkpoint is None:
+            return record
+        saved = RunRecord.model_validate(
+            {**dict(record), "checkpoint": checkpoint, "updated_at": datetime.now(UTC)}
+        )
+        self._runs[saved.run_id] = saved
+        return saved
+
     def _move(
         self, record: RunRecord, status: RunStatus, *, keep_checkpoint: bool = False, **changes: Any
     ) -> RunRecord:
-        if record.status is not status and not record.status.can_become(status):
-            raise _conflict(f"run {record.run_id}: {record.status} cannot become {status}")
-        if status.final:  # an ending clears what the run waited on and would resume from
-            changes["awaiting"] = None
-            if not keep_checkpoint:  # unless its caller keeps it, to rewind it from
-                changes["checkpoint"] = None
-            self._cancelling.pop(record.run_id, None)
+        """The run moved to ``status`` as the contracts move a record (``RunRecord.moved``,
+        the rule agent-runs follows): a move they refuse is a ``ConflictError``, a status that
+        becomes itself among them, and changes nothing."""
         moment = datetime.now(UTC)
-        if status is not RunStatus.RUNNING:  # a hold is on a running run only
-            held = self._holds.pop(record.run_id, None)
-            if status is RunStatus.PAUSED and held is not None and held[0] is not None:
-                self._held_before.add(record.run_id)
-            elif status.final:
-                self._held_before.discard(record.run_id)
-        since = self._running_since.pop(record.run_id, None)
-        if since is not None and status is not RunStatus.RUNNING:  # it stops working
+        since = self._running_since.get(record.run_id)
+        if since is not None:  # it stops working: no running run moves to RUNNING
             changes["worked_seconds"] = record.worked_seconds + (moment - since).total_seconds()
-        elif status is RunStatus.RUNNING:
-            self._running_since[record.run_id] = since or moment
-        moved = RunRecord.model_validate(
-            {**record.model_dump(), **changes, "status": status, "updated_at": moment}
-        )
+        try:
+            moved = record.moved(
+                status, keep_checkpoint=keep_checkpoint, updated_at=moment, **changes
+            )
+        except ValidationError:
+            raise
+        except ValueError as exc:
+            raise _conflict(f"run {record.run_id}: {exc}") from exc
         self._runs[moved.run_id] = moved
+        self._running_since.pop(moved.run_id, None)
+        if status is RunStatus.RUNNING:
+            self._running_since[moved.run_id] = moment
+        else:  # a hold is on a running run only
+            held = self._holds.pop(moved.run_id, None)
+            if status is RunStatus.PAUSED and held is not None and held[0] is not None:
+                self._held_before.add(moved.run_id)
         if status.final:
+            self._cancelling.pop(moved.run_id, None)
+            self._held_before.discard(moved.run_id)
             self._finished[moved.run_id] = time.monotonic()
             self._finished.move_to_end(moved.run_id)
             self._forget()
@@ -805,27 +811,14 @@ class LocalRuns:
             self._fire(schedule, now, now)
 
     def _fire(self, schedule: Schedule, tick: datetime, now: datetime) -> FireResult:
-        """Queue ``schedule``'s run for ``tick`` (a repeated tick answers the run it queued)
-        and advance the schedule past ``now``."""
-        key = f"{schedule.schedule_id}@{tick.astimezone(UTC).isoformat()}"
+        """Queue ``schedule``'s run for ``tick``, the one agent-runs queues
+        (``Schedule.run_start``; a repeated tick answers the run it queued), and advance the
+        schedule past ``now``."""
+        start = schedule.run_start(fire_time=tick, thread_id=_thread(schedule))
+        key = start.idempotency_key
+        assert key is not None
         run_id = self._fired.get(key)
         if run_id is None:
-            start = RunStart(
-                run_id=new_id("run_"),
-                tenant_id=schedule.tenant_id,
-                agent_id=schedule.agent_id,
-                user_id=schedule.on_behalf_of,
-                on_behalf_of=schedule.on_behalf_of,
-                thread_id=_thread(schedule),
-                workspace_id=schedule.workspace_id,
-                input=schedule.input,
-                timeout_seconds=schedule.timeout_seconds,
-                agent_version=schedule.agent_version,
-                # as agent-runs fires it: the schedule's metadata, the fire's own keys over it
-                metadata={**schedule.metadata, "schedule_id": schedule.schedule_id},
-                priority=getattr(schedule, "priority", 0),
-                concurrency_key=getattr(schedule, "concurrency_key", None),
-            )
             run_id = self._fired[key] = self._start(start, RunStatus.QUEUED).run_id
             self._fired_by_run[run_id] = key
             schedule = self._schedules[schedule.schedule_id] = schedule.model_copy(

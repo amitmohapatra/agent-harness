@@ -430,9 +430,13 @@ run options as `start`, and every fired run gets them — agent-runs and `LocalR
 | `priority=` | `RunStart.priority` | `ScheduleSpec.priority` | `priority` |
 | `concurrency_key=` (`start`: by default `thread:<conversation>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
 
-agent-runs copies a schedule's `metadata` into each fired run's `RunStart.metadata`, its own
-keys (`schedule_id`...) laid over it, so a worker reads a scheduled run's choices exactly as a
-started run's. `priority=` and `concurrency_key=` need trellis-contracts 0.6.1 or later: with an
+A fired run is the one the contracts build for its schedule (`Schedule.run_start`), from
+agent-runs and from `LocalRuns` alike: the schedule's `metadata` is copied into the run's
+`RunStart.metadata`, the fire's own keys (`schedule_id`, `schedule_name`, `fire_time` in UTC,
+`created_by`) laid over it, so a worker reads a scheduled run's choices exactly as a started
+run's; its `idempotency_key` is `<schedule_id>@<fire_time in UTC>`; and its `user_id` is
+`None` — nobody is present at a fire — while it acts for `on_behalf_of`, which is the run's
+user to the harness (`Runtime.user`, memory, files). `priority=` and `concurrency_key=` need trellis-contracts 0.6.1 or later: with an
 older one `schedule` refuses them (`ConfigurationError`) rather than drop them. In Way 2 the
 same keys work without a harness: `runs.schedules.create(ScheduleSpec(..., priority=,
 metadata={"without": [...], "framework_options": {...}}))`, and whatever executes the fired run
