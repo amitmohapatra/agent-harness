@@ -244,8 +244,8 @@ later approvals asked of the same person or role (governance's, or a hook's `Ask
 same `assignee`): an `Ask` that names someone else — finance, for a large amount — still
 asks.
 
-**On failure.** `remember="run"` on anything but an approval of a tool call is refused
-(`ConfigurationError`); a comment over 4000 characters too.
+**On failure.** `remember="run"` or `"always"` on anything but an approval of a tool call is
+refused (`ConfigurationError`); a comment over 4000 characters too.
 
 ## Results from outside: `ask` in the tool
 
