@@ -270,6 +270,60 @@ async def test_claude_codes_plan_mode_writes_nothing_until_its_plan_is_approved(
 
 
 @pytest.mark.timeout(TEST_SECONDS)
+@pytest.mark.parametrize("engine", engines(only=("kimi",)), indirect=True)
+async def test_kimi_codes_plan_mode_writes_nothing_until_its_plan_is_approved(
+    engine: str, tmp_path: Path
+) -> None:
+    """Kimi Code's own plan mode (``mode="plan"``): nothing writes before a person approved
+    the plan Kimi presents (the run's question, with Kimi's options); approved, the account is
+    closed once (the write asked as ever). A Kimi that answers with its plan in text and
+    presents none has written nothing either."""
+    suffix = uuid.uuid4().hex[:8]
+    user, account = f"live-{suffix}", f"ACC-{suffix[:5].upper()}"
+    ledger: list[tuple[str, str]] = []
+
+    @tool(name=f"account_{suffix}", side_effects="read")
+    def lookup(account: str) -> str:
+        """An account's state, by its id."""
+        ledger.append(("lookup", account))
+        state = "closed" if writes() else "open"
+        return f"{account}: {state}, balance 0"
+
+    @tool(name=f"close_account_{suffix}", side_effects="write")
+    def close_account(account: str) -> str:
+        """Close an account, by its id."""
+        ledger.append(("close", account))
+        return f"closed {account}"
+
+    def writes() -> list[str]:
+        return [step for step, _ in ledger if step != "lookup"]
+
+    kit = Kit([lookup, close_account], plan=True)
+    async with live_harness() as h:
+        ops = await made(engine, h, kit, tmp_path, "ops")
+        done = await ops.run(f"Close the account {account}.", user=user)
+        planned = False
+        for _ in range(6):
+            if done.status is not RunStatus.PAUSED or done.interrupt is None:
+                break
+            asked = done.interrupt
+            if asked.tool_call is None:  # Kimi's plan, presented: its options, Approve among them
+                assert writes() == [], f"a write ran before its plan was approved: {ledger}"
+                values = [o if isinstance(o, str) else o.value for o in asked.options]
+                approve = [v for v in values if "approve" in v.lower()] or values[:1]
+                planned = True
+                done = await ops.resume(done, "answer", user=user, answer=approve[0])
+            else:  # a write asks as ever
+                assert planned or asked.tool_call.tool != close_account.spec.name, (
+                    "the write asked before any plan was presented",
+                    asked,
+                )
+                done = await ops.resume(done, "approve", user=user)
+    assert done.status is RunStatus.SUCCESS, done
+    assert writes() == (["close"] if planned else []), (planned, ledger, done.answer)
+
+
+@pytest.mark.timeout(TEST_SECONDS)
 @pytest.mark.parametrize("engine", ENGINES, indirect=True)
 async def test_a_five_step_job_runs_each_step_once_in_order(engine: str, tmp_path: Path) -> None:
     """Each step's tool takes the code the step before it returned, so the order is the

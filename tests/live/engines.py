@@ -239,7 +239,11 @@ async def _kimi(h: Harness, kit: Kit, tmp: Path) -> Built:
             "KIMI_MODEL_NAME": MODEL,
         }
     skills = kit.skills.kimi() if kit.skills is not None else {}
-    return Built(kimi(model=MODEL, cwd=str(work), env=env, **skills), kit.sources(slot=True))
+    # plan mode: Kimi Code's own (its plan presented for review, a question with its options)
+    planning = {"mode": "plan"} if kit.plan else {}
+    return Built(
+        kimi(model=MODEL, cwd=str(work), env=env, **planning, **skills), kit.sources(slot=True)
+    )
 
 
 BUILDS: Final[dict[str, Build]] = {
