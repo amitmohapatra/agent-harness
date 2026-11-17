@@ -340,6 +340,8 @@ class LocalRuns:
         #: run id -> the schedule tick that queued it (``_fired``'s key)
         self._fired_by_run: dict[str, str] = {}
         self._runs: dict[str, RunRecord] = {}
+        #: parent run id -> its children's run ids (``iterate(parent_run_id=)`` reads no other)
+        self._children: dict[str, set[str]] = {}
         #: run id -> every interrupt it paused on and how it was answered, oldest first
         self._resolutions: dict[str, list[ResolutionEntry]] = {}
         self._queue: deque[str] = deque()
@@ -387,6 +389,8 @@ class LocalRuns:
         if record.concurrency_key is not None:  # placed among its key's runs: when it started
             record = record.model_copy(update={"placed_at": record.created_at})
         self._runs[record.run_id] = record
+        if record.parent_run_id is not None:
+            self._children.setdefault(record.parent_run_id, set()).add(record.run_id)
         if status is RunStatus.QUEUED:
             self._enqueue(record.run_id)
         else:
@@ -582,9 +586,14 @@ class LocalRuns:
     ) -> AsyncIterator[RunSummary]:
         """The runs that match, newest first, as summaries: at most ``max_pages`` pages of
         ``limit`` when given."""
+        among = (
+            self._runs.values()
+            if parent_run_id is None
+            else [self._runs[c] for c in self._children.get(parent_run_id, ())]
+        )
         matching = [
             r
-            for r in self._runs.values()
+            for r in among
             if tenant in (None, r.tenant_id)
             and status in (None, r.status)
             and agent_id in (None, r.agent_id)
@@ -754,7 +763,12 @@ class LocalRuns:
             self._drop(run_id)
 
     def _drop(self, run_id: str) -> None:
-        self._runs.pop(run_id, None)
+        record = self._runs.pop(run_id, None)
+        if record is not None and record.parent_run_id is not None:
+            siblings = self._children.get(record.parent_run_id, set())
+            siblings.discard(run_id)
+            if not siblings:
+                self._children.pop(record.parent_run_id, None)
         self._resolutions.pop(run_id, None)
         self._queued.discard(run_id)
         self._leases.pop(run_id, None)

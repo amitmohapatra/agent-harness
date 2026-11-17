@@ -276,6 +276,26 @@ async def test_listing_filters_and_stops_after_its_pages() -> None:
     assert len([s async for s in runs.iterate(limit=2, max_pages=2)]) == 4
 
 
+async def test_a_parents_children_are_listed_from_its_own_index_and_leave_it_when_forgotten() -> (
+    None
+):
+    """``iterate(parent_run_id=)`` reads the parent's children only (a run's ending asks it
+    every time: it must not scan every run kept), and a child the store forgets leaves it."""
+    runs = LocalRuns(keep_finished=1)
+    await runs.start(start("parent"))
+    for child in ("kid_1", "kid_2"):
+        await runs.start(start(child).model_copy(update={"parent_run_id": "parent"}))
+    await runs.start(start("other"))
+    listed = {s.run_id async for s in runs.iterate(parent_run_id="parent")}
+    assert listed == {"kid_1", "kid_2"}
+    await runs.finish("kid_1", RunStatus.SUCCESS, output="ok")
+    await runs.finish("kid_2", RunStatus.SUCCESS, output="ok")  # kid_1 is forgotten: cap 1
+    assert [s.run_id async for s in runs.iterate(parent_run_id="parent")] == ["kid_2"]
+    await runs.finish("other", RunStatus.SUCCESS, output="ok")  # and now kid_2
+    assert [s.run_id async for s in runs.iterate(parent_run_id="parent")] == []
+    assert runs._children == {}
+
+
 async def test_a_due_schedule_queues_a_run_when_a_worker_claims() -> None:
     runs = LocalRuns()
     schedule = await runs.schedules.create(

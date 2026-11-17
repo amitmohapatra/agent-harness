@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a run's end no longer scans every run the in-process store keeps
+
+Ending a run asks the store for its open children, once for each open status. `LocalRuns`
+answered by scanning every run it keeps (up to `keep_finished`), so each run paid two full
+scans at its end, and more the longer a process ran. It now keeps each parent's children in
+an index of their own: `iterate(parent_run_id=)` reads only those, and a child the store
+forgets leaves the index. On the overhead benchmark this branch is again level with or faster
+than the release before it (a run with one tool call about 8% faster, a stream about 20%, a
+run that starts a child about 15%).
+
 ### Fixed: Claude Agent SDK plan mode holds until a person approves the plan
 
 A run with `permission_mode="plan"` (the options', or a run's `framework_options`) looked
