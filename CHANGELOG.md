@@ -265,6 +265,18 @@ switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` g
   `background.left`). An outcome told while a turn of the chat holds its turn in the process is
   now told again by that turn's own task once it lets go (`background.delivered`), by a turn of
   the chat's own; one that finds the outcome told already stays quiet.
+* **Cost benchmark: every turn of the comparison's case lists is strictly scored.** Of the
+  139 turns of a run (`benchmark/cost/results/haiku-2026-11-15/sets/`), 119 were: 18 filler
+  turns carried only a scripted reply and 2 explain follow-ups were judge-only. Each filler
+  turn now has an exact answer from the data — `conversation-08`'s supplier name, the Silk
+  Scarf Navy's unit cost (its gold calls now read `sku_details`), the south's store count,
+  August's top category by revenue (the question now says "by revenue": by units it is
+  another), S12's empty audit, SKU-00042's price; `advconv-05`'s 12 counts of SKUs priced
+  above £100. `explain-01`'s "Where did that number come from?" is scored on the source it
+  names (the sales summary tool, outerwear, 1 July to 30 September 2026) and `explain-04`'s
+  "Why do you think that's the right number?" on the figure and every input of its formula
+  (units, lead time, on hand): a `tools` or `steps` check would want the tool names verbatim
+  and a call count, which neither question asks for.
 
 ### Fixed: gaps the SDK full-stack pass found
 

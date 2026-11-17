@@ -145,6 +145,11 @@ FORMULA: Final = (
 )
 WEIGHTED: Final = "score = 0.6 x on-time rate + 0.4 x (1 - lead time days / 60)"
 SEP28: Final = ("2026-09-03", "2026-09-30")
+#: Says a store's audit came back empty (``store_audit``: no audit date, no items).
+EMPTY_AUDIT: Final = (
+    r"\bno (?:items?|findings?|audit|record)|nothing|empty|none (?:were|was|found|recorded)|"
+    r"not (?:been )?audited"
+)
 
 
 # --------------------------------------------------------------------------- the cases
@@ -1564,6 +1569,8 @@ def cases() -> tuple[Case, ...]:
     q1 = {"start": "2026-01-01", "end": "2026-03-31"}
     wq1 = r.truth_total(w, "revenue", region="west", **q1)
     eq1 = r.truth_total(w, "revenue", region="east", **q1)
+    sup04, scarf = w.suppliers["SUP-04"], s("Silk Scarf Navy")
+    aug_top, aug_top_rev = r.truth_top(w, "category", "revenue", 1, **aug)[0]
     add(
         Case(
             "conversation-08",
@@ -1575,35 +1582,47 @@ def cases() -> tuple[Case, ...]:
                     ((("sales_summary", {"group_by": "region", "region": "west", **q1}),),),
                     money(wq1),
                 ),
+                # the turns between the first figure and its recall: each scored on its own
                 Turn(
                     "Which supplier is SUP-04?",
                     ((("supplier_info", {"supplier": "SUP-04"}),),),
-                    reply=w.suppliers["SUP-04"].name,
+                    record({"name": sup04.name}, reference=sup04.name),
                 ),
                 Turn(
                     "What does the Silk Scarf Navy cost us?",
-                    ((("find_sku", {"query": "Silk Scarf Navy"}),),),
-                    reply="See the catalogue.",
+                    (
+                        (("find_sku", {"query": scarf.name}),),
+                        (("sku_details", {"sku": scarf.sku}),),
+                    ),
+                    money(scarf.unit_cost, truth="sku_details unit_cost (what it costs us)"),
                 ),
                 Turn(
                     "How many stores in the south?",
                     ((("store_list", {"region": "south"}),),),
-                    reply="10.",
+                    count(sum(st.region == "south" for st in w.stores)),
                 ),
                 Turn(
-                    "What's the top category in August?",
+                    "What's the top category by revenue in August?",
                     ((("sales_summary", {"group_by": "category", **aug, "top": 1}),),),
-                    reply="See above.",
+                    record(
+                        {"category": aug_top},
+                        reference=f"{aug_top} (£{fmt(aug_top_rev)})",
+                        truth="sales_summary by category, Aug 2026, revenue",
+                    ),
                 ),
                 Turn(
                     "Any audit findings at S12?",
                     ((("store_audit", {"store": "S12"}),),),
-                    reply="None recorded.",
+                    # "findings" asked: "no missing or damaged items" says none too
+                    flags(
+                        EMPTY_AUDIT + r"|\bno (?:missing|damaged)\b",
+                        "None recorded: the audit of S12 came back empty.",
+                    ),
                 ),
                 Turn(
                     "Thanks. What's the price of SKU-00042?",
                     ((("sku_details", {"sku": "SKU-00042"}),),),
-                    reply=f"£{w.skus['SKU-00042'].price}",
+                    money(w.skus["SKU-00042"].price, truth="sku_details price"),
                 ),
                 Turn(
                     "Going back to the west's Q1 revenue you told me at the start: how much higher or lower "
@@ -1707,10 +1726,19 @@ def cases() -> tuple[Case, ...]:
                 Turn(
                     "Where did that number come from?",
                     (),
-                    judge(
-                        "Names the sales_summary tool (sales data) with category outerwear and Jul 1 - Sep 30 2026, "
-                        "and does not name a source the record does not hold.",
-                        "From the sales_summary tool: outerwear revenue, 2026-07-01 to 2026-09-30.",
+                    # the source as asked: the tool (by its name, or in words), its filter and
+                    # its period — not the ``tools`` kind, which wants the tool's name verbatim
+                    record(
+                        {
+                            "source": ("sales_summary", "sales summary", "sales data"),
+                            "category": "outerwear",
+                            "from": Q3[0],
+                            "to": Q3[1],
+                        },
+                        rubric="Names the sales_summary tool (sales data) with category outerwear and "
+                        "Jul 1 - Sep 30 2026, and does not name a source the record does not hold.",
+                        reference="From the sales_summary tool: outerwear revenue, 2026-07-01 to "
+                        "2026-09-30.",
                     ),
                 ),
             ),
@@ -1771,6 +1799,10 @@ def cases() -> tuple[Case, ...]:
         ),
         count(reorder(card.sku, "north")),
     )
+    e4_qty = reorder(card.sku, "north")
+    e4_units = int(
+        r.truth_total(w, "units", sku=card.sku, region="north", start=SEP28[0], end=SEP28[1])
+    )
     add(
         Case(
             "explain-04",
@@ -1781,11 +1813,23 @@ def cases() -> tuple[Case, ...]:
                 Turn(
                     "Why do you think that's the right number?",
                     (),
-                    judge(
-                        "Gives the inputs it used — the 28-day north units (and the daily average), the supplier "
-                        "master's lead time, 7 review days, the north on-hand count — and the arithmetic; "
-                        "no input it did not fetch.",
-                        "Average daily units x (lead + 7) - on hand, from the tools.",
+                    # why: the figure and every input the formula took, as fetched
+                    record(
+                        {
+                            "qty": e4_qty,
+                            "units_28d": e4_units,
+                            "lead_time_days": w.suppliers[card.supplier].lead_time_days,
+                            "on_hand": w.on_hand(card.sku, "north"),
+                        },
+                        tol={"qty": 0, "units_28d": 0, "lead_time_days": 0, "on_hand": 0},
+                        rubric="Gives the inputs it used — the 28-day north units (and the daily "
+                        "average), the supplier master's lead time, 7 review days, the north on-hand "
+                        "count — and the arithmetic; no input it did not fetch.",
+                        reference=f"{e4_qty}: the north sold {e4_units} units over the 28 days "
+                        f"({avg28(card.sku, 'north'):.3f} a day); the supplier master's lead time is "
+                        f"{w.suppliers[card.supplier].lead_time_days} days, plus 7 review days; the "
+                        f"north has {w.on_hand(card.sku, 'north')} on hand. Average daily units x "
+                        "(lead + 7) - on hand, rounded up.",
                     ),
                 ),
             ),
@@ -2276,7 +2320,7 @@ def cases() -> tuple[Case, ...]:
                     "What did the latest shelf audit at S07 find missing or damaged?",
                     ((("store_audit", {"store": "S07"}),),),
                     flags(
-                        r"\bno (?:items?|findings?|audit|record)|nothing|empty|none (?:were|was|found|recorded)|not (?:been )?audited",
+                        EMPTY_AUDIT,
                         "The audit came back empty: no items recorded (it has no audit date).",
                     ),
                 ),
