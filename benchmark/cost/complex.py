@@ -145,10 +145,11 @@ FORMULA: Final = (
 )
 WEIGHTED: Final = "score = 0.6 x on-time rate + 0.4 x (1 - lead time days / 60)"
 SEP28: Final = ("2026-09-03", "2026-09-30")
-#: Says a store's audit came back empty (``store_audit``: no audit date, no items).
+#: Says a store's audit came back empty (``store_audit``: no audit date, no items) — "no
+#: missing or damaged items" says so too.
 EMPTY_AUDIT: Final = (
-    r"\bno (?:items?|findings?|audit|record)|nothing|empty|none (?:were|was|found|recorded)|"
-    r"not (?:been )?audited"
+    r"\bno (?:items?|findings?|audit|record|missing|damaged)\b|nothing|empty|"
+    r"none (?:were|was|found|recorded)|not (?:been )?audited"
 )
 
 
@@ -1613,11 +1614,7 @@ def cases() -> tuple[Case, ...]:
                 Turn(
                     "Any audit findings at S12?",
                     ((("store_audit", {"store": "S12"}),),),
-                    # "findings" asked: "no missing or damaged items" says none too
-                    flags(
-                        EMPTY_AUDIT + r"|\bno (?:missing|damaged)\b",
-                        "None recorded: the audit of S12 came back empty.",
-                    ),
+                    flags(EMPTY_AUDIT, "None recorded: the audit of S12 came back empty."),
                 ),
                 Turn(
                     "Thanks. What's the price of SKU-00042?",
