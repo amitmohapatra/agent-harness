@@ -11,14 +11,23 @@ A run with `permission_mode="plan"` (the options', or a run's `framework_options
 things up, then closed an account and notified the customer without ever presenting a plan.
 The harness's `PreToolUse` hook answers `allow` for every harness tool (the bridge decides
 it), and the hook's word is final for the CLI: its own plan mode never saw those calls.
-The hook now holds plan mode itself: until Claude presents its plan (`ExitPlanMode`) and it
-runs — a person approved it, as Claude Code asks — only a call that reads runs (governance's
+The hook now holds plan mode itself: until a person approves the plan Claude presents
+(`ExitPlanMode`) only a call that reads runs (governance's
 risk, as `PlanMode` for `ReAct`; a shell command that only reads) or Claude's write of its
 plan in its plans folder. Any other — a harness tool that writes, `Write`, `Edit`, a command
 that changes something, a hand-over to another harness agent — is refused, Claude reading
 why, and recorded as a rejected call. The approval is kept in the run's journal
 (`Journal.plan_approved`), so a resume on any worker goes on governed as ever. A run that
 set plan mode and relied on its writes running sees them refused until the plan is approved.
+
+Checked against the real CLI with Haiku, three more holes are closed. The CLI presents its
+plan unasked when an SDK drives it, so the hook asks the person itself — always, whatever the
+tool catalog says of `ExitPlanMode` (it only reads, so the catalog's word on it would have let
+every later plan through). In plan mode the CLI asks about every harness tool after the hook
+allowed it; `can_use_tool` now lets a harness tool through (the hook decided it, the bridge
+governs its call), so a lookup no longer waits for a person. Resumed, the CLI presents the
+plan again, worded again and under another id: the plans a run presented are kept in its
+journal (`Journal.plans`), and a person's approval of any of them ends plan mode.
 
 ### Fixed: the same AG-UI `runId` sent twice at once opens one run
 

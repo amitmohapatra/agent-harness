@@ -55,7 +55,7 @@ from tests.support.arm import arm, native_tools
 from tests.support.kimi import needs_kimi
 from trellis import Agent, Harness, Hooks, ReAct, Result, Runtime, deep_agent, kimi, middleware
 from trellis.contracts import ToolCall, ToolOutcome
-from trellis.harness.adapters.claude import SKILLS_SLOT
+from trellis.harness.adapters.claude import PLAN_TOOL, SKILLS_SLOT
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.history import Speaker
 from trellis.harness.middleware import RunCheckpointer
@@ -209,13 +209,16 @@ async def _claude(h: Harness, kit: Kit, tmp: Path) -> Built:
     home = tmp / f"claude-{uuid.uuid4().hex[:6]}"
     home.mkdir()
     slot = [SKILLS_SLOT] if kit.skills is not None else []
+    # plan mode: Claude Code's own, held by the harness (its plan written, then presented)
+    planning = {"permission_mode": "plan"} if kit.plan else {}
     options = ClaudeAgentOptions(
         model=MODEL,
         system_prompt=kit.system,
-        tools=slot,
+        tools=[*slot, *(("Write", PLAN_TOOL) if kit.plan else ())],
         max_turns=MAX_TURNS,
         cwd=home,
         env=claude_cli_env(),
+        **planning,
         **(kit.skills.claude() if kit.skills is not None else {}),
     )
     return Built(options, kit.sources(slot=True))

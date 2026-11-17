@@ -807,8 +807,9 @@ class Cli:
         self, name: str, args: dict[str, Any], tool_id: str, *, ask: bool = False
     ) -> dict[str, Any]:
         """What the SDK's ``can_use_tool`` says about a call — not asked, as the real CLI does
-        not ask it, for a tool in ``--allowedTools``, any tool under ``bypassPermissions`` and
-        an edit under ``acceptEdits`` (allowed then), unless a hook said ``ask``."""
+        not ask it, for a tool in ``--allowedTools``, any tool under ``bypassPermissions``, an
+        edit under ``acceptEdits`` and a plan presented under ``plan`` (allowed then), unless a
+        hook said ``ask``."""
         allowed = (argument("--allowedTools") or "").split(",")
         mode = argument("--permission-mode")
         if argument("--permission-prompt-tool") != "stdio" or (
@@ -818,6 +819,8 @@ class Cli:
                 or name == STRUCTURED
                 or mode == "bypassPermissions"
                 or (mode == "acceptEdits" and name in EDITS)
+                # the real CLI (2.1.x, driven with Haiku) presents a plan unasked
+                or (mode == "plan" and name == "ExitPlanMode")
             )
         ):
             return {"behavior": "allow"}
@@ -1211,11 +1214,14 @@ class Cli:
                 "message": decided.get("permissionDecisionReason", "denied"),
                 "interrupt": hooked.get("continue") is False,
             }
-        if decided.get("permissionDecision") == "allow":
+        # under --permission-mode plan the real CLI (2.1.x, driven with Haiku) still asks
+        # about an MCP server's tool a hook allowed: its plan mode is not the hook's to lift
+        planned = argument("--permission-mode") == "plan" and name.startswith("mcp__")
+        if decided.get("permissionDecision") == "allow" and not planned:
             return {"behavior": "allow", "updatedInput": decided.get("updatedInput", args)}
         given = decided.get("updatedInput", args)
         asked = self.permission(
-            name, given, tool_id, ask=decided.get("permissionDecision") == "ask"
+            name, given, tool_id, ask=planned or decided.get("permissionDecision") == "ask"
         )
         return {"updatedInput": given, **asked}
 

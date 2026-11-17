@@ -280,19 +280,20 @@ async def asked(
     *,
     call_id: str | None = None,
     kept: bool = False,
+    always: bool = False,
 ) -> ToolCall | ToolOutcome:
     """A call ``framework`` asks its user about before it runs it (its own permission check:
     Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
     :func:`permitted` let it through: a person is asked, as governance asks — answered from the
     journal when the run resumes, not asked again when the tool was approved for the rest of the
     run — and the call to let through (perhaps edited), or the outcome of one rejected. The
-    tool catalog's word on the tool decides first, as for any call (:func:`_catalog_decides`).
-    A pause propagates."""
+    tool catalog's word on the tool decides first, as for any call (:func:`_catalog_decides`),
+    unless the question is ``always`` a person's (a plan to approve). A pause propagates."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
-    if await _catalog_decides(runtime, spec, args):
+    if not always and await _catalog_decides(runtime, spec, args):
         return call
     why = FRAMEWORK_ASKS.format(framework=framework)
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted

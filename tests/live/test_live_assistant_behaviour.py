@@ -34,6 +34,7 @@ from tests.live.support import eventually
 from tests.live.test_live_sandbox_data import IMAGE, PROVIDER, _image_here
 from trellis import ReAct, Runtime, ask_user, sandbox, tool
 from trellis.contracts import Option, RunStatus, ToolError
+from trellis.harness.adapters.claude import PLAN_TOOL
 from trellis.harness.automatic import TODOS
 from trellis.harness.files import part
 from trellis.harness.schedules import TASK
@@ -225,6 +226,47 @@ async def test_a_plan_is_approved_before_anything_is_written_and_a_rejection_cha
         done = await ops.resume(changed, "approve", user=user)
     assert done.status is RunStatus.SUCCESS, done
     assert writes() == ["close"] and ledger[-1] == ("close", account), ledger
+
+
+@pytest.mark.timeout(TEST_SECONDS)
+@pytest.mark.parametrize("engine", engines(only=("claude_agent_sdk",)), indirect=True)
+async def test_claude_codes_plan_mode_writes_nothing_until_its_plan_is_approved(
+    engine: str, tmp_path: Path
+) -> None:
+    """Claude Code's own plan mode (``permission_mode="plan"``), held by the harness: the
+    run reads, presents its plan (``ExitPlanMode``, asked of a person) and writes nothing
+    before; approved, it does what the plan says, each write once."""
+    suffix = uuid.uuid4().hex[:8]
+    user, account = f"live-{suffix}", f"ACC-{suffix[:5].upper()}"
+    ledger: list[tuple[str, str]] = []
+
+    @tool(name=f"account_{suffix}", side_effects="read")
+    def lookup(account: str) -> str:
+        """An account's state, by its id."""
+        ledger.append(("lookup", account))
+        return f"{account}: open, balance 0"
+
+    @tool(name=f"close_account_{suffix}", side_effects="write")
+    def close_account(account: str) -> str:
+        """Close an account, by its id."""
+        ledger.append(("close", account))
+        return f"closed {account}"
+
+    kit = Kit([lookup, close_account], plan=True)
+    async with live_harness() as h:
+        ops = await made(engine, h, kit, tmp_path, "ops")
+        planned = await ops.run(f"Close the account {account}.", user=user)
+        assert [step for step, _ in ledger if step != "lookup"] == [], ledger
+        assert planned.status is RunStatus.PAUSED and planned.interrupt is not None, planned
+        presented = planned.interrupt.tool_call
+        assert presented is not None and presented.tool == PLAN_TOOL, planned.interrupt
+        done = await ops.resume(planned, "approve", user=user)
+        while done.status is RunStatus.PAUSED and done.interrupt is not None:
+            call = done.interrupt.tool_call  # the plan approved, a write asks as ever
+            assert call is not None and call.tool != PLAN_TOOL, done.interrupt
+            done = await ops.resume(done, "approve", user=user)
+    assert done.status is RunStatus.SUCCESS, done
+    assert [step for step, _ in ledger if step != "lookup"] == ["close"], ledger
 
 
 @pytest.mark.timeout(TEST_SECONDS)

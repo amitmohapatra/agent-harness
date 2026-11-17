@@ -148,7 +148,7 @@ from trellis.harness.governance.shell import EDITORS, SHELLS, Shell, file_of, mo
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.hooks import Deny, denied
 from trellis.harness.host import CLAUDE_SHELLS
-from trellis.harness.journal import Pending, approvals_read, call_key
+from trellis.harness.journal import Pending, approvals_read, call_key, content_key
 from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.telemetry import gateway_headers, lasting_headers
@@ -1583,6 +1583,8 @@ def _governance(steps: Steps, shell: Shell) -> Any:
             held = await _unplanned(steps, shell, given, tool_use_id, bare(given["tool_name"]))
             if held is not None:  # plan mode, and no plan approved yet
                 return _decided("deny", held)
+            if given["tool_name"] == PLAN_TOOL and _planning(steps):
+                return await _presented(steps, given, tool_use_id, WAITING)
             return await _decide(steps, given, tool_use_id)
         except Exception as exc:
             log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
@@ -1633,6 +1635,60 @@ async def _unplanned(
     ref = tool_use_id or str(given.get("tool_use_id") or name)
     await bridge.observed(runtime, spec, args, outcome, ref=ref, started=time.time())
     return str(outcome.output)
+
+
+#: The answers that let a presented plan through.
+PLAN_APPROVALS: Final = frozenset({InterruptDecision.APPROVE.value, InterruptDecision.EDIT.value})
+
+
+def _planning(steps: Steps) -> bool:
+    """Whether the query is in plan mode with no plan approved yet."""
+    return steps.plans is not None and not steps.runtime.replay.journal.plan_approved
+
+
+async def _presented(
+    steps: Steps, given: Any, tool_use_id: str | None, waiting: str
+) -> SyncHookJSONOutput:
+    """Claude presents its plan (``ExitPlanMode``) in plan mode: a person approves it here,
+    as Claude Code would ask its user — the CLI presents it unasked when an SDK drives it.
+    Approved, plan mode is over and it runs; rejected, Claude reads
+    why and stays in plan mode; unanswered, the run pauses (Claude reads ``waiting``)."""
+    runtime = steps.runtime
+    args = dict(given.get("tool_input") or {})
+    call_id = tool_use_id or str(given.get("tool_use_id") or PLAN_TOOL)
+    journal = runtime.replay.journal
+    filed = [a for key in journal.plans for a in journal.answers.get(key, [])]
+    if any(a.get("decision") in PLAN_APPROVALS for a in filed):
+        # a person approved a plan it presented when the run paused on it: the CLI, resumed,
+        # presents it again (another id, its plan worded again)
+        journal.plan_approved = True
+        steps.started(call_id, PLAN_TOOL, args)
+        return _decided("allow")
+    asked = content_key("approve", PLAN_TOOL, args)
+    if asked not in journal.plans:
+        journal.plans.append(asked)
+    assert runtime.helpers is not None  # the query runs with the attempt's helpers
+    try:
+        with runtime.helpers.working(await steps.helper_of(call_id, given)):
+            # always a person's: the catalog's word on the tool (it only reads) is no approval;
+            # the answer is the plan's, not one call id's: the CLI, resumed, presents it again
+            decided = await bridge.asked(
+                _spec(runtime, PLAN_TOOL), args, CLAUDE_CODE, kept=True, always=True
+            )
+    except Paused:  # the run pauses: Claude stops here, and the resume goes on
+        decided = None
+    if decided is None:
+        steps.helped.pop(call_id, None)
+        return {**_decided("deny", waiting), "continue_": False, "stopReason": waiting}
+    if isinstance(decided, ToolOutcome):
+        steps.helped.pop(call_id, None)
+        return _decided("deny", str(decided.output))
+    # approved: plan mode is over, whatever the CLI then makes of the tool (driven by an SDK,
+    # it may answer it as failed, and Claude presents it again)
+    journal.plan_approved = True
+    steps.approved(tool_use_id or given.get("tool_use_id"))
+    steps.started(call_id, PLAN_TOOL, decided.args)
+    return _decided("allow", updated=decided.args)
 
 
 async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
@@ -1719,11 +1775,13 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
     may be in, none known while another call that may move it is under way) —, so does the
     shell (:data:`CLAUDE_SHELLS`: in its sandbox, or on a host the deployment allows it on —
     the deployment's decision, announced in the hook) and the network the catalog let through
-    (:data:`CLAUDE_NETWORK`), and any other asks a person (``bridge.asked``); Claude's
+    (:data:`CLAUDE_NETWORK`), and a harness tool (its hook decided it, and the bridge governs
+    its call: Claude Code asks about one in plan mode all the same), and any other asks a
+    person (``bridge.asked``); Claude's
     question to its user is the run's (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-    from trellis.harness.tools.convert.claude import WAITING
+    from trellis.harness.tools.convert.claude import WAITING, bare
 
     async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
         this = str(getattr(context, "tool_use_id", None) or name)
@@ -1747,6 +1805,9 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif (
             steps.carries(getattr(context, "tool_use_id", None))
+            # a harness tool: the hook decided it (in plan mode too, where the CLI still
+            # asks), and the bridge governs its call as ever
+            or bare(name) is not None
             # the shell in its sandbox, or on a host the deployment allows it on, and the
             # network as the catalog let it through: the deployment's, never the user's
             or name in CLAUDE_SHELLS

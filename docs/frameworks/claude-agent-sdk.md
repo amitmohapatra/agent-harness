@@ -106,15 +106,19 @@ the user Claude Code would ask:
 * **Plan mode** (`permission_mode="plan"`, on the options or a run's `framework_options`) is
   held by the harness's hook, not left to Claude Code: the hook's word on a harness tool is
   final for the CLI, so the CLI's own plan mode would let a write of the harness's run. Until
-  Claude presents its plan (`ExitPlanMode`) and it runs — a person approved it, as Claude
-  Code asks — a call runs only if it reads (governance rates it a read, as
+  a person approves the plan Claude presents (`ExitPlanMode`: the hook asks, always — the CLI
+  presents it unasked when an SDK drives it, and the catalog's word on a tool that only reads
+  approves no plan) a call runs only if it reads (governance rates it a read, as
   [plan mode for `ReAct`](react.md#plan-mode) does; a shell command that only reads) or writes Claude's
   plan in the plans folder of the run's Claude Code config folder. Any other — a harness
   tool that writes, `Write`, `Edit`, a command that changes something, a hand-over to
   another harness agent — is refused, Claude reading "plan mode is on: present your plan
   with ExitPlanMode…", and recorded as the run's rejected call. A plan the person rejects
   leaves the run in plan mode. Approved, the plan is in the run's journal: every later
-  attempt (a resume, another worker) governs the run's calls as ever.
+  attempt (a resume, another worker) governs the run's calls as ever — resumed, the CLI
+  presents its plan again, worded again, and the approval of any plan the run presented lets
+  it through. The CLI asks about every harness tool in plan mode; those the hook allowed run
+  unasked (a read), the others as the bridge governs them.
 * **Claude's questions** (`AskUserQuestion`) are the run's questions, asked as `ask_user` asks
   them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
   recommended with its description as why, another answer in words); Claude reads the answers

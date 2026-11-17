@@ -293,6 +293,9 @@ class Journal(BaseModel):
     #: was let through (``ExitPlanMode`` ran: a person approved it, as Claude Code asks): its
     #: calls are governed as ever from then on, in any attempt (``adapters.claude``)
     plan_approved: bool = False
+    #: the approval keys of the plans it presented (``content_key("approve", ...)``): a person's
+    #: approval of any of them ends plan mode, however the framework presents it again
+    plans: list[str] = Field(default_factory=list)
     #: the calls a person rejected at a framework's own approval gate (LangChain's
     #: ``HumanInTheLoopMiddleware``), by content: each is that person's decision — the failed
     #: message the gate answers it with is no failed call of the run (:meth:`rejected_by_person`)

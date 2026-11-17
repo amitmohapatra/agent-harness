@@ -1378,6 +1378,51 @@ async def test_a_plan_a_person_rejects_leaves_the_run_in_plan_mode(
     assert closed == [] and "plan mode is on" in str(done.answer), done.answer
 
 
+async def test_a_plan_is_a_persons_to_approve_whatever_the_catalog_says_of_its_tool(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ExitPlanMode`` only reads, and the catalog says so once the tool was seen: that
+    lets no plan through — a person approves each one."""
+    closed.clear()
+
+    async def says_it_reads(*args: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(claude_adapter.bridge, "_catalog_decides", says_it_reads)
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-catalogued"), [close_account])
+    paused = await agent.run("close a1", user="u1")
+    assert closed == [] and paused.status is RunStatus.PAUSED, paused
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.tool == "ExitPlanMode"
+
+
+async def test_a_plan_approved_ends_plan_mode_however_the_resumed_cli_presents_it_again(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Resumed, the CLI presents its plan again (another call, its plan worded again): the
+    person's approval of the plan it presented when the run paused lets it through, unasked."""
+    closed.clear()
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"builtin": "ExitPlanMode", "args": {"plan": "close the account a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-again"), [close_account])
+    paused = await agent.run("close a1", user="u1")
+    assert paused.interrupt is not None and closed == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done
+    assert closed == ["a1"] and done.answer == "said: closed a1"
+
+
 async def test_a_call_governance_cannot_decide_is_refused_never_let_through(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
