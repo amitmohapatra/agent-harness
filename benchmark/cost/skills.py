@@ -692,11 +692,14 @@ def cases() -> list[Case]:
              every(reads("markdown-price", files=("tiers.md",)),
                    *(says(markdown(k), penny) for k in footwear),
                    *(line(f"MARKDOWN {k}") for k in footwear))),
+        # "no need to confirm" is the user's word, not an approval: a write still asks (the one
+        # rule, docs/governance.md), and the case's reviewer approves it.
         Case("tools-write", T,
              (Turn("Order what our reorder procedure says for SKU-00858, for store S12. Place "
                    "the order now, no need to confirm."),),
              called("reorder", sku="SKU-00858", quantity=reorder("SKU-00858"),
-                    supplier=w.skus["SKU-00858"].supplier)),
+                    supplier=w.skus["SKU-00858"].supplier),
+             decide={"reorder": "approve"}),
         Case("chat-three-turns", T,
              (Turn("Grade SUP-09 with our supplier scorecard."), Turn("And SUP-02?"),
               Turn("By how much does SUP-02's score beat SUP-09's?")),
