@@ -452,7 +452,8 @@ for work; in agent-runs its ticker queues the run.
 "change it to 9", "pause it", "cancel it": every agent has four built-in tools for this
 (`trellis/harness/schedules.py`), on agent-runs' schedules (`RUNS_URL`) or `LocalRuns`'. Nothing
 to configure; `without=["schedules"]` turns them off (for the agent or one run). A graph built
-with its tools bound takes them as it takes the memory tools: `h.schedule_tools()`.
+with its tools bound takes them when it is built, with the harness's other tools: `await h.harness_tools()`
+([frameworks/langgraph.md](frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build); `h.schedule_tools()` alone). A run a schedule fired is offered none: a graph's bound ones answer that they are not for it.
 
 | Tool | What it does |
 |---|---|

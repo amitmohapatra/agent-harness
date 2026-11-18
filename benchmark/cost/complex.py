@@ -3641,6 +3641,13 @@ def adapter_of(history: str, adapter: str | None) -> str:
     return adapter or ("react" if history == "memory" else "langgraph")
 
 
+async def bound_of(h: Any, adapter: str) -> list[Any]:
+    """What the ``graph`` adapter binds besides its own tools, as docs/frameworks/langgraph.md
+    says a graph built by hand takes them: the harness's own tools (``h.harness_tools()``: the
+    memory tools, the schedule tools, ``ask_user``); none for any other adapter."""
+    return await h.harness_tools() if adapter == "graph" else []
+
+
 def target_of(
     model: Any,
     history: str,
@@ -3658,8 +3665,9 @@ def target_of(
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
     ``langgraph`` / ``deepagents`` — ``create_agent`` / ``create_deep_agent`` with the
     harness's middleware and an in-process checkpointer (the framework keeps the conversation);
-    ``graph`` — ``create_agent`` with the retail tools and ``bound`` (memory's LangChain tools,
-    ``h.memory_tools()``) bound when it is built, the checkpointer and no harness middleware,
+    ``graph`` — ``create_agent`` with the retail tools and ``bound`` (the harness's own tools
+    as LangChain tools: :func:`bound_of`) bound when it is built — one of ``bound`` named as one
+    of the tools left out —, the checkpointer and no harness middleware,
     its step limit LangGraph's ``recursion_limit`` (a model call and a tool step a step);
     ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
@@ -3724,8 +3732,9 @@ def target_of(
 
         chat = routed_chat_model(model) if isinstance(model, str) else model
         own = convert("langchain", [t.tool for t in tools]) or []
+        named = {t.name for t in own}
         graph = create_agent(
-            chat, tools=[*own, *bound], system_prompt=r.SYSTEM,
+            chat, tools=[*own, *(t for t in bound if t.name not in named)], system_prompt=r.SYSTEM,
             checkpointer=InMemorySaver(), name="complex",
         )  # fmt: skip
         if skills is not None:  # bound by the caller, and declared: the harness knows of them
@@ -3969,7 +3978,7 @@ async def run_case(
     target, options = target_of(
         model, history, case.window or window, max_steps, adapter=kind, wire=wire,
         tools=(*r.TOOLS, *case.tools),
-        bound=await h.memory_tools() if kind == "graph" else (), variant=variant,
+        bound=await bound_of(h, kind), variant=variant,
     )  # fmt: skip
     # each variant its own agent: a worker claims queued runs by agent id, so two variants on
     # one run store (agent-runs) would take each other's runs

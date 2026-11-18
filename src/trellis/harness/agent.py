@@ -1190,8 +1190,7 @@ class Agent:
             named = {t.name for t in tools}
             tools.extend(t for t in schedule_tools(runtime) if t.name not in named)
             if runtime.attended and ASK_USER not in named and not self.adapter.asks(self.target):
-                apps = runtime.frontend.tools if runtime.frontend is not None else ()
-                tools.append(ask.offered([t["name"] for t in apps]))
+                tools.append(ask.for_run(runtime))
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})

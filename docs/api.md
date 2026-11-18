@@ -113,6 +113,18 @@ await h.memory_tools(*, tenant=None) -> list
 hand: each call in the scope of the run that makes it ([memory.md](memory.md)). A wrapped
 graph's own tools are governed with no middleware of yours ([governance.md](governance.md)).
 
+### h.harness_tools
+
+```text
+await h.harness_tools(*, tenant=None) -> list
+```
+
+The tools the harness gives every agent by itself — the MCP tools the virtual key allows, the
+memory tools, the schedule tools and `ask_user` — as LangChain tools, for a graph built with its
+tools bound: each call the run's own, governed, journaled and recorded, off where the run is
+without its part, refused outside a run
+([frameworks/langgraph.md](frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build)).
+
 ### h.worker
 
 ```text

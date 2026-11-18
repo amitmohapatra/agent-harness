@@ -62,7 +62,9 @@ allow it for the conversation or always, as on every adapter
 ([governance.md](../governance.md#a-tool-that-does-not-say-what-it-does)). `HarnessTools` offers the harness's tools at each model
 call: every MCP tool the Bifrost virtual key allows and — memory on — the memory tools
 (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`,
-`tool_search`). A hand-built graph takes the memory tools alone with `await h.memory_tools()`.
+`tool_search`) — and the harness's own tools by themselves: the schedule tools and `ask_user`. A
+graph built with its tools bound takes them when it is built: [the harness's tools on a graph
+you build](#the-harnesss-tools-on-a-graph-you-build).
 
 **`graph.invoke` itself is not intercepted.** The harness runs the graph through
 `agent.run` / `agent.stream` / `agent.resume` / `agent.start`; called directly, the graph runs
@@ -74,6 +76,49 @@ conversation is the tenant's, the user's and the thread's, so two users giving t
 `thread=` never share a checkpointer thread; to read your graph's state yourself, ask for its
 key: `graph.aget_state({"configurable": {"thread_id": await h.conversation(user="ada",
 thread="t-7")}})`.
+
+## The harness's tools on a graph you build
+
+Every other target is offered, run by run, the tools the harness gives an agent by itself: the
+MCP tools the virtual key allows, the memory tools, the schedule tools (`schedule_task`,
+`list_schedules`, `update_schedule`, `cancel_schedule`: [runs.md](../runs.md#schedules-users-set-in-chat))
+and `ask_user` ([interrupts.md](../interrupts.md#asking)). A graph whose model binds its tools
+when it is built (a hand-built `StateGraph`, a `create_agent` graph without `middleware()`)
+takes them then, with `await h.harness_tools()`: LangChain tools for its `ToolNode` and
+`model.bind_tools`.
+
+```python
+tools = [stock, *await h.harness_tools()]
+model = chat.bind_tools(tools)
+
+
+async def think(state: MessagesState) -> dict:
+    return {"messages": [await model.ainvoke(state["messages"])]}
+
+
+graph = StateGraph(MessagesState)
+graph.add_node("model", think)
+graph.add_node("tools", ToolNode(tools))
+graph.add_edge(START, "model")
+graph.add_conditional_edges("model", tools_condition)
+graph.add_edge("tools", "model")
+agent = h.wrap(graph.compile(checkpointer=InMemorySaver()), id="desk")
+```
+
+Each is the harness's own tool, called as the run that makes the call: governed, journaled and
+recorded as its `ToolNode`'s calls are; `schedule_task` makes the run's user a schedule in their
+zone; `ask_user` pauses the run (LangGraph's `interrupt` with a checkpointer, a re-run from the
+journal without one) and the answer is the call's result. A part the run is without
+(`without=["mcp"]`, `["memory"]`, `["schedules"]`, `["ask"]`) answers that it is off in this
+run, and a schedule tool answers so in a run a schedule fired (it does its task, no more).
+Called outside a run, each is refused (`ToolError`). `ask_user` is bound, so every run of the
+graph may ask, not only a chat front end's: bind the tools without it where nobody answers.
+What the tools say is said when they are bound, so a hand-built graph's model reads neither the
+hour in the user's zone (`schedule_task`'s) nor the app's own controls (`ask_user`'s); a
+`create_agent` graph is offered them in the run's words at each model call (the harness runs a
+copy of it: [Tool hints](#what-is-automatic)). The MCP tools are those the key allows when the
+graph is built, each a tool of its own (no Code Mode). `h.memory_tools()` and
+`h.schedule_tools()` are those parts alone.
 
 ## middleware(): ReAct's harness part on your graph
 
@@ -102,7 +147,7 @@ data after a resume: declare the type in the state, or use a checkpointer of you
 | | |
 |---|---|
 | Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a durable checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). Without one (`ReAct`, a `create_agent` graph without a checkpointer) memory keeps the conversation: its recent turns follow the context as LangChain's own messages — `HumanMessage`, `AIMessage` with its `tool_calls`, `ToolMessage` — as a checkpointer would replay them, and each run's question, tool calls, results and answer are written back before it returns. An `InMemorySaver` (`MemorySaver`) loses the thread on a restart, so memory's window stays on with it, in the context's text (the saver replays the thread while the process lives), said once (`trellis.harness.history`). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
-| Memory pull | the memory tools come with `HarnessTools`; for a hand-built graph, `await h.memory_tools()` is the memory block alone: LangChain tools for its `ToolNode` and `model.bind_tools`, each call made in the scope of the run calling it (refused outside a run) |
+| Memory pull | the memory tools come with `HarnessTools`; for a hand-built graph, with `await h.harness_tools()` (above), or `await h.memory_tools()`, the memory block alone: LangChain tools for its `ToolNode` and `model.bind_tools`, each call made in the scope of the run calling it (refused outside a run) |
 | Long-term store | a graph compiled without a `store` gets the memory service as its `BaseStore` per run (`runtime.store`, `get_store()`): each item one memory of the user's. A graph compiled with its own store keeps it (said once); `without={"memory"}` leaves the graph as built |
 | Records | the transcript (the question and the final AI message), every tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every tool call — the graph's own and the harness's — is governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
@@ -338,7 +383,9 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
   harness runs it with one more `awrap_model_call` handler; `ModelHooks` does the same); a
   hand-built `StateGraph` binds its model's tools in its own node code, which the harness
   cannot reach, so it is offered every tool it bound — the hints shape its context only, and
-  a call of a part turned off is an error the model reads ("off in this run").
+  a call of a part turned off is an error the model reads ("off in this run"). The harness's
+  own tools (`h.harness_tools()`) say what they said when they were bound
+  ([above](#the-harnesss-tools-on-a-graph-you-build)).
 * A tool call whose arguments the chat model could not parse (`AIMessage.invalid_tool_calls`,
   as langchain-openai reports broken JSON) is not a call to `create_agent` (or Deep Agents):
   the run ends on that message, and the model is told nothing — unless the graph has the

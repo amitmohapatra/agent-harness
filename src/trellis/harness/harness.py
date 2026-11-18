@@ -59,6 +59,7 @@ from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.schedules import LimitsHook, schedule_tools
 from trellis.harness.settings import Settings, default_files_url, deployment_spool
 from trellis.harness.subagents import asked_by
+from trellis.harness.tools import ask
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.mcp import MCPSource
 from trellis.harness.tools.toolbox import Toolbox
@@ -638,10 +639,14 @@ class Harness:
         scope of the run making it (its user, thread and run; a call outside a run is refused)
         and is governed and recorded like any tool of the run. Memory off: none. ``tenant``
         is the runs', named by a platform key only."""
+        return convert("langchain", await self._pulled(tenant)) or []
+
+    async def _pulled(self, tenant: str | None) -> list[Tool]:
+        """The memory service's agent tools in ``tenant`` (:meth:`memory_tools`); none with
+        memory off."""
         if self.memory is None:
             return []
-        scope = self.memory.scoped(await self._tenant(tenant))
-        return convert("langchain", await self._pull_tools(scope))
+        return await self._pull_tools(self.memory.scoped(await self._tenant(tenant)))
 
     def schedule_tools(self) -> list[Any]:
         """The schedule tools (``schedule_task``, ``list_schedules``, ``update_schedule``,
@@ -649,6 +654,22 @@ class Harness:
         yourself with its tools bound, as :meth:`memory_tools`; every other target gets them
         on its own. Each call is the run's, governed and recorded like any tool of it."""
         return convert("langchain", schedule_tools())
+
+    async def harness_tools(self, *, tenant: str | None = None) -> list[Any]:
+        """The tools the harness gives every agent by itself, as LangChain tools, for a graph
+        you build yourself: bind them to its model and put them in its ``ToolNode`` when it is
+        built (``HarnessTools`` gives a ``create_agent`` graph the same per model call). They
+        are the MCP tools the virtual key allows (each as a tool of its own: no Code Mode),
+        the memory tools (:meth:`memory_tools`), the schedule tools (:meth:`schedule_tools`)
+        and ``ask_user`` (``tools/ask.py``). Each call is the harness's own tool, run as the
+        run making it: governed, journaled and recorded; ``ask_user`` pauses the run and its
+        answer is the call's result; a part the run is without (``without=["mcp"]``,
+        ``["memory"]``, ``["schedules"]``, ``["ask"]``) answers that it is off in this run, and
+        a schedule tool answers so in a run a schedule fired. Outside a run a call is refused
+        (``ToolError``). ``tenant`` as :meth:`memory_tools`'s."""
+        box = self._toolbox([], tenant=await self._tenant(tenant))
+        tools = [*await box.tools(code_mode=False), *await self._pulled(tenant)]
+        return convert("langchain", [*tools, *schedule_tools(), ask.offered()])  # type: ignore[no-any-return]
 
     async def _pull_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""

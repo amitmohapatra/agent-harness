@@ -275,4 +275,10 @@ def offered(apps: Sequence[str] = ()) -> Tool:
     return dataclasses.replace(made, spec=spec, feature="ask")
 
 
-__all__ = ["ASK_USER", "ask_question", "ask_user", "offered"]
+def for_run(runtime: Runtime) -> Tool:
+    """``ask_user`` as ``runtime`` is offered it (:func:`offered`): naming its app's own tools."""
+    apps = runtime.frontend.tools if runtime.frontend is not None else ()
+    return offered([t["name"] for t in apps])
+
+
+__all__ = ["ASK_USER", "ask_question", "ask_user", "for_run", "offered"]

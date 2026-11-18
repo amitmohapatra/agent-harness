@@ -2,8 +2,14 @@
 with a checkpointer, wrap the graph — and call ``agent.run`` / ``agent.resume`` where you called
 ``graph.ainvoke``.
 
-Two pauses, both resumed in place from the checkpoint (the model is not asked again):
+The harness's own tools — ``ask_user``, the schedule tools, the memory tools — are bound with
+yours when the graph is built (``await h.harness_tools()``): the graph's model can ask the user,
+or set them a schedule, as every other agent's can.
 
+Three pauses, each resumed in place from the checkpoint (the model is not asked again):
+
+* the model's question: it calls ``ask_user`` (how many units?), the run waits for the answer,
+  and the answer is the call's result;
 * the harness's: the tool catalog says ``reorder`` is irreversible (offline: a scripted memory
   service's), so its call inside the tool node waits for a person;
 * the graph's own: the ``confirm`` node calls LangGraph's ``interrupt()``, which the harness
@@ -74,11 +80,13 @@ async def main() -> None:
         model = langchain_model(
             [
                 ("stock", {"sku": "SKU-1"}),
+                ("ask_user", {"question": "How many units of SKU-1?", "kind": "number"}),
                 ("reorder", {"sku": "SKU-1", "qty": 20}),
                 "SKU-1 was at 3 units; ordered 20.",
             ]
         )
-        agent = h.wrap(build(model, [stock, reorder]), id="stock-graph")
+        tools = [stock, reorder, *await h.harness_tools()]
+        agent = h.wrap(build(model, tools), id="stock-graph")
 
         result = await agent.run("Top up SKU-1 if it is low.", user="ada", thread="stock-1")
         while result.interrupt is not None:
@@ -86,9 +94,10 @@ async def main() -> None:
             print("asks:", asked.question)
             if asked.tool_call is not None:  # the harness's approval of the reorder
                 result = await agent.resume(asked.interrupt_id, "approve", reviewer="lead")
-            else:  # the graph's own interrupt(): a question, answered
+            else:  # the model's ask_user, or the graph's own interrupt(): answered
+                answer = "20" if asked.component == "ask_user" else "yes"
                 result = await agent.resume(
-                    asked.interrupt_id, "answer", answer="yes", reviewer="ada"
+                    asked.interrupt_id, "answer", answer=answer, reviewer="ada"
                 )
         print(result.status.value, result.answer)
 
