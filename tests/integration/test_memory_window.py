@@ -342,6 +342,45 @@ async def test_a_turn_whose_write_fails_is_queued_and_delivered() -> None:
         assert [m["content"] for m in service.threads[KEPT]] == ["hi", "ok"]
 
 
+async def test_a_later_turn_is_stored_after_an_earlier_one_still_on_its_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first turn's write is slow and queued; the second turn, said meanwhile, is not
+    written past it: memory keeps a conversation's messages in the order they arrive."""
+    from trellis.harness import agent as agent_module
+    from trellis.harness.clients.memory import RunMemory
+
+    service = FakeMemoryService()
+    plain = RunMemory.record_messages
+    first = asyncio.Event()
+
+    async def slow_first(self: RunMemory, messages: Any, run_id: str, attempt: int) -> None:
+        if messages[0].content == "one" and not first.is_set():
+            await asyncio.sleep(0.3)  # past the run's wait: queued, and still on its way
+            first.set()
+        await plain(self, messages, run_id, attempt)
+
+    monkeypatch.setattr(RunMemory, "record_messages", slow_first)
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.05)
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        agent = h.wrap(create_agent(ScriptedChat(["1", "2"]), tools=[]), id="ordered")
+        for said in ("one", "two"):
+            result = await agent.run(said, user="u1", thread=THREAD)
+            assert result.status is RunStatus.SUCCESS
+        await h.writes.drain()
+        assert [m["content"] for m in service.threads[KEPT]] == ["one", "1", "two", "2"]
+
+
+async def test_a_turn_given_up_on_holds_the_later_ones_only_so_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis.harness import agent as agent_module
+
+    landed: dict[str, asyncio.Event] = {"lost": asyncio.Event()}
+    monkeypatch.setattr(agent_module, "TURN_ORDER_SECONDS", 0.05)
+    await agent_module._after(landed, ["lost", "gone already"])  # returns at the bound
+
+
 async def test_a_turn_stored_but_answered_past_the_deadline_is_stored_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

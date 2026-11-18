@@ -180,6 +180,10 @@ UNREACHED_FIX: Final = {
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
+#: How long a queued turn's transcript waits for its conversation's earlier turns still on
+#: their way to memory before it is sent all the same: memory keeps a conversation's messages
+#: in the order they arrive, so a turn sent past an earlier one would be stored before it.
+TURN_ORDER_SECONDS: Final = 60.0
 #: How many conversations' last framework sessions an agent keeps in this process
 #: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
 #: and its next turn starts a new one.
@@ -442,6 +446,9 @@ class Agent:
         #: turn says them (:meth:`unwritten_said`), as a messages window's reads them from the
         #: run store (:meth:`caught_up`)
         self.unwritten: LRU[str, dict[str, list[Said]]] = LRU(SESSIONS_KEPT)
+        #: for those turns, by conversation and run id: set once each is in memory, so the
+        #: conversation's later turns are sent after it (:func:`_after`)
+        self.landing: LRU[str, dict[str, asyncio.Event]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -1534,7 +1541,11 @@ class Agent:
                 self.results.said(runtime.conversation, runtime.run_id, messages)
             return
         run_id, attempt = runtime.run_id, runtime.attempt
-        if self.owner(runtime) is history.Owner.MEMORY:
+        conversation_key = runtime.conversation
+        on_its_way = self.unwritten.get(conversation_key) or {}
+        # written now only when no earlier turn of the conversation is still on its way: past
+        # one, it would be stored before it — it goes behind them instead
+        if self.owner(runtime) is history.Owner.MEMORY and not on_its_way:
             try:
                 async with asyncio.timeout(TURN_WRITE_SECONDS):
                     await memory.record_messages(messages, run_id, attempt)
@@ -1544,14 +1555,20 @@ class Agent:
                     "the turn could not be written before the run returned; it is queued",
                     extra={"run_id": run_id, "error_class": type(exc).__name__},
                 )
-        conversation_key = runtime.conversation
-        on_its_way = self.unwritten.get(conversation_key) or {}
+        earlier = [r for r in on_its_way if r != run_id]  # in the order they were said
         on_its_way[run_id] = list(messages)
         self.unwritten[conversation_key] = on_its_way
+        landed = self.landing.get(conversation_key) or {}
+        landed[run_id] = asyncio.Event()
+        self.landing[conversation_key] = landed
 
         async def written() -> None:
+            await _after(landed, earlier)
             await memory.record_messages(messages, run_id, attempt)
             on_its_way.pop(run_id, None)  # memory has it: its window says it from now on
+            done = landed.pop(run_id, None)
+            if done is not None:
+                done.set()  # the turns after it may go
 
         await self.harness.writes.submit(
             "memory.transcript",
@@ -1998,6 +2015,19 @@ class RunHandle:
                 if record.status is RunStatus.PAUSED or record.final:
                     return self._agent.hooks.answer(Result.of(record))
                 await asyncio.sleep(POLL_SECONDS)
+
+
+async def _after(landed: Mapping[str, asyncio.Event], earlier: Sequence[str]) -> None:
+    """Until the conversation's ``earlier`` turns are in memory (each sets its event in
+    ``landed`` once written), at most :data:`TURN_ORDER_SECONDS`: a turn is stored after them.
+    A turn given up on (lost, or kept in the spool) leaves its later ones to go after the
+    bound."""
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(TURN_ORDER_SECONDS):
+            for run_id in earlier:
+                event = landed.get(run_id)
+                if event is not None:
+                    await event.wait()
 
 
 __all__ = ["Agent", "RunHandle", "Throttled"]

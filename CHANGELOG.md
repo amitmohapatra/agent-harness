@@ -27,6 +27,15 @@ window leaves out. A background task's notification kept its metadata four level
 the service allows two, and was refused the same way: it is kept as its JSON text (one stored
 before still reads).
 
+### Fixed: a conversation's turns are stored in the order they were said
+
+A turn whose transcript write took longer than the run waits (memory slow or overloaded) was
+queued, and the conversation's next turn, written at once, reached memory before it: memory
+keeps a conversation's messages in the order they arrive, so the window replayed them out of
+order. A turn is written at once only when no earlier turn of its conversation is still on its
+way; otherwise it is queued and sent after them (waiting at most `TURN_ORDER_SECONDS`, 60 s,
+for a turn given up on).
+
 ### Fixed: a run served under load is no longer ended for a missed heartbeat
 
 A run a server keeps in its own process is held by a heartbeat every 20 s for a 60 s hold. Each
