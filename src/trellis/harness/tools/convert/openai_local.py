@@ -115,10 +115,9 @@ def with_fields(tool: Any, **fields: Any) -> Any:
     made it) stays on the copy."""
     if dataclasses.is_dataclass(type(tool)) and type(tool).__module__ == "agents.tool":
         made = dataclasses.replace(tool, **fields)
-        own = {f.name for f in dataclasses.fields(tool)}
-        for name, value in vars(tool).items():
-            if name not in own:
-                setattr(made, name, value)
+        marks = vars(tool).keys() - {f.name for f in dataclasses.fields(tool)}
+        for name in marks:
+            setattr(made, name, getattr(tool, name))
         return made
     made = copy.copy(tool)
     for name, value in fields.items():
