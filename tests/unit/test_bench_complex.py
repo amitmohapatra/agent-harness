@@ -1070,7 +1070,9 @@ def test_a_runs_spend_prices_cache_writes_at_the_cache_write_rate() -> None:
     # 100,000 plain input tokens and 1,000,000 written to the cache
     priced = (100_000 * 0.10 + 1_000_000 * 0.125) / 1_000_000
     accounted = cx.Spend(haiku, None)
-    top: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    top: Any = SimpleNamespace(
+        replay=Replay(Journal()), parent=None, budget=None, spent_more=lambda: None, running_in=None
+    )
     with run.metered(cx.Accounted(accounted), adapter="claude"):
         budget.account(top, model="m", input_tokens=1_100_000, output_tokens=0, written=1_000_000)
     assert accounted.usd == pytest.approx(priced)

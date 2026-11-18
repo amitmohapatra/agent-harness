@@ -323,6 +323,20 @@ class Runtime:
     _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
     #: why the latest progress save failed (``None``: it did not), for :meth:`saved_start`
     _unsaved_error: Exception | None = field(default=None, repr=False)
+    #: the spending saves under way (:meth:`spent_more`), and whether one is what holds
+    #: :attr:`_saving` (a save of the spending alone: no journal taken)
+    _spending: asyncio.Task[None] | None = field(default=None, repr=False)
+    _spending_only: bool = field(default=False, repr=False)
+    #: the attempt ended (:meth:`unwatched`): no spending save starts — its pause or end
+    #: records what it spent
+    _spending_closed: bool = field(default=False, repr=False)
+    #: the replies accounted (:meth:`spent_more`), and how many of them a save has carried:
+    #: what a read waits for (:meth:`spent_saved`), told as each save ends (``_spent_told``)
+    _spent_count: int = field(default=0, repr=False)
+    _spent_carried: int = field(default=0, repr=False)
+    _spent_told: asyncio.Future[None] | None = field(default=None, repr=False)
+    #: a spending save failed and was said (once in the run: the next progress save carries it)
+    _spending_warned: bool = field(default=False, repr=False)
     #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
     stalled: ModelTimeout | None = None
     #: what the run's front end gave it: its tools, context and state (``frontend.py``)
@@ -592,7 +606,10 @@ class Runtime:
         """A model call (``key``: the framework's id of it) began: its watchdog ends the
         attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within
         ``seconds`` (else :data:`STALL_SECONDS`). The run's own time left bounds it too: the
-        run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew."""
+        run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew.
+        Once a save found the run's lease lost, the call does not start (``LeaseLostError``):
+        another worker may hold the run."""
+        self._lease_held()
         if self._elsewhere(self.model_started, key, seconds):
             return
         self.model_ended(key)
@@ -621,10 +638,24 @@ class Runtime:
         return False
 
     def unwatched(self) -> None:
-        """The attempt ended: every watchdog still on is off."""
+        """The attempt ended: every watchdog still on is off, and no spending save starts
+        (how the attempt ended says what it spent: :meth:`spending_ended`)."""
         for handle in self._watched.values():
             handle.cancel()
         self._watched.clear()
+        self._spending_closed = True
+
+    async def spending_ended(self) -> None:
+        """Before the attempt writes how it ended — its pause or its end, or nothing as its
+        worker hands the run back: no spending save starts any more, and the one under way
+        has its answer first. It is not cut off: a heartbeat already sent may still be
+        applied, and applied after that write — after the run went back on the queue and
+        this worker claimed it again — it would put this attempt's checkpoint back over the
+        next one's."""
+        self._spending_closed = True
+        task = self._spending
+        if task is not None and not task.done():
+            await asyncio.wait([task])
 
     def _stall(self, key: str, seconds: float) -> None:
         self._watched.pop(key, None)
@@ -660,8 +691,9 @@ class Runtime:
                 await self.parent.progress(now=now)
                 return
             # a save that waits for one under way is never put off: that one's journal was
-            # taken before this change (a graph checkpoint written during its upload)
-            behind = self._saving.locked()
+            # taken before this change (a graph checkpoint written during its upload) — unless
+            # it saves the spending alone, which takes no journal
+            behind = self._saving.locked() and not self._spending_only
             async with self._saving:
                 await self._saved(now=now or behind)
         except LeaseLostError:
@@ -677,11 +709,13 @@ class Runtime:
         runs = self.agent.harness.runs
         journal = self.replay.journal
         try:
+            counted = self._spent_count  # the replies the journal saved now holds
             save = await journal.save(
                 runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
             )
             if save is None:  # nothing changed since the last save: nothing to send
                 self._saved_at = clock
+                self._carried(counted)
                 return
             await runs.heartbeat(
                 self.run_id,
@@ -698,6 +732,126 @@ class Runtime:
             self._unsaved(f"{type(exc).__name__}: {exc}")
             return
         self._saved_at = clock
+        self._carried(counted)
+
+    def spent_more(self) -> None:
+        """A model reply was accounted (``budget.account``): what the run has spent is saved,
+        on its own (:meth:`_send_spent`), so a worker that dies before its next progress save
+        does not take the reply's spending with it — a worker's run only, saved by the run
+        its sub-agents' runs work inside, and only while its attempt goes on. In a task of
+        its own, the attempt not held up; the replies accounted while one is under way go
+        with the next (one at a time)."""
+        root = self._root()
+        if root.worker_id is None or root.lease_seconds is None or root.lease_lost:
+            return
+        if root._spending_closed or self._elsewhere(self.spent_more):  # a sync node's thread
+            return
+        root._spent_count += 1
+        if root._spending is None or root._spending.done():
+            root._spending = asyncio.get_running_loop().create_task(root._send_spent())
+
+    async def spent_saved(self) -> None:
+        """The replies accounted before now saved (:meth:`spent_more`): before a call that
+        only reads runs — a worker that dies in it has had their spending saved. It waits
+        for the save that carries them alone (the one under way, else the next), not for
+        those of replies accounted meanwhile, and not at all when one did or when a save
+        failed (the next carries them). Once a save found the lease lost, the call does not
+        run (``LeaseLostError``). A call that does more than read saves the whole journal
+        before it runs (:meth:`saved_start`)."""
+        root = self._root()
+        self._lease_held()
+        counted = root._spent_count
+        while root._spent_carried < counted:
+            task = root._spending
+            if task is None or task.done():
+                break
+            if root._spent_told is None:
+                root._spent_told = asyncio.get_running_loop().create_future()
+            await asyncio.wait([task, root._spent_told], return_when=asyncio.FIRST_COMPLETED)
+        self._lease_held()
+
+    def _carried(self, counted: int) -> None:
+        """A save carried the first ``counted`` replies' spending: the reads that wait for
+        them go on."""
+        self._spent_carried = max(self._spent_carried, counted)
+        told, self._spent_told = self._spent_told, None
+        if told is not None:
+            told.set_result(None)
+
+    def _lease_held(self) -> None:
+        root = self._root()
+        if root.lease_lost:
+            raise LeaseLostError(
+                f"{root.worker_id} lost the lease on {root.run_id}: nothing written",
+                code="LEASE_LOST",
+                status=409,
+            )
+
+    async def _send_spent(self) -> None:
+        """What the run has spent, sent with a heartbeat of its lease while replies are
+        accounted that no save carried: one small segment of it after the segments the run
+        store holds (``Journal.save_spending``), the previous spending segment replaced — a
+        checkpoint of segments alone, as every save sends; with no segments to add to
+        (before the first save, or a chain as long as a save keeps), the journal is saved
+        whole (:meth:`progress`). A save that fails is not tried again: the next one carries
+        the spending, and the failure is a warning once in the run (a lost lease stops the
+        run at its next model call, read or save, and no more spending is sent). Not once the
+        attempt ended: its pause or end records the spending."""
+        while self._spent_carried < self._spent_count:
+            async with self._saving:
+                if self.lease_lost or self._spending_closed:
+                    return
+                counted = self._spent_count
+                if not await self._spending_sent(counted):
+                    return
+
+    async def _spending_sent(self, counted: int) -> bool:
+        """Whether the save of the first ``counted`` replies' spending went: one is made
+        (:meth:`_send_spent`)."""
+        journal, runs = self.replay.journal, self.agent.harness.runs
+        try:
+            if not journal.spends_alone():
+                await self._saved(now=True)  # a failure said there
+                return self._spent_carried >= counted
+            self._spending_only = True
+            save = await journal.save_spending(
+                runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+            )
+            if save is not None:  # else the spending is what the run store holds
+                if self._spending_closed:  # the attempt's end records it
+                    return False
+                await runs.heartbeat(
+                    self.run_id,
+                    self.worker_id or "",
+                    lease_seconds=self.lease_seconds or 0,
+                    checkpoint=save.checkpoint,
+                    tenant=self.tenant,
+                )
+                journal.spending_saved(save)
+        except LeaseLostError:
+            self.lease_lost = True
+            return False
+        except Exception as exc:  # the next save carries it
+            self._spending_unsaved(exc)
+            return False
+        finally:
+            self._spending_only = False
+        self._carried(counted)
+        return True
+
+    def _spending_unsaved(self, exc: Exception) -> None:
+        why = f"what it spent: {type(exc).__name__}: {exc}"
+        if self._spending_warned:
+            log.debug("progress of run %s not saved: %s", self.run_id, why)
+            return
+        self._spending_warned = True
+        self._unsaved(why)
+
+    def _root(self) -> Runtime:
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        return root
 
     async def saved_start(self) -> bool:
         """Save the journal before a call that does more than read runs, so the attempt after a
@@ -707,9 +861,7 @@ class Runtime:
         it would run the call again. ``False`` then: the call must not run. A save refused for
         good (one that will not pass) is a warning, as for any save, and the call runs; an
         in-process run saves no progress (nobody resumes it elsewhere)."""
-        root = self
-        while root.parent is not None:
-            root = root.parent
+        root = self._root()
         began, slept = time.monotonic(), 0.0
         wait, longest = START_RETRY_SECONDS
         while True:
