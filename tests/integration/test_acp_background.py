@@ -199,9 +199,9 @@ async def test_a_background_sub_agents_call_is_governed_in_its_own_run(
     asks a person, so that run pauses; the conversation's next turn asks the person (as a
     sub-agent's question is asked through its parent), and the answer lets the call run; the
     task ends, its run with it; then the turn's own prompt is sent."""
-    catalog = FakeCatalog({"Write": Rule(risk="irreversible")})
+    catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
     async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as harness:
-        ask = {"builtin": "Write", "args": {"path": "notes.md", "content": "x"}}
+        ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
             {"agent": LOOK, "background": {"after": after, "asks": ask, "result": "cleaned"}},
             *meanwhile,
@@ -221,7 +221,7 @@ async def test_a_background_sub_agents_call_is_governed_in_its_own_run(
         second = await say(agent, "how is it going?")
         assert second.status is RunStatus.PAUSED and second.interrupt is not None
         call = second.interrupt.tool_call
-        assert call is not None and call.tool == "Write"
+        assert call is not None and call.tool == "Bash"
         named = (second.interrupt.payload or {})["subagent"]
         assert named["background"] is True and named["run_id"] == child.run_id
         done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
@@ -672,9 +672,9 @@ async def test_an_answer_that_reaches_a_worker_without_the_session_ends_its_run(
     """A background sub-agent's question, asked in a turn, is answered on another worker:
     its session — and its task — are not there to go on, so its run records the answer and
     ends, and the turn says so; the turn's own prompt goes on."""
-    catalog = FakeCatalog({"Write": Rule(risk="irreversible")})
+    catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
     async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as harness:
-        ask = {"builtin": "Write", "args": {"path": "notes.md", "content": "x"}}
+        ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
             {"agent": LOOK, "background": {"after": 0.2, "asks": ask, "result": "cleaned"}},
             {"text": "started it"},
@@ -739,9 +739,9 @@ async def test_a_background_sub_agents_harness_tool_call_is_made_in_its_own_run(
 
 
 async def test_a_background_sub_agents_call_a_person_rejects_is_refused(tmp_path: Path) -> None:
-    catalog = FakeCatalog({"Write": Rule(risk="irreversible")})
+    catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
     async with with_governance(Harness(config=KIMI_HERE), Governance(catalog)) as harness:
-        ask = {"builtin": "Write", "args": {"path": "notes.md", "content": "x"}}
+        ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
             {"agent": LOOK, "background": {"after": 0.2, "asks": ask, "result": "left it"}},
             {"text": "started it"},

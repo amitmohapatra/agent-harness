@@ -675,9 +675,9 @@ async def test_a_call_the_teams_hook_refuses_is_not_a_persons_to_approve(
         refused = {"permissionDecision": "deny", "permissionDecisionReason": "not on Fridays"}
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", **refused}}
 
-    script = [{"builtin": "Write", "args": {"file_path": "deploy.txt"}}, {"text": "{last}"}]
-    own = {"PreToolUse": [HookMatcher(matcher="Write", hooks=[refusing])]}
-    rules = {"Write": Rule(risk="irreversible")}  # governance would ask a person
+    script = [{"builtin": "Bash", "args": {"command": "make deploy"}}, {"text": "{last}"}]
+    own = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[refusing])]}
+    rules = {"Bash": Rule(risk="irreversible")}  # governance would ask a person
     async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog(rules))) as h:
         agent = h.wrap(options(tmp_path, script, hooks=own), id="refused")
         result = await agent.run("deploy", user="u1", thread=conversation(path))
@@ -806,34 +806,34 @@ async def test_a_built_in_governance_asked_about_is_one_question_whatever_made_i
     tmp_path: Path, path: str, inside: bool, why: str
 ) -> None:
     """Governance asks a person about a call of Claude's own before it runs (``PreToolUse``),
-    and Claude Code asks its user about the same call (``can_use_tool``: ``Write`` is not in
+    and Claude Code asks its user about the same call (``can_use_tool``: ``Bash`` is not in
     its allowed tools): one call, one question — whatever made governance ask, on either
     path, the main agent's call or a subagent's. Approved, it runs once, as decided."""
-    command = {"file_path": "deploy.txt"}
-    call = {"builtin": "Write", "args": command}
+    command = {"command": "make deploy"}
+    call = {"builtin": "Bash", "args": command}
     deploys = {"agent": "deployer", "prompt": "deploy", "steps": [call, {"text": "deployed"}]}
     script = [deploys if inside else call, {"text": "{last}"}]
 
     class Asking(Hooks):
         async def before_tool(self, call: ToolCall) -> Ask | Rewrite | None:
-            if call.tool != "Write" or why == "rule":
+            if call.tool != "Bash" or why == "rule":
                 return None
-            return Ask("Deploy now?") if why == "hook" else Rewrite({"file_path": "dry.txt"})
+            return Ask("Deploy now?") if why == "hook" else Rewrite({"command": "make deploy -n"})
 
-    rules = {} if why == "hook" else {"Write": Rule(risk="irreversible")}
+    rules = {} if why == "hook" else {"Bash": Rule(risk="irreversible")}
     agents = {"deployer": AgentDefinition(description="Deploys.", prompt="Deploy it.")}
     async with with_governance(Harness(config=HOST_ALLOWED), Governance(FakeCatalog(rules))) as h:
         target = options(tmp_path, script, agents=agents)
         agent = h.wrap(target, id="deploys", hooks=[Asking()])
         paused = await agent.run("deploy", user="u1", thread=conversation(path))
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
-        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "Write"
+        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "Bash"
         assert "Claude Code asks" not in paused.interrupt.question  # governance's question
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
         again = None if done.interrupt is None else done.interrupt.question
         assert done.status is RunStatus.SUCCESS, again  # no second question
     ran = [(c["tool"], c["args"]) for c in lines(tmp_path / "builtins.jsonl")]
-    assert ran == [("Write", {"file_path": "dry.txt"} if why == "rewritten" else command)]
+    assert ran == [("Bash", {"command": "make deploy -n"} if why == "rewritten" else command)]
 
 
 async def test_an_approval_is_carried_for_the_call_it_answered_and_no_other(

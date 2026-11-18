@@ -425,21 +425,20 @@ async def test_a_command_out_of_time_is_killed_and_its_effect_is_unknown(
     assert provider.killed == ["sleep 5"]
 
 
-async def test_a_sandbox_command_the_catalog_would_have_approved_is_denied() -> None:
-    """The catalog governs the sandbox tools like any other, but they are the platform's
-    infrastructure: a command its word would have a person approve is denied — not run, the
-    model told why, nobody asked (ADR 0008)."""
+async def test_the_catalog_governs_the_sandbox_tools_like_any_other() -> None:
     governance = Governance(FakeCatalog({"sandbox_exec": Rule(risk="irreversible")}))
     provider = FakeSandboxes()
 
     async def work(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("sandbox_exec", command="echo approved")
+        return (await agent.tools.call("sandbox_exec", command="echo approved"))["stdout"]
 
     async with with_governance(Harness(config=Settings()), governance) as h:
         agent = arm(h.wrap(work, id="governed"), [sandbox(provider).tools()])
-        done = await agent.run("go", user="u")
-    assert done.interrupt is None and provider.commands == []
-    assert "sandbox_exec was not run: it is the platform's infrastructure" in str(done.answer)
+        waiting = await agent.run("go", user="u")
+        assert waiting.interrupt is not None and waiting.interrupt.tool_call is not None
+        assert waiting.interrupt.tool_call.tool == "sandbox_exec" and provider.calls == []
+        done = await agent.resume(waiting.interrupt.interrupt_id, "approve", reviewer="cfo")
+    assert done.answer == "approved"
 
 
 async def test_what_a_command_prints_reaches_the_stream_and_memory_as_it_is(

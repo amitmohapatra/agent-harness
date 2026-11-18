@@ -149,29 +149,6 @@ async def test_an_agent_wrapped_rewindable_rewinds_a_run_that_ended(harness: Har
     assert again.status is RunStatus.SUCCESS and again.answer == "refunded again", again.error
 
 
-async def test_a_shell_command_made_again_past_the_rewind_runs_announced_never_asked(
-    harness: Harness,
-) -> None:
-    """A rewound run makes again the command its run made past the checkpoint: the shell is
-    the platform's infrastructure (ADR 0008), so the call runs as any of its calls does —
-    announced, neither asked of a person nor denied."""
-    from tests.support.sandbox import FakeSandboxes
-    from trellis import sandbox
-
-    provider = FakeSandboxes()
-    command = ("execute", {"command": "echo hi"})
-    model = ScriptedChat([*LOOKUPS, command, "ran", command, "ran again"])
-    graph = ReAct("You run commands.", model, backend=sandbox(provider))
-    agent = arm(harness.wrap(graph, id="shell-kept", rewindable=True), [order])
-    first = await agent.run("run it", user="u", thread="t")
-    assert first.status is RunStatus.SUCCESS and first.answer == "ran", first.error
-    before = [s for s in await history(agent, first.run_id) if said(s)[-1:] == ["o3: paid"]][-1]
-    rewound = await agent.rewind(first.run_id, id_of(before), reviewer="u")
-    assert rewound.interrupt is None and rewound.status is RunStatus.SUCCESS, rewound
-    assert rewound.answer == "ran again"
-    assert provider.commands == ["echo hi", "echo hi"]
-
-
 # --------------------------------------------------------------------------- the rewind
 async def test_a_rewound_run_sees_the_state_langgraphs_time_travel_gives(harness: Harness) -> None:
     @lc_tool

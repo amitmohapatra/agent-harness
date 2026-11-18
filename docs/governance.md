@@ -12,22 +12,18 @@ its own framework checks its own tools with the same decisions, from the same ca
 
 ## Who decides what
 
-The person a run is for decides only the actions taken in their name, on their business data:
-an order, a refund, an email, a price, their schedules, deleting their alerts, approving a
-plan. The shells and the network out are **infrastructure**, and infrastructure belongs to the
-**platform operator** — not to the run's user, and not to the client company (tenant) either:
-many tenants share the platform. It is set in configuration and in the tool catalog, never
-left to anyone's approval at the call: a call of an infrastructure tool that would need a
-person's approval is **denied** ([below](#infrastructure-is-the-platform-operators)) — and
-audited either way, every call journaled, recorded on the run's stream and in the memory
-service's tool records, and traced.
+The person a run is for decides only the actions taken in their name. What the deployment's
+own machine, network and services do is infrastructure: the administrator's policy, set in
+configuration and in the tool catalog, never left to an end user's approval — and audited
+either way, every call journaled, recorded on the run's stream and in the memory service's
+tool records, and traced.
 
 | Decision | Whose | Where it is set |
 |---|---|---|
 | an action in the user's name: a refund, an email, a write to their records | the run's user — or the reviewer a rule names | governance asks them at the call ([below](#what-the-person-picks)): allow once, for this conversation, always, deny |
 | whether agents may run shell commands on the machine the harness runs on, outside a sandbox | the deployment's administrator | `TRELLIS_HOST_EXECUTION` (`Settings.host_execution`): `allow` by default, `deny` switches them off ([below](#commands-on-the-host)) |
 | a tool's risk, and when its calls need a person | an administrator (or an accepted approval suggestion) | the tool catalog: `risk`, `approve_when` ([below](#one-place-for-approval-rules)) |
-| an infrastructure tool's call that would need approval | nobody: the platform operator's policy | **denied**, the model told why — never asked of the user, nor of a role a hook names ([below](#infrastructure-is-the-platform-operators)) |
+| who answers an infrastructure tool's approval | an administrator, in code | a `before_tool` hook's `Ask(assignee="role:…")`: the call waits in that role's inbox, not the user's ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook)) |
 | which MCP servers an agent reaches, what it runs without asking (Claude's `allowed_tools`, a permission mode such as `acceptEdits` or `bypassPermissions`) | the deployment | the agent's options or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused |
 
 **Claude Code and Kimi Code, tool by tool.** They run their own tools, in the user's workspace:
@@ -36,46 +32,35 @@ service's tool records, and traced.
 |---|---|---|
 | `Read`, `Grep`, `Glob` (Kimi's reads) in the workspace | nobody | run unasked, recorded |
 | `Write`, `Edit` of the user's own files | the user | the one rule: allow once, for this conversation, always (with memory), deny |
-| the shell (`Bash`) in the sandbox | the platform operator | runs unasked, announced and recorded: the framework's own permission question is not the user's; a call the catalog makes ask is denied |
-| the shell on the host | the platform operator | runs as Claude Code or Kimi runs it — as the service's user, without the harness's isolation — unasked and announced; `TRELLIS_HOST_EXECUTION=deny` switches it off ([below](#commands-on-the-host)) |
-| the network out: Claude's `WebFetch`, `WebSearch`; Kimi's `FetchURL`, `WebSearch` | the platform operator, in the catalog | **refused by default**: until the catalog gives the tool a risk `read` (runs unasked); a risk that asks, or an `approve_when` that holds, denies the call; with memory off there is no catalog, and they are refused |
+| the shell (`Bash`) in the sandbox | the deployment | runs unasked, announced and recorded: the framework's own permission question is not the user's |
+| the shell on the host | the administrator | runs as Claude Code or Kimi runs it — as the service's user, without the harness's isolation — unasked and announced; `TRELLIS_HOST_EXECUTION=deny` switches it off ([below](#commands-on-the-host)) |
+| the network out: Claude's `WebFetch`, `WebSearch`; Kimi's `FetchURL`, `WebSearch` | the administrator, in the catalog | **refused by default**: until the catalog gives the tool a risk (`read`: runs unasked) or an `approve_when` (asks when it holds); with memory off there is no catalog, and they are refused |
 | an MCP server's tool | the administrator chooses the servers; the user the actions in their name | the one rule, by what the tool says ([below](#one-rule-every-adapter-and-every-way-a-tool-arrives)) |
 
 The network is closed by default because a fetch can carry what the run read to any host, and a
 search reveals what it looks for: no end user can approve that for the deployment.
 
-### Infrastructure is the platform operator's
+**An infrastructure approval routed to a role.** A tool that acts on the platform — a deploy, a
+restart, a change to shared configuration — still asks when the catalog says so, but its
+question need not be the run's user's. The catalog says *when* (`risk: irreversible`, or an
+`approve_when` on its arguments); a `before_tool` hook says *whose* it is: it waits in that
+role's inbox (`h.inbox("role:ops")`), agent-runs' webhooks tell whoever waits, and a person of
+that role answers (`agent.resume(..., reviewer=...)`). Nothing the run's user allowed — for
+this conversation, always, or by a schedule — covers it: a hook's `Ask` is asked at every call
+([below](#what-the-person-picks)).
 
-A tool is infrastructure when the harness or its framework made it and it is a shell or reaches
-the network out — one definition, `trellis.harness.governance.infrastructure` ([ADR
-0008](adr/0008-infrastructure-approvals.md)):
+```python
+await scope.advanced.tools.put_catalog([{"name": "restart_service", "risk": "irreversible"}])
 
-| Infrastructure tool | Where it comes from |
-|---|---|
-| `Bash`, `PowerShell`, `REPL`, `Monitor` | Claude Code's own shell |
-| `Bash` | Kimi Code's own shell |
-| `exec_command`, `write_stdin` | an OpenAI `SandboxAgent`'s `Shell` capability |
-| `execute` | Deep Agents' shell (on `sandbox()`, or its own sandbox backend) |
-| `shell` | LangChain's `ShellToolMiddleware` |
-| `sandbox_exec`, `sandbox_write` | the harness's sandbox (`sandbox().tools()`) |
-| `WebFetch`, `WebSearch`; `FetchURL`, `WebSearch` | Claude Code's, Kimi Code's network out |
 
-A function of your own that happens to share one of these names is not infrastructure: it says
-what it does, as any tool (an OpenAI `LocalShellTool` or local `ShellTool` runs *your*
-executor, governed as your tool).
+class OpsReviews(Hooks):
+    """The platform's tools are the operators' to approve, never the chat user's."""
 
-| The call | What happens |
-|---|---|
-| nothing makes it ask (the default) — a call a rewound run makes again included | runs unasked, announced and recorded |
-| the catalog makes it ask (a risk `write` or `irreversible`, an `approve_when` that holds), or a `before_tool` hook's `Ask` — with an assignee or without | **denied**: not run; the model reads "`<tool>` was not run: it is the platform's infrastructure, and a call of it that needs approval is denied; no user can approve it."; the run records it (the call's `REJECTED` result, `error_class="InfrastructureDenied"`, on its stream and in its log, and the `decision` event `REFUSE`) |
-| a network tool the catalog says nothing of | refused as before ("the tool catalog does not allow it") |
-
-Nothing the user allowed — for this conversation, always, or for a schedule — lets an
-infrastructure call through, and a schedule's confirmation never lists one. To let a call run,
-the operator declares the tool `read` in the catalog (or drops its `approve_when`). The
-`before_tool` hook's `Ask(assignee="role:…")` stays what it is — a way to route a business
-approval to a role ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook))
-— and is no way to approve infrastructure.
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        if call.tool == "restart_service":
+            return Ask(f"Restart {call.args.get('name')}?", assignee="role:ops")
+        return None  # the rest: governance decides, by the catalog
+```
 
 ### Commands on the host
 
@@ -262,9 +247,7 @@ the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub
 (the sub-agent's own calls are governed), Deep Agents' `execute` in the run's sandbox and an
 OpenAI `SandboxAgent`'s shell (`exec_command`, `write_stdin`). The catalog's word on any of
 them wins: a risk an administrator declared there (`write`: asked once a conversation;
-`irreversible`: every call) or an `approve_when` asks as it says — except on an
-infrastructure tool (the shells, `sandbox_write`), whose call that would ask is denied
-([above](#infrastructure-is-the-platform-operators)). Deep
+`irreversible`: every call) or an `approve_when` asks as it says. Deep
 Agents' file tools on the graph's own state are its scratch, not a call of the run; on a disk, a
 store or a sandbox (a backend, or a route of a `CompositeBackend`) they change real files, so
 `write_file`, `edit_file` and `delete` ask as any write — allow once, for this conversation,

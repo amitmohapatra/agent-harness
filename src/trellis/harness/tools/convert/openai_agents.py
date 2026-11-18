@@ -201,9 +201,9 @@ async def _handed_on(
 #: catalog's word overrides it), for a tool the SDK's capability made (:data:`CAPABILITY_TOOL`;
 #: a function of the agent's own of the same name says nothing): loading a skill and viewing an
 #: image read; a command run, typed into, or a patch applied writes — a command announced
-#: (:data:`CAPABILITY_SHELLS`), a patch asked once a conversation, as any write. The shell is
-#: the platform's infrastructure (``governance.infrastructure``): a command that would need a
-#: person's approval is denied.
+#: (:data:`CAPABILITY_SHELLS`), a patch asked once a conversation, as any write. A team that
+#: wants every command approved gives ``exec_command`` the risk ``irreversible`` (or an
+#: ``approve_when``) in the catalog.
 CAPABILITY_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "load_skill": "read",
     "view_image": "read",
@@ -216,9 +216,9 @@ CAPABILITY_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 CAPABILITY_TOOL: Final = "_trellis_capability_tool"
 #: The SDK's ``Shell`` capability's tools: its commands run in the run's sandbox, as Claude
 #: Code's and Kimi Code's ``Bash``, Deep Agents' ``execute`` and the harness's ``sandbox_exec``
-#: do — run unasked and announced (``Tool.confined``), whatever they do; a call of them a risk
-#: the catalog declares or an ``approve_when`` would have a person approve is denied
-#: (``governance.infrastructure``). A patch applied to files asks, as their ``Write`` does.
+#: do — run unasked and announced (``Tool.confined``), whatever they do. A risk the catalog
+#: declares for them (``write``: asked once a conversation; ``irreversible``: every call) or an
+#: ``approve_when`` asks as it says. A patch applied to files asks, as their ``Write`` does.
 CAPABILITY_SHELLS: Final = frozenset({"exec_command", "write_stdin"})
 
 
@@ -299,17 +299,19 @@ async def _told(
     return told if said is None else said
 
 
-def held(tool: Any, spec: ToolSpec) -> Any:
+def held(tool: Any, spec: ToolSpec, *, confined: bool = False) -> Any:
     """``tool`` (a ``FunctionTool``) held at the SDK's own approval gate (``needs_approval``)
     whenever governance asks a person about a call of it (``bridge.asks_first``: asked then,
     governance's question): the SDK pauses its run before the call and keeps its
     ``RunState``, and the resume continues it — the approved call runs, the model is not asked
-    again. A tool with a gate of its own keeps it; anything else is returned as it is."""
+    again. A tool with a gate of its own keeps it; anything else is returned as it is. A
+    ``confined`` one (a sandbox's shell) is held only where governance asks of it as it runs
+    (:func:`bridge.asks_first`)."""
     if not isinstance(tool, FunctionTool) or tool.needs_approval is not False:
         return tool
 
     async def asks(_context: Any, args: dict[str, Any], call_id: str) -> bool:
-        if not await bridge.asks_first(spec, args):
+        if not await bridge.asks_first(spec, args, confined=confined):
             return False
         runtime = current()
         assert runtime is not None and runtime.pending is not None  # it asked: the run's pause

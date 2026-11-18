@@ -111,9 +111,9 @@ The run's user decides only the actions taken in their name; the rest is the dep
 |---|---|---|
 | `Read`, `Glob`, `Grep` in the workspace | nobody | they run, recorded |
 | `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny (Kimi's own approval inside a git working tree aside: below) |
-| `Bash` in the run's sandbox (`kimi(sandbox=sandbox())`) | the platform operator | runs unasked, announced (`tool_notice`) and recorded; a call that would need approval is denied ([governance.md](../governance.md#infrastructure-is-the-platform-operators)) |
-| `Bash` on the host (no sandbox) | the platform operator | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it: `kimi(sandbox=sandbox())` |
-| `FetchURL`, `WebSearch` | the platform operator, in the tool catalog | Kimi's own policy runs them unasked, so a run's Kimi is configured to ask about them (an `ask` rule in its `config.toml`, as for `Skill`) and the catalog decides: refused (Kimi is told why) until it gives the tool the risk `read`; a risk that asks, or an `approve_when` that holds, denies the call. A sandboxed run's Kimi has no config of the team's: its own holds the same `ask` rules, so the catalog decides there too (Kimi fetches from this machine's network either way) |
+| `Bash` in the run's sandbox (`kimi(sandbox=sandbox())`) | the deployment | runs unasked, announced (`tool_notice`) and recorded |
+| `Bash` on the host (no sandbox) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it: `kimi(sandbox=sandbox())` |
+| `FetchURL`, `WebSearch` | the administrator, in the tool catalog | Kimi's own policy runs them unasked, so a run's Kimi is configured to ask about them (an `ask` rule in its `config.toml`, as for `Skill`) and the catalog decides: refused (Kimi is told why) until it gives the tool a risk or an `approve_when`. A sandboxed run's Kimi has no config of the team's: its own holds the same `ask` rules, so the catalog decides there too (Kimi fetches from this machine's network either way) |
 | MCP servers, the session mode | the deployment | `kimi(mcp_servers=)` or `h.wrap(framework_options=)`; a run's own `mcp_servers` that change them are refused, and `auto` and `yolo` are refused everywhere |
 
 ## Native or ours: sandbox, skills, hooks

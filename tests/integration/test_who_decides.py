@@ -36,8 +36,6 @@ FAKE_ACP = str(Path(__file__).resolve().parents[1] / "support" / "fake_acp_agent
 BOXED = {"enabled": True, "allowUnsandboxedCommands": False}
 #: What the model reads of a network call the catalog says nothing of.
 UNLISTED = "the tool catalog does not allow it"
-#: What the model reads of an infrastructure call a person would have been asked about.
-INFRASTRUCTURE_DENIED = "is the platform's infrastructure, and a call of it that needs approval"
 
 
 def claude(tmp: Path, *steps: dict[str, Any], **fields: Any) -> ClaudeAgentOptions:
@@ -139,9 +137,8 @@ async def test_claude_network_out_is_refused_until_the_catalog_allows_it(
 ) -> None:
     """The network out is the administrator's policy in the tool catalog, not a question to
     the user: with no word there (no catalog, or no risk and no rule for the tool) the call is
-    refused and the model reads why; the risk ``read`` lets it run unasked; an
-    ``approve_when`` that holds would ask a person, and the network is the platform's
-    infrastructure: the call is denied, asked of nobody."""
+    refused and the model reads why; a risk lets it run unasked; an ``approve_when`` that holds
+    asks, as the administrator's rule says."""
     step = {"builtin": name, "args": {"url": "https://example.com/x"}}
     async with Harness(config=Settings(), memory=False) as h:
         done = await h.wrap(claude(tmp_path, step), id="off").run("fetch", user="ada")
@@ -157,9 +154,9 @@ async def test_claude_network_out_is_refused_until_the_catalog_allows_it(
         assert allowed.status is RunStatus.SUCCESS and allowed.interrupt is None, allowed
         assert ran(tmp_path) == [name]
         service.catalog[name] = {"name": name, "approve_when": "url != ''"}
-        ruled = await h.wrap(claude(tmp_path, step), id="ruled").run("fetch", user="ada")
-        assert ruled.status is RunStatus.SUCCESS and ruled.interrupt is None, ruled
-        assert INFRASTRUCTURE_DENIED in str(ruled.answer) and ran(tmp_path) == [name], ruled
+        asked = await h.wrap(claude(tmp_path, step), id="ruled").run("fetch", user="ada")
+        assert asked.interrupt is not None and asked.interrupt.tool_call is not None, asked
+        assert asked.interrupt.tool_call.tool == name
 
 
 async def test_claude_mcp_servers_and_permission_modes_are_the_deployments(
