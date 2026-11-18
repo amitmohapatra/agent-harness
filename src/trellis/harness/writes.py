@@ -164,7 +164,28 @@ class Writes:
 
     async def aclose(self) -> None:
         """Drain (at most :data:`DRAIN_SECONDS`), then stop the workers: what is still queued
-        is spooled or counted lost."""
+        is spooled or counted lost. Closed from a loop other than the workers' (a harness
+        served from another thread: uvicorn's), that is done on theirs while it runs; a loop
+        that has stopped stopped its workers already (and they finished the queue)."""
+        owner = self._loop
+        if owner is not None and owner is not asyncio.get_running_loop():
+            if owner.is_running():
+                try:
+                    await asyncio.wrap_future(
+                        asyncio.run_coroutine_threadsafe(self._close(), owner)
+                    )
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise  # this close was cancelled, not the loop it waited on
+                    # their loop ended meanwhile: its shutdown stopped the workers
+            self._workers.clear()
+            self._queue = None
+            return
+        await self._close()
+
+    async def _close(self) -> None:
+        """:meth:`aclose`, on the workers' own loop."""
         try:
             async with asyncio.timeout(DRAIN_SECONDS):
                 await self.drain()

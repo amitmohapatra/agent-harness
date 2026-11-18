@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -326,6 +327,116 @@ def test_the_loop_shutting_down_drains_the_queue() -> None:
 
     asyncio.run(main())
     assert len(done) == 20
+
+
+def test_a_close_from_another_loop_drains_the_writes_on_their_own() -> None:
+    """A harness served from another thread (uvicorn's loop) does its writes there; closed from
+    the main loop, its writes are drained and its workers stopped on their own loop."""
+    done: list[int] = []
+    writes = Writes()
+    owner = asyncio.new_event_loop()
+    thread = threading.Thread(target=owner.run_forever, daemon=True)
+    thread.start()
+
+    async def write() -> None:
+        await asyncio.sleep(0.01)
+        done.append(1)
+
+    async def submit() -> None:
+        for _ in range(5):
+            await writes.submit("w", write)
+
+    try:
+        asyncio.run_coroutine_threadsafe(submit(), owner).result(timeout=5)
+        asyncio.run(writes.aclose())
+        assert len(done) == 5
+        assert writes._workers == []
+    finally:
+        owner.call_soon_threadsafe(owner.stop)
+        thread.join(timeout=5)
+        owner.close()
+
+
+def test_a_close_from_another_loop_that_ends_meanwhile_is_not_cancelled_itself() -> None:
+    """The writes' loop ends while a close from another loop waits on it (uvicorn told to exit
+    first): its shutdown stops the workers, and the close returns rather than raise the
+    cancellation of the loop that went away."""
+    writes = Writes()
+    started, stop = threading.Event(), threading.Event()
+
+    async def write() -> None:
+        started.set()
+        await asyncio.sleep(30)
+
+    async def serve() -> None:
+        await writes.submit("w", write)
+        while not stop.is_set():  # noqa: ASYNC110 - the other thread says when, with an Event
+            await asyncio.sleep(0.01)
+
+    thread = threading.Thread(target=asyncio.run, args=(serve(),), daemon=True)
+    thread.start()
+    assert started.wait(5)
+
+    async def close() -> None:
+        closing = asyncio.create_task(writes.aclose())
+        await asyncio.sleep(0.05)
+        stop.set()  # the serving loop ends: asyncio.run cancels what is left on it
+        await closing
+
+    asyncio.run(close())
+    thread.join(timeout=5)
+    assert writes._workers == []
+
+
+async def test_a_close_from_another_loop_that_is_cancelled_itself_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "DRAIN_SECONDS", 0.1)
+    writes = Writes()
+    owner = asyncio.new_event_loop()
+    thread = threading.Thread(target=owner.run_forever, daemon=True)
+    thread.start()
+    started = threading.Event()
+
+    async def write() -> None:
+        started.set()
+        await asyncio.sleep(30)
+
+    async def submit() -> None:
+        await writes.submit("w", write)
+
+    try:
+        asyncio.run_coroutine_threadsafe(submit(), owner).result(timeout=5)
+        assert started.wait(5)
+        closing = asyncio.create_task(writes.aclose())
+        await asyncio.sleep(0.05)
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+    finally:
+        # the workers the cancelled close left: stopped on their loop, as its shutdown would
+        asyncio.run_coroutine_threadsafe(Writes._close(writes), owner).result(timeout=15)
+        owner.call_soon_threadsafe(owner.stop)
+        thread.join(timeout=5)
+        owner.close()
+
+
+def test_a_close_after_its_loop_ended_forgets_the_workers_that_loop_stopped() -> None:
+    """The loop the writes ran on has ended (its shutdown stopped the workers, which finished
+    the queue first): a close from a new loop has nothing left to wait for."""
+    done: list[int] = []
+    writes = Writes()
+
+    async def write() -> None:
+        done.append(1)
+
+    async def submit() -> None:
+        await writes.submit("w", write)
+
+    asyncio.run(submit())
+    asyncio.run(writes.aclose())
+    assert done == [1]
+    assert writes._workers == []
 
 
 async def test_a_full_queue_holds_the_writer_until_there_is_room(

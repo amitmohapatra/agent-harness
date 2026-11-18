@@ -207,6 +207,17 @@ def test_every_speaker_goes_both_ways(role: Speaker) -> None:
     assert langchain_message(said).content == "text"
 
 
+def test_a_user_role_message_an_agent_wrote_is_kept_as_the_agents() -> None:
+    """A sub-agent's question (its parent's hand-off) is the service's AGENT message: never the
+    person's words. Through the spool and back it is the same message; a window leaves it
+    out (it is not a turn of the person's conversation)."""
+    handed = Said(Speaker.USER, "Count SKU-1.", id="q1", delegated=True)
+    stored = recorded(handed)
+    assert stored["role"] == "AGENT"
+    assert said_of(json.loads(json.dumps(stored))) == handed
+    assert from_window([WindowMessage(id="m1", role="AGENT", text="Count SKU-1.")]) == []
+
+
 def test_no_store_leaves_the_history_to_memory() -> None:
     assert owner(None, agent_id="a") is Owner.MEMORY
 

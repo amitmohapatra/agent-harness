@@ -283,7 +283,9 @@ class Helpers:
             )
         )
         parent.agent.harness.holds.hold(run_id, parent.tenant)
-        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)], kind=kind)
+        # its task is what the agent above it wrote: the hand-off, not the person's words
+        handed = [Said(Speaker.USER, task, delegated=True)]
+        helper = Helper(run_id, parent.run_id, name, handed, kind=kind)
         helper.span = telemetry.helper_span(
             name, run_id, parent.run_id, task, framework=self.framework, kind=kind.value
         )
@@ -550,7 +552,8 @@ class Helpers:
                 tenant=parent.tenant,
             )
             name = str((record.metadata.get(HELPER) or {}).get("name", ""))
-            left = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, str(record.input))])
+            handed = [Said(Speaker.USER, str(record.input), delegated=True)]
+            left = Helper(run_id, parent.run_id, name, handed)
             left.memory = self._memory(run_id)
             await self._recorded(left)
             await self._outcome(left, NOT_CONTINUED)

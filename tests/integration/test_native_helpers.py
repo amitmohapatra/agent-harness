@@ -155,8 +155,9 @@ async def test_a_deep_agents_sub_agent_is_a_child_run_its_turns_in_memory(
     assert record is not None and record.parent_run_id == result.run_id
     assert record.metadata[HELPER] == {"framework": "langgraph", "kind": "task", "name": "checker"}
     assert record.input == "refund o1" and record.output == "refunded o1"
+    # its task is the main agent's hand-off: an agent's message, never the person's words
     assert told(memory_service, child.run_id) == [
-        ("USER", "refund o1"),
+        ("AGENT", "refund o1"),
         ("ASSISTANT", "refunded o1"),
     ]
     # the helper's scope is a sub-agent's: its parent the run, the run's tree its group
@@ -267,7 +268,7 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
         "name": "checker",
     }
     assert told(memory_service, child.run_id) == [
-        ("USER", "check o1"),
+        ("AGENT", "check o1"),  # the main agent's hand-off, not the person's words
         ("ASSISTANT", "o1 is fine"),
     ]
     # a full child run: the subagent's prompt carries its memory context (the PreToolUse
@@ -460,7 +461,7 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
         "kind": "agent_tool",
         "name": "check",
     }
-    assert told(memory_service, child.run_id) == [("USER", "check o1"), ("ASSISTANT", "o1 is fine")]
+    assert told(memory_service, child.run_id) == [("AGENT", "check o1"), ("ASSISTANT", "o1 is fine")]
     # a full child run: the agent is given its memory context before its task
     assert inner.inputs[0][-1]["content"] == (
         f"{memory_service.context_text}\n\n{TASK_HEADING}check o1"
