@@ -177,9 +177,10 @@ if TYPE_CHECKING:
 #: stopped, a page published, a notification, a file or feedback sent, the session ended, a
 #: claude.ai design or project changed (``ClaudeDesign``, ``Projects``), a goal that keeps
 #: the session working (``ProposeGoal``).
-#: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
-#: or an ``approve_when``, in the tool catalog. ``WebFetch`` and ``WebSearch`` are listed here
-#: but decided by the catalog alone (:data:`CLAUDE_NETWORK`). What Claude Code asks its user
+#: The shell and the network out are the platform's infrastructure
+#: (``governance.infrastructure``): a call of them that would need a person's approval is
+#: denied. ``WebFetch`` and ``WebSearch`` are listed here but decided by the catalog alone
+#: (:data:`CLAUDE_NETWORK`). What Claude Code asks its user
 #: about although it only reads — leaving plan mode with a plan, a skill (:data:`CLAUDE_ASKS`)
 #: — a person answers. Any other tool says nothing of what it does: a person approves its
 #: calls (its risk in the catalog says more). A person asked about a call Claude runs picks

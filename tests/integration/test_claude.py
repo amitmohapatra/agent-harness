@@ -623,19 +623,20 @@ async def test_a_command_a_person_rejected_is_not_run_and_claude_reads_why(
 @pytest.mark.parametrize(
     "rule", [Rule(risk="irreversible"), Rule(risk="write", approve_when="true")], ids=str
 )
-async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_catalog(
+async def test_a_catalog_that_would_have_claudes_shell_approved_denies_its_calls(
     tmp_path: Path, rule: Rule
 ) -> None:
-    """The tool catalog's word on ``Bash`` (its risk, or an ``approve_when``) is the team's:
-    then a command that only reads asks a person too, before Claude Code is asked."""
+    """The tool catalog's word on ``Bash`` (a risk that asks, or an ``approve_when``) would
+    have a person approve each command, even one that only reads: the shell is the
+    platform's infrastructure, so the call is denied — Claude reads why, nobody is asked
+    (ADR 0008)."""
     script = [{"builtin": "Bash", "args": {"command": "ls"}}, {"text": "said: {last}"}]
     async with with_governance(
         Harness(config=HOST_ALLOWED), Governance(FakeCatalog({"Bash": rule}))
     ) as h:
-        asked = await h.wrap(options(tmp_path, script), id="strict").run("look", user="u1")
-        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
-        call = asked.interrupt.tool_call
-        assert call is not None and (call.tool, call.args) == ("Bash", {"command": "ls"})
+        done = await h.wrap(options(tmp_path, script), id="strict").run("look", user="u1")
+        assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
+        assert "Bash was not run: it is the platform's infrastructure" in str(done.answer)
         assert built_ins(tmp_path) == []
 
 

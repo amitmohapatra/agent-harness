@@ -5,6 +5,28 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: an infrastructure call that needs approval is denied, never asked of the user
+
+Infrastructure — the shells (Claude Code's and Kimi Code's `Bash`, an OpenAI `SandboxAgent`'s
+`exec_command` and `write_stdin`, Deep Agents' `execute`, LangChain's `ShellToolMiddleware`
+`shell`, the harness's `sandbox_exec` and `sandbox_write`) and the network out (Claude's
+`WebFetch`, `WebSearch`; Kimi's `FetchURL`, `WebSearch`) — is the platform operator's, shared
+by every tenant. They still run unasked and announced by default. But where the tool catalog
+made one ask (a risk `write` or `irreversible`, an `approve_when` that holds), its question went
+to the run's user, and a `before_tool` hook's `Ask(assignee=...)` could route it to a tenant's
+role. Such a call is now denied: not run, the model reads "`<tool>` was not run: it is the
+platform's infrastructure, and a call of it that needs approval is denied; no user can approve
+it.", and the run records it (its `REJECTED` result, `error_class="InfrastructureDenied"`, and
+the `decision` event `REFUSE`). Nothing the user allowed — for the conversation, always, or a
+schedule — lets it through. One definition
+decides what is infrastructure (`trellis.harness.governance.infrastructure`: a shell or network
+tool the harness or the framework made; a function of yours of the same name is not). No new
+setting. To let such a call run, declare the tool `read` in the catalog (or drop its
+`approve_when`). LangChain's `ShellToolMiddleware` `shell` declares nothing, so its calls, which
+asked the user, are now denied until the catalog declares it. An OpenAI `SandboxAgent`'s shell
+is no longer held at the SDK's own approval gate (`held`, `bridge.asks_first` lost `confined=`). Business tools ask as before; the hook's `Ask` is unchanged for them.
+[ADR 0008](docs/adr/0008-infrastructure-approvals.md).
+
 ### Changed: an OpenAI `SandboxAgent`'s shell runs unasked, as every framework's shell does
 
 A `SandboxAgent`'s `exec_command` and `write_stdin` asked a person as any write, while Claude
@@ -13,10 +35,8 @@ the run's sandbox unasked and announced. On the skills benchmark the OpenAI agen
 waited on a person to `cat` a skill file (5 of 30 cases right). They now run as the others do:
 announced, recorded, unasked — a command that reads and one that writes alike; on a host
 `TRELLIS_HOST_EXECUTION=deny` still refuses the SDK's local sandbox. A risk the catalog declares
-still asks as it says, for this shell and for every tool announced this way (Deep Agents'
-`execute`, `sandbox_exec`, a framework's own write): `write` once a conversation, `irreversible`
-at every call (held at the SDK's own gate, its approved call continuing the paused run), and so
-does an `approve_when`. Only the SDK's own `Shell` capability's tools are the sandbox shell, and
+for a framework's own write announced this way still asks as it says; for this shell, Deep
+Agents' `execute` and `sandbox_exec` — infrastructure — such a call is denied (above). Only the SDK's own `Shell` capability's tools are the sandbox shell, and
 the mark survives the harness's copies of the tool. `apply_patch` asks as a write, as `Write`
 does.
 ### Fixed: a run a dead worker left keeps what that worker's model calls spent

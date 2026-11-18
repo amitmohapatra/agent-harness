@@ -71,6 +71,8 @@ from trellis.harness.clients.memory import Permissions, grants
 from trellis.harness.conversation import allowed, result_id
 from trellis.harness.events import DECISION, NOTICE, preview
 from trellis.harness.governance.decision import Decision, choices, reach
+from trellis.harness.governance.infrastructure import REFUSED as INFRA_DENIED
+from trellis.harness.governance.infrastructure import REFUSED_CLASS, infrastructure
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, RECORD, Made, call_key, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
@@ -270,6 +272,8 @@ async def permitted(
         lasting = kept and verdict is None
         decision, call, rejected = await _decided(runtime, spec, call, verdict, kept=lasting)
     if rejected is not None:
+        if rejected.error_class == REFUSED_CLASS:  # on the stream as a harness call refused is
+            _events(runtime, call_id or key, call, rejected)
         return rejected
     runtime.governed[call_key(spec.name, call.args)] = decision.action.value
     if framework is None or decision.asks or call.args != args:
@@ -364,20 +368,17 @@ def remembered(runtime: Runtime, tool: str) -> bool:
     return reach(tool, None) in runtime.replay.journal.remembered
 
 
-async def asks_first(spec: ToolSpec, args: dict[str, Any], *, confined: bool = False) -> bool:
+async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     """For a framework that holds a call at its own approval gate before it runs it (OpenAI
     Agents' ``needs_approval``): whether governance asks a person about this call, as it would
     when the call runs — and if so, asked now (the run's pause, governance's question), so the
     framework keeps its run where it paused and its resume runs the call, instead of a new
     attempt that asks the model again. Not for a call governance lets run, one allowed for the
     conversation (or its schedule), or one already approved or answered: the call decides those
-    as ever. A ``confined`` tool (a sandbox's shell) asks only where its rule or its risk past
-    a write does, as when it runs (``Decision.unasked``)."""
+    as ever. (A sandbox's shell is never held here: it is infrastructure.)"""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     decision = await _checked(runtime, spec, args)
-    if confined:
-        decision = decision.unasked()
     journal = runtime.replay.journal
     if (
         not decision.asks
@@ -830,10 +831,15 @@ async def _decided(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
     ours = tool is not None
-    decision, repeat = _rewound_past(runtime, spec, call, decision)
     # a call answered already in this run keeps its answer: a denial stays the call's (a new
     # call its framework names by another id is asked: ``Replay.answer``)
     answered = runtime.replay.answered(content_key("approve", spec.name, call.args))
+    decision, repeat, refused = _again_or_denied(
+        runtime, spec, call, decision, own=tool is None or tool.confined, answered=answered
+    )
+    if refused is not None:
+        events.custom(DECISION, tool=spec.name, decision="REFUSE", reason=decision.reason)
+        return decision, call, refused
     lasts = ours or kept  # what is allowed for the conversation covers its later runs
     # a hook's ``Ask`` is your rule in code; the question of a framework that keeps an
     # approval for its session is its own, and no rule (:func:`asked`)
@@ -884,6 +890,35 @@ async def _decided(
     elif decision.announces:
         events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
+
+
+def _again_or_denied(
+    runtime: Runtime,
+    spec: ToolSpec,
+    call: ToolCall,
+    decision: Decision,
+    *,
+    own: bool,
+    answered: bool,
+) -> tuple[Decision, str | None, ToolOutcome | None]:
+    """The decision on a call made again past a rewind (:func:`_rewound_past`), and — for an
+    infrastructure call (``own``: the harness's or its framework's tool;
+    ``governance.infrastructure``) — what the model reads when it is denied. Infrastructure is
+    the platform operator's: made again past a rewind it runs as any of its calls (repeating it
+    is the platform's concern, no person's question); one the catalog or a hook would have a
+    person approve is denied, before anything allowed is looked up (it was never the user's to
+    allow) — unless this run already answered it."""
+    if not infrastructure(spec.name, own=own):
+        return (*_rewound_past(runtime, spec, call, decision), None)
+    if not decision.asks or answered:
+        return decision, None, None
+    refused = ToolOutcome(
+        tool=spec.name,
+        status=ToolStatus.REJECTED,
+        output=INFRA_DENIED.format(tool=spec.name),
+        error_class=REFUSED_CLASS,
+    )
+    return decision, None, refused
 
 
 def _rewound_past(

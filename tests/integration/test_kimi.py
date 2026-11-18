@@ -629,19 +629,21 @@ async def test_a_plan_kimi_presents_is_reviewed_by_a_person_with_every_option(
 @pytest.mark.parametrize(
     "rule", [Rule(risk="irreversible"), Rule(risk="write", approve_when="true")], ids=str
 )
-async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_catalog(
+async def test_a_catalog_that_would_have_kimis_shell_approved_denies_its_calls(
     endpoint: PlannedEndpoint, tmp_path: Path, rule: Rule
 ) -> None:
+    """The catalog's word on ``Bash`` would have a person approve each command: the shell is
+    the platform's infrastructure, so the call is denied — Kimi told why, nobody asked
+    (ADR 0008)."""
     endpoint.plan = [("Bash", {"command": "ls"})]
     async with with_governance(
         Harness(config=HOST_ALLOWED), Governance(FakeCatalog({"Bash": rule}))
     ) as h:
-        paused = await h.wrap(kimi_target(endpoint, tmp_path), id="kimi-strict").run(
+        done = await h.wrap(kimi_target(endpoint, tmp_path), id="kimi-strict").run(
             "look", user="u1"
         )
-        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-        call = paused.interrupt.tool_call
-        assert call is not None and (call.tool, call.args) == ("Bash", {"command": "ls"})
+        assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
+        assert "Bash was not run: it is the platform's infrastructure" in endpoint.said()
 
 
 async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
