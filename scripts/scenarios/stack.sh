@@ -127,6 +127,8 @@ case "${1:-status}" in
     for v in SCEN_HOME SCEN_PG_PORT SCEN_REDIS_PORT SCEN_MEM_PORT SCEN_RUNS_PORT SCEN_MEM_ROOT \
              SCEN_RUNS_ROOT SCEN_CONTRACTS SCEN_BIFROST SCEN_SVC_PY SCEN_RUNS_PY SCEN_PY SCEN_MODELS \
              SCEN_DB_MEM SCEN_DB_RUNS SCEN_TENANT; do settings+=("$v=${!v}"); done
+    # the scenarios' own knobs, when set (SCEN_SEED, SCEN_STRESS_CHATS: tests/scenarios)
+    for v in SCEN_SEED SCEN_STRESS_CHATS; do [ -n "${!v:-}" ] && settings+=("$v=${!v}"); done
     cd "$HERE" && env -i "${settings[@]}" PATH="$PATH" HOME="$H/home" LANG=C.UTF-8 NO_PROXY='*' TMPDIR="$H/tmp" HF_HUB_OFFLINE=1 \
       PYTHONPATH="$HERE/src:$SCEN_MEM_ROOT/sdk/python/src:$SCEN_RUNS_ROOT/sdk/python/src:$SCEN_CONTRACTS:$SCEN_BIFROST" \
       MEMORY_URL=http://127.0.0.1:$SCEN_MEM_PORT RUNS_URL=http://127.0.0.1:$SCEN_RUNS_PORT \
