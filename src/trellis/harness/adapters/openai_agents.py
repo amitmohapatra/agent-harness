@@ -570,7 +570,7 @@ def _governing(kind: type) -> type:
             own = super().tools()
             for tool in own:  # its risk is the capability's (``CAPABILITY_SIDE_EFFECTS``)
                 with contextlib.suppress(AttributeError, TypeError):
-                    setattr(tool, CAPABILITY_TOOL, True)
+                    setattr(tool, CAPABILITY_TOOL, kind)  # which capability made it
             made = [governed(tool) for tool in own]
             runtime = current()
             if runtime is None or runtime.agent.hooks:

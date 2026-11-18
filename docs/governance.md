@@ -100,7 +100,7 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
 |---|---|---|
 | `sandbox()` (ReAct, Deep Agents, `sandbox().tools()`), sandboxed Kimi | runs in Docker, else this machine's isolation layer, else refused with the reason | Docker or another provider runs; the isolation layer on this machine is refused |
 | Deep Agents `LocalShellBackend` | refused, naming `sandbox()` | refused |
-| LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | runs as the framework runs it, unisolated | refused |
+| LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | runs as the framework runs it, unisolated (an OpenAI `SandboxAgent`'s shell: unasked, announced) | refused |
 | Claude Code's shell (no sandbox, or one that lets a command out) | runs as the service's user, unisolated, announced | refused |
 | Claude Code's shell in its own sandbox (`allowUnsandboxedCommands: False`, no `excludedCommands`) | runs in it | runs in it |
 | Kimi's `Bash` with no `sandbox=` | runs as the service's user, unisolated, announced | refused |
@@ -244,7 +244,10 @@ and `approve_when` stay the administrator's.
 A write the run keeps to itself is announced as before, not asked: the harness's own schedule
 tools (a schedule is confirmed when it is made, below), its memory tools (`memory_forget` of
 the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub-agent's call
-(the sub-agent's own calls are governed) and Deep Agents' `execute` in the run's sandbox. Deep
+(the sub-agent's own calls are governed), Deep Agents' `execute` in the run's sandbox and an
+OpenAI `SandboxAgent`'s shell (`exec_command`, `write_stdin`). The catalog's word on any of
+them wins: a risk an administrator declared there (`write`: asked once a conversation;
+`irreversible`: every call) or an `approve_when` asks as it says. Deep
 Agents' file tools on the graph's own state are its scratch, not a call of the run; on a disk, a
 store or a sandbox (a backend, or a route of a `CompositeBackend`) they change real files, so
 `write_file`, `edit_file` and `delete` ask as any write — allow once, for this conversation,

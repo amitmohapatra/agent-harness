@@ -41,6 +41,8 @@ from trellis.harness.adapters.openai_agents import (
     governed_capability,
 )
 from trellis.harness.gateways import Bifrost
+from trellis.harness.governance.catalog import Rule
+from trellis.harness.tools import bridge
 
 GOLDEN = Path(__file__).parent / "golden"
 
@@ -546,6 +548,48 @@ async def test_a_sandbox_shell_runs_unasked_and_announced_as_every_frameworks_sh
     events = [e async for e in agent.stream("go", user="u")]
     assert not [e for e in events if e.type is RunEventType.INTERRUPT]
     assert events[-1].type is RunEventType.RUN_FINISHED and "kept" in str(model.outputs()[-1])
+    announced = [e.data["args"]["cmd"] for e in events if e.data.get("name") == bridge.NOTICE]
+    assert announced == ["echo kept > f.txt", "cat f.txt"]  # each command said on the stream
+
+
+@pytest.mark.host_execution
+@pytest.mark.parametrize(
+    ("said", "asks"),
+    [({"exec_command": "write"}, 1), ({"exec_command": Rule(None, approve_when="true")}, 1)],
+    ids=["catalog-write", "approve-when"],
+)
+async def test_a_sandbox_shell_asks_where_the_administrator_said_so(
+    harness: Harness, said: dict[str, Any], asks: int
+) -> None:
+    """The catalog's word on the shell wins over the sandbox's default: an administrator's
+    ``write`` asks once a conversation (the second command runs, allowed for it), an
+    ``approve_when`` asks for the call it holds on."""
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    model = ScriptedModel(
+        [
+            ("exec_command", {"cmd": "rm -f old.txt"}),
+            ("exec_command", {"cmd": "rm -f older.txt"}),
+            "done",
+        ]
+    )
+    target = SandboxAgent(name="box", instructions="Work.", model=model, capabilities=[Shell()])
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = declaring(harness, **said).wrap(
+        target, id="said", framework_options={"run_config": config}
+    )
+    result = await agent.run("go", user="u")
+    asked = 0
+    while result.interrupt is not None:
+        assert result.interrupt.tool_call is not None
+        assert result.interrupt.tool_call.tool == "exec_command"
+        asked += 1
+        result = await agent.resume(
+            result.interrupt.interrupt_id, "approve", reviewer="u", remember="run"
+        )
+    assert result.status is RunStatus.SUCCESS and asked >= asks
 
 
 # --------------------------------------------------------------------------- pass-throughs

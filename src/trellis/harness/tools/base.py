@@ -169,7 +169,8 @@ class Tool:
     #: Its writes keep to what the run owns, so they are announced rather than asked (governance
     #: ``Decision.unasked``): a harness built-in — its sandbox, its schedules (confirmed when
     #: made), its memory, a sub-agent (whose own calls are governed) — or a framework's own tool
-    #: (Deep Agents' files and ``execute``). Set by the harness only.
+    #: (Deep Agents' files and ``execute``, an OpenAI ``SandboxAgent``'s shell). A risk the
+    #: catalog declares for it still asks as it says. Set by the harness only.
     confined: bool = False
     #: A framework's own tool whose error goes back to its framework (a LangGraph graph's: raised
     #: into it), which may try the call again itself: tried once here, the harness trying it

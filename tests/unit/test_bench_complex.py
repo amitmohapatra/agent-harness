@@ -177,8 +177,15 @@ def test_a_wrong_answer_fails_its_strict_check() -> None:
     assert not cx.score(sets, "S07, S22 and S11.", [])["correct"]
     empty = cx.flags(cx.EMPTY_AUDIT, "The audit came back empty.")
     said = "The latest shelf audit for S07 lists no missing or damaged items."  # react-deep, run 2
-    assert cx.score(empty, said, [])["correct"]
-    assert not cx.score(empty, "The audit found 3 damaged items.", [])["correct"]
+    for empty_said in (
+        said,
+        "There are no records of an audit at S12.",
+        "S12 has no audits on file.",
+        "There are no recorded findings for S12.",
+    ):
+        assert cx.score(empty, empty_said, [])["correct"], empty_said
+    for found in ("The audit found 3 damaged items.", "2 missing items and no damaged items."):
+        assert not cx.score(empty, found, [])["correct"], found
     abstain = cx.abstain("no data")
     assert cx.score(abstain, "I don't have data before 2026-01-01.", [])["correct"]
     made_up = cx.score(abstain, "No data, but it was about 45,000.", [], "December 2025?")

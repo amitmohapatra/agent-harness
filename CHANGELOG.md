@@ -12,9 +12,13 @@ Code's and Kimi Code's `Bash`, Deep Agents' `execute` and the harness's `sandbox
 the run's sandbox unasked and announced. On the skills benchmark the OpenAI agent's chats
 waited on a person to `cat` a skill file (5 of 30 cases right). They now run as the others do:
 announced, recorded, unasked — a command that reads and one that writes alike; on a host
-`TRELLIS_HOST_EXECUTION=deny` still refuses the SDK's local sandbox. The catalog's risk or an
-`approve_when` still asks (an `irreversible` shell is held at the SDK's own gate, its approved
-call continuing the paused run), and `apply_patch` asks as a write, as `Write` does.
+`TRELLIS_HOST_EXECUTION=deny` still refuses the SDK's local sandbox. A risk the catalog declares
+still asks as it says, for this shell and for every tool announced this way (Deep Agents'
+`execute`, `sandbox_exec`, a framework's own write): `write` once a conversation, `irreversible`
+at every call (held at the SDK's own gate, its approved call continuing the paused run), and so
+does an `approve_when`. Only the SDK's own `Shell` capability's tools are the sandbox shell, and
+the mark survives the harness's copies of the tool. `apply_patch` asks as a write, as `Write`
+does.
 
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 

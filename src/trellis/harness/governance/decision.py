@@ -141,6 +141,8 @@ class Decision:
     props: Mapping[str, Any] | None = None
     #: why the rule could not be evaluated, when it could not (the call then asks)
     error: ApprovalRuleError | None = None
+    #: the risk is the catalog's (an administrator declared it there), not the tool's own
+    declared: bool = False
 
     @property
     def asks(self) -> bool:
@@ -179,10 +181,11 @@ class Decision:
         )
 
     def unasked(self) -> Decision:
-        """This call as a write announced rather than asked, when only its risk asks (no rule):
-        for a framework's own tool, under its own permission flow, and a harness built-in that
-        keeps to what the run owns (``Tool.confined``)."""
-        if self.asks and self.risk == "write" and self.rule is None:
+        """This call as a write announced rather than asked, when only its own risk asks (no
+        rule, and no risk the catalog declared: an administrator's ``write`` there asks as it
+        says): for a framework's own tool, under its own permission flow, and a harness
+        built-in that keeps to what the run owns (``Tool.confined``)."""
+        if self.asks and self.risk == "write" and self.rule is None and not self.declared:
             return dataclasses.replace(self, action=Action.ANNOUNCE)
         return self
 

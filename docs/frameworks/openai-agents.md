@@ -141,8 +141,10 @@ function tools: the catalog's risk, approvals, the journal, the record and the s
 shell (`exec_command`, `write_stdin`) is the run's sandbox shell, as Claude Code's and Kimi
 Code's `Bash`, Deep Agents' `execute` and `sandbox_exec` are: a command runs unasked and is
 announced, whatever it does ([governance.md](../governance.md)); `load_skill` and `view_image`
-read; `apply_patch` writes files and asks, as their `Write` does. The catalog's risk or an
-`approve_when` overrides each (an `irreversible` shell asks at every command).
+read; `apply_patch` writes files and asks, as their `Write` does. A risk the catalog declares
+overrides each (`write`: the shell asks once a conversation; `irreversible`: at every
+command), and so does an `approve_when`. Only the SDK's own `Shell` capability's tools are the
+sandbox shell: a capability of your own whose tool has the same name says what it does itself.
 
 A sandbox is one conversation's. `SandboxRunConfig(client=...)` on `h.wrap` makes a sandbox per
 run. A live `SandboxRunConfig(session=...)` or a `session_state` on `h.wrap` would be one

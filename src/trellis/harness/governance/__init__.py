@@ -19,6 +19,7 @@ suggestions from.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -151,7 +152,8 @@ class Governance:
                 if side_effects != "read":
                     return decide(tool, side_effects, CATALOG_UNREAD, args)
             elif (rule := rules.get(tool)) is not None:
-                return decide(tool, rule.risk or side_effects, rule.approve_when, args)
+                decided = decide(tool, rule.risk or side_effects, rule.approve_when, args)
+                return dataclasses.replace(decided, declared=rule.risk is not None)
         return decide(tool, side_effects, None, args)
 
     async def rules(

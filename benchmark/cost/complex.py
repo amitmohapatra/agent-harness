@@ -146,10 +146,10 @@ FORMULA: Final = (
 WEIGHTED: Final = "score = 0.6 x on-time rate + 0.4 x (1 - lead time days / 60)"
 SEP28: Final = ("2026-09-03", "2026-09-30")
 #: Says a store's audit came back empty (``store_audit``: no audit date, no items) — "no
-#: missing or damaged items" says so too.
+#: missing or damaged items" says so too, as a whole (not "no damaged items, 2 missing").
 EMPTY_AUDIT: Final = (
-    r"\bno (?:items?|findings?|audit|record|missing|damaged)\b|nothing|empty|"
-    r"none (?:were|was|found|recorded)|not (?:been )?audited"
+    r"\bno (?:items?|findings?|audits?|records?|recorded)\b|\bno missing or damaged\b|"
+    r"nothing|empty|none (?:were|was|found|recorded)|not (?:been )?audited"
 )
 
 

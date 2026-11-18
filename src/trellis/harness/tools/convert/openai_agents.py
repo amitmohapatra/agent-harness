@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, cast
 
 from agents import FunctionTool
+from agents.sandbox.capabilities import Shell
 from agents.tool_context import ToolContext
 
 from trellis.contracts import AgentPaused, ToolOutcome, ToolSpec
@@ -210,19 +211,25 @@ CAPABILITY_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "write_stdin": "write",
     "apply_patch": "write",
 }
-#: The mark of a tool a sandbox capability made (``adapters.openai_agents._governing``).
+#: The mark of a tool a sandbox capability made (``adapters.openai_agents._governing``): the
+#: capability's class.
 CAPABILITY_TOOL: Final = "_trellis_capability_tool"
-#: A sandbox capability's shell: its commands run in the run's sandbox, as Claude Code's and
-#: Kimi Code's ``Bash``, Deep Agents' ``execute`` and the harness's ``sandbox_exec`` do — run
-#: unasked and announced (``Tool.confined``), whatever they do; the catalog's risk or
-#: ``approve_when`` still asks. A patch it applies to files asks, as their ``Write`` does.
+#: The SDK's ``Shell`` capability's tools: its commands run in the run's sandbox, as Claude
+#: Code's and Kimi Code's ``Bash``, Deep Agents' ``execute`` and the harness's ``sandbox_exec``
+#: do — run unasked and announced (``Tool.confined``), whatever they do. A risk the catalog
+#: declares for them (``write``: asked once a conversation; ``irreversible``: every call) or an
+#: ``approve_when`` asks as it says. A patch applied to files asks, as their ``Write`` does.
 CAPABILITY_SHELLS: Final = frozenset({"exec_command", "write_stdin"})
 
 
 def shell_of_sandbox(tool: Any) -> bool:
-    """Whether ``tool`` is a sandbox capability's shell (:data:`CAPABILITY_SHELLS`, made by the
-    capability: a function of the agent's own of the same name says what it does itself)."""
-    return getattr(tool, CAPABILITY_TOOL, False) and tool.name in CAPABILITY_SHELLS
+    """Whether ``tool`` is the SDK's sandbox shell (:data:`CAPABILITY_SHELLS`, made by its
+    ``Shell`` capability): a tool of another capability, or a function of the agent's own, of
+    the same name says what it does itself."""
+    made_by = getattr(tool, CAPABILITY_TOOL, None)
+    return (
+        isinstance(made_by, type) and issubclass(made_by, Shell) and tool.name in CAPABILITY_SHELLS
+    )
 
 
 def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:
