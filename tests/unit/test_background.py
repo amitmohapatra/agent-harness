@@ -169,10 +169,15 @@ def test_a_notification_is_recorded_as_one_and_replayed_as_one() -> None:
     noted = {"source": "async_subagent", "data": {"task_id": "task_1"}}
     said = Said(Speaker.USER, "update", notified=noted, facts={"status": "SUCCESS"})
     stored = recorded(said)
-    assert stored["custom_metadata"]["run_record"] == {"status": "SUCCESS", NOTIFICATION: noted}
+    # its JSON text: the service's custom_metadata nests two levels at most
+    assert stored["custom_metadata"]["run_record"] == {
+        "status": "SUCCESS",
+        NOTIFICATION: json.dumps(noted),
+    }
     back = said_of(stored)
     assert (back.notified, back.facts) == (noted, {"status": "SUCCESS"})
-    window = WindowMessage(id="m", role="USER", text="update", run_record={NOTIFICATION: noted})
+    kept = {NOTIFICATION: json.dumps(noted)}
+    window = WindowMessage(id="m", role="USER", text="update", run_record=kept)
     [replayed] = from_window([window])
     assert replayed.notified == noted and replayed.facts is None
     message = langchain_message(replayed)
