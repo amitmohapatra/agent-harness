@@ -669,9 +669,14 @@ async def test_progress_after_reads_is_saved_at_most_every_20_s(
         _carried=lambda counted: None,
         replay=SimpleNamespace(journal=Changing()),
         agent=SimpleNamespace(
-            harness=SimpleNamespace(runs=SimpleNamespace(artifacts=None, heartbeat=heartbeat))
+            harness=SimpleNamespace(
+                runs=SimpleNamespace(artifacts=None, heartbeat=heartbeat),
+                _saves_without_events=False,
+            )
         ),
+        events=SimpleNamespace(unsent=None),  # no event log: the progress alone
     )
+    run._beat = lambda checkpoint: Runtime._beat(run, checkpoint)
     for step in (0.0, 19.5, 0.5, 5.0):  # 19.5 s on: not yet; 20 s on: saved
         clock[0] += step
         await Runtime._saved(run, now=False)
@@ -786,7 +791,9 @@ def _worker_run(heartbeat: Any) -> Any:
     from trellis.harness.runtime import Runtime
 
     runs = SimpleNamespace(heartbeat=heartbeat, artifacts=_Artifacts())
-    agent: Any = SimpleNamespace(without=frozenset(), harness=SimpleNamespace(runs=runs))
+    agent: Any = SimpleNamespace(
+        without=frozenset(), harness=SimpleNamespace(runs=runs, _saves_without_events=False)
+    )
     identity = Identity(tenant="t", agent_id="a", run_id="run_1", user="u")
     events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="a"))
     journal = Journal()

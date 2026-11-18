@@ -69,7 +69,16 @@ PREVIEW_CHARS: Final = 2000
 class RunEvents:
     """One attempt's emitter. ``sequence`` is per attempt, as the contract orders it."""
 
-    __slots__ = ("_held", "_listeners", "_sinks", "attempt", "context", "sequence", "trace_run")
+    __slots__ = (
+        "_held",
+        "_listeners",
+        "_sinks",
+        "attempt",
+        "context",
+        "sequence",
+        "trace_run",
+        "unsent",
+    )
 
     def __init__(self, context: AgentExecutionContext, attempt: int = 1) -> None:
         self.context = context
@@ -80,6 +89,9 @@ class RunEvents:
         self._listeners: list[Listener] = []
         self._sinks: list[Sink] = []
         self._held: list[RunEvent] | None = None
+        #: the run's events not in its log yet (``runlog.RunLog.unsent``, set where agent-runs
+        #: keeps the log): a progress save sends them with its checkpoint, in one transaction
+        self.unsent: Callable[[], list[RunEvent]] | None = None
 
     def listen(self, listener: Listener) -> None:
         """Someone watching: every event from now on."""

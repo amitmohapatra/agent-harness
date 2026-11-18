@@ -33,7 +33,10 @@ An append of events agent-runs could not be reached for was dropped once its cli
 retries (about two seconds) were spent, so a restart lost the events of every run in flight.
 It is now tried again, in order, for up to a minute, then dropped with one warning as before.
 A tool call's record is queued before the run's progress is saved, so a worker killed right
-after the call leaves its record too.
+after the call leaves its record too, and the progress save carries the events not in the log
+yet: agent-runs keeps them in the checkpoint's transaction (its heartbeat's `events`), so a
+worker killed right after a step leaves the step and the events that show it, or neither. An
+agent-runs from before that refuses them once; progress is then saved alone, as before.
 
 ### Fixed: a run a dead worker left keeps what that worker's model calls spent
 

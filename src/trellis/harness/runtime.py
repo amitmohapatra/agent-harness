@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import functools
 import json
 import logging
 import time
@@ -55,7 +56,7 @@ from trellis.harness.journal import (
     calling_ident,
     content_key,
 )
-from trellis.runs import LeaseLostError
+from trellis.runs import LeaseLostError, ValidationError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -717,13 +718,7 @@ class Runtime:
                 self._saved_at = clock
                 self._carried(counted)
                 return
-            await runs.heartbeat(
-                self.run_id,
-                self.worker_id,
-                lease_seconds=self.lease_seconds,
-                checkpoint=save.checkpoint,
-                tenant=self.tenant,
-            )
+            await self._beat(save.checkpoint)
             journal.saved(save)
         except LeaseLostError:
             raise
@@ -733,6 +728,33 @@ class Runtime:
             return
         self._saved_at = clock
         self._carried(counted)
+
+    async def _beat(self, checkpoint: dict[str, Any]) -> None:
+        """The progress saved on the run's heartbeat, with the events not in its log yet in
+        its transaction (``RunLog.unsent``: a worker killed right after a step leaves both or
+        neither). An agent-runs that refuses the events (a release before it took them) is
+        sent the progress alone, from then on, and the events reach the log as appends."""
+        assert self.worker_id is not None and self.lease_seconds is not None
+        harness = self.agent.harness
+        unsent = None if harness._saves_without_events else self.events.unsent
+        shown = unsent() if unsent is not None else []
+        beat = functools.partial(
+            harness.runs.heartbeat,
+            self.run_id,
+            self.worker_id,
+            lease_seconds=self.lease_seconds,
+            checkpoint=checkpoint,
+            tenant=self.tenant,
+        )
+        if not shown:
+            await beat()
+            return
+        try:
+            await beat(events=shown)
+        except ValidationError:
+            harness._saves_without_events = True
+            log.info("agent-runs takes no events on a heartbeat: progress is saved without them")
+            await beat()
 
     def spent_more(self) -> None:
         """A model reply was accounted (``budget.account``): what the run has spent is saved,

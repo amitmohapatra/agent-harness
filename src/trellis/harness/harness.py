@@ -200,6 +200,9 @@ class Harness:
         self._endpoints_told: set[tuple[str, str]] = set()
         #: the memory service takes no model endpoints, or refused this one: none is told again
         self._endpoints_off = False
+        #: agent-runs refused a heartbeat that carried events (a release before it took them):
+        #: progress is saved without them from then on, the events appended as before
+        self._saves_without_events = False
         #: governance per tenant (:meth:`governance`), the least recently used forgotten past
         #: the bound; ``_governance_given`` replaces it for every tenant (tests)
         self._governances: LRU[str, Governance] = LRU()

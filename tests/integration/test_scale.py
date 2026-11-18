@@ -25,7 +25,7 @@ from trellis.harness.agent import Throttled
 from trellis.harness.agui.sse import decode
 from trellis.harness.runlog import BATCH, RunLog
 from trellis.harness.runs import LocalRuns
-from trellis.runs import LeaseLostError, RateLimitedError
+from trellis.runs import LeaseLostError, RateLimitedError, ValidationError
 
 #: These tests are about what a write does once it runs, not whether it asks.
 pytestmark = pytest.mark.usefixtures("writes_unasked")
@@ -74,6 +74,62 @@ async def test_every_event_is_in_the_runs_log_before_its_pause_or_ending_is_reco
     assert both[-1].type is RunEventType.RUN_FINISHED and both[-1].outcome is RunOutcome.SUCCESS
     [decided] = [e.data for e in both if e.data.get("name") == "decision"]
     assert (decided["interrupt_id"], decided["reviewer"]) == (paused["interrupt_id"], "lee")
+
+
+async def _charged(input: str, agent: Runtime) -> Any:
+    return await agent.tools.call("charge", order=input)
+
+
+async def test_a_step_and_the_events_that_show_it_are_saved_together() -> None:
+    """Every plain append is lost (as when the worker dies before it lands): the write's
+    events reach the log all the same, with the progress saved after it, in one request."""
+
+    class Unappendable(LoggedRuns):
+        async def append_events(self, run_id: str, events: Sequence[RunEvent], **kw: Any) -> Any:
+            await asyncio.sleep(0.2)  # on its way when the step's progress is saved
+            raise ConnectionError("lost with the worker")
+
+    runs = Unappendable()
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = arm(h.wrap(_charged, id="billing"), [charge])
+        handle = await agent.start("o-9", user="ada")
+        assert await h.worker([agent], concurrency=1).run_once()
+        assert (await handle.status()).status is RunStatus.SUCCESS
+    shown = runs.logged(handle.id)
+    assert [e.data.get("tool") for e in shown if e.type is RunEventType.TOOL_CALL_RESULT] == [
+        "charge"
+    ]
+    assert runs.beats_with_events and not runs.appends
+
+
+async def test_progress_is_saved_without_events_where_agent_runs_takes_none() -> None:
+    """An agent-runs from before heartbeats took events refuses them (422): the progress is
+    saved alone, from then on, and the events reach the log as appends."""
+
+    class Older(LoggedRuns):
+        refused = 0
+
+        async def heartbeat(
+            self, run_id: str, worker_id: str, *, events: Any = None, **kw: Any
+        ) -> Any:
+            if events is not None:
+                Older.refused += 1
+                raise ValidationError("events: extra field", code="VALIDATION", status=422)
+            return await super().heartbeat(run_id, worker_id, **kw)
+
+        async def append_events(self, run_id: str, events: Sequence[RunEvent], **kw: Any) -> Any:
+            await asyncio.sleep(0.2)  # on its way when the step's progress is saved
+            return await super().append_events(run_id, events, **kw)
+
+    runs = Older()
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = arm(h.wrap(_charged, id="billing"), [charge])
+        for order in ("o-10", "o-11"):
+            handle = await agent.start(order, user="ada")
+            assert await h.worker([agent], concurrency=1).run_once()
+            assert (await handle.status()).status is RunStatus.SUCCESS
+            assert any(e.type is RunEventType.TOOL_CALL_RESULT for e in runs.logged(handle.id))
+        assert h._saves_without_events and Older.refused == 1  # asked once, then not again
 
 
 async def test_agent_events_reads_a_run_from_the_log_wherever_it_ran(
@@ -144,7 +200,7 @@ async def test_the_log_is_best_effort_and_a_lost_lease_stops_it(caplog: Any) -> 
     await log.close()
     log(heard[0])  # closed: nothing more is sent
     await log.flush()
-    assert lost.calls == 1 and log.closed
+    assert lost.calls == 1 and log.closed and log.unsent() == []
     assert BATCH == 500
 
 

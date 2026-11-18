@@ -1194,6 +1194,7 @@ def _emitter(
             ended=ended,
         )
         events.record(log_)
+        events.unsent = log_.unsent
     return events
 
 

@@ -98,6 +98,13 @@ class RunLog:
         if self._sending is None or self._sending.done():
             self._sending = asyncio.get_running_loop().create_task(self._send())
 
+    def unsent(self) -> list[RunEvent]:
+        """The events not in the log yet (at most one append's worth, oldest first): a
+        progress save sends them with its checkpoint (``Runtime``), so a worker killed right
+        after a step leaves both or neither. They stay queued here: sent again, agent-runs
+        adds each once."""
+        return [] if self.closed else self._pending[:BATCH]
+
     async def flush(self) -> None:
         """Wait until every event so far is in the log (or dropped)."""
         while self._sending is not None and not self._sending.done():

@@ -419,9 +419,17 @@ takes nothing after) — and whoever watches in process hears `RUN_FINISHED` onl
 recorded. A worker's appends name it (fenced by its lease). Without `RUNS_URL` nothing is kept:
 `agent.events` follows the run's attempts in this process from now on.
 
-**On failure.** Best-effort: events agent-runs refuses or cannot take (after its SDK's retries)
-are dropped with one `warning` event (`events_undelivered`, logged, counted
-`trellis.run_events.undelivered`); the run goes on. A lost lease stops the log.
+**With progress.** A worker's progress save (the heartbeat after a step with side effects)
+carries the events not in the log yet, and agent-runs keeps them in the same transaction as the
+checkpoint: a worker killed right after a step leaves both the step and the events that show
+it, or neither — never a step the next attempt will not repeat that its log never shows. An
+agent-runs from before heartbeats took events refuses them once; progress is then saved alone
+and the events go as appends.
+
+**On failure.** Best-effort: while agent-runs cannot be reached (a restart), an append is tried
+again, in order, for up to a minute; events it refuses or still cannot take are dropped with one
+`warning` event (`events_undelivered`, logged, counted `trellis.run_events.undelivered`); the
+run goes on. A lost lease stops the log.
 
 ## Admission: agent-runs' rate limit
 

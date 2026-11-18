@@ -75,6 +75,7 @@ from trellis.contracts import (
     Interrupt,
     InterruptDecision,
     InterruptResolution,
+    RunEvent,
     RunRecord,
     RunStart,
     RunStatus,
@@ -201,6 +202,7 @@ class RunStore(Protocol):
         *,
         lease_seconds: int = ...,
         checkpoint: dict[str, Any] | None = ...,
+        events: Sequence[RunEvent] | None = ...,
         tenant: str | None = ...,
     ) -> Lease: ...
 
@@ -450,8 +452,10 @@ class LocalRuns:
         *,
         lease_seconds: int = LEASE_SECONDS,
         checkpoint: dict[str, Any] | None = None,
+        events: Sequence[RunEvent] | None = None,  # no log in process: nobody streams them
         tenant: str | None = None,
     ) -> Lease:
+        del events
         found = self._require(run_id, tenant)
         if self._in_callers_process(found):
             return self._hold(found, worker_id, lease_seconds, checkpoint)
