@@ -19,6 +19,7 @@ examples are [examples/](../examples/README.md).
 | [troubleshooting.md](troubleshooting.md) | what an error or a symptom means, and what to do |
 | [versioning.md](versioning.md) | the versions this release was tested with, the policy, how to upgrade |
 | [adr/](adr/README.md) | the decisions behind the design |
+| [agents/handoff.md](agents/handoff.md) | where the platform stands, the decisions taken with the owner, and the phase-wise plan (performance, user isolation, conversational tools, schedule settings, skills, rules files, channels, enterprise operations) |
 | [CHANGELOG.md](../CHANGELOG.md) | what changed in each release |
 | [research/](research/README.md) | the reference for improving the harness: the [index of every report](research/README.md) (what each found, its date, current or superseded), the open items in [handoff/REMAINING.md](research/handoff/REMAINING.md), the [evaluation protocol](research/EVAL_PROTOCOL.md) every change must pass to be kept, the [design rules](research/DESIGN_RULES.md), the [query engine benchmark](research/QUERY_ENGINE.md) and the [feature coverage](research/FEATURE_COVERAGE.md) |
 
