@@ -30,6 +30,7 @@ import logging
 import os
 import secrets
 import socket
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
@@ -153,18 +154,36 @@ class Holds:
         self._held.clear()
 
     async def _beating(self, run_id: str, tenant: str) -> None:
-        """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS`, ``renewed`` told
-        after each. A refused one (the run waits for a person, or ended — cancelled elsewhere:
-        ``lost`` is told) is tried again at the next; a store that cannot be reached too, said
-        in the log."""
-        while True:
-            try:
-                await self._runs().heartbeat(
-                    run_id, self.name, lease_seconds=HOLD_SECONDS, tenant=tenant
-                )
-                await self._renewed(run_id, tenant)
-            except LeaseLostError:
-                await self._lost(run_id, tenant)
-            except RunsError as exc:
-                log.warning("run %s not held: %s", run_id, exc)
-            await asyncio.sleep(HOLD_SECONDS / 3)
+        """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS` on the clock,
+        whatever each takes: one that has not answered within that third is given up (the next
+        is on time), and ``renewed`` is told after each in a task of its own (one at a time),
+        so neither a slow store nor what ``renewed`` reads delays the next past the hold. A
+        refused one (the run waits for a person, or ended — cancelled elsewhere: ``lost`` is
+        told) is tried again at the next; one that fails otherwise too, said in the log."""
+        every = HOLD_SECONDS / 3
+        telling: asyncio.Task[None] | None = None
+        try:
+            while True:
+                began = time.monotonic()
+                try:
+                    async with asyncio.timeout(every):
+                        await self._runs().heartbeat(
+                            run_id, self.name, lease_seconds=HOLD_SECONDS, tenant=tenant
+                        )
+                    if telling is None or telling.done():
+                        telling = asyncio.create_task(self._told(run_id, tenant))
+                except LeaseLostError:
+                    await self._lost(run_id, tenant)
+                except Exception as exc:  # a store that is slow, unreachable or refusing
+                    log.warning("run %s not held: %s", run_id, str(exc) or type(exc).__name__)
+                await asyncio.sleep(max(0.0, every - (time.monotonic() - began)))
+        finally:
+            if telling is not None:
+                telling.cancel()
+
+    async def _told(self, run_id: str, tenant: str) -> None:
+        """``renewed`` told of ``run_id``; what fails there is said in the log."""
+        try:
+            await self._renewed(run_id, tenant)
+        except Exception as exc:
+            log.warning("run %s: after its heartbeat: %s", run_id, str(exc) or type(exc).__name__)

@@ -27,6 +27,15 @@ window leaves out. A background task's notification kept its metadata four level
 the service allows two, and was refused the same way: it is kept as its JSON text (one stored
 before still reads).
 
+### Fixed: a run served under load is no longer ended for a missed heartbeat
+
+A run a server keeps in its own process is held by a heartbeat every 20 s for a 60 s hold. Each
+heartbeat waited for the store and then for the conversation's line read before the next could
+start, so under load (a slow agent-runs, a slow line read) they fell behind until the hold
+lapsed and agent-runs ended a run that was still working (`holder_lost`). Heartbeats now keep
+their time: one not answered within 20 s is given up, the line is read in a task of its own,
+and a failure of any kind is logged without stopping them.
+
 ### Fixed: a brief agent-runs outage no longer loses a run's events
 
 An append of events agent-runs could not be reached for was dropped once its client's own
