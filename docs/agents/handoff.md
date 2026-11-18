@@ -12,8 +12,6 @@ work up.
 * The end user gets a conversation: natural questions with options, approvals only for actions
   in their own name on their business data (an order, a refund, an email, a price, their
   schedules), plan mode, skills.
-* The platform operator owns infrastructure (shells, the sandbox, the network out). The end
-  user is never asked about it, and neither is a client company.
 * The framework (this harness) decides *how* and enforces; the company using it decides *how
   much* (numbers in settings), *where* (delivery connectors) and *what it looks like* (its UI).
 
@@ -21,7 +19,7 @@ work up.
 
 | Area | Change |
 |---|---|
-| Governance | One approval rule on every adapter; read-only shell commands run unasked everywhere (the OpenAI `SandboxAgent` shell made consistent); an administrator's explicit catalog risk wins over an announced write; an infrastructure call that needs approval is denied, never asked ([ADR 0008](../adr/0008-infrastructure-approvals.md)); Claude and Kimi plan mode hold until the plan is approved |
+| Governance | One approval rule on every adapter; read-only shell commands run unasked everywhere (the OpenAI `SandboxAgent` shell made consistent); an administrator's explicit catalog risk wins over an announced write; Claude and Kimi plan mode hold until the plan is approved |
 | Asking | An answer that is an option's value or label is that option; any other answer reaches the model as the user's words (never refused, never guessed); the "when to ask" guidance reaches every adapter that has a question tool, memory on or off |
 | Graphs | `h.harness_tools()`: a graph that binds its tools at build time gets the same harness tools as every other adapter (`ask_user`, schedules, memory, the gateway's MCP tools) |
 | Runs | A dead worker's model spend is saved as it accrues (a small spending segment after each reply); a run's end lists its children from an index, not a scan |
@@ -33,12 +31,10 @@ work up.
 Decisions taken with the owner during the round:
 
 * `TRELLIS_HOST_EXECUTION` stays `allow` by default; the Docker sandbox is unchanged.
-* Infrastructure approvals are denied; no new setting, no client approval path.
+* No infrastructure-specific approval rule: shells and the network follow the same catalog and hooks as any tool.
 * The spend-per-reply save is kept.
 * The memory lock queue and request priority are kept.
 * A graph binds `ask_user` in every run; build an unattended graph without it.
-* LangChain's own `ShellToolMiddleware` shell counts as infrastructure: denied when the catalog
-  would have it approved, unless the catalog marks it `read`.
 
 ## Phase-wise plan
 
@@ -138,7 +134,6 @@ agent (the harness's MCP/A2A endpoint) over raw tools.
 
 * The tool catalog is per tenant: a tenant's `read` on a shell or network tool still lets it
   run (platform ownership is not enforced at the catalog).
-* A team's own `HumanInTheLoopMiddleware` on an infrastructure tool still asks the user.
 * Examples share tool names in one tenant's catalog and one user (`ada`); `examples-env.sh
   fresh` gives each full run a clean tenant.
 * The overhead baseline (`benchmark-results.json`) was recorded on another machine: re-record
