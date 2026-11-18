@@ -145,9 +145,11 @@ the user Claude Code would ask:
   nothing of what it does: a person approves its calls (and may allow it for the
   conversation or always), until its risk is in the tool catalog.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
-  ([governance.md](../governance.md)): a team that wants every shell command approved gives
-  `Bash` the risk `irreversible` (or an `approve_when` such as `true`) there — the
-  administrator's rule, whose question a `before_tool` hook may route to a role.
+  ([governance.md](../governance.md)) — except that the shell (`Bash`, `PowerShell`, `REPL`,
+  `Monitor`) and the network out (`WebFetch`, `WebSearch`) are the platform's infrastructure:
+  a call of them that would need a person's approval (a risk that asks, an `approve_when` that
+  holds, a `before_tool` hook's `Ask`) is denied, Claude told why — never asked of the user
+  ([governance.md](../governance.md#infrastructure-is-the-platform-operators)).
 * **Not offered: schedules.** A scheduled prompt (`CronCreate`), a wake-up
   (`ScheduleWakeup`) or a claude.ai scheduled task (`RemoteTrigger`) fires with no run to
   check its calls: the first two only in a CLI that is running then. A query's own process ends
@@ -239,9 +241,9 @@ The run's user decides only the actions taken in their name; the rest is the dep
 |---|---|---|
 | `Read`, `Grep`, `Glob` in the workspace | nobody | they run, recorded |
 | `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny |
-| its shell in its sandbox | the deployment | runs unasked, announced (`tool_notice`) and recorded |
-| its shell on the host (no sandbox, or one that lets a command out) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it, give Claude Code its own sandbox (below) |
-| `WebFetch`, `WebSearch` | the administrator, in the tool catalog | refused until the catalog gives the tool a risk or an `approve_when` |
+| its shell in its sandbox | the platform operator | runs unasked, announced (`tool_notice`) and recorded; a call that would need approval is denied |
+| its shell on the host (no sandbox, or one that lets a command out) | the platform operator | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it, give Claude Code its own sandbox (below) |
+| `WebFetch`, `WebSearch` | the platform operator, in the tool catalog | refused until the catalog gives the tool the risk `read`; a risk that asks, or an `approve_when` that holds, denies the call |
 | MCP servers, `allowed_tools`, a `permission_mode` that lets calls through (`acceptEdits`, `bypassPermissions`, `dontAsk`, `auto`), the CLI's own flags (`extra_args`), its `settings` | the deployment | on the options you wrap or `h.wrap(framework_options=)`; a run's own `framework_options` that change them are refused (`default` and `plan` it may choose) |
 
 ## Where sandbox, skills and hooks go

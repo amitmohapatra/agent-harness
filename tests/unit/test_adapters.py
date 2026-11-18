@@ -847,7 +847,7 @@ async def test_only_the_sdks_shell_capability_makes_a_sandbox_shell() -> None:
     assert shell_of_sandbox(by_shell)
     assert not any(shell_of_sandbox(t) for t in (by_files, by_own, mine))
     spec = own_spec(SimpleNamespace(native={}), by_shell)  # type: ignore[arg-type]
-    for copy in (governed(by_shell), held(governed(by_shell), spec, confined=True)):
+    for copy in (governed(by_shell), held(governed(by_shell), spec)):
         assert copy is not by_shell and shell_of_sandbox(copy)
 
 

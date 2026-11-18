@@ -824,12 +824,13 @@ async def test_file_search_middlewares_tool_asks_then_searches_the_folder(
 
 
 @pytest.mark.host_execution
-async def test_shell_tool_middlewares_shell_asks_then_runs_in_the_librarys_session(
+async def test_shell_tool_middlewares_shell_is_infrastructure_a_call_needing_approval_denied(
     harness: Harness, tmp_path: Path
 ) -> None:
     """``ShellToolMiddleware`` starts a shell before the agent and gives it as the ``shell``
-    tool: a call asks a person first (the tool declares no side effects), then runs in the
-    library's own session — started again by the library for the run that resumes."""
+    tool. It declares no side effects, so a call would need a person's approval; but the shell
+    is the platform's infrastructure (ADR 0008): the call is denied, the model told why,
+    nothing run, nobody asked."""
     shell = ShellToolMiddleware(
         workspace_root=str(tmp_path), execution_policy=HostExecutionPolicy()
     )
@@ -837,15 +838,13 @@ async def test_shell_tool_middlewares_shell_asks_then_runs_in_the_librarys_sessi
     model = ScriptedChatModel(turns=[("shell", {"command": command}), "ok"])
     graph = create_agent(model, tools=[], middleware=[shell], checkpointer=InMemorySaver())
     agent = harness.wrap(graph, id="shell")
-    paused = await agent.run("write tides", user="u", thread="t")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "shell"
-    assert paused.interrupt.tool_call.args == {"command": command}
+    done = await agent.run("write tides", user="u", thread="t")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
+    assert done.answer == "ok"
+    assert "shell was not run: it is the platform's infrastructure" in str(
+        model.seen[-1][-1].content
+    )
     assert not (tmp_path / "t.txt").exists()
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
-    assert done.status is RunStatus.SUCCESS and done.answer == "ok"
-    assert "tides" in str(model.seen[-1][-1].content)
-    assert (tmp_path / "t.txt").read_text().strip() == "tides"
 
 
 # ------------------------------------------------------------------- create_react_agent

@@ -554,24 +554,29 @@ async def test_a_sandbox_shell_runs_unasked_and_announced_as_every_frameworks_sh
 
 @pytest.mark.host_execution
 @pytest.mark.parametrize(
-    ("said", "asks"),
-    [({"exec_command": "write"}, 1), ({"exec_command": Rule(None, approve_when="true")}, 1)],
-    ids=["catalog-write", "approve-when"],
+    "said",
+    [
+        {"exec_command": "write"},
+        {"exec_command": "irreversible"},
+        {"exec_command": Rule(None, approve_when="true")},
+    ],
+    ids=["catalog-write", "catalog-irreversible", "approve-when"],
 )
-async def test_a_sandbox_shell_asks_where_the_administrator_said_so(
-    harness: Harness, said: dict[str, Any], asks: int
+async def test_a_sandbox_shell_the_catalog_would_have_approved_is_denied(
+    harness: Harness, said: dict[str, Any]
 ) -> None:
-    """The catalog's word on the shell wins over the sandbox's default: an administrator's
-    ``write`` asks once a conversation (the second command runs, allowed for it), an
-    ``approve_when`` asks for the call it holds on."""
+    """The catalog's word on the shell that would have a person approve a command (a risk that
+    asks, an ``approve_when``): the shell is the platform's infrastructure, so each such
+    command is denied — never held at the SDK's own gate, never asked of anyone —, the model
+    reads why and the SDK's run goes on (ADR 0008)."""
     from agents.sandbox import SandboxAgent, SandboxRunConfig
     from agents.sandbox.capabilities import Shell
     from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
     model = ScriptedModel(
         [
-            ("exec_command", {"cmd": "rm -f old.txt"}),
-            ("exec_command", {"cmd": "rm -f older.txt"}),
+            ("exec_command", {"cmd": "echo kept > f.txt"}),
+            ("exec_command", {"cmd": "cat f.txt"}),
             "done",
         ]
     )
@@ -581,15 +586,11 @@ async def test_a_sandbox_shell_asks_where_the_administrator_said_so(
         target, id="said", framework_options={"run_config": config}
     )
     result = await agent.run("go", user="u")
-    asked = 0
-    while result.interrupt is not None:
-        assert result.interrupt.tool_call is not None
-        assert result.interrupt.tool_call.tool == "exec_command"
-        asked += 1
-        result = await agent.resume(
-            result.interrupt.interrupt_id, "approve", reviewer="u", remember="run"
-        )
-    assert result.status is RunStatus.SUCCESS and asked >= asks
+    assert result.status is RunStatus.SUCCESS and result.interrupt is None, result
+    assert len(model.inputs) == 3
+    told = str(model.outputs())
+    assert "exec_command was not run: it is the platform's infrastructure" in told
+    assert "kept" not in told.replace("echo kept", "")
 
 
 # --------------------------------------------------------------------------- pass-throughs
@@ -665,38 +666,6 @@ async def test_an_sse_server_and_a_server_managers_servers_are_governed_as_any_s
     assert cast("Any", governed).params is sse.params  # the SDK's own state, read through
     agent = harness.wrap(target, id="sse")
     assert await agent.adapter.native(agent.target) == []
-
-
-# --------------------------------------------------------------------------- sandbox
-@pytest.mark.host_execution
-async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_sandbox(
-    harness: Harness,
-) -> None:
-    """A ``SandboxAgent``'s shell the catalog says asks (``irreversible``) is held at the SDK's
-    own gate: the approved call continues the SDK's paused run — the model is not asked again,
-    and the file the first command wrote is there for the second."""
-    from agents.sandbox import SandboxAgent, SandboxRunConfig
-    from agents.sandbox.capabilities import Shell
-    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
-
-    model = ScriptedModel(
-        [
-            ("exec_command", {"cmd": "echo kept > f.txt"}),
-            ("exec_command", {"cmd": "cat f.txt"}),
-            "done",
-        ]
-    )
-    target = SandboxAgent(name="box", instructions="Work.", model=model, capabilities=[Shell()])
-    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    governed = declaring(harness, exec_command="irreversible")
-    agent = governed.wrap(target, id="held", framework_options={"run_config": config})
-    result = await agent.run("go", user="u")
-    for command in ("echo kept > f.txt", "cat f.txt"):
-        assert result.interrupt is not None and result.interrupt.tool_call is not None
-        assert result.interrupt.tool_call.args == {"cmd": command}
-        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="u")
-    assert result.status is RunStatus.SUCCESS and len(model.inputs) == 3  # never asked again
-    assert "kept" in str(model.outputs()[-1])
 
 
 async def test_an_encrypted_session_on_wrap_is_each_conversations_with_the_one_it_wraps(

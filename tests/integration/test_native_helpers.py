@@ -238,12 +238,12 @@ def subagent(builtin: str) -> dict[str, Any]:
 async def test_a_claude_subagents_built_in_asks_as_the_catalog_rules_and_a_rejection_holds(
     tmp_path: Path,
 ) -> None:
-    governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
+    governance = Governance(FakeCatalog({"Write": Rule(risk="irreversible")}))
     async with with_governance(Harness(config=HOST_ALLOWED), governance) as h:
-        agent = h.wrap(claude(tmp_path, [subagent("Bash"), {"text": "checked"}]), id="desk")
+        agent = h.wrap(claude(tmp_path, [subagent("Write"), {"text": "checked"}]), id="desk")
         paused = await agent.run("check o1", user="u")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "Bash"
+        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "Write"
         ended = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="r")
     assert ended.status is RunStatus.SUCCESS and built_ins(tmp_path) == []
 
@@ -615,11 +615,11 @@ async def test_an_agent_tools_approved_call_is_feedback_on_its_run(
 async def test_a_claude_subagents_approved_built_in_is_feedback_on_its_run(
     tmp_path: Path, memory_service: FakeMemoryService
 ) -> None:
-    governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
+    governance = Governance(FakeCatalog({"Write": Rule(risk="irreversible")}))
     async with with_governance(
         Harness(config=HOST_ALLOWED, memory=memory_service.client()), governance
     ) as h:
-        agent = h.wrap(claude(tmp_path, [subagent("Bash"), {"text": "checked"}]), id="desk")
+        agent = h.wrap(claude(tmp_path, [subagent("Write"), {"text": "checked"}]), id="desk")
         result = await agent.run("check o1", user="u")
         assert result.status is RunStatus.PAUSED and result.interrupt is not None
         [waiting] = await children(h, result.run_id)
@@ -628,9 +628,9 @@ async def test_a_claude_subagents_approved_built_in_is_feedback_on_its_run(
         # not asked again (one call, one question): the decision is on the subagent's call
         result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
         assert result.status is RunStatus.SUCCESS, result.interrupt
-        assert built_ins(tmp_path) == ["Bash"]
+        assert built_ins(tmp_path) == ["Write"]
         await h.writes.drain()
-    approved_where_recorded(memory_service, "Bash", result.run_id)
+    approved_where_recorded(memory_service, "Write", result.run_id)
 
 
 @pytest.mark.host_execution
@@ -648,7 +648,7 @@ async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_
                     "agent": "checker",
                     "prompt": f"check {order}",
                     "steps": [
-                        {"builtin": "Bash", "args": {"command": f"check {order}"}},
+                        {"builtin": "Write", "args": {"file_path": f"check {order}"}},
                         {"text": f"{order} is fine"},
                     ],
                 }
@@ -657,7 +657,7 @@ async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_
         },
         {"text": "checked both"},
     ]
-    governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
+    governance = Governance(FakeCatalog({"Write": Rule(risk="irreversible")}))
     async with with_governance(
         Harness(config=HOST_ALLOWED, memory=memory_service.client()), governance
     ) as h:
@@ -667,7 +667,7 @@ async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_
         while result.status is RunStatus.PAUSED:
             assert result.interrupt is not None and result.interrupt.tool_call is not None
             named = (result.interrupt.payload or {})[HELPER]
-            asked.append((str(result.interrupt.tool_call.args["command"]), named["run_id"]))
+            asked.append((str(result.interrupt.tool_call.args["file_path"]), named["run_id"]))
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
         assert result.status is RunStatus.SUCCESS and result.answer == "checked both"
         found = {r.input: r.run_id for r in await records(h, result.run_id)}
@@ -675,7 +675,7 @@ async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_
     # one question a call, each naming the run of the subagent that made it
     assert asked == [("check o1", found["check o1"]), ("check o2", found["check o2"])]
     made = {
-        c.body["args"]["command"]: c.scope["agent_run_id"] for c in bash_records(memory_service)
+        c.body["args"]["file_path"]: c.scope["agent_run_id"] for c in write_records(memory_service)
     }
     assert made == {"check o1": found["check o1"], "check o2": found["check o2"]}
     decided = {
@@ -686,5 +686,5 @@ async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_
     assert decided == {found["check o1"], found["check o2"]}
 
 
-def bash_records(service: FakeMemoryService) -> list[Any]:
-    return [c for c in service.named("record_tool") if c.body["tool"] == "Bash"]
+def write_records(service: FakeMemoryService) -> list[Any]:
+    return [c for c in service.named("record_tool") if c.body["tool"] == "Write"]

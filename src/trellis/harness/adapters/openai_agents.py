@@ -575,9 +575,11 @@ def _governing(kind: type) -> type:
             runtime = current()
             if runtime is None or runtime.agent.hooks:
                 return made
+            # the sandbox's shell is infrastructure, never held for a person: the bridge runs
+            # it announced, or denies it (``governance.infrastructure``)
             return [
-                held(tool, own_spec(runtime, tool), confined=shell_of_sandbox(tool))
-                if isinstance(tool, FunctionTool)
+                held(tool, own_spec(runtime, tool))
+                if isinstance(tool, FunctionTool) and not shell_of_sandbox(tool)
                 else tool
                 for tool in made
             ]

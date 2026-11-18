@@ -45,14 +45,14 @@ Today (`5e2429a`):
    `ShellTool` runs *your* executor (not confined): governed as your tool — unchanged.
 
 2. **The rule, at the one decision point.** `bridge._decided` (every call the harness runs,
-   and every framework built-in through `bridge.permitted`) and `bridge.asks_first` (a call
-   held at OpenAI Agents' own gate). A call of an **infrastructure** tool that would **ask** a
-   person — for whatever reason: the catalog's risk or `approve_when`, a rewind past a write, a
-   `before_tool` hook's `Ask` (with an assignee or without) — is **denied**: not run, its
+   and every framework built-in through `bridge.permitted`); an OpenAI `SandboxAgent`'s shell
+   is no longer held at the SDK's own gate, so its calls reach it too. A call of an
+   **infrastructure** tool that the catalog (its risk or `approve_when`) or a `before_tool`
+   hook's `Ask` (with an assignee or without) would have a person approve is **denied**: not run, its
    outcome `REJECTED` (`error_class="InfrastructureDenied"`), the model reads `"<tool> was not
    run: it is the platform's infrastructure, and a call of it that needs approval is denied; no
-   user can approve it."`, and the run records it (the call's result on the run's stream, its
-   span and memory tool record, the `decision` event `REFUSE`).
+   user can approve it."`, and the run records it (the call's `REJECTED` result on the run's
+   stream, kept in its log, and the `decision` event `REFUSE`).
 
 3. **No new setting, no new default.** Shells still run unasked and announced; network tools
    are still refused without the catalog's word; `TRELLIS_HOST_EXECUTION` and the sandbox are
@@ -63,7 +63,8 @@ Today (`5e2429a`):
    infrastructure tool its `Ask` is denied like any other question.
 
 5. **Schedules.** A schedule's confirmation ("allowing X in its runs") never lists an
-   infrastructure tool. An unattended scheduled run follows the same rule: denied.
+   infrastructure tool (it already leaves out confined tools and framework built-ins). An
+   unattended scheduled run follows the same rule: denied.
 
 6. **Plan mode** is unchanged: approving a plan is the user's (business). Until it is
    approved a call that does more than read is refused as every such call is; after, the rule.
@@ -80,6 +81,11 @@ Today (`5e2429a`):
 
 ## Consequences
 
+* LangChain's `ShellToolMiddleware` `shell` declares no side effects, so its calls asked the
+  run's user before; as infrastructure they are now denied by default (with every other
+  shell's default unchanged: those declare a write, run unasked and announced). The catalog's
+  `read` for `shell` lets it run.
+
 * One place decides, by one definition of infrastructure; adapters gain no per-adapter code.
 * The adapter matrix gains a test per adapter path (`tests/matrix/test_infra_approval.py`).
 
@@ -89,30 +95,41 @@ Today (`5e2429a`):
 review's recommendation). It first reviewed a version that routed the question to an
 administrator's role behind a new setting; the owner then simplified the design twice (no
 setting; then denial, infrastructure being the platform operator's), and the findings below
-carried over. Scope accepted as-is (4 source files, 1 new module, no new class).
+carried over. Scope accepted as-is (5 source files, 1 new module, no new class).
 
 1. **Deny before anything allowed the tool beyond one call** (architecture, 9/10,
    `tools/bridge.py` `_decided`: `_allowed(...)` runs before the approval is asked). A user's
    "for this conversation" or "always" for `Bash` kept before this change, a schedule's
    allowance, or a framework gate's approval (`journal.approved`) must not let an
-   infrastructure call through. The rule runs right after the hooks, governance and the rewind
-   check, before `_allowed` and the gate.
+   infrastructure call through. The rule runs right after the hooks and governance, before
+   `_allowed` and the gate.
 2. **OpenAI Agents' own gate** (architecture, 9/10, `bridge.asks_first`: `await
-   runtime.approve(...)`). It would pause and ask. It now reports "does not ask" for an
-   infrastructure call that would, so the SDK runs the call into the bridge, which denies it
-   there: one place denies.
-3. **A rewind past an infrastructure write** (edge case, 8/10, `_rewound_past` asks a person
-   whatever the risk): denied too, by the same rule.
+   runtime.approve(...)`). It would pause on a sandbox shell's call and ask. The sandbox's
+   shell is now never held at the SDK's gate (`adapters.openai_agents`: `held` skips
+   `shell_of_sandbox` tools; `asks_first` lost its `confined` parameter): the SDK runs the
+   call into the bridge, which runs it announced or denies it — one place denies.
+3. **A rewind past an infrastructure call** (edge case, 8/10, `_rewound_past` asks a person
+   about any call a rewound run makes again that did more than read). First decided "denied
+   too"; amended by the owner: an infrastructure call made again past a rewind is neither
+   asked nor denied — it runs announced, as any of its calls (its sandbox is the run's own;
+   repeating it is the platform's concern, and a denial would break legitimate rewound runs).
+   The rewind check is skipped for infrastructure; the denial applies only where the catalog
+   or a hook would have a person approve.
 4. **Recording a denied framework built-in** (code quality, 7/10). A call the harness runs is
-   recorded by the bridge's refused path (`_events`); a framework's built-in denied in
-   `bridge.permitted` gets the same `TOOL_CALL_*` events, span and memory record through
-   `bridge.observed`, with the `decision` event `REFUSE`.
+   put on the run's stream by the bridge's refused path (`_events`); a framework's built-in
+   denied in `bridge.permitted` gets the same `TOOL_CALL_*` events, with the `decision` event
+   `REFUSE`. (A first cut recorded it through `bridge.observed`; `/review` found that it then
+   also counted, traced and recorded in the memory service a call that never ran, unlike a
+   harness call denied — both now take the same path, as any rejected call does.)
 5. **One list, derived where it can be** (red flag "hand-synced list"): the module derives from
    `host.CLAUDE_SHELLS` and `governance.shell.SHELLS` (light modules); the names held in heavy
    modules (`CAPABILITY_SHELLS`, `middleware.EXECUTE`, the sandbox's `EXEC`/`WRITE`,
    `CLAUDE_NETWORK`, `KIMI_NETWORK`) are literal here and a unit test fails when any of them is
    not inside the definition.
-6. **Schedules' confirmation** excludes infrastructure tools (`schedules._asking`).
+6. **Schedules' confirmation** (checked, no change: `schedules._asking`). It already lists
+   neither a confined tool (the sandbox's) nor a framework's built-in (`Runtime.own_tools`
+   leaves them out), so it never offers the user an infrastructure tool; a check there by
+   name would have caught a tool of the team's own of the same name.
 
 Second shape considered: a `Tool.infrastructure` flag set wherever `confined` is set, plus a
 flag each adapter passes to `bridge.permitted`. Rejected: it spreads the decision over every

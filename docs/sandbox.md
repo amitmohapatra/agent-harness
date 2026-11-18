@@ -354,9 +354,10 @@ not be paused.
 **Every call is a tool call** ([tools.md](tools.md#every-call)):
 
 * *governed* — `sandbox_exec` and `sandbox_write` write (announced: `tool_notice`),
-  `sandbox_read` reads; the catalog overrides it like any tool's: `risk: irreversible` on
-  `sandbox_exec` asks a person before every command, an `approve_when` on its `command`
-  argument before some ([governance.md](governance.md));
+  `sandbox_read` reads. `sandbox_exec` and `sandbox_write` are the platform's infrastructure:
+  a call of them the catalog (a risk that asks, an `approve_when`) or a hook would have a
+  person approve is denied, the model told why — never asked of the run's user
+  ([governance.md](governance.md#infrastructure-is-the-platform-operators));
 * *journaled* — a resumed run reads every command's recorded output and runs nothing again;
 * *recorded* — the arguments and the output on the run's stream and in the memory service's
   tool records, as they are; the command's span masks credentials, and an `on_output` hook

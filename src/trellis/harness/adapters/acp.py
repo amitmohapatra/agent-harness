@@ -222,9 +222,9 @@ KIMI_SUBAGENT: Final = "coder"
 # --------------------------------------------------------------------------- Kimi Code
 #: Kimi Code's built-in tools, and what each does as governance sees it (the tool catalog's
 #: word overrides it): reads run; writes, ``Bash`` among them, run and are announced, Kimi's
-#: own policy asking first where it would (a team that wants every shell command approved
-#: gives ``Bash`` the risk ``irreversible``, or an ``approve_when``, in the tool catalog); a
-#: sub-agent's
+#: own policy asking first where it would (``Bash`` and the network out are the platform's
+#: infrastructure, ``governance.infrastructure``: a call of them that would need a person's
+#: approval is denied); a sub-agent's
 #: call (``Agent``, ``AgentSwarm``) only hands work on — each of its calls Kimi asks about is
 #: governed on its own. Any other tool Kimi asks about is a write.
 KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
