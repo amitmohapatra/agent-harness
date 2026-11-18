@@ -711,3 +711,13 @@ async def test_closing_a_session_cancels_what_it_left_running_aside() -> None:
     await session.close()
     await asyncio.sleep(0)
     assert aside.cancelled()
+
+
+async def test_with_no_context_the_prompt_hook_adds_nothing() -> None:
+    """``bridges.claude.with_context``: with no context to add, the harness's own
+    ``UserPromptSubmit`` hook answers nothing, so the prompt goes as it is."""
+    from trellis.harness.bridges.claude import PROMPT_EVENT, with_context
+
+    [matcher] = with_context(None, "")[PROMPT_EVENT]
+    [hook] = matcher.hooks
+    assert await hook({}, None, {}) == {}
