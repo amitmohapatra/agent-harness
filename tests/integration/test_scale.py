@@ -148,6 +148,53 @@ async def test_the_log_is_best_effort_and_a_lost_lease_stops_it(caplog: Any) -> 
     assert BATCH == 500
 
 
+async def test_events_wait_while_agent_runs_restarts_and_are_dropped_only_past_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An append agent-runs cannot be reached for (a restart) is tried again, in order, and
+    nothing is lost; one still unreachable past ``UNREACHABLE_SECONDS`` is dropped, said once."""
+    from trellis.harness import runlog
+    from trellis.harness.events import RunEvents
+    from trellis.harness.identity import Identity
+    from trellis.runs import DependencyUnavailableError
+
+    monkeypatch.setattr(runlog, "RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(runlog, "RETRY_MAX_SECONDS", 0.02)
+
+    class Restarting:
+        def __init__(self, refusals: int) -> None:
+            self.refusals = refusals
+            self.kept: list[RunEvent] = []
+
+        async def append_events(self, run_id: str, events: Sequence[RunEvent], **kw: Any) -> Any:
+            if self.refusals:
+                self.refusals -= 1
+                raise DependencyUnavailableError("unreachable", code="X", status=503)
+            self.kept.extend(events)
+
+        def stream_events(self, run_id: str, **kw: Any) -> AsyncIterator[Any]:
+            raise NotImplementedError
+
+    identity = Identity(tenant="t", user="u", agent_id="a", run_id="run_1", thread=None)
+    events = RunEvents(identity.context())
+    heard: list[RunEvent] = []
+    events.listen(heard.append)
+    back = Restarting(refusals=4)
+    log = RunLog(back, "run_1", tenant="t", worker_id=None, events=events)  # type: ignore[arg-type]
+    events.record(log)
+    for n in range(3):
+        events.custom("step", n=n)
+    await log.close()
+    assert [e.data["n"] for e in back.kept] == [0, 1, 2]  # all of them, in order
+    assert not [e for e in heard if e.data.get("code") == "events_undelivered"]
+    monkeypatch.setattr(runlog, "UNREACHABLE_SECONDS", 0.05)
+    gone = Restarting(refusals=10_000)
+    log = RunLog(gone, "run_1", tenant="t", worker_id=None, events=events)  # type: ignore[arg-type]
+    log(heard[0])
+    await log.flush()
+    assert not gone.kept and [e for e in heard if e.data.get("code") == "events_undelivered"]
+
+
 async def test_in_process_events_follow_a_run_here_until_it_ends(harness: Harness) -> None:
     agent = arm(harness.wrap(charging, id="billing"), [charge])
     paused = await agent.run("o-4", user="ada")

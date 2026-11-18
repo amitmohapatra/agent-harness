@@ -19,6 +19,22 @@ the harness publishes to the catalog itself): `irreversible` at every call (held
 own gate, its approved call continuing the paused run), and so does an `approve_when`. Only the
 SDK's own `Shell` capability's tools are the sandbox shell, and the mark survives the harness's
 copies of the tool. `apply_patch` asks as a write, as `Write` does.
+### Fixed: a conversation's transcript is no longer refused by the memory service
+
+A sub-agent's question (stored as the agent's message, below) went as visible chat, which the
+service refuses: the whole turn's transcript was lost. It is now an internal message, which a
+window leaves out. A background task's notification kept its metadata four levels deep where
+the service allows two, and was refused the same way: it is kept as its JSON text (one stored
+before still reads).
+
+### Fixed: a brief agent-runs outage no longer loses a run's events
+
+An append of events agent-runs could not be reached for was dropped once its client's own
+retries (about two seconds) were spent, so a restart lost the events of every run in flight.
+It is now tried again, in order, for up to a minute, then dropped with one warning as before.
+A tool call's record is queued before the run's progress is saved, so a worker killed right
+after the call leaves its record too.
+
 ### Fixed: a run a dead worker left keeps what that worker's model calls spent
 
 A queued run whose worker died and another finished reported, in `RUN_FINISHED`'s `spent`

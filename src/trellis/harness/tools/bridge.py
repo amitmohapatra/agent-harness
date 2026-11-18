@@ -762,10 +762,12 @@ async def _record(
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     runtime.replay.record_step(call, outcome)
+    metrics.tool_called(call.tool, outcome.status.value)
+    # queued before the save, so it is on its way while the save is: a worker killed right
+    # after the call (which the journal then keeps from running again) leaves its record
+    await runtime.agent.record_tool(runtime, call, outcome)
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
-    metrics.tool_called(call.tool, outcome.status.value)
-    await runtime.agent.record_tool(runtime, call, outcome)
 
 
 async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall, Deny | Ask | None]:
