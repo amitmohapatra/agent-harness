@@ -147,7 +147,9 @@ def test_a_replys_cache_reads_cache_writes_and_cost_are_read_from_its_usage() ->
 
     from trellis.harness.journal import Journal, Replay
 
-    runtime: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    runtime: Any = SimpleNamespace(
+        replay=Replay(Journal()), parent=None, budget=None, spent_more=lambda: None
+    )
     reply = AIMessage(
         content="ok",
         usage_metadata={

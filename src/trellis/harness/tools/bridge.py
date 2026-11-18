@@ -537,7 +537,9 @@ async def _ran(
         runtime.code_mode_scripts.append((datetime.now(UTC), tool_call.step))
     runtime.used.add(tool.name)
     reads = decision.risk == "read"
-    if not reads:
+    if reads:  # the model's spending saved first: a worker that dies in the call has it said
+        await runtime.spent_saved()
+    else:
         # saved before it runs: the attempt after a crash knows it was running
         runtime.replay.start(key)
         if not await runtime.saved_start():

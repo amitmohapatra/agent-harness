@@ -18,6 +18,7 @@ from trellis.contracts import (
 from trellis.harness import agent as agent_module
 from trellis.harness import journal as journal_module
 from trellis.harness.journal import (
+    SPENDING,
     Journal,
     Made,
     Pending,
@@ -25,9 +26,11 @@ from trellis.harness.journal import (
     apply,
     content_key,
     delta,
+    spending,
+    spent_of,
 )
 from trellis.harness.runs import LocalRuns
-from trellis.runs.payloads import SEGMENTS
+from trellis.runs.payloads import SEGMENTS, PayloadRef
 
 
 def resolution(answer: str) -> InterruptResolution:
@@ -651,7 +654,7 @@ async def test_progress_after_reads_is_saved_at_most_every_20_s(
     class Changing:  # a journal that always has something new to save
         async def save(self, *args: Any, **kwargs: Any) -> Any:
             saves.append(clock[0])
-            return SimpleNamespace(checkpoint={})
+            return SimpleNamespace(checkpoint={}, dumped={})
 
         def saved(self, save: Any) -> None:
             return None
@@ -713,3 +716,151 @@ def test_an_attempt_that_goes_on_takes_the_record_made_for_its_call_by_id() -> N
     goes_on = Replay(journal, goes_on=True)
     with goes_on.calling("k", ident="call_b"):
         assert goes_on.occurrence("k") == 1
+
+
+async def test_spending_kept_beside_the_segments_is_read_back_and_saved_next(
+    tmp_path: Path,
+) -> None:
+    """A spend-only save lists the segments as they are, with what the run and its
+    sub-agents' runs spent since beside them: read back over the segments' (a sub-agent's run
+    the segments do not hold yet has a journal of its spending alone), and the next save of
+    the journal keeps it."""
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal(spent={"tokens": 10}, children={"kid": Journal(spent={"tokens": 4})})
+    assert journal.spend_checkpoint(spending(journal.spent, journal.children)) is None  # unsaved
+    saved = await _saved(journal, runs, run_id)
+    assert saved is not None
+    journal.spent["tokens"] = 30
+    journal.children["kid"].spent["tokens"] = 9
+    journal.children["kid"].children["grandkid"] = Journal(spent={"tokens": 5})
+    journal.children["new"] = Journal(spent={"tokens": 7})
+    tree = spending(journal.spent, journal.children)
+    checkpoint = journal.spend_checkpoint(tree)
+    assert checkpoint is not None and checkpoint[SEGMENTS] == saved[SEGMENTS]
+    resumed = await Journal.read(checkpoint, runs.artifacts, tenant="acme")
+    assert spending(resumed.spent, resumed.children) == tree
+    assert spending(*spent_of(resumed.dump())) == tree
+    again = await _saved(resumed, runs, run_id)  # the segments hold it from now on
+    assert again is not None and SPENDING not in again
+    reread = await Journal.read(again, runs.artifacts, tenant="acme")
+    assert spending(reread.spent, reread.children) == tree
+
+
+def _worker_run(heartbeat: Any) -> Any:
+    from types import SimpleNamespace
+
+    from trellis.contracts import AgentExecutionContext
+    from trellis.harness.events import RunEvents
+    from trellis.harness.identity import Identity
+    from trellis.harness.runtime import Runtime
+
+    runs = SimpleNamespace(heartbeat=heartbeat)
+    agent: Any = SimpleNamespace(without=frozenset(), harness=SimpleNamespace(runs=runs))
+    identity = Identity(tenant="t", agent_id="a", run_id="run_1", user="u")
+    events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="a"))
+    journal = Journal()
+    journal._segments = (PayloadRef(ref="r", size=1, sha256="0" * 64),)
+    runtime = Runtime(identity=identity, agent=agent, events=events, replay=Replay(journal))
+    runtime.worker_id, runtime.lease_seconds = "w", 60
+    return runtime
+
+
+async def test_a_reply_accounted_on_a_workers_run_is_saved_once_at_a_time() -> None:
+    """Each reply accounted on a worker's run sends what the run spent with a heartbeat,
+    the segments listed unchanged; replies accounted while one is under way go with the
+    next; a reply of a sub-agent's run is saved by the run it works inside; an in-process
+    run sends nothing."""
+    from trellis.harness import budget
+
+    sent: list[dict[str, Any]] = []
+    going = asyncio.Event()
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw["checkpoint"][SPENDING]["spent"])
+        await going.wait()
+
+    run = _worker_run(heartbeat)
+    child = _worker_run(heartbeat)
+    child.parent, child.worker_id = run, None
+    budget.account(child, model="m", input_tokens=1, output_tokens=1)
+    await asyncio.sleep(0)
+    budget.account(run, model="m", input_tokens=2, output_tokens=2)
+    budget.account(run, model="m", input_tokens=3, output_tokens=3)
+    going.set()
+    await run.spent_saved()
+    assert [s["tokens"] for s in sent] == [2, 12]
+    await run.spent_saved()  # nothing under way
+    run.worker_id = None
+    budget.account(run, model="m", input_tokens=1, output_tokens=0)
+    assert run._spending.done() and len(sent) == 2
+
+
+async def test_a_reply_accounted_in_a_thread_is_saved_on_the_runs_loop() -> None:
+    sent: list[Any] = []
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw["checkpoint"])
+
+    run = _worker_run(heartbeat)
+    run.running_in = asyncio.current_task()
+    await asyncio.to_thread(run.spent_more)
+    await asyncio.sleep(0)
+    await run.spent_saved()
+    assert len(sent) == 1
+
+
+async def test_a_spending_save_refused_is_not_tried_again_and_a_lost_lease_is_said() -> None:
+    from trellis.harness import budget
+    from trellis.runs import LeaseLostError
+
+    async def lost(run_id: str, worker_id: str, **kw: Any) -> None:
+        raise LeaseLostError("gone", code="LEASE_LOST", status=409)
+
+    async def down(run_id: str, worker_id: str, **kw: Any) -> None:
+        raise RuntimeError("agent-runs is down")
+
+    run = _worker_run(lost)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await run.spent_saved()
+    assert run.lease_lost and run._spent_sent is None
+    run = _worker_run(down)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await run.spent_saved()
+    assert not run.lease_lost and run._spent_sent is None
+
+
+async def test_a_spending_save_under_way_when_the_attempt_ends_is_not_made() -> None:
+    from trellis.harness import budget
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        await asyncio.sleep(5)
+
+    run = _worker_run(heartbeat)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await asyncio.sleep(0)
+    run.unwatched()
+    with pytest.raises(asyncio.CancelledError):
+        await run._spending
+
+
+async def test_a_reply_accounted_before_the_journals_first_save_saves_it_whole() -> None:
+    """With no segments yet there are none to list beside the spending: the journal is saved
+    whole (a progress save), and no spend-only heartbeat is sent."""
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+    saves: list[bool] = []
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw)
+
+    async def saved(*, now: bool) -> None:
+        saves.append(now)
+
+    run = _worker_run(heartbeat)
+    run.replay.journal._segments = ()
+    run._saved = saved
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await run.spent_saved()
+    assert saves == [True] and sent == []

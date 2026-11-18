@@ -5,6 +5,7 @@ checkpoint lists."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -183,6 +184,41 @@ async def test_a_resumed_react_run_replays_its_model_steps_and_its_writes(
     assert done.answer == "paid 3" and paid == [3]
     # the first model step (it chose pay) came from the checkpoint: only the steps after it
     assert len(model.requests) - asked_before == 2
+
+
+async def test_the_model_calls_a_dead_worker_made_since_its_last_save_are_spent(
+    harness: Harness,
+) -> None:
+    crashes = [Crash()]
+
+    @tool(side_effects="read")
+    def boom() -> str:
+        """Crash the worker."""
+        if crashes:
+            raise crashes.pop()
+        return "fine"
+
+    # every reply 110 tokens: the step that chose boom was made after pay's save, and the
+    # worker died before any later one — its tokens are the provider's all the same
+    model = ScriptedChatModel(turns=[("pay", {"amount": 3}), ("boom", {})], spends=(100, 10))
+    agent = arm(harness.wrap(ReAct("You pay.", model), id="payer"), [pay, boom])
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    handle = await agent.start("pay 3", user="u")
+    await crash_once(store, agent, handle)
+    model.turns = [("boom", {}), "paid 3"]
+    seen: list[Any] = []
+
+    async def watch() -> None:
+        seen.extend([e async for e in agent.events(handle.id)])
+
+    watching = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # following the run before its next attempt
+    assert await harness.worker([agent]).run_once()
+    assert (await handle.result(wait=5)).answer == "paid 3"
+    await asyncio.wait_for(watching, 5)
+    spent = seen[-1].data["spent"]
+    assert (spent["model_calls"], spent["tokens"]) == (4, 440)  # two calls on each worker
 
 
 async def test_reads_are_saved_at_most_every_progress_interval(

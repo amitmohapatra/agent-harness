@@ -163,6 +163,7 @@ def account(
         spent["cache_written_tokens"] = spent.get("cache_written_tokens", 0) + written
         spent["cost"] = spent.get("cost", 0.0) + (cost or 0.0)
         spent["model_calls"] = spent.get("model_calls", 0) + calls
+    runtime.spent_more()  # saved at once: a worker that dies next has it said
 
 
 def reported(runtime: Runtime, **spent: Any) -> None:
