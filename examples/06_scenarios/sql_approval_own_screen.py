@@ -73,6 +73,7 @@ async def main() -> None:
             ),
             id="analyst",
             hooks=[SqlReview()],
+            without={"mcp"},  # run_sql is its one tool: none of the gateway's MCP tools
         )
         result = await agent.run(
             "Order 7 is stuck: set its status to 'retry' in orders, then re-queue its job in "

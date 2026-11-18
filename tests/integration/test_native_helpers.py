@@ -461,7 +461,10 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
         "kind": "agent_tool",
         "name": "check",
     }
-    assert told(memory_service, child.run_id) == [("AGENT", "check o1"), ("ASSISTANT", "o1 is fine")]
+    assert told(memory_service, child.run_id) == [
+        ("AGENT", "check o1"),
+        ("ASSISTANT", "o1 is fine"),
+    ]
     # a full child run: the agent is given its memory context before its task
     assert inner.inputs[0][-1]["content"] == (
         f"{memory_service.context_text}\n\n{TASK_HEADING}check o1"

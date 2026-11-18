@@ -101,7 +101,8 @@ async def main() -> None:
             middleware=[MaskCards()],  # no card number reaches the model
         )
         # in order: no card number in a tool result, then the refund rules
-        agent = h.wrap(target, id="refunds", hooks=[Cards(), Refunds()])
+        # its tools are its own: none of the gateway's MCP tools (a shared key allows others')
+        agent = h.wrap(target, id="refunds", hooks=[Cards(), Refunds()], without={"mcp"})
         paused = await agent.run(
             "Refund order o1 in full (250 EUR, card 4111111111111111).", user="ada"
         )
