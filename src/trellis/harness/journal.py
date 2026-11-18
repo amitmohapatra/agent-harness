@@ -91,11 +91,6 @@ if TYPE_CHECKING:
 #: reads at most this many, in one request. Measured on a 50-step run of 1.5 MiB: 16 resumes
 #: in 27 ms (64: 45 ms) for 0.4 MB stored (64: 0.1 MB; a whole journal per save: 23 MB).
 MAX_SEGMENTS: Final = 16
-#: The key a spend-only save (:meth:`Journal.spend_checkpoint`) keeps the run's spending under
-#: in its checkpoint, beside the segments it lists unchanged: what the run and its sub-agents'
-#: runs had spent then (:func:`spending`), newer than the segments say. A save of the journal
-#: replaces the checkpoint without it (its segments hold the spending as it is then).
-SPENDING: Final = "spending"
 #: The key a call's record is filed under, whatever its outcome: ``{RECORD: {"status": ...,
 #: "output": ..., "metadata": ...}}`` (``tools.bridge.journal_record``; read back by its
 #: ``journal_outcome``) — an envelope around every output, so one a tool shapes like a record
@@ -138,23 +133,33 @@ def apply(base: Any, node: dict[str, Any]) -> Any:
     return changed
 
 
-def spending(spent: dict[str, Any], children: dict[str, Any]) -> dict[str, Any]:
-    """What a journal (its ``spent``, its ``children`` journals or their dumps) has spent, its
-    sub-agents' runs' journals by run id, each as its own: ``{"spent": ..., "children":
-    {run_id: ...}}`` (``children`` only when there are any)."""
-    tree: dict[str, Any] = {"spent": dict(spent)}
+def _spending(dumped: dict[str, Any], journal: Journal) -> dict[str, Any] | None:
+    """What turns ``dumped`` (a dump of the journal, as a save left it) into it with the
+    journal's spending now — its ``spent``, and its sub-agents' runs' (one ``dumped`` does
+    not hold yet: a journal of its spending alone) — and nothing else of it (``None``: the
+    spending is the same): a :func:`delta`, made in O(the run's sub-agents' runs)."""
+    changed: dict[str, Any] = {}
+    if dumped.get("spent", {}) != journal.spent:
+        changed["spent"] = {"$r": dict(journal.spent)}
+    held = dumped.get("children") or {}
+    children: dict[str, Any] = {}
+    for run_id, child in journal.children.items():
+        if run_id in held:
+            if (node := _spending(held[run_id], child)) is not None:
+                children[run_id] = node
+        else:
+            children[run_id] = {"$r": _spent_alone(child).dump()}
     if children:
-        tree["children"] = {
-            run_id: spending(*spent_of(child)) for run_id, child in children.items()
-        }
-    return tree
+        changed["children"] = {"$d": children}
+    return {"$d": changed} if changed else None
 
 
-def spent_of(journal: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-    """A journal's ``spent`` and ``children``, of the journal or of its dump."""
-    if isinstance(journal, dict):  # a dump
-        return journal.get("spent") or {}, journal.get("children") or {}
-    return journal.spent, journal.children
+def _spent_alone(journal: Journal) -> Journal:
+    """A journal of ``journal``'s spending alone, its sub-agents' runs' included."""
+    return Journal(
+        spent=dict(journal.spent),
+        children={run_id: _spent_alone(child) for run_id, child in journal.children.items()},
+    )
 
 
 class _Absent:
@@ -398,6 +403,11 @@ class Journal(BaseModel):
     #: (a constant default: a default factory costs pydantic a signature look-up per journal)
     _segments: tuple[PayloadRef, ...] = PrivateAttr(default=())
     _saved: dict[str, Any] | None = PrivateAttr(default=None)
+    #: the segments and journal of the last whole save while a spending save's segment
+    #: follows them (:meth:`save_spending`), which the next spending save replaces
+    _unspent: tuple[tuple[PayloadRef, ...], dict[str, Any] | None] | None = PrivateAttr(
+        default=None
+    )
 
     # ------------------------------------------------------------------ persistence
     @classmethod
@@ -422,19 +432,7 @@ class Journal(BaseModel):
         journal = cls.model_validate(dumped)
         # what the next save compares with: a copy, never the objects the journal holds
         journal._segments, journal._saved = tuple(segments), journal.dump()
-        # spent since the segments were saved (a spend-only save): the next save keeps it
-        journal._spent(checkpoint.get(SPENDING))
         return journal
-
-    def _spent(self, tree: dict[str, Any] | None) -> None:
-        """The spending a spend-only save kept (:func:`spending`), on this journal and its
-        sub-agents' runs' — one the segments do not hold yet is a journal of its spending
-        alone (it had made no call they journal)."""
-        if not tree:
-            return
-        self.spent = dict(tree["spent"])
-        for run_id, child in (tree.get("children") or {}).items():
-            self.children.setdefault(run_id, Journal())._spent(child)
 
     def dump(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
@@ -485,17 +483,50 @@ class Journal(BaseModel):
             dumped=dumped,
         )
 
-    def spend_checkpoint(self, tree: dict[str, Any]) -> dict[str, Any] | None:
-        """The checkpoint of a spend-only save: the segments the run store holds, listed
-        unchanged — no upload —, with what the run has spent now (``tree``: :func:`spending`)
-        beside them; ``None`` before the first save (no segments to list: a whole save then)."""
-        if not self._segments:
+    def spends_alone(self) -> bool:
+        """Whether a spending save (:meth:`save_spending`) has segments to add to: a save
+        was made, and its segments are fewer than :data:`MAX_SEGMENTS` (else a whole save,
+        :meth:`save`, which starts them again)."""
+        segments = (self._unspent or (self._segments, None))[0]
+        return 0 < len(segments) < MAX_SEGMENTS
+
+    async def save_spending(
+        self, artifacts: RunArtifacts, run_id: str, *, worker_id: str | None, tenant: str
+    ) -> Save | None:
+        """A spending save: what the run and its sub-agents' runs have spent now, uploaded as
+        one small segment after the segments the last whole save left — a spending save's
+        own replaced, so they grow by one at most — the checkpoint every save sends (its
+        segments alone: agent-runs keeps any other whole, letting the segments go); then
+        :meth:`spending_saved`. ``None`` when the spending is what the last save took. Only
+        when :meth:`spends_alone`."""
+        assert self._saved is not None and self.spends_alone()
+        if _spending(self._saved, self) is None:
             return None
-        return {SEGMENTS: [r.model_dump() for r in self._segments], SPENDING: tree}
+        segments, dumped = self._unspent or (self._segments, self._saved)
+        assert dumped is not None
+        # the whole save's own spending again (none spent since it): a segment that changes
+        # nothing, in place of the spending segment the run store holds
+        node = _spending(dumped, self) or {"$d": {}}
+        ref = await artifacts.put_payload(
+            run_id, await aencode(node), worker_id=worker_id, tenant=tenant
+        )
+        return Save(
+            checkpoint={SEGMENTS: [r.model_dump() for r in [*segments, ref]]},
+            segments=[*segments, ref],
+            dumped=apply(dumped, node),
+        )
+
+    def spending_saved(self, save: Save) -> None:
+        """The run store took a spending save: the next one replaces its segment, a whole
+        save adds to it."""
+        if self._unspent is None:
+            self._unspent = (self._segments, self._saved)
+        self._segments, self._saved = tuple(save.segments), save.dumped
 
     def saved(self, save: Save) -> None:
         """The run store took ``save``: the next one adds to it."""
         self._segments, self._saved = tuple(save.segments), save.dumped
+        self._unspent = None
 
     async def checkpoint(
         self, artifacts: RunArtifacts, run_id: str, *, worker_id: str | None, tenant: str

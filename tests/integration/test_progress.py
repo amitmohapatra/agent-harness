@@ -206,6 +206,8 @@ async def test_the_model_calls_a_dead_worker_made_since_its_last_save_are_spent(
     assert isinstance(store, LocalRuns)
     handle = await agent.start("pay 3", user="u")
     await crash_once(store, agent, handle)
+    record = await handle.status()  # segments alone: how agent-runs keeps a checkpoint's
+    assert record.checkpoint is not None and set(record.checkpoint) == {SEGMENTS}
     model.turns = [("boom", {}), "paid 3"]
     seen: list[Any] = []
 

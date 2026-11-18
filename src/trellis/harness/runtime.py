@@ -54,8 +54,6 @@ from trellis.harness.journal import (
     call_key,
     calling_ident,
     content_key,
-    spending,
-    spent_of,
 )
 from trellis.runs import LeaseLostError
 
@@ -325,10 +323,10 @@ class Runtime:
     _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
     #: why the latest progress save failed (``None``: it did not), for :meth:`saved_start`
     _unsaved_error: Exception | None = field(default=None, repr=False)
-    #: the spend-only save under way (:meth:`spent_more`), and the spending the run store
-    #: last took (``journal.spending``; ``None``: none taken in this attempt)
+    #: the spending save under way (:meth:`spent_more`), and whether it is what holds
+    #: :attr:`_saving` (a save of the spending alone: no journal taken)
     _spending: asyncio.Task[None] | None = field(default=None, repr=False)
-    _spent_sent: dict[str, Any] | None = field(default=None, repr=False)
+    _spending_only: bool = field(default=False, repr=False)
     #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
     stalled: ModelTimeout | None = None
     #: what the run's front end gave it: its tools, context and state (``frontend.py``)
@@ -627,7 +625,7 @@ class Runtime:
         return False
 
     def unwatched(self) -> None:
-        """The attempt ended: every watchdog still on is off, and a spend-only save under way
+        """The attempt ended: every watchdog still on is off, and a spending save under way
         is not made (how the attempt ended says what it spent)."""
         for handle in self._watched.values():
             handle.cancel()
@@ -669,8 +667,9 @@ class Runtime:
                 await self.parent.progress(now=now)
                 return
             # a save that waits for one under way is never put off: that one's journal was
-            # taken before this change (a graph checkpoint written during its upload)
-            behind = self._saving.locked()
+            # taken before this change (a graph checkpoint written during its upload) — unless
+            # it saves the spending alone, which takes no journal
+            behind = self._saving.locked() and not self._spending_only
             async with self._saving:
                 await self._saved(now=now or behind)
         except LeaseLostError:
@@ -707,7 +706,6 @@ class Runtime:
             self._unsaved(f"{type(exc).__name__}: {exc}")
             return
         self._saved_at = clock
-        self._spent_sent = spending(*spent_of(save.dumped))
 
     def spent_more(self) -> None:
         """A model reply was accounted (``budget.account``): what the run has spent is saved,
@@ -716,7 +714,7 @@ class Runtime:
         its sub-agents' runs work inside. In a task of its own, the attempt not held up; the
         replies accounted while one is under way go with the next (one at a time)."""
         root = self._root()
-        if root.worker_id is None or root.lease_seconds is None:
+        if root.worker_id is None or root.lease_seconds is None or root.lease_lost:
             return
         if self._elsewhere(self.spent_more):  # a reply of a sync node's model, in a thread
             return
@@ -724,7 +722,7 @@ class Runtime:
             root._spending = asyncio.get_running_loop().create_task(root._send_spent())
 
     async def spent_saved(self) -> None:
-        """The spend-only save under way, made (:meth:`spent_more`): before a call that only
+        """The spending save under way, made (:meth:`spent_more`): before a call that only
         reads runs — a worker that dies in it has had its replies' spending saved. A call
         that does more than read saves the whole journal before it runs (:meth:`saved_start`)."""
         task = self._root()._spending
@@ -732,27 +730,31 @@ class Runtime:
             await asyncio.wait([task])
 
     async def _send_spent(self) -> None:
-        """What the run has spent, sent with a heartbeat of its lease: its checkpoint lists the
-        segments the run store holds as they are — nothing uploaded — and the spending beside
-        them (``Journal.spend_checkpoint``); before its first save, the journal is saved whole
-        (:meth:`progress`). A save that fails is not tried again: the next one carries the
-        spending (a lost lease stops the run at its next save or its end)."""
-        journal = self.replay.journal
-        while True:
+        """What the run has spent, sent with a heartbeat of its lease: one small segment of
+        it after the segments the run store holds (``Journal.save_spending``), the previous
+        spending segment replaced — a checkpoint of segments alone, as every save sends;
+        with no segments to add to (before the first save, or a chain as long as a save
+        keeps), the journal is saved whole (:meth:`progress`). A save that fails is not tried
+        again: the next one carries the spending (a lost lease stops the run at its next save
+        or its end, and no more spending is sent)."""
+        journal, runs = self.replay.journal, self.agent.harness.runs
+        while not self.lease_lost:
             async with self._saving:
-                tree = spending(journal.spent, journal.children)
-                if tree == self._spent_sent:
-                    return
-                checkpoint = journal.spend_checkpoint(tree)
                 try:
-                    if checkpoint is None:
+                    if not journal.spends_alone():
                         await self._saved(now=True)
                         return
-                    await self.agent.harness.runs.heartbeat(
+                    self._spending_only = True
+                    save = await journal.save_spending(
+                        runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+                    )
+                    if save is None:  # the spending is what the run store holds
+                        return
+                    await runs.heartbeat(
                         self.run_id,
                         self.worker_id or "",
                         lease_seconds=self.lease_seconds or 0,
-                        checkpoint=checkpoint,
+                        checkpoint=save.checkpoint,
                         tenant=self.tenant,
                     )
                 except LeaseLostError:
@@ -761,7 +763,9 @@ class Runtime:
                 except Exception as exc:  # the next save carries it
                     log.debug("run %s: its spending not saved: %s", self.run_id, exc)
                     return
-                self._spent_sent = tree
+                finally:
+                    self._spending_only = False
+                journal.spending_saved(save)
 
     def _root(self) -> Runtime:
         root = self

@@ -12,10 +12,11 @@ A queued run whose worker died and another finished reported, in `RUN_FINISHED`'
 replies the dead worker was charged for after it — those followed by calls that only read,
 saved at most every 20 s — were lost (the accuracy benchmark's restart case, `long-flow-04`:
 32,978 tokens reported against 40,723 metered). Each reply accounted on a worker's run now
-saves what the run has spent at once, on a heartbeat whose checkpoint lists the journal's
-segments as they are with the spending beside them (`Journal.spend_checkpoint`): no upload,
-one save under way at a time, and a call that only reads waits for it before it runs. A model
-call still under way when the worker died is not counted (its reply never came).
+saves what the run has spent at once, on a heartbeat: one small segment of the spending after
+the journal's segments, which the next spending save replaces (`Journal.save_spending`) — a
+checkpoint of segments alone, as agent-runs keeps one, and as a worker of an earlier release
+reads it. One save under way at a time, and a call that only reads waits for it before it
+runs. A model call still under way when the worker died is not counted (its reply never came).
 
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 

@@ -154,10 +154,10 @@ tool that is idempotent runs again with the same idempotency key
 again.
 What the run has spent (`RUN_FINISHED`'s `spent`) is saved as each model reply is accounted,
 so the replies a dead worker was paid for since its last save stay counted: a heartbeat whose
-checkpoint lists the journal's segments unchanged, with the spending of the run and its
-sub-agents' runs beside them (`spending`) — nothing uploaded; one save under way at a time,
-the replies accounted meanwhile sent with the next; a call that only reads waits for it
-before it runs. A model call still under way when the worker died is not counted: the harness
+checkpoint adds one small segment, the spending of the run and its sub-agents' runs, to the
+journal's segments — the next spending save replaces it, the next progress save adds to it,
+and the checkpoint stays segments alone; one save under way at a time, the replies accounted
+meanwhile sent with the next; a call that only reads waits for it before it runs. A model call still under way when the worker died is not counted: the harness
 never saw its reply, though the provider may have charged it; nor is a reply a framework
 reports only later (when its turn or query ends) before it does.
 A save that fails is a `warning` event and a log line — the run goes on, and the next save
