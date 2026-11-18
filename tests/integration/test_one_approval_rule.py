@@ -74,11 +74,13 @@ async def test_a_claude_servers_tool_that_says_nothing_offers_every_choice_and_a
 
 
 @pytest.mark.host_execution
+@pytest.mark.parametrize("picked", ["run", " allow for THIS  conversation"])
 async def test_claude_codes_own_question_offers_the_choices_of_the_risk(
-    harness: Harness, tmp_path: Path
+    harness: Harness, tmp_path: Path, picked: str
 ) -> None:
     """A write Claude Code asks about itself (its ``Write``): the person picks as for a
-    harness tool's write, and what they allow for the conversation covers the next call."""
+    harness tool's write — an option's value, or its label handed back (case and spacing
+    aside) — and what they allow for the conversation covers the next call."""
     calls = [{"builtin": "Write", "args": {"n": n}} for n in (1, 2)]
     agent = harness.wrap(claude(tmp_path, *calls), id="writer")
     first = await agent.run("write", user="ada", thread="c1")
@@ -88,7 +90,7 @@ async def test_claude_codes_own_question_offers_the_choices_of_the_risk(
         "Approve Write? Claude Code asks before it runs this call. "
         "Allow once, allow for this conversation, or deny."
     )
-    done = await agent.resume(asked.interrupt_id, "answer", answer="run", reviewer="ada")
+    done = await agent.resume(asked.interrupt_id, "answer", answer=picked, reviewer="ada")
     assert done.status is RunStatus.SUCCESS, done
     written = (tmp_path / "builtins.jsonl").read_text().splitlines()
     assert [json.loads(line)["args"]["n"] for line in written] == [1, 2]

@@ -29,6 +29,7 @@ from trellis.contracts import (
 from trellis.harness import admission, compat
 from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
+    ANSWERED,
     EDITED,
     KIMI,
     KIMI_ASKED,
@@ -40,7 +41,7 @@ from trellis.harness.adapters.acp import (
     kimi,
     native_spec,
 )
-from trellis.harness.agent import NARROW_FROM
+from trellis.harness.agent import ASKING, NARROW_FROM
 from trellis.harness.bridges import acp_live, live
 from trellis.harness.bridges.resumed import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.budget import Budget
@@ -116,8 +117,10 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert server["headers"][0]["name"] == "Authorization"
     # the harness tool needs no person: Kimi asks, the harness lets it through
     assert record["permissions"] == [{"title": "mcp__trellis__lookup", "answer": "approve_once"}]
-    # what Kimi is told of its folder's outputs/ (the user's), then the user's message
-    assert record["prompts"] == [f"{DELIVERS_HERE}\ntell me about tea"]
+    # what Kimi is told of its folder's outputs/ (the user's), when to ask with its question
+    # tool (memory off: the note alone), then the user's message
+    told = ASKED_WITH.format(context=ASKING)
+    assert record["prompts"] == [f"{DELIVERS_HERE}\n{told}\ntell me about tea"]
     assert record["initialize"][0]["terminal"] is False  # no sandbox: no terminal of ours
 
 
@@ -486,6 +489,70 @@ async def test_its_question_is_the_runs_question(harness: Harness, tmp_path: Pat
     ]
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="blue", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "picked blue"
+
+
+SUPPLIERS = ["SUP-04 (Lyon Mills)", "SUP-07 (Prato Knit)"]
+
+
+@pytest.mark.parametrize("forms", ["1", "0"], ids=["form", "permission-request"])
+@pytest.mark.parametrize(
+    ("answer", "read"),
+    [
+        (" sup-04  (LYON mills) ", "picked SUP-04 (Lyon Mills)"),  # its option, handed back
+        ("SUP-07 (Prato Knit)", "picked SUP-07 (Prato Knit)"),
+        *(
+            (said, f"picked {ANSWERED.format(question='Which supplier?', answer=said)}")
+            for said in ("SUP-04", "not SUP-04", "the second one", "neither")
+        ),
+    ],
+    ids=["label-case-spacing", "exact", "part", "not", "ordinal", "neither"],
+)
+async def test_an_answer_to_its_question_is_an_option_handed_back_or_the_users_words(
+    harness: Harness, tmp_path: Path, forms: str, answer: str, read: str
+) -> None:
+    """An answer that hands an option back (its case and spacing aside) is that option; any
+    other is never refused and never read as an option: the question is dismissed and the
+    agent told the person's words, for its model to read."""
+    script = [{"question": "Which supplier?", "options": SUPPLIERS}, {"text": "picked {last}"}]
+    env = {"FAKE_ACP_FORMS": forms}
+    agent = harness.wrap(fake(tmp_path, script, env=env), id=f"words-{forms}")
+    asked = await agent.run("reorder", user="u1")
+    assert asked.interrupt is not None
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=answer, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == read
+
+
+async def test_several_picks_or_a_form_answered_in_words_reach_the_agent(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Several picks handed back are those options; words to a form of several questions
+    fill none of it: the agent reads them."""
+    regions = [{"question": "Which regions?", "options": [{"label": "north"}, {"label": "east"}],
+                "multi_select": True}]  # fmt: skip
+    script = [{"questions": regions}, {"text": "got {last}"}]
+    (tmp_path / "picks").mkdir()
+    (tmp_path / "form").mkdir()
+    agent = harness.wrap(fake(tmp_path / "picks", script), id="picks")
+    asked = await agent.run("alert", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.multiple
+    picked = [" North", "EAST "]
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1")
+    assert done.answer == 'got {"answers": {"Which regions?": "north, east"}}'
+    asked = await agent.run("alert again", user="u2")
+    assert asked.interrupt is not None
+    words = ["north", "and the west"]
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=words, reviewer="u2")
+    said = ANSWERED.format(question="Which regions?", answer="north, and the west")
+    assert done.answer == f"got {said}"
+    script = [{"questions": QUESTIONS}, {"text": "got {last}"}]
+    agent = harness.wrap(fake(tmp_path / "form", script), id="form-words")
+    asked = await agent.run("set it up", user="u1")
+    assert asked.interrupt is not None
+    keep = "Postgres, and both clouds"
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=keep, reviewer="u1")
+    said = ANSWERED.format(question="Which db?\nWhich cloud?", answer=keep)
+    assert done.status is RunStatus.SUCCESS and done.answer == f"got {said}"
 
 
 QUESTIONS = [
@@ -912,7 +979,8 @@ async def test_a_session_the_agent_no_longer_holds_is_run_again_from_its_prompt(
     [warning] = [e for e in events if e.data.get("code") == "acp_session"]
     assert "was not resumed" in warning.data["message"]
     # from the prompt, the journal's
-    assert recorded(tmp_path)["prompts"][-1] == f"{DELIVERS_HERE}\nrefund o4"
+    told = ASKED_WITH.format(context=ASKING)  # when to ask: Kimi has its question tool
+    assert recorded(tmp_path)["prompts"][-1] == f"{DELIVERS_HERE}\n{told}\nrefund o4"
 
 
 async def test_an_agent_without_session_resume_loads_the_session(

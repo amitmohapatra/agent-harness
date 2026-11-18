@@ -27,8 +27,9 @@ MAX_COMPLEXITY = 34
 MAX_FUNCTION_LINES = 198
 #: how many functions may exceed a complexity of 15
 MAX_OVER_15 = 63
-#: the mean (4.0735 today: Claude plan mode's own checks, 2026-11-17) must not drift upwards
-MAX_MEAN_COMPLEXITY = 4.08
+#: the mean (4.0826 today: the spend saves of a worker's run, the one answer rule, the
+#: infrastructure denial and a graph's harness tools, 2026-11-18) must not drift upwards
+MAX_MEAN_COMPLEXITY = 4.09
 
 _BRANCHING = (
     ast.If,

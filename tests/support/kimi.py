@@ -74,6 +74,9 @@ NOT_RUN: Final = (
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
 _REJECTED = re.compile(r"^Your call to \S+ was not run: ")
 _DENIED = "the person denied it"
+#: A prompt that tells it the user answered its question in words (``adapters.acp.ANSWERED``):
+#: what they said is the question's result.
+_ANSWERED = "The user answered your question"
 #: The harness's prompts at a step limit (``budget.TURN_LIMIT``) and after a loop
 #: (``bridge.TURN_STALLED``): a model told so answers.
 _TOLD_TO_ANSWER = ("This turn has reached its limit", TURN_STALLED)
@@ -158,7 +161,7 @@ class PlannedEndpoint:
                 matched = _EDITED.search(said)
                 if matched:
                     edited = (matched["tool"], json.loads(matched["args"]))
-                elif users > 1 and (_REJECTED.match(said) or _DENIED in said):
+                elif users > 1 and (_REJECTED.match(said) or _DENIED in said or _ANSWERED in said):
                     results.append(said)
         if _told_to_answer(body):  # told its turn is stopped: it answers, calling nothing
             return self.final.replace("{last}", results[-1] if results else "")
