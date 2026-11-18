@@ -978,8 +978,9 @@ async def run_case(
             shelf.add(skill)
         source = skills.combine(shelf)
         # a graph that binds its own tools has no slot and no declared tools: the two skill
-        # tools are bound with the rest
-        bound = convert("langchain", await source.tools().resolve()) if adapter == "graph" else ()
+        # tools are bound with the rest, and the harness's own tools
+        shelved = convert("langchain", await source.tools().resolve()) if adapter == "graph" else []
+        bound = [*shelved, *await cx.bound_of(h, adapter)]
         target, options = cx.target_of(
             model, "thread", None, max_steps, adapter=adapter, wire=wire, tools=TOOLS,
             bound=bound or (), variant=variant, skills=source,

@@ -66,7 +66,7 @@ from tests.support.memory import FakeMemoryService
 
 from benchmark.cost import prices
 from benchmark.cost import run as runner
-from benchmark.cost.complex import ADAPTERS, target_of
+from benchmark.cost.complex import ADAPTERS, bound_of, target_of
 from benchmark.cost.schedules import Calls, Seed, _kept, _seed
 from trellis import Harness, Settings, ask_user, tool
 from trellis.contracts import ConfigurationError, Interrupt, InterruptReason, RunStatus
@@ -942,7 +942,8 @@ async def run_case(
     async with Harness(config=config, memory=service.client(), gateway=False) as h:
         tools = [*r.TOOLS, *TOOLS, *ALSO.get(case.category, ()), *declared]
         target, options = target_of(model, "thread", None, max_steps, adapter=adapter,
-                                    tools=tools, variant=variant)  # fmt: skip
+                                    tools=tools, bound=await bound_of(h, adapter),
+                                    variant=variant)  # fmt: skip
         trace = Calls()
         agent = h.wrap(target, id=f"ask-{case.id}", hooks=[trace], run_timeout=300,
                        without=without, **options)  # fmt: skip

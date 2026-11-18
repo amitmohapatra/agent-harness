@@ -145,6 +145,10 @@ TURN_STALLED: Final = (
 #: again (:func:`_repeated`, the model reading :data:`STALLED` instead of its result): a model
 #: looping on one call, whatever its framework.
 MAX_REPEATS: Final = 3
+#: What a schedule tool answers in a run a schedule fired: such a run does its task, no more
+#: (``Agent.tools_for`` offers it none; a graph built with them bound, ``h.harness_tools()``,
+#: is refused at the call: :func:`_off`).
+FIRED: Final = "{tool} is not for a run a schedule started: do its task, no more"
 #: The ``error_class`` of that call, and the warning on the run's stream (once).
 REPEATED: Final = "Repeated"
 #: The error class of a call not run because its start could not be saved (:func:`_unsaved`).
@@ -707,17 +711,15 @@ def _refused(
 ) -> ToolOutcome | None:
     """Why a call is not run at all, as the model reads it: the run's budget is spent, the
     same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
-    feature this run is without, or arguments that do not fit its schema (nothing runs,
-    nothing is journaled: the model corrects them)."""
+    feature this run is without (:func:`_off`), or arguments that do not fit its schema
+    (nothing runs, nothing is journaled: the model corrects them)."""
     over = _over_budget(runtime, tool) or _repeated(runtime, tool, key, decision)
     if over is not None:
         return over
-    if tool.feature is not None and not runtime.uses(tool.feature):
+    off = _off(runtime, tool)
+    if off is not None:
         return ToolOutcome(
-            tool=tool.name,
-            status=ToolStatus.ERROR,
-            output=f"{tool.name} is off in this run (without {tool.feature})",
-            error_class="FeatureOff",
+            tool=tool.name, status=ToolStatus.ERROR, output=off, error_class="FeatureOff"
         )
     problem = arguments_problem(tool.spec.input_schema or {}, args)
     if problem is None:
@@ -728,6 +730,19 @@ def _refused(
         output=not_run(tool.name, problem),
         error_class=INVALID_ARGUMENTS,
     )
+
+
+def _off(runtime: Runtime, tool: Tool) -> str | None:
+    """Why a tool the framework was built with is not this run's (``h.harness_tools()``, bound
+    when a graph is built): a part the run is without, or a schedule tool in a run a schedule
+    fired (:data:`FIRED`: every other target is offered none there)."""
+    if tool.feature is None:
+        return None
+    if not runtime.uses(tool.feature):
+        return f"{tool.name} is off in this run (without {tool.feature})"
+    if tool.feature == "schedules" and runtime.scheduled is not None:
+        return FIRED.format(tool=tool.name)
+    return None
 
 
 async def _record(

@@ -89,7 +89,7 @@ answer the call's result. Who has it:
 | a chat front end's ([`serve_chat`](surfaces.md): a person reads it and answers its pauses) | offered by itself; off with `without=["ask"]` |
 | the same, on Claude Code or Kimi Code | theirs instead (`AskUserQuestion`, asked as the run's question): no second tool |
 | started from code (`agent.run`, `stream`), queued (`start`), fired by a schedule, called over A2A or by another run | not offered by itself: nobody is known to answer, and a pause there may never be resumed. An agent whose caller answers pauses declares it: `ReAct(tools=[trellis.ask_user()])` (or any agent's tools) |
-| a graph built with its tools bound | never (its tools are fixed) |
+| a graph built with its tools bound | bound when it is built, with the harness's other tools: `await h.harness_tools()` ([frameworks/langgraph.md](frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build)); every run of it may ask; off with `without=["ask"]` |
 
 A tool of the agent's own named `ask_user` wins, and one declared is offered once. `kind` is
 `text`, `date`, `date_range` or `number`; `options` makes it a choice, `multiple` lets several be

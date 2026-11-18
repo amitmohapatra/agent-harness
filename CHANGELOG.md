@@ -38,6 +38,23 @@ one that finds the lease lost stops the run's next model call or read. Each save
 small segment; one a later save replaced is deleted by agent-runs' payload sweep 24 h after it
 was written. A
 model call still under way when the worker died is not counted (its reply never came).
+### Added: `h.harness_tools()`: the harness's own tools for a graph you build
+
+A graph whose model binds its tools when it is built (a hand-built `StateGraph`, a
+`create_agent` graph without `middleware()`) never had `ask_user` and had the schedule tools
+only by asking for them (`h.schedule_tools()`): in the accuracy run such a graph asked in its
+reply and never made a schedule. `await h.harness_tools()` gives it, as LangChain tools for its
+`ToolNode` and `model.bind_tools`, what every other target is offered by itself: the MCP tools
+the virtual key allows, the memory tools, the schedule tools and `ask_user` — the same tools,
+not copies. Each call is the run's that makes it: governed, journaled and recorded;
+`ask_user` pauses the run and its answer is the call's result; a part the run is without
+answers that it is off in this run; outside a run a call is refused. A schedule tool called in
+a run a schedule fired now answers that it is not for that run (every other target is offered
+none there). A `create_agent` graph is offered them in the run's words at each model call
+(`schedule_task` saying the hour in the user's zone, `ask_user` naming the app's own controls).
+The benchmark's `graph` adapter binds them as the docs say: asking 59 to 71 of 80, schedules
+20 to 57 of 61, skills 28 to 29 of 30
+([frameworks/langgraph.md](docs/frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build)).
 
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 
