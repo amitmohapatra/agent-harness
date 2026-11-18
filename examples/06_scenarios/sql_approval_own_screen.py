@@ -66,11 +66,19 @@ async def main() -> None:
     )
     async with Harness() as h:
         agent = h.wrap(
-            ReAct(system_prompt="You fix stuck orders with SQL.", model=model, tools=[run_sql]),
+            ReAct(
+                system_prompt="You fix stuck orders with SQL: run_sql, one statement per call.",
+                model=model,
+                tools=[run_sql],
+            ),
             id="analyst",
             hooks=[SqlReview()],
         )
-        result = await agent.run("Retry the stuck order 7.", user="ada")
+        result = await agent.run(
+            "Order 7 is stuck: set its status to 'retry' in orders, then re-queue its job in "
+            "jobs (state 'queued', tries 0).",
+            user="ada",
+        )
         await dba_screen(h)
         assert result.interrupt is not None
         fixed = {"sql": "UPDATE orders SET status = 'retry' WHERE id = 7"}

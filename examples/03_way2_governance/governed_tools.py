@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 
 from examples._support.memory import ScriptedMemory
 
@@ -81,7 +82,8 @@ async def main() -> None:
             print("denied:", denied.outcome.output)
 
     asked = await gov.check("refund", {"order": "o-8", "amount": 250})
-    await gov.decided(asked, "approve", reviewer="lee", run_id="run_example", user="ada")
+    run_id = f"run_{uuid.uuid4().hex}"  # the run the call was asked in (its id is the feedback's)
+    await gov.decided(asked, "approve", reviewer="lee", run_id=run_id, user="ada")
     await gov.aclose()
 
 

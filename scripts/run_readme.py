@@ -4,7 +4,8 @@
 
     python scripts/run_readme.py           # offline: a scripted model answers (make examples)
     python scripts/run_readme.py --live    # the environment as it is: LLM_BASE_URL or the
-                                           # provider's key (make examples-live)
+                                           # provider's key (make examples-live); the
+                                           # walkthrough's model is EXAMPLES_MODEL when set
 
 Offline the walkthrough's model name is served by the examples' scripted model
 (``examples._support.offline``) on the route a name takes without Bifrost; everything else —
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
@@ -26,6 +28,8 @@ from trellis.harness import gateways
 
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
+#: the walkthrough's model argument
+MODEL_ARG = re.compile(r"""\bmodel=(["'])[^"']+\1,""")
 #: what the scripted model does, offline: check the stock, reorder, answer
 SCRIPT: list[Any] = [
     ("stock", {"sku": "SKU-1"}),
@@ -43,6 +47,14 @@ def walkthrough(text: str) -> str:
     if not blocks:
         raise SystemExit("the README's walkthrough has no python block")
     return "\n".join(blocks)
+
+
+def live(source: str) -> str:
+    """Live, the walkthrough's model name is the one the examples use (``EXAMPLES_MODEL``) when
+    it is set: a model the deployment serves (its gateway's key allows it), not necessarily the
+    README's."""
+    model = os.environ.get("EXAMPLES_MODEL")
+    return MODEL_ARG.sub(f"model={model!r},", source, count=1) if model else source
 
 
 def offline() -> None:
@@ -64,9 +76,12 @@ async def run(source: str) -> dict[str, Any]:
 
 def main(argv: list[str]) -> int:
     sys.path.insert(0, str(ROOT))
-    if "--live" not in argv:
+    source = walkthrough(README.read_text())
+    if "--live" in argv:
+        source = live(source)
+    else:
         offline()
-    namespace = asyncio.run(run(walkthrough(README.read_text())))
+    namespace = asyncio.run(run(source))
     status = getattr(namespace.get("result"), "status", None)
     if status is not RunStatus.SUCCESS:
         print(f"the walkthrough ended {status}, not SUCCESS", file=sys.stderr)  # noqa: T201

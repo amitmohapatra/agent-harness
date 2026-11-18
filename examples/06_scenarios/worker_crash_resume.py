@@ -5,8 +5,8 @@ first one did happens twice.
 * worker A claims it under a short lease; it pays the invoice (its
   result is saved as the run's progress checkpoint on the heartbeat right after) and then the
   process dies — no finish, no release, nothing written;
-* the lease lapses; agent-runs (here the in-process store) puts the run back on the queue as
-  attempt 2;
+* the lease lapses; agent-runs (its ticker; offline the in-process store) puts the run back on
+  the queue as attempt 2;
 * worker B claims it: the journal in the checkpoint answers the payment (it is not paid again)
   and the run goes on to its end.
 
@@ -22,7 +22,8 @@ import asyncio
 from trellis import Harness, Runtime, tool
 from trellis.runs import Job
 
-LEASE_SECONDS = 1
+#: the shortest lease agent-runs grants (5 to 3600 s), so the lapse comes soon
+LEASE_SECONDS = 5
 paid: list[int] = []
 crashes = ["the machine"]
 

@@ -95,14 +95,16 @@ async def main() -> None:
             ]
         )
         target = ReAct(
-            system_prompt="You handle refunds. Look the order up first.",
+            system_prompt="You handle refunds. Look the order up first with the order tool.",
             model=model,
             tools=[order, refund],
             middleware=[MaskCards()],  # no card number reaches the model
         )
         # in order: no card number in a tool result, then the refund rules
         agent = h.wrap(target, id="refunds", hooks=[Cards(), Refunds()])
-        paused = await agent.run("Refund order o1, card 4111111111111111.", user="ada")
+        paused = await agent.run(
+            "Refund order o1 in full (250 EUR, card 4111111111111111).", user="ada"
+        )
         assert paused.interrupt is not None  # over 100: the catalog's rule asks
         print("waiting:", paused.interrupt.question)
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")

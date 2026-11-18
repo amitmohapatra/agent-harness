@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
+from bifrost_sdk import NO_GATEWAY_TOOLS
 from examples._support.gateway import McpTool, ScriptedGateway
 from examples._support.memory import ScriptedMemory
 
@@ -33,8 +35,9 @@ from trellis.harness.runs import LocalRuns, RunStore
 from trellis.memory import MemoryClient
 from trellis.runs import RunsClient
 
-#: The model the examples use through Bifrost.
-MODEL = "openrouter/openai/gpt-4.1-nano"
+#: The model the examples use through Bifrost: ``EXAMPLES_MODEL`` (``provider/model``, one the
+#: gateway's virtual key allows), else this one.
+MODEL = os.environ.get("EXAMPLES_MODEL") or "openrouter/openai/gpt-4.1-nano"
 MAX_TOKENS = 2048
 #: A stand-in for the Claude Code CLI that speaks its stream-json protocol.
 FAKE_CLAUDE_CLI = str(
@@ -53,7 +56,8 @@ def online() -> bool:
 
 
 def gateway() -> tuple[str, str]:
-    """Bifrost's base URL and virtual key, for a framework's own OpenAI client."""
+    """Bifrost's base URL and virtual key, for a framework's own OpenAI client (which sends
+    ``NO_GATEWAY_TOOLS``: the gateway adds none of its MCP tools to a model client of yours)."""
     return os.environ["LLM_BASE_URL"], os.environ.get("LLM_API_KEY") or "unused"
 
 
@@ -65,7 +69,13 @@ def langchain_model(turns: Sequence[Turns]) -> Any:
         from langchain_openai import ChatOpenAI
 
         url, key = gateway()
-        return ChatOpenAI(model=MODEL, base_url=url, api_key=key, max_completion_tokens=MAX_TOKENS)  # type: ignore[arg-type]
+        return ChatOpenAI(
+            model=MODEL,
+            base_url=url,
+            api_key=key,  # type: ignore[arg-type]
+            max_completion_tokens=MAX_TOKENS,
+            default_headers=dict(NO_GATEWAY_TOOLS),  # the framework decides every tool call
+        )
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
@@ -114,9 +124,8 @@ def openai_agents_model(turns: Sequence[Turn]) -> Any:
         from openai import AsyncOpenAI
 
         url, key = gateway()
-        return OpenAIChatCompletionsModel(
-            model=MODEL, openai_client=AsyncOpenAI(base_url=url, api_key=key)
-        )
+        client = AsyncOpenAI(base_url=url, api_key=key, default_headers=dict(NO_GATEWAY_TOOLS))
+        return OpenAIChatCompletionsModel(model=MODEL, openai_client=client)
     script = list(turns)
 
     class Scripted(Model):
@@ -252,10 +261,24 @@ def offline_blocks(
 
 def claude_cli(script: Sequence[dict[str, Any]], server: str) -> dict[str, Any]:
     """``ClaudeAgentOptions`` arguments for the CLI: the real ``claude`` through Bifrost's
-    Anthropic route when online, else the scripted stand-in calling tools of ``server``."""
+    Anthropic route when online — on :data:`MODEL` (its background calls too, not the CLI's
+    own default models), adding none of the gateway's MCP tools (``NO_GATEWAY_TOOLS``, as
+    ``ANTHROPIC_CUSTOM_HEADERS``), in a directory of its own — else the scripted stand-in
+    calling tools of ``server``."""
     if online():
         url, key = gateway()
         origin = url.removesuffix("/v1")
-        return {"env": {"ANTHROPIC_BASE_URL": f"{origin}/anthropic", "ANTHROPIC_API_KEY": key}}
+        headers = "\n".join(f"{name}: {value}" for name, value in NO_GATEWAY_TOOLS.items())
+        env = {
+            "ANTHROPIC_BASE_URL": f"{origin}/anthropic",
+            "ANTHROPIC_API_KEY": key,
+            "ANTHROPIC_CUSTOM_HEADERS": headers,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": MODEL,
+            "ANTHROPIC_SMALL_FAST_MODEL": MODEL,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+        # a working directory of its own: from the repository the CLI would read its
+        # CLAUDE.md and project settings into the model's context
+        return {"model": MODEL, "env": env, "cwd": tempfile.mkdtemp(prefix="claude-example-")}
     environment = {"FAKE_CLAUDE_SCRIPT": json.dumps(list(script)), "FAKE_CLAUDE_SERVER": server}
     return {"cli_path": FAKE_CLAUDE_CLI, "env": environment}

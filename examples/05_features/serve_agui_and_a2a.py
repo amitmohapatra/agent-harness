@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
+import uuid
 from typing import Any
 
 import httpx
@@ -64,7 +65,7 @@ async def main() -> None:
             print("A2A card:", card.json()["name"])
             run = {
                 "threadId": "t1",
-                "runId": "r1",
+                "runId": f"r-{uuid.uuid4().hex}",  # a new run's id: a run store keeps them
                 "messages": [{"id": "m1", "role": "user", "content": "book a table"}],
             }
             async with client.stream(
