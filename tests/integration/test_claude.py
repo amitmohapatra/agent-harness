@@ -36,7 +36,7 @@ from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     native_spec,
 )
-from trellis.harness.agent import NARROW_FROM
+from trellis.harness.agent import ASKING, NARROW_FROM
 from trellis.harness.bridges.resumed import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
@@ -692,8 +692,10 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
     assert (work / "outputs" / "sub" / "x.txt").exists()
     # no system prompt of its own stays none (the SDK's default): told with the context
+    # (when to ask, then its outputs/)
     started = started_with(tmp_path)
-    assert started["system_prompt"] == "" and started["context"] == boxes.DELIVERS_HERE
+    told = f"{ASKING}\n\n{boxes.DELIVERS_HERE}"
+    assert started["system_prompt"] == "" and started["context"] == told
     await harness.aclose()
 
 
@@ -854,13 +856,15 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     assert available == sorted(available) and {"Read", "Bash", "Skill"} <= set(available)
 
 
-async def test_without_memory_no_context_hook_is_registered(
+async def test_without_memory_the_context_is_when_to_ask_alone(
     harness: Harness, tmp_path: Path
 ) -> None:
+    """No memory: the context hook says only when to ask (Claude has its question tool,
+    ``AskUserQuestion``: ``Agent.push``)."""
     script = [{"text": "told: {context}"}]
     target = options(tmp_path, script, system_prompt="You help.")  # told of outputs/ there
     result = await harness.wrap(target, id="helper").run("reach me how?", user="u1")
-    assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
+    assert result.answer == f"told: {ASKING}" and started_with(tmp_path)["context"] == ASKING
 
 
 def lookups(n: int) -> list[Any]:

@@ -5,6 +5,42 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: an answer in words to an agent's question reaches its model, on every adapter
+
+An answer to a question with options was refused unless it was an option's exact value:
+answering Kimi Code's own `AskUserQuestion` (options `SUP-04 (Lyon Mills)`, `SUP-07 (Prato
+Knit)`) with "SUP-04" failed `resume` with `the answer 'SUP-04' is not one of the options`,
+and the run stayed paused; in the asking benchmark seven Kimi cases ended there. One rule now
+holds for every answer, on every surface (`agent.resume`, AG-UI, A2A: `Agent._resolution`,
+and a queued run's worker through `Question.answer`) and every adapter: an option handed back
+— its value or label, case and spacing aside — is that option
+(`trellis.runs.answers.meant`, which agent-runs checks with too); any other answer is never
+refused and never guessed into an option ("SUP-04", "not SUP-04", "the second one" are the
+model's to read). `ask_user` took words already. Kimi's question now takes them
+(`expects` a string, or a form's object or words): its question is dismissed and Kimi told
+`The user answered your question "…" with: …` in the resumed turn (`adapters.acp.ANSWERED`).
+Claude's `AskUserQuestion` reads the words as its answer, as before. An approval's choice
+handed back by its label (`"Allow for this conversation"`) is that choice. Needs agent-runs'
+SDK with `answers.meant`.
+
+### Fixed: when to ask reaches the model wherever it has a question tool, memory or none
+
+The note on when and how to ask (`agent.ASKING`) came only with a memory context: a run with
+memory off (or unreachable) never told its model when to ask, though it had `ask_user` or its
+own `AskUserQuestion`. `Agent.push` now adds it, after the context, to every run whose model
+has a question tool (`Agent.offers_a_question`: `ask_user` among its tools, or the
+framework's own, `Adapter.asks`), through the same context every adapter already takes its
+memory context in — and only when the memory context did not say it already, so it is said
+once.
+
+### Fixed: the asking benchmark scores Kimi's own question as its question tool
+
+`benchmark/cost/asking.py` scored a question Kimi asked with its own `AskUserQuestion`
+"asked via ask, not ask_user", though `ASKING` names that tool as the model's question tool
+and Claude's same tool counted (it is asked as `ask_user`). A question an agent asks with its
+own tool now counts as asked with its question tool, its shape checked as that tool shows it
+(options, several picks, a form, the option labelled "(Recommended)").
+
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 
 In the accuracy run, a Kimi Code session now and then opened without its connection to the

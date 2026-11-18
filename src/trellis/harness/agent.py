@@ -124,7 +124,7 @@ from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox, said_undeclared
 from trellis.memory.models import PromptContext
 from trellis.runs import Job, RateLimitedError
-from trellis.runs.answers import answer_problem
+from trellis.runs.answers import answer_problem, meant
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
@@ -220,7 +220,8 @@ EARLIER_CHATS: Final = (
     'with kinds ["message"]) before you say a detail is missing.'
 )
 #: When and how the model asks its user, for every adapter and every topic, sent with every
-#: memory context (as the notes above): a "which one" is asked, never guessed or answered for
+#: memory context (as the notes above) and, memory on or off, to every run whose model has a
+#: question tool (``Agent.push``), said once: a "which one" is asked, never guessed or answered for
 #: each (as an app's own "ask which one is meant" says); else ask only when the model cannot
 #: find out itself, the choice is the user's and a wrong guess costs; otherwise act and say the
 #: assumption. The shape of each question is the model's: the
@@ -927,6 +928,8 @@ class Agent:
             )
         chosen = InterruptDecision(str(decision).upper())
         awaiting = record.awaiting
+        if chosen is InterruptDecision.ANSWER:  # an option handed back is that option
+            answer = meant(awaiting, answer)
         picked = choice(answer) if answer in awaiting.option_values else None
         if chosen is InterruptDecision.ANSWER and awaiting.tool_call is not None and picked:
             (chosen, remember), answer = picked, None  # an approval's choice: what it names
@@ -1235,7 +1238,9 @@ class Agent:
         conversation's earlier turns (:meth:`recalled`) — and after it the front end's
         context and state (``frontend.rendered``), which take at most
         :data:`~trellis.harness.frontend.SHARE` of the context's token budget, the memory
-        context the rest."""
+        context the rest; and when to ask (:data:`ASKING`) where the model has a question
+        tool (:meth:`offers_a_question`) and the memory context did not say it already —
+        once, memory on or off."""
         app, used = frontend.rendered(
             runtime.frontend, runtime.state, int(self.context_budget * frontend.SHARE)
         )
@@ -1246,7 +1251,15 @@ class Agent:
             pushed = await self.remembered(runtime, budget=self.context_budget - used)
         if app:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, app) if p)
+        if ASKING not in (runtime.pushed_context or "") and self.offers_a_question(runtime):
+            # when to ask reaches the model wherever it has a question tool, memory or none
+            runtime.context = "\n\n".join(p for p in (runtime.pushed_context, ASKING) if p)
         return pushed
+
+    def offers_a_question(self, runtime: Runtime) -> bool:
+        """Whether the run's model has a question tool: ``ask_user`` among the run's tools, or
+        its framework's own (``Adapter.asks``: Claude's and Kimi's ``AskUserQuestion``)."""
+        return ASK_USER in runtime.toolbox or self.adapter.asks(self.target)
 
     async def recalled(self, runtime: Runtime) -> None:
         """With memory off (or unreachable where it replays the conversation), the

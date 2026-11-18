@@ -47,8 +47,10 @@ What the person is shown follows from what is asked:
 renders it with the props as they are (your AG-UI client from the interrupt's `metadata`, your
 own inbox from `h.inbox`'s interrupts: [below](#an-inbox-of-your-own)), any other renders
 `ui`. Everything goes on the
-contracts' `Interrupt` as it is. An answer carries option values, never labels; with `form=`
-it is read back into the model.
+contracts' `Interrupt` as it is. An answer carries option values; an option's value or label
+handed back in another case or spacing (`" sup-04 (lyon MILLS)"`) is that option
+(`trellis.runs.answers.meant`, the rule agent-runs keeps too), and nothing else is read as one;
+with `form=` it is read back into the model.
 
 The whole signature: `await trellis.current().ask(question, *, expects=None, form=None,
 table=None, diff=None, options=None, multiple=False, ui_schema=None, component=None,
@@ -94,8 +96,9 @@ answer the call's result. Who has it:
 A tool of the agent's own named `ask_user` wins, and one declared is offered once. `kind` is
 `text`, `date`, `date_range` or `number`; `options` makes it a choice, `multiple` lets several be
 picked, `recommended` (with `why`) marks one option `Option.recommended`. The model decides each
-question's shape; when to ask at all is the note sent with every memory context
-(`agent.ASKING`): when several things fit the user's words, ask which one; else ask only when it
+question's shape; when to ask at all is the note sent with every memory context and, memory
+on or off, to every run whose model has a question tool (`ask_user`, or Claude's and Kimi's
+`AskUserQuestion`), said once (`agent.ASKING`): when several things fit the user's words, ask which one; else ask only when it
 cannot find out itself, the choice is the user's and a wrong guess costs; otherwise act and say
 the assumption. A context with a profile also gets `agent.REMEMBERED`: a remembered rule,
 preference or value used is said with its date, a costly or old fill asked about first. A context
@@ -110,7 +113,11 @@ filled in, before it is used again. It is `ask` with what every surface needs:
 | What plain chat reads | `Which size?`, the options numbered (`(Recommended: why)` on one, which comes first on every surface) | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
 
 A range and a number may be answered in words, so a plain chat can answer them; a choice is
-one of its options or another answer in words ("Other"). Measured (`benchmark/cost/asking.py`:
+one of its options or another answer in words ("Other"). **One rule for every answer to a
+model's question, on every adapter and surface:** an option handed back (its value or label,
+case and spacing aside) is that option; any other answer — "SUP-04" of "SUP-04 (Lyon Mills)",
+"not SUP-04", "the second one", "neither" — is never refused and never guessed into an option:
+the model reads the person's words. Measured (`benchmark/cost/asking.py`:
 `--ask auto`, `declared`, `none`), offering it changes no ask-or-act case, only the shape a UI
 shows: a picker, a dropdown or a number field where there was a sentence.
 
@@ -139,7 +146,7 @@ own way; the harness changes neither:
 | | Claude Code `AskUserQuestion` | Kimi Code `AskUserQuestion` |
 |---|---|---|
 | a choice | the `ask_user` component, the options, several picks (`multiSelect`), the option labelled "(Recommended)" recommended with its description as why | `ui: "choice"` with its options; no component, no recommended option, one pick |
-| another answer in words | taken | refused: one of its options only |
+| another answer in words | taken: Claude reads it as the answer | taken: the question is dismissed and Kimi told `The user answered your question "…" with: …` in the resumed turn (`adapters.acp.ANSWERED`) |
 | a date, a number, open text | no kinds: asked in its reply, as text | the same |
 | several values | several questions in one call, asked one after another | one question a call |
 
@@ -480,7 +487,10 @@ does not fit its question, with a `ConfigurationError` saying why, and the run k
 
 * an `answer` must fit `expects` (JSON Schema) — `not an answer to <id>: the answer does not
   fit what was asked: 'five' is not of type 'integer'` — and, with no `expects`, be one of the
-  `options` when there are some (`the answer 'M' is not one of the options ['S', 'L']`);
+  `options` when there are some (`the answer 'M' is not one of the options ['S', 'L']`): an
+  option's value or label handed back in another case or spacing is that option. A model's
+  question (`ask_user`'s choice, Claude's and Kimi's `AskUserQuestion`) takes words too
+  (`expects` a string): they reach the model;
 * an `edit` of a question (a review) must fit `expects` the same way;
 * an `edit` of a tool call must fit the tool's input schema — its required arguments, the
   basic types of the declared ones, no unknown ones where the schema allows none (`the edited

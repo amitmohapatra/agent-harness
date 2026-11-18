@@ -29,6 +29,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | F36u ask_user: the model asks a structured question (a date), the answer is its result | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36m ask_user: several picks among options, one recommended with why | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36f ask_user: several values asked at once are one form, the remembered ones filled in | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
+| F36w an answer to an agent's question: an option handed back is that option, any other the user's words its model reads (ask_user, Claude's and Kimi's AskUserQuestion) | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36a ask_user by itself: a chat front end's run is given it with nothing declared | partly 2 (3) | partly 2 (3) | partly 2 (3) | no (4) | no (4) | partly 2 (3) | partly 2 (3) | partly 2 (3) |
 | F36o ask_user: asked once, though the model words the call differently when it makes it again | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F04 a rejected approval: the call never runs and the model reads why | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
@@ -54,7 +55,8 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | F41 memory push: the context reaches the model | yes 28 | yes 28 | no (28) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
 | F41a memory push: nothing remembered for the question, the model is told so | yes 28 | yes 28 | no (29) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
 | F41f memory push: a function target reads agent.context | no (30) | yes 28 | yes 28 | no (30) | no (30) | no (30) | no (30) | no (30) |
-| F41q when and how to ask: the note reaches the model with the memory context | yes 28 | yes 28 | no (29) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
+| F41q when and how to ask: the note reaches the model with the memory context (and with a question tool, F41t), once | yes 28 | yes 28 | no (29) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
+| F41t when and how to ask: the note reaches a model given a question tool, memory or none | yes 14 | yes 14 | no (29) | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F41s learned skills: what the agent learned reaches it with the context | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
 | F42 memory pull: the memory tools are the agent's | yes 28 | yes 28 | no (31) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
 | F42d memory pull: forgetting what the user said asks, then forgets it as them | yes 28 | yes 28 | no (32) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
@@ -127,88 +129,90 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 | F36u ask_user: the model asks a structured question (a date), the answer is its result | no (52) |
 | F36m ask_user: several picks among options, one recommended with why | no (52) |
 | F36f ask_user: several values asked at once are one form, the remembered ones filled in | no (52) |
+| F36w an answer to an agent's question: an option handed back is that option, any other the user's words its model reads (ask_user, Claude's and Kimi's AskUserQuestion) | no (53) |
 | F36a ask_user by itself: a chat front end's run is given it with nothing declared | no (52) |
 | F36o ask_user: asked once, though the model words the call differently when it makes it again | no (52) |
 | F04 a rejected approval: the call never runs and the model reads why | yes 1 |
-| F35 framework-native approvals (HITL middleware, interrupt_on, needs_approval) | no (53) |
-| F23 journal: what ran before a pause is replayed, not run again | no (54) |
-| F12 a journal larger than a checkpoint is kept in segments | no (55) |
+| F35 framework-native approvals (HITL middleware, interrupt_on, needs_approval) | no (54) |
+| F23 journal: what ran before a pause is replayed, not run again | no (55) |
+| F12 a journal larger than a checkpoint is kept in segments | no (56) |
 | F20 per-tool timeout: a read past its time limit says so | yes 1 |
 | F24 unknown outcome: a write past its time limit is never run again | yes 1 |
 | F21 retries: a read is tried again after an error that may pass | yes 1 |
-| F22 idempotency key: a write gets its run's key | no (56) |
-| F05 cancel: a running run stops, CANCELLED with its reason | no (57) |
-| F09 run time limit: past it the run ends TIMEOUT | no (57) |
-| F30p sub-agent: the adapter under test calls a child agent (a wrapped agent as a tool) | no (58) |
-| F30c sub-agent: the adapter under test is the child of a function parent | no (58) |
-| F25r parallel calls: the reads of one turn run together | no (59) |
-| F25w parallel calls: the writes of one turn run one at a time, in order | no (59) |
-| F25d repeated calls: a call a turn repeats (same tool, same arguments) runs once | no (59) |
-| F26 large results: saved as a file, a head-and-tail preview read in pages (read_file) | no (60) |
-| F26r large results: read to the last part (read_file from an offset), none out of reach | no (60) |
-| F26q large results: counted, summed, filtered and ranked by read-only SQL over every row (query_result), no sandbox needed | no (60) |
-| F65 context management: older results cleared past the window's share | no (61) |
-| F65f a request over the window made to fit: never a failure for its size | no (61) |
+| F22 idempotency key: a write gets its run's key | no (57) |
+| F05 cancel: a running run stops, CANCELLED with its reason | no (58) |
+| F09 run time limit: past it the run ends TIMEOUT | no (58) |
+| F30p sub-agent: the adapter under test calls a child agent (a wrapped agent as a tool) | no (59) |
+| F30c sub-agent: the adapter under test is the child of a function parent | no (59) |
+| F25r parallel calls: the reads of one turn run together | no (60) |
+| F25w parallel calls: the writes of one turn run one at a time, in order | no (60) |
+| F25d repeated calls: a call a turn repeats (same tool, same arguments) runs once | no (60) |
+| F26 large results: saved as a file, a head-and-tail preview read in pages (read_file) | no (61) |
+| F26r large results: read to the last part (read_file from an offset), none out of reach | no (61) |
+| F26q large results: counted, summed, filtered and ranked by read-only SQL over every row (query_result), no sandbox needed | no (61) |
+| F65 context management: older results cleared past the window's share | no (62) |
+| F65f a request over the window made to fit: never a failure for its size | no (62) |
 | F41 memory push: the context reaches the model | yes 1 |
-| F41a memory push: nothing remembered for the question, the model is told so | no (62) |
-| F41f memory push: a function target reads agent.context | no (63) |
-| F41q when and how to ask: the note reaches the model with the memory context | no (64) |
+| F41a memory push: nothing remembered for the question, the model is told so | no (63) |
+| F41f memory push: a function target reads agent.context | no (64) |
+| F41q when and how to ask: the note reaches the model with the memory context (and with a question tool, F41t), once | no (65) |
+| F41t when and how to ask: the note reaches a model given a question tool, memory or none | no (65) |
 | F41s learned skills: what the agent learned reaches it with the context | yes 1 |
-| F42 memory pull: the memory tools are the agent's | no (65) |
-| F42d memory pull: forgetting what the user said asks, then forgets it as them | no (66) |
-| F95 schedules set in chat: the built-in schedule tools, the user's own | no (67) |
+| F42 memory pull: the memory tools are the agent's | no (66) |
+| F42d memory pull: forgetting what the user said asks, then forgets it as them | no (67) |
+| F95 schedules set in chat: the built-in schedule tools, the user's own | no (68) |
 | F43 memory records: transcript, tool calls, outcome | yes 1 |
 | F40 a decision on a call is fed back to memory | yes 1 |
-| F28 tool hints narrow what the model is offered | no (68) |
-| F28c tool chains: said in the descriptions, kept whole when the hints narrow | no (69) |
+| F28 tool hints narrow what the model is offered | no (69) |
+| F28c tool chains: said in the descriptions, kept whole when the hints narrow | no (70) |
 | F17 the key's MCP tools (through the gateway) | yes 1 |
-| F18s MCP servers of the agent's own: a server over stdio, its tools governed and journaled | no (70) |
-| F18c Credentials for tools: the run's user's token on each call, over the fixed headers | no (71) |
-| F18e MCP elicitation: a server's question in a call pauses the run, the answer goes back | no (72) |
-| F18r MCP resources: a server's resources read by one tool whose description maps them | no (73) |
-| F19 Code Mode: a script's nested calls are recorded from the gateway's log | no (74) |
-| F49 stored prompts: pinned per run and recorded | no (75) |
+| F18s MCP servers of the agent's own: a server over stdio, its tools governed and journaled | no (71) |
+| F18c Credentials for tools: the run's user's token on each call, over the fixed headers | no (72) |
+| F18e MCP elicitation: a server's question in a call pauses the run, the answer goes back | no (73) |
+| F18r MCP resources: a server's resources read by one tool whose description maps them | no (74) |
+| F19 Code Mode: a script's nested calls are recorded from the gateway's log | no (75) |
+| F49 stored prompts: pinned per run and recorded | no (76) |
 | F55 online judges score sampled runs | yes 1 |
 | F54 grounding: the answer checked against its context | yes 1 |
-| F57 tracing: run and tool spans | no (76) |
+| F57 tracing: run and tool spans | no (77) |
 | F61 redaction: credentials never reach a trace; the rest goes as it is | yes 1 |
 | F16 a2a(): a remote A2A agent as a tool | yes 1 |
-| F62 AG-UI: numbered events, the answer, a reconnect replays | no (77) |
-| F62t AG-UI frontend tools: offered, called, run by the app, its result read | no (77) |
-| F63 A2A: the task is the run, submitted to completed | no (77) |
-| F06 schedules: a schedule fires a run for its person | no (57) |
-| F03 durable workers: a queued run is claimed and finished by a worker | no (57) |
-| F10 the agent's version (and time limit) recorded with every run it starts | no (78) |
+| F62 AG-UI: numbered events, the answer, a reconnect replays | no (78) |
+| F62t AG-UI frontend tools: offered, called, run by the app, its result read | no (78) |
+| F63 A2A: the task is the run, submitted to completed | no (78) |
+| F06 schedules: a schedule fires a run for its person | no (58) |
+| F03 durable workers: a queued run is claimed and finished by a worker | no (58) |
+| F10 the agent's version (and time limit) recorded with every run it starts | no (79) |
 | F71d hooks: before_tool denies a call (never run, the model reads why) | yes 1 |
 | F71w hooks: before_tool rewrites a call's arguments | yes 1 |
 | F71a hooks: before_tool asks a person first | yes 1 |
 | F71t hooks: after_tool replaces what the model reads | yes 1 |
-| F71r hooks: on_run_start / on_run_end around every attempt | no (79) |
-| F09r a run's own time limit: run/stream/start/schedule(run_timeout=) | no (80) |
-| F09q a queued run's own queue order: start/schedule(priority=, concurrency_key=) | no (81) |
-| F75r a run's own without=: memory off for one run, kept across its attempts | no (82) |
-| F70 the framework's own run options: a run's over its agent's, kept across attempts | no (83) |
-| F73 sandbox: write, exec across a pause, one sandbox per run, deleted at its end | no (84) |
-| SEL the selection: everything on works together, everything off leaves no trace | no (85) |
-| F34 an approval rule in code | no (86) |
-| F36v2 HITL v2: options with labels, several answers | no (86) |
-| X01 two people on one thread id: each run reads only its person's conversation | no (87) |
-| X02 a message to a busy conversation: queued, interrupting, steering | no (88) |
-| X03 a burst of twenty runs at once: each ends well with its own answer | no (89) |
-| X04 a slow run store: every call 30 ms late, the run still ends well | no (90) |
-| X05 malformed tool calls (an unknown tool, a wrong type): answered, and the run goes on | no (91) |
-| X06 a model repeating one call: stopped well before, and the run still answers | no (92) |
-| X07 fan-out: twenty-four helpers in one turn, every one answered, at most the admission limit at once | no (93) |
-| X08 nested helpers: three runs deep, each the child of the one above | no (93) |
-| X09 a helper that fails and one past its time limit: errors the parent reads, the parent answers | no (93) |
-| X10 cancelling a run cancels its helper and its helper's helper | no (93) |
-| X11 an approval asked inside a helper pauses the parent; approved, the call runs once | no (93) |
-| X12 a message steered into a run while its helper works: both end well | no (88) |
-| X13 a file a run makes for its user: a download link only that user can open | no (94) |
-| X14 a scenario job: a durable run, a child per scenario, progress on the stream, an approval before applying, explained after | no (93) |
-| X15 a scenario job whose worker dies mid-way: another worker finishes it, no scenario worked out twice | no (93) |
-| X16 a scenario job cancelled while its scenarios work: every scenario cancelled | no (93) |
-| X17 what a finished run spent (tokens, model calls, cost) is on its end, not only on spans | no (95) |
+| F71r hooks: on_run_start / on_run_end around every attempt | no (80) |
+| F09r a run's own time limit: run/stream/start/schedule(run_timeout=) | no (81) |
+| F09q a queued run's own queue order: start/schedule(priority=, concurrency_key=) | no (82) |
+| F75r a run's own without=: memory off for one run, kept across its attempts | no (83) |
+| F70 the framework's own run options: a run's over its agent's, kept across attempts | no (84) |
+| F73 sandbox: write, exec across a pause, one sandbox per run, deleted at its end | no (85) |
+| SEL the selection: everything on works together, everything off leaves no trace | no (86) |
+| F34 an approval rule in code | no (87) |
+| F36v2 HITL v2: options with labels, several answers | no (87) |
+| X01 two people on one thread id: each run reads only its person's conversation | no (88) |
+| X02 a message to a busy conversation: queued, interrupting, steering | no (89) |
+| X03 a burst of twenty runs at once: each ends well with its own answer | no (90) |
+| X04 a slow run store: every call 30 ms late, the run still ends well | no (91) |
+| X05 malformed tool calls (an unknown tool, a wrong type): answered, and the run goes on | no (92) |
+| X06 a model repeating one call: stopped well before, and the run still answers | no (93) |
+| X07 fan-out: twenty-four helpers in one turn, every one answered, at most the admission limit at once | no (94) |
+| X08 nested helpers: three runs deep, each the child of the one above | no (94) |
+| X09 a helper that fails and one past its time limit: errors the parent reads, the parent answers | no (94) |
+| X10 cancelling a run cancels its helper and its helper's helper | no (94) |
+| X11 an approval asked inside a helper pauses the parent; approved, the call runs once | no (94) |
+| X12 a message steered into a run while its helper works: both end well | no (89) |
+| X13 a file a run makes for its user: a download link only that user can open | no (95) |
+| X14 a scenario job: a durable run, a child per scenario, progress on the stream, an approval before applying, explained after | no (94) |
+| X15 a scenario job whose worker dies mid-way: another worker finishes it, no scenario worked out twice | no (94) |
+| X16 a scenario job cancelled while its scenarios work: every scenario cancelled | no (94) |
+| X17 what a finished run spent (tokens, model calls, cost) is on its end, not only on spans | no (96) |
 
 ### What the Kimi Code (ACP) column does not show
 
@@ -275,46 +279,47 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 50. the run's end is the same on every surface
 51. by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)
 52. ask_user is a harness tool: it asks through a harness run's pause
-53. Way 2 recipes use the native approvals themselves (W2R)
-54. Way 2 continues from your framework's own checkpoint
-55. Way 2 keeps your framework's checkpoint (the artifacts API by hand)
-56. by design: outside a harness run your code names the key of its own write; the runs SDK and the memory SDK take idempotency_key=
-57. a block runs inline in your code: no surface or queue of its own here
-58. by design: your code calls another agent with a2a(url)(...) (A2A), or runs it as plain code
-59. your framework runs its calls
-60. by design: a Way 2 caller's own code receives the whole result and decides what its model reads
-61. native middleware: a graph is built with it
-62. the harness's note: Way 2 reads the service's evidence status itself
-63. checked by F41
-64. the harness's note: Way 2 builds its own context
-65. by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them
-66. the harness's approval path: Way 2 calls the service, which refuses the agent
-67. Way 2 has no run store: your code calls runs.schedules itself
-68. by design: memory.tool_hints() ranks the tools; your code offers the ones it picks
-69. by design: the descriptions are the toolbox's; your code offers the tools
-70. Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools
-71. Way 2 builds its tools' clients itself, with the headers it chooses
-72. Way 2 gives the MCP SDK's client an elicitation callback of its own
-73. Way 2 reads a server's resources with the MCP SDK's client itself
-74. Code Mode is the gateway's: Way 2 calls its meta-tools through bifrost-sdk
-75. by design: your code reads the prompt from Bifrost's prompt repository itself (h.prompt is the Way 1 form)
-76. by design: OpenTelemetry is the block: your code's own spans, which the SDKs continue (traceparent)
-77. Way 1 only by design (README: surfaces are the harness's)
-78. RunStart.agent_version: your code sets it
-79. no run of the harness's in Way 2: your code has its own
-80. RunStart.timeout_seconds: your code sets it (F09's Way 2 row)
-81. RunStart/ScheduleSpec.priority: your code sets it (F09's Way 2 row)
-82. Way 2 selects by import
-83. Way 2 calls the framework itself, with its own options
-84. sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)
-85. Way 2 selects by import: each block is used or not by your own code
-86. probed in Way 1; the plan names no Way 2 form yet
-87. a block keys nothing by thread
-88. the busy-conversation modes are the Harness's
-89. by design: your code runs the block as often as it likes
-90. a block takes no run store
-91. your framework checks its own calls
-92. your framework runs its own loop
-93. a block starts no child runs
-94. a block keeps no file for a run's user
-95. a block keeps no run record
+53. an agent's question asks through a harness run's pause
+54. Way 2 recipes use the native approvals themselves (W2R)
+55. Way 2 continues from your framework's own checkpoint
+56. Way 2 keeps your framework's checkpoint (the artifacts API by hand)
+57. by design: outside a harness run your code names the key of its own write; the runs SDK and the memory SDK take idempotency_key=
+58. a block runs inline in your code: no surface or queue of its own here
+59. by design: your code calls another agent with a2a(url)(...) (A2A), or runs it as plain code
+60. your framework runs its calls
+61. by design: a Way 2 caller's own code receives the whole result and decides what its model reads
+62. native middleware: a graph is built with it
+63. the harness's note: Way 2 reads the service's evidence status itself
+64. checked by F41
+65. the harness's note: Way 2 builds its own context
+66. by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them
+67. the harness's approval path: Way 2 calls the service, which refuses the agent
+68. Way 2 has no run store: your code calls runs.schedules itself
+69. by design: memory.tool_hints() ranks the tools; your code offers the ones it picks
+70. by design: the descriptions are the toolbox's; your code offers the tools
+71. Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools
+72. Way 2 builds its tools' clients itself, with the headers it chooses
+73. Way 2 gives the MCP SDK's client an elicitation callback of its own
+74. Way 2 reads a server's resources with the MCP SDK's client itself
+75. Code Mode is the gateway's: Way 2 calls its meta-tools through bifrost-sdk
+76. by design: your code reads the prompt from Bifrost's prompt repository itself (h.prompt is the Way 1 form)
+77. by design: OpenTelemetry is the block: your code's own spans, which the SDKs continue (traceparent)
+78. Way 1 only by design (README: surfaces are the harness's)
+79. RunStart.agent_version: your code sets it
+80. no run of the harness's in Way 2: your code has its own
+81. RunStart.timeout_seconds: your code sets it (F09's Way 2 row)
+82. RunStart/ScheduleSpec.priority: your code sets it (F09's Way 2 row)
+83. Way 2 selects by import
+84. Way 2 calls the framework itself, with its own options
+85. sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)
+86. Way 2 selects by import: each block is used or not by your own code
+87. probed in Way 1; the plan names no Way 2 form yet
+88. a block keys nothing by thread
+89. the busy-conversation modes are the Harness's
+90. by design: your code runs the block as often as it likes
+91. a block takes no run store
+92. your framework checks its own calls
+93. your framework runs its own loop
+94. a block starts no child runs
+95. a block keeps no file for a run's user
+96. a block keeps no run record

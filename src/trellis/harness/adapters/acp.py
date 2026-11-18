@@ -144,7 +144,7 @@ from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
 from trellis.harness.tools.convert import SERVER
-from trellis.harness.tools.elicit import elicited
+from trellis.harness.tools.elicit import Elicited, elicited
 
 log = logging.getLogger("trellis.harness")
 
@@ -205,6 +205,17 @@ PLAN: Final = "plan"
 FAILED_TURN: Final = "the agent could not finish its turn: {why}"
 #: What a person is asked when the agent offers options and says nothing with them.
 CHOOSE: Final = "The agent asks you to choose."
+#: What the agent is told when the person answered its question with words that are none of
+#: the options it offered (``trellis.runs.answers.meant``): the question is dismissed and its
+#: model reads their words, as a model reads an ``ask_user`` answer in words. Nothing is
+#: guessed of them ("SUP-04", "not SUP-04", "the second one" are the model's to read).
+ANSWERED: Final = 'The user answered your question "{question}" with: {answer}'
+#: What an answer to the agent's question may be besides one of its options: words (with
+#: several picks, a list of them or words), as ``ask_user``'s choice takes them.
+IN_WORDS: Final[dict[bool, dict[str, Any]]] = {
+    False: {"type": "string"},
+    True: {"type": ["array", "string"], "items": {"type": "string"}, "minItems": 1},
+}
 #: Why the person denied the call, after the resumed session is told they did (ACP's answer
 #: carries no reason: the prompt does).
 DENIED_WHY: Final = "Their reason: {why}"
@@ -1848,26 +1859,45 @@ class Attempt:
 
     async def _question(self, options: list[Any], name: str, tool_call: Any) -> Any:
         """The agent's question to its user, asked as the run's (:func:`_asked`); the run
-        paused on it, the agent stops here."""
+        paused on it, the agent stops here. Answered with words that are none of its options,
+        the question is dismissed and the agent told their words (:meth:`_in_words`)."""
         args = self.calls[tool_call.tool_call_id].args  # its call's update came before it
         try:
-            return await _asked(self.runtime, options, name, args, tool_call)
+            question, answer, picked = await _asked(self.runtime, options, name, args, tool_call)
         except Paused:
             await self._stop()
             return dismissed()
+        if picked is not None:
+            return selected(picked)
+        await self._in_words(question, answer)
+        return dismissed()
+
+    async def _in_words(self, question: str, answer: Any) -> None:
+        """The person answered the agent's question with words that pick none of its options:
+        the turn stops, and the agent is told what they said in the next prompt
+        (:data:`ANSWERED`) — its model reads them."""
+        said = ", ".join(map(str, answer)) if isinstance(answer, list) else str(answer)
+        self.followup = ANSWERED.format(question=question, answer=said)
+        await self._stop()
 
     async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
         """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``: every question
         of the call, a field each), asked as the run's question (:func:`_filled`) on behalf of
-        the call it is for; the run paused on it, the agent stops here."""
+        the call it is for; the run paused on it, the agent stops here. Answered with words
+        that fill none of it, the form is cancelled and the agent told their words
+        (:meth:`_in_words`)."""
         self._handles()
         known = self.calls[mode.tool_call_id]  # its call's update came before it
         try:
             async with self.runtime.asking_within(known.name, known.args):
-                return await _filled(self.runtime, message, mode)
+                filled, answer = await _filled(self.runtime, message, mode)
         except Paused:
             await self._stop()
             return unfilled()
+        if filled is None:  # answered in words: the agent's model reads them
+            await self._in_words(message, answer)
+            return unfilled()
+        return filled
 
     # the agent's files and terminals, in the run's sandbox (``Sandboxed``)
     async def read_text_file(
@@ -2296,31 +2326,50 @@ def _offers_a_choice(options: Sequence[Any]) -> bool:
 
 async def _asked(
     runtime: Runtime, options: Sequence[Any], name: str, args: dict[str, Any], tool_call: Any
-) -> Any:
+) -> tuple[str, Any, str | None]:
     """The agent's question to its user (:func:`_offers_a_choice`), asked as the run's: one
     question, what the agent shows with it (a question's words, a plan) and every option it
-    offers, each by its name; the answer chooses the option of that name. Asked on behalf of
-    the agent's call (``name``, ``args``: ``Runtime.asking_within``), which a session resumed
-    after the pause is told to make again. A pause propagates."""
+    offers, each by its name, or words (:data:`IN_WORDS`). Asked on behalf of the agent's call
+    (``name``, ``args``: ``Runtime.asking_within``), which a session resumed after the pause is
+    told to make again. The question, the answer, and the id of the option it names (an
+    option handed back: ``answers.meant``), ``None`` for words. A pause propagates."""
     question = _text(tool_call.content) or CHOOSE
     async with runtime.asking_within(name, args):
-        answer = await runtime.ask(question, options=[option.name for option in options])
-    picked = {option.name: option.option_id for option in options}[answer]  # one it was asked
-    return selected(picked)
+        answer = await runtime.ask(
+            question, options=[option.name for option in options], expects=IN_WORDS[False]
+        )
+    picked = {option.name: option.option_id for option in options}.get(answer)
+    return question, answer, picked
 
 
-async def _filled(runtime: Runtime, message: str, mode: Any) -> Any:
+async def _filled(runtime: Runtime, message: str, mode: Any) -> tuple[Any, Any]:
     """A form the agent asks its user to fill (ACP's ``elicitation/create``, its form
     ``mode``), asked as the run's question the way an MCP server's form is (``tools.elicit``:
-    one field that picks from values a choice, else a form with the agent's schema), and the
-    person's answer as the agent takes it. A pause propagates."""
+    one field that picks from values a choice, else a form with the agent's schema) — or
+    answered in words (:data:`IN_WORDS`, a form's schema an object or words). The person's
+    answer as the agent takes it, and the answer; ``None`` and their words when it fills
+    nothing of the form (words that are none of its options). A pause propagates."""
     from acp.schema import CreateElicitationResponse
     from pydantic import TypeAdapter
 
     schema = mode.requested_schema.model_dump(by_alias=True, exclude_none=True)
     asking = elicited(SimpleNamespace(message=message, requested_schema=schema))
-    answer = await runtime.ask(asking.question, **asking.asking)
-    return TypeAdapter(CreateElicitationResponse).validate_python(asking.result(answer))
+    choice = asking.picks is not None
+    words = IN_WORDS[asking.multiple] if choice else {**schema, "type": ["object", "string"]}
+    answer = await runtime.ask(asking.question, **{**asking.asking, "expects": words})
+    if not _fills(asking, answer):
+        return None, answer
+    return TypeAdapter(CreateElicitationResponse).validate_python(asking.result(answer)), answer
+
+
+def _fills(asking: Elicited, answer: Any) -> bool:
+    """Whether ``answer`` fills the form ``asking`` is: its fields (an object), or the options
+    of its one field that picks (with several picks, each one of them) — not words."""
+    if asking.picks is None:
+        return isinstance(answer, dict)
+    values = [o if isinstance(o, str) else o.value for o in asking.options]
+    picks = answer if asking.multiple else [answer]
+    return isinstance(picks, list) and all(pick in values for pick in picks)
 
 
 def _spec(runtime: Runtime, profile: Profile | None, name: str) -> ToolSpec:

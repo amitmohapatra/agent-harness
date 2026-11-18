@@ -151,8 +151,54 @@ def test_a_run_nobody_reads_finishes_and_says_what_it_needed() -> None:
     assert check(guessed) == ["wrote reorder", "answer lacks 'quantit|how many'"]
 
 
+def own(text: str = "Which?", *options: str | Option, **fields: Any) -> Interrupt:
+    """A question an agent asked with its own question tool (Kimi's ``AskUserQuestion``): no
+    component of the harness's."""
+    reason = InterruptReason.CHOICE if options else InterruptReason.QUESTION
+    return Interrupt(interrupt_id="i", tenant_id="t", run_id="r", reason=reason, question=text,
+                     ui="choice" if options else "form", options=list(options), **fields)  # fmt: skip
+
+
+def test_an_agents_own_question_tool_is_its_question_tool() -> None:
+    """``ASKING`` tells the model to ask with its question tool — ``ask_user``, Claude's and
+    Kimi's ``AskUserQuestion``. Claude's is asked as ``ask_user``; Kimi's, with no component,
+    was scored "asked via ask, not ask_user": it is asked with its question tool, and its
+    shape is checked as it shows it."""
+    q = own("Which supplier?", "SUP-07", "SUP-04")
+    chat = asked(q, own="AskUserQuestion")
+    assert chat.via() == "AskUserQuestion"
+    assert b.asks(tool_only=True, options=True, multiple=False)(chat) == []
+    assert b.asks(via="ask_user")(chat) == []  # where no app's control fits
+    assert b.asks(via="pick_store")(chat) == ["asked via AskUserQuestion, not pick_store"]
+    assert b.asks(tool_only=True, options=False)(chat) == [
+        "options ['SUP-07', 'SUP-04'] on an open ask"
+    ]
+    assert b.asks(tool_only=True)(asked(q)) == ["asked via ask, not ask_user"]  # none of its own
+    best = own("Which?", "SUP-04 (Recommended)", "SUP-07", multiple=True)
+    picks = asked(best, own="AskUserQuestion")
+    assert b.asks(recommended="sup-04", first=True, multiple=True)(picks) == []
+    assert b.asks(recommended=False, multiple=False)(picks) == [
+        "multiple=True",
+        "recommended 'SUP-04 (Recommended)' with no reason",
+    ]
+    late = asked(own("Which?", "SUP-07", "SUP-04 (Recommended)"), own="AskUserQuestion")
+    assert b.asks(first=True, recommended="sup-07")(late) == [
+        "recommended ['SUP-04 (Recommended)'], not 'sup-07'",
+        "the recommended 'SUP-04 (Recommended)' is not the first option",
+    ]
+    assert b.asks(recommended=True)(asked(q, own="AskUserQuestion")) == [
+        "nothing recommended or filled in"
+    ]
+    fields = {"q0": {"oneOf": [{"const": "north (Recommended)"}, {"const": "south"}]},
+              "q1": {"oneOf": [{"const": "email"}]}}  # fmt: skip
+    form = own("Which region?\nWhich channel?", expects={"type": "object", "properties": fields})
+    assert b.asks(kind="form", recommended="north")(asked(form, own="AskUserQuestion")) == []
+    assert b.asks(kind="form")(chat) == ["kind=not a form"]
+
+
 async def test_an_answer_the_question_does_not_take_leaves_the_run_paused() -> None:
-    """A choice that takes only its options (Kimi's own question) refuses another answer."""
+    """A choice that takes only its options (a graph's own ``interrupt``) refuses another
+    answer: the case gives up there."""
     from trellis.contracts import ConfigurationError
     from trellis.harness.result import Result
 

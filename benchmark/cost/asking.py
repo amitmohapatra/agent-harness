@@ -252,6 +252,10 @@ class Chat:
     said: list[str] = field(default_factory=list)
     #: how the last run ended (a fired run's too)
     status: RunStatus | None = None
+    #: the agent's own question tool, when its framework gives its model one that the harness
+    #: asks as the run's question with no component of its own (Kimi's ``AskUserQuestion``;
+    #: Claude's is asked as ``ask_user``): a question asked so is asked with it
+    own: str | None = None
 
     def questions(self) -> list[Interrupt]:
         return [q for q in self.pauses if q.reason is not InterruptReason.APPROVAL]
@@ -270,7 +274,7 @@ class Chat:
         """How it asked: ``ask_user``, a front-end tool's name, ``text``, or ``None``."""
         if self.asked is not None:
             front = (self.asked.payload or {}).get(FRONTEND_TOOL)
-            return front or self.asked.component or "ask"
+            return front or self.asked.component or self.own or "ask"
         return "text" if self.said or self.in_reply() else None
 
     def in_reply(self) -> bool:
@@ -353,17 +357,23 @@ def asks(
         if how is None:
             return ["did not ask"]
         problems = [f"wrote {n}" for n, _ in chat.ran[: chat.before]]
+        tool = how in QUESTION_TOOLS
         if via is not None:
-            return problems + ([] if how == via else [f"asked via {how}, not {via}"])
-        if tool_only and how != "ask_user":
+            fits = how == via or (via == ASK_USER and tool)
+            return problems + ([] if fits else [f"asked via {how}, not {via}"])
+        if tool_only and not tool:
             return [*problems, f"asked via {how}, not ask_user"]
         q = chat.asked
         asked = q.question if q is not None else chat.said[0] if chat.said else chat.answers[-1]
         offered = [o if isinstance(o, str) else o.value for o in (q.options if q else ())]
         problems += _said(" ".join([asked, *offered]), says)
         problems += _options(offered, most, among)
-        if q is None or q.component != "ask_user":
+        if q is None or not tool:
             return problems
+        if q.component != ASK_USER:  # the agent's own question tool: what it shows of its shape
+            return problems + _own_shape(
+                q, options, multiple, kind=kind, recommended=recommended, first=first
+            )
         props = q.props or {}
         if options is not None and bool(q.options) != options:
             problems.append(f"options {q.options} on {'a choice' if options else 'an open'} ask")
@@ -386,6 +396,44 @@ def asks(
         return problems
 
     return check
+
+
+#: The question tools a model asks with (``agent.ASKING``: "your question tool"): the
+#: harness's ``ask_user``, and an agent's own (Claude's is asked as ``ask_user``; Kimi's by its
+#: name, ``Chat.own``).
+ASK_USER: Final = "ask_user"
+QUESTION_TOOLS: Final = frozenset({ASK_USER, "AskUserQuestion"})
+#: How an agent's own question tool marks the option it recommends (Claude's and Kimi's
+#: ``AskUserQuestion``: its label).
+RECOMMENDED: Final = "(Recommended)"
+
+
+def _own_shape(q: Interrupt, options: bool | None, multiple: bool | None, *, kind: str | None,
+               recommended: str | bool | None, first: bool) -> list[str]:  # fmt: skip
+    """The shape checks of :func:`asks` an agent's own question tool shows: options or none,
+    several picks, a form (several questions at once: an object of fields), the option its
+    label marks recommended (:data:`RECOMMENDED`) and first. A date or a number has no kind
+    there: not checked."""
+    problems: list[str] = []
+    if options is not None and bool(q.options) != options:
+        problems.append(f"options {q.options} on {'a choice' if options else 'an open'} ask")
+    if multiple is not None and q.multiple != multiple:
+        problems.append(f"multiple={q.multiple}")
+    fields = (q.expects or {}).get("properties") or {}
+    if kind == "form" and len(fields) < 2:
+        problems.append("kind=not a form")
+    labels = [o if isinstance(o, str) else (o.label or o.value) for o in q.options]
+    labels += [str(c.get("const", "")) for f in fields.values() for c in f.get("oneOf") or ()]
+    best = [label for label in labels if label.endswith(RECOMMENDED)]
+    if recommended is False and best:
+        problems.append(f"recommended {best[0]!r} with no reason")
+    if recommended is True and not best:
+        problems.append("nothing recommended or filled in")
+    if isinstance(recommended, str) and not any(recommended.lower() in b.lower() for b in best):
+        problems.append(f"recommended {best}, not {recommended!r}")
+    if first and best and q.options and labels[0] != best[0]:
+        problems.append(f"the recommended {best[0]!r} is not the first option")
+    return problems
 
 
 def then(name: str, *, args: dict[str, str], questions: int = 1) -> Check:
@@ -894,7 +942,7 @@ async def answered(agent: Any, chat: Chat, result: Any, replies: list[str | bool
                 result = await agent.resume(
                     waits.interrupt_id, "answer", answer=reply, reviewer=user
                 )
-            except ConfigurationError:  # a choice that takes its options only (Kimi's)
+            except ConfigurationError:  # an answer the question does not take
                 break
             continue
         if reply and waits.tool_call is not None:
@@ -948,7 +996,8 @@ async def run_case(
                        without=without, **options)  # fmt: skip
         user = thread = f"ask-{tag}-{case.id}"
         app = None if case.plain else Frontend(tools=case.frontend)
-        chat = Chat()
+        # an agent's own question tool asked with no component (Kimi's): asked with it
+        chat = Chat(own="AskUserQuestion" if agent.adapter.asks(agent.target) else None)
         replies = list(case.replies)
         started = time.monotonic()
         with runner.metered(adapter=adapter) as meter:

@@ -101,6 +101,41 @@ async def test_options_are_a_choice_plain_chat_reads_numbered(harness: Harness) 
     assert done["result"] == "Done. M, if you have it"
 
 
+@pytest.mark.parametrize(
+    ("answer", "read"),
+    [
+        ("SUP-04 (Lyon Mills)", "SUP-04 (Lyon Mills)"),
+        (" sup-04   (LYON mills)", "SUP-04 (Lyon Mills)"),  # handed back, case and spacing aside
+        ("SUP-04", "SUP-04"),  # part of an option: the model reads the words
+        ("not SUP-04", "not SUP-04"),  # never read as the option it names
+        ("the second one", "the second one"),
+        ("neither", "neither"),
+    ],
+)
+async def test_an_option_handed_back_is_that_option_any_other_answer_the_models_to_read(
+    harness: Harness, answer: str, read: str
+) -> None:
+    """One rule for every answer to a question with options (``Agent._resolution``, every
+    surface): an option's value or label handed back, its case and spacing aside, is that
+    option; anything else is never refused and never guessed into one — the model reads it."""
+    args = {"question": "Which supplier?", "options": ["SUP-04 (Lyon Mills)", "SUP-07 (Prato)"]}
+    agent = asking(harness, args, "ask-supplier")
+    paused = await agent.run("reorder", user="u1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer=answer, reviewer="u1")
+    assert done.answer == f"Done. {read}"
+
+
+async def test_several_picks_handed_back_are_those_options(harness: Harness) -> None:
+    args = {"question": "Which regions?", "options": ["North", "East"], "multiple": True}
+    agent = asking(harness, args, "ask-regions")
+    paused = await agent.run("alert", user="u1")
+    assert paused.interrupt is not None
+    picked = [" north", "EAST", "and the west"]
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1")
+    assert done.answer == 'Done. ["North", "East", "and the west"]'
+
+
 async def test_a_recommended_option_says_why_and_several_may_be_picked(
     harness: Harness,
 ) -> None:

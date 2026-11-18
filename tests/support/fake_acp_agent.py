@@ -140,6 +140,9 @@ MODES = {
 #: the words of a resumed prompt that tell the model to make such a call again
 #: (``bridges.resumed.RESUMED``): told so, the step runs again, as a paused one does.
 CUT_SHORT = "The run ended before this tool finished."
+#: What a prompt starts with that tells it the user answered its question in words
+#: (``adapters.acp.ANSWERED``): what they said is the question's result.
+ANSWERED_IN_WORDS = "The user answered your question"
 REMAKE_CUT = "its result says the run ended before it finished"
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
 
@@ -392,8 +395,10 @@ class FakeAgent:
         self.cancelled[session_id] = asyncio.Event()
         data = state(session_id)
         edited = EDITED.search(text)
-        told = ("rejected" in (data.get("stopped") or "") and "was not run" in text) or (
-            "denied it" in text
+        told = (
+            ("rejected" in (data.get("stopped") or "") and "was not run" in text)
+            or "denied it" in text
+            or ANSWERED_IN_WORDS in text  # its question answered in words: what they said
         )
         if data.get("stopped") and not edited and data["done"] < len(SCRIPT) and told:
             data["done"] += 1  # the step was rejected: what the prompt says is its result
