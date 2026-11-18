@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import sys
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -28,6 +29,7 @@ from trellis.harness import admission, budget
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.gateways import Capability
 from trellis.harness.runtime import current
+from trellis.runs import LeaseLostError
 
 log = logging.getLogger("trellis.harness")
 
@@ -81,6 +83,13 @@ class UsageAccounting(BaseCallbackHandler):
     each call watched for a stall from its start to its end."""
 
     run_inline = True  # in the run's own task: ``current()`` is the run
+
+    @property
+    def raise_error(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Whether LangChain raises the error a callback of these just raised, which it
+        asks as it catches one: a lost lease only (``Runtime.model_started``), which stops
+        the model call; any other is LangChain's to log."""
+        return isinstance(sys.exception(), LeaseLostError)
 
     def on_chat_model_start(
         self, serialized: dict[str, Any], messages: list[Any], *, run_id: UUID, **kwargs: Any

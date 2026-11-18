@@ -58,6 +58,7 @@ def runtime(runs: LocalRuns, attempt: int = 1) -> Any:
         deadline=None,
         replay=Replay(Journal()),
         spent_more=lambda: None,
+        running_in=None,
     )
 
 

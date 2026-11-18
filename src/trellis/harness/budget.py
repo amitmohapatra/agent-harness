@@ -15,6 +15,7 @@ best answer with what it has; the run ends ``PARTIAL``, its error ``BUDGET_EXCEE
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 from collections.abc import Iterator
@@ -152,7 +153,39 @@ def account(
     """One model reply's spending, on the run and every run it works inside: ``input_tokens``
     counts every prompt token, of which ``cached`` were read from the provider's prompt cache
     and ``written`` written to it (priced apart: a cache write costs more than plain input);
-    ``calls``: 0 for a cost that came apart from its replies."""
+    ``calls``: 0 for a cost that came apart from its replies. A reply in a thread (a sync
+    graph node's model) is accounted on the run's loop, its next turn: never while the loop
+    reads the spending to save it (``Runtime.spent_more``)."""
+    spent: dict[str, Any] = {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached": cached,
+        "written": written,
+        "cost": cost,
+        "calls": calls,
+    }
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        if runtime.running_in is not None:
+            loop = runtime.running_in.get_loop()
+            loop.call_soon_threadsafe(functools.partial(_account, runtime, **spent))
+            return
+    _account(runtime, **spent)
+
+
+def _account(
+    runtime: Runtime,
+    *,
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cached: int,
+    written: int,
+    cost: float | None,
+    calls: int,
+) -> None:
     capped = any(r.budget is not None and r.budget.max_cost for r in _runs(runtime))
     if cost is None and capped:
         _no_cost(model or "a model")

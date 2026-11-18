@@ -758,6 +758,7 @@ def test_the_budget_stops_a_run_at_its_limit_across_a_reset() -> None:
         budget=budget.Budget(max_cost=1.0),
         parent=None,
         spent_more=lambda: None,
+        running_in=None,
     )
     costs: LRU[str, SessionCost] = LRU()
     spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]

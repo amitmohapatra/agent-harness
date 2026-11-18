@@ -859,7 +859,10 @@ async def _cancelled(
     to end — CANCELLED here only when someone asked (its heartbeat said so); stopped for its
     lease or a release, the worker ends it. Stopped by its worker at the end of its working
     time (the worker's clock and the attempt's end together, the worker's first), it ends
-    TIMEOUT here, as when the attempt's own clock ends it."""
+    TIMEOUT here, as when the attempt's own clock ends it. Whatever it writes, or nothing as
+    its worker hands the run back, comes after the spending save under way
+    (``Runtime.spending_ended``)."""
+    await runtime.spending_ended()
     task = asyncio.current_task()
     assert task is not None
     stalled = STALLED in exc.args and runtime.stalled is not None
@@ -1048,7 +1051,8 @@ async def _concluded(
     """Record how the attempt ended: cancelled, out of time, paused, failed or answered — the
     graph state its conversation carries kept first (:func:`_kept_state`). The run's sandbox
     is paused with the run, and deleted when the run ends — unless agent-runs runs it again
-    (:func:`_again`)."""
+    (:func:`_again`). Written after the spending save under way (``Runtime.spending_ended``)."""
+    await runtime.spending_ended()
     if runtime.lease_lost:
         # another worker may hold the run now (a framework may have swallowed the error)
         raise LeaseLostError(

@@ -6,6 +6,8 @@ checkpoint lists."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import json
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -21,11 +23,13 @@ from tests.support.journals import CHECKPOINT_BOUND
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, current, middleware, tool
 from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
+from trellis.harness import budget
 from trellis.harness import runtime as runtime_module
 from trellis.harness.events import PREVIEW_CHARS
 from trellis.harness.journal import apply, content_key
 from trellis.harness.runs import LocalRuns
 from trellis.runs import (
+    RELEASED,
     DependencyUnavailableError,
     Job,
     Lease,
@@ -221,6 +225,70 @@ async def test_the_model_calls_a_dead_worker_made_since_its_last_save_are_spent(
     await asyncio.wait_for(watching, 5)
     spent = seen[-1].data["spent"]
     assert (spent["model_calls"], spent["tokens"]) == (4, 440)  # two calls on each worker
+
+
+@pytest.mark.parametrize("ending", ["release", "pause"])
+async def test_a_spending_save_under_way_is_answered_before_the_attempt_writes_its_end(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    """A heartbeat already sent can be applied after the attempt's end — after its pause, or
+    after the run was handed back and the same worker claimed it again — and put back the
+    checkpoint that attempt left behind: the attempt waits for the answer to the spending save
+    under way before it writes its pause or end, or its worker hands the run back."""
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    writes: list[str] = []
+    sent, late = asyncio.Event(), asyncio.Event()
+    applying: list[asyncio.Task[Any]] = []
+    heartbeat, release, pause = store.heartbeat, store.release, store.pause
+
+    async def applied(run_id: str, worker_id: str, kw: dict[str, Any]) -> Lease:
+        await late.wait()  # agent-runs applies it when it comes, however long the client waits
+        writes.append("heartbeat")
+        return await heartbeat(run_id, worker_id, **kw)
+
+    async def slow(run_id: str, worker_id: str, **kw: Any) -> Lease:
+        if sent.is_set():
+            return await heartbeat(run_id, worker_id, **kw)
+        sent.set()  # the save of what the reply spent: answered late
+        applying.append(asyncio.ensure_future(applied(run_id, worker_id, kw)))
+        return await asyncio.shield(applying[0])
+
+    async def written(write: Any, name: str, *args: Any, **kw: Any) -> Any:
+        writes.append(name)
+        late.set()
+        return await write(*args, **kw)
+
+    monkeypatch.setattr(store, "heartbeat", slow)
+    monkeypatch.setattr(store, "release", functools.partial(written, release, "release"))
+    monkeypatch.setattr(store, "pause", functools.partial(written, pause, "pause"))
+
+    async def spender(input: str, agent: Runtime) -> str:
+        budget.account(agent, model="m", input_tokens=5, output_tokens=5)
+        await sent.wait()  # its save sent
+        if ending == "pause":
+            return str(await agent.ask("go on?"))
+        await asyncio.Event().wait()  # works until its worker hands the run back
+        return "never"
+
+    agent = harness.wrap(spender, id="spender")
+    handle = await agent.start("x", user="u")
+    claimed = await store.claim("w1", [agent.id])
+    assert claimed is not None
+    job = Job(record=claimed.run, worker_id="w1", lease_seconds=60, store=store)
+    execution = asyncio.ensure_future(agent.execute(job))
+    await sent.wait()
+    if ending == "release":
+        execution.cancel(RELEASED)  # its worker stops: the run goes back on the queue
+    # the attempt ends at once, unless it waits for the heartbeat's answer (then given)
+    if not (await asyncio.wait({execution}, timeout=0.2))[0]:
+        late.set()
+    await asyncio.gather(execution, return_exceptions=True)
+    if ending == "release":
+        await store.release(handle.id, "w1", tenant=claimed.run.tenant_id)
+    with contextlib.suppress(Exception):
+        await applying[0]
+    assert writes == ["heartbeat", ending]
 
 
 async def test_reads_are_saved_at_most_every_progress_interval(

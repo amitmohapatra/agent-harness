@@ -203,6 +203,7 @@ def runtime_of(agent: Any, run_id: str) -> Any:
         cancelled=None,
         replay=SimpleNamespace(journal=Journal()),
         spent_more=lambda: None,
+        running_in=None,
     )
 
 

@@ -15,8 +15,15 @@ saved at most every 20 s — were lost (the accuracy benchmark's restart case, `
 saves what the run has spent at once, on a heartbeat: one small segment of the spending after
 the journal's segments, which the next spending save replaces (`Journal.save_spending`) — a
 checkpoint of segments alone, as agent-runs keeps one, and as a worker of an earlier release
-reads it. One save under way at a time, and a call that only reads waits for it before it
-runs. A model call still under way when the worker died is not counted (its reply never came).
+reads it. One save under way at a time; a call that only reads waits, before it runs, for the
+one save that carries the replies accounted before it (not for later ones, and not at all
+when a save already carried them). The attempt's pause, end or hand-back is written only after
+the spending save under way is answered, and none starts after it, so a late heartbeat cannot
+put back an earlier attempt's checkpoint; a failed spending save is a warning once per run, and
+one that finds the lease lost stops the run's next model call or read. Each save uploads one
+small segment; one a later save replaced is deleted by agent-runs' payload sweep 24 h after it
+was written. A
+model call still under way when the worker died is not counted (its reply never came).
 
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 

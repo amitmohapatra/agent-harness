@@ -157,9 +157,22 @@ so the replies a dead worker was paid for since its last save stay counted: a he
 checkpoint adds one small segment, the spending of the run and its sub-agents' runs, to the
 journal's segments — the next spending save replaces it, the next progress save adds to it,
 and the checkpoint stays segments alone; one save under way at a time, the replies accounted
-meanwhile sent with the next; a call that only reads waits for it before it runs. A model call still under way when the worker died is not counted: the harness
-never saw its reply, though the provider may have charged it; nor is a reply a framework
-reports only later (when its turn or query ends) before it does.
+meanwhile sent with the next (none when a progress save carried them). A call that only reads
+waits, before it runs, for the one save that carries the replies accounted before it — not
+for the saves of replies accounted while it waits, not at all when a save already carried
+them, and not past a save that failed. A spending save that fails is a `warning` once in the
+run (the next progress save carries the spending); one that finds the lease lost stops the
+run at its next model call or read. Each spending save uploads one content-addressed segment:
+a run writes one per model reply at most (none when the spending is already saved, or back at
+what the last progress save holds), and one a later save replaced stays in agent-runs'
+payload store until its sweep deletes it, as it deletes any object no record refers to, 24 h
+after it was written. The attempt's end starts no
+more spending saves: its pause or ending — or its worker handing the run back — is written
+only once the spending save under way has its answer, so a heartbeat already sent cannot land
+after it (after the same worker claimed the run again, it would put back the earlier
+attempt's checkpoint). A model call still under way when the worker died is not counted: the
+harness never saw its reply, though the provider may have charged it; nor is a reply a
+framework reports only later (when its turn or query ends) before it does.
 A save that fails is a `warning` event and a log line — the run goes on, and the next save
 tries again; a save refused with `409` (the lease is gone) stops the run without writing
 anything more. Runs started in process (`run`, `stream`) save no progress: nobody resumes them

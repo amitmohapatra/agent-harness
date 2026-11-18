@@ -261,7 +261,9 @@ def test_an_adapter_not_on_langchain_is_metered_by_what_the_harness_accounts() -
     def runtime(parent: Any = None) -> Any:
         journal = SimpleNamespace(spent={})
         replay = SimpleNamespace(journal=journal)
-        return SimpleNamespace(parent=parent, budget=None, replay=replay, spent_more=lambda: None)
+        return SimpleNamespace(
+            parent=parent, budget=None, replay=replay, spent_more=lambda: None, running_in=None
+        )
 
     top = runtime()
     with run.metered(adapter="openai") as meter:

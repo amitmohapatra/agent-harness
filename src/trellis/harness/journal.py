@@ -497,16 +497,21 @@ class Journal(BaseModel):
         one small segment after the segments the last whole save left — a spending save's
         own replaced, so they grow by one at most — the checkpoint every save sends (its
         segments alone: agent-runs keeps any other whole, letting the segments go); then
-        :meth:`spending_saved`. ``None`` when the spending is what the last save took. Only
-        when :meth:`spends_alone`."""
+        :meth:`spending_saved`. ``None`` when the spending is what the last save took; the
+        last whole save's segments alone, nothing uploaded, when it is what that one took
+        (a tool call counted no more). Only when :meth:`spends_alone`."""
         assert self._saved is not None and self.spends_alone()
         if _spending(self._saved, self) is None:
             return None
         segments, dumped = self._unspent or (self._segments, self._saved)
         assert dumped is not None
-        # the whole save's own spending again (none spent since it): a segment that changes
-        # nothing, in place of the spending segment the run store holds
-        node = _spending(dumped, self) or {"$d": {}}
+        node = _spending(dumped, self)
+        if node is None:  # the whole save's own spending again: its segments alone
+            return Save(
+                checkpoint={SEGMENTS: [r.model_dump() for r in segments]},
+                segments=list(segments),
+                dumped=dumped,
+            )
         ref = await artifacts.put_payload(
             run_id, await aencode(node), worker_id=worker_id, tenant=tenant
         )
