@@ -555,15 +555,18 @@ async def test_a_sandbox_shell_runs_unasked_and_announced_as_every_frameworks_sh
 @pytest.mark.host_execution
 @pytest.mark.parametrize(
     ("said", "asks"),
-    [({"exec_command": "write"}, 1), ({"exec_command": Rule(None, approve_when="true")}, 1)],
-    ids=["catalog-write", "approve-when"],
+    [
+        ({"exec_command": "irreversible"}, 2),
+        ({"exec_command": Rule(None, approve_when="true")}, 1),
+    ],
+    ids=["catalog-irreversible", "approve-when"],
 )
 async def test_a_sandbox_shell_asks_where_the_administrator_said_so(
     harness: Harness, said: dict[str, Any], asks: int
 ) -> None:
     """The catalog's word on the shell wins over the sandbox's default: an administrator's
-    ``write`` asks once a conversation (the second command runs, allowed for it), an
-    ``approve_when`` asks for the call it holds on."""
+    ``irreversible`` asks at every call, an ``approve_when`` asks for the call it holds on. (The
+    shell's own ``write``, which the harness publishes to the catalog, announces it.)"""
     from agents.sandbox import SandboxAgent, SandboxRunConfig
     from agents.sandbox.capabilities import Shell
     from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient

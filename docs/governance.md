@@ -246,8 +246,9 @@ tools (a schedule is confirmed when it is made, below), its memory tools (`memor
 the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub-agent's call
 (the sub-agent's own calls are governed), Deep Agents' `execute` in the run's sandbox and an
 OpenAI `SandboxAgent`'s shell (`exec_command`, `write_stdin`). The catalog's word on any of
-them wins: a risk an administrator declared there (`write`: asked once a conversation;
-`irreversible`: every call) or an `approve_when` asks as it says. Deep
+them wins: a risk an administrator declared there other than the tool's own (`irreversible`:
+every call; the tool's own `write`, which the harness publishes there itself, announces it) or
+an `approve_when` asks as it says. Deep
 Agents' file tools on the graph's own state are its scratch, not a call of the run; on a disk, a
 store or a sandbox (a backend, or a route of a `CompositeBackend`) they change real files, so
 `write_file`, `edit_file` and `delete` ask as any write — allow once, for this conversation,

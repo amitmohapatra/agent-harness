@@ -14,11 +14,11 @@ waited on a person to `cat` a skill file (5 of 30 cases right). They now run as 
 announced, recorded, unasked — a command that reads and one that writes alike; on a host
 `TRELLIS_HOST_EXECUTION=deny` still refuses the SDK's local sandbox. A risk the catalog declares
 still asks as it says, for this shell and for every tool announced this way (Deep Agents'
-`execute`, `sandbox_exec`, a framework's own write): `write` once a conversation, `irreversible`
-at every call (held at the SDK's own gate, its approved call continuing the paused run), and so
-does an `approve_when`. Only the SDK's own `Shell` capability's tools are the sandbox shell, and
-the mark survives the harness's copies of the tool. `apply_patch` asks as a write, as `Write`
-does.
+`execute`, `sandbox_exec`, a framework's own write) where it is not the tool's own risk (which
+the harness publishes to the catalog itself): `irreversible` at every call (held at the SDK's
+own gate, its approved call continuing the paused run), and so does an `approve_when`. Only the
+SDK's own `Shell` capability's tools are the sandbox shell, and the mark survives the harness's
+copies of the tool. `apply_patch` asks as a write, as `Write` does.
 ### Fixed: a run a dead worker left keeps what that worker's model calls spent
 
 A queued run whose worker died and another finished reported, in `RUN_FINISHED`'s `spent`
