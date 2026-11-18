@@ -1614,7 +1614,9 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
     # a rewound run's question is the one its run was asked: recorded once, under that id
     first = runtime.rewound_from
     ident = None if first is None else question_id(runtime.conversation, first)
-    asked = [Said(Speaker.USER, task, id=ident)] if runtime.task else []
+    # a child run's question is the hand-off of the agent above it, not the person's words
+    handed = runtime.identity.parent_run is not None
+    asked = [Said(Speaker.USER, task, id=ident, delegated=handed)] if runtime.task else []
     if not asked and runtime.notification is not None:  # a notification it was given to say
         asked = [runtime.notification]
     # a message steered into the run that its framework does not report: after the question

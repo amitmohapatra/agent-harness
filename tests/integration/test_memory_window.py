@@ -27,8 +27,9 @@ from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import snapshots
 from trellis.harness import writes as writes_module
 from trellis.harness.agent import TURN_WRITE_SECONDS
-from trellis.harness.history import ASKED_WITH
+from trellis.harness.history import ASKED_WITH, Speaker, from_window
 from trellis.harness.identity import conversation_key
+from trellis.memory.models import WindowMessage
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
@@ -196,6 +197,34 @@ async def test_a_function_target_gets_the_window_in_its_context_text(
     [call] = memory_service.named("context")
     assert call.body["window"] is True and "window_format" not in call.body
     assert seen == [pushed(memory_service.context_text)]
+
+
+async def test_a_child_runs_question_is_its_parents_words_not_the_users(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A sub-agent's question is what the agent that handed it the work wrote: kept as an
+    agent's message (the service's AGENT role), so the service never reads it as the person's
+    own words (their standing rules, their facts) and their conversation's window never
+    replays it as a turn of theirs. The person's own question stays theirs."""
+
+    async def specialist(input: str, agent: Runtime) -> str:
+        return "3 units"
+
+    child = memory_harness.wrap(specialist, id="specialist")
+
+    async def desk(input: str, agent: Runtime) -> str:
+        handed = await child.run("Count SKU-1. Research only; never reorder.", user=agent.user)
+        return f"specialist says {handed.answer}"
+
+    parent = memory_harness.wrap(desk, id="desk")
+    await parent.run("How many SKU-1?", user="u1", thread=THREAD)
+    roles = [(m["role"], m["content"]) for m in memory_service.threads[KEPT]]
+    assert ("USER", "How many SKU-1?") in roles
+    assert ("AGENT", "Count SKU-1. Research only; never reorder.") in roles
+    assert ("USER", "Count SKU-1. Research only; never reorder.") not in roles
+    # the person's conversation, as its next turn's window replays it: their turn, not the hand-off
+    window = from_window([WindowMessage.model_validate(m) for m in memory_service._window(KEPT)])
+    assert [s.content for s in window if s.role is Speaker.USER] == ["How many SKU-1?"]
 
 
 async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_items(

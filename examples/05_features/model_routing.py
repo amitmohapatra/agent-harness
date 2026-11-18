@@ -14,8 +14,9 @@ chain of fallbacks.
 
 The same ``ReAct`` runs on each route. Offline all three are served by a stand-in
 OpenAI-compatible endpoint on a local port, which answers saying which name and key reached
-it; with Bifrost set the first run is the real Bifrost's, and with ``OPENAI_API_KEY`` set the
-last is OpenAI's.
+it; with Bifrost set the first run is the real Bifrost's, and with the name's provider key set
+(``OPENAI_API_KEY``; ``ANTHROPIC_API_KEY`` for an ``anthropic/`` name) the last is the
+provider's own.
 
     python -m examples.05_features.model_routing
 """
@@ -39,6 +40,8 @@ from trellis.contracts import RunStatus
 
 #: the name every run asks for: its provider, then the provider's own name for it
 NAME = MODEL if online() else "openai/gpt-4.1-mini"
+#: the key each provider's own SDK reads (the third route)
+PROVIDER_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 
 
 class StandIn(BaseHTTPRequestHandler):
@@ -134,10 +137,11 @@ async def main() -> None:
             await ask(h, "LLM_BASE_URL alone")
 
         # 3. no endpoint: the provider's own SDK, with its own key and endpoint
-        if online() and not os.environ.get("OPENAI_API_KEY"):
-            print("no LLM_BASE_URL: skipped (set OPENAI_API_KEY to run it against OpenAI)")
+        key = PROVIDER_KEYS.get(NAME.partition("/")[0], "OPENAI_API_KEY")
+        if online() and not os.environ.get(key):
+            print(f"no LLM_BASE_URL: skipped (set {key} to run it against the provider)")
             return
-        if not os.environ.get("OPENAI_API_KEY"):
+        if not os.environ.get(key):  # offline: the stand-in is OpenAI's endpoint
             os.environ.update(OPENAI_API_KEY="sk-provider", OPENAI_BASE_URL=url)
         async with Harness(config=Settings(), **offline_blocks()) as h:
             await ask(h, "no LLM_BASE_URL")

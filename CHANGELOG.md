@@ -55,6 +55,25 @@ none there). A `create_agent` graph is offered them in the run's words at each m
 The benchmark's `graph` adapter binds them as the docs say: asking 59 to 71 of 80, schedules
 20 to 57 of 61, skills 28 to 29 of 30
 ([frameworks/langgraph.md](docs/frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build)).
+### Fixed: a sub-agent's question is no longer kept as the person's own words
+
+A child run's question (a `subagents=` call, a nested `run()`, a framework's own sub-agent or
+async task) is what the agent above it wrote. It was written to the memory service as the
+person's message, in their conversation: the service formed their memories from it (a planner's
+"Research only; never reorder" became the user's standing rule, steering every later run of
+theirs) and the conversation's window replayed it as a turn of theirs. It is now kept as an
+agent's message (the service's `AGENT` role, `Said.delegated`): in the transcript, never the
+person's words, and no window replays it. The person's own question stays theirs.
+
+### Fixed: a harness served from another thread closes from the main one
+
+A harness whose agents serve AG-UI or A2A from uvicorn in a thread does its background
+writes on that thread's event loop. `h.aclose()` from the main loop then failed with a
+`RuntimeError` ("attached to a different loop"), and when uvicorn was told to exit first,
+with that loop's `CancelledError`. The writes are now drained and their workers stopped on
+their own loop while it runs; a loop that has ended stopped them already. Only a close that
+is itself cancelled says so (`examples/05_features/serve_agui_and_a2a.py`,
+`examples/02_way1_react/subagents.py` against the real services).
 
 ### Fixed: a Kimi that never reached the harness's tools no longer answers without them
 

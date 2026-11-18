@@ -33,16 +33,20 @@ def send_email(to: str, body: str) -> str:
 async def main() -> None:
     async with Harness() as h:
         draft = ("send_email", {"to": "supplier@acme.test", "body": "Send 20 units."})
-        model = langchain_model([draft, "Sent.", draft, "Not sent: the order is on hold."])
+        more = ("send_email", {"to": "supplier@acme.test", "body": "Send 50 more units."})
+        model = langchain_model([draft, "Sent.", more, "Not sent: the order is on hold."])
         graph = create_agent(
             model,
             tools=[send_email],
+            system_prompt="You email suppliers with send_email. Send what you are asked to.",
             middleware=[HumanInTheLoopMiddleware(interrupt_on={"send_email": True})],
             checkpointer=InMemorySaver(),  # a middleware pause resumes from the checkpoint
         )
         agent = h.wrap(graph, id="mailer")
 
-        first = await agent.run("Ask ACME for 20 units.", user="ada", thread="mail-1")
+        first = await agent.run(
+            "Email supplier@acme.test: send 20 units.", user="ada", thread="mail-1"
+        )
         assert first.interrupt is not None
         print("asks:", first.interrupt.question)  # "Approve send_email?"
         edited = {"to": "supplier@acme.test", "body": "Send 20 units by Friday."}
@@ -51,7 +55,9 @@ async def main() -> None:
         )
         print(done.status.value, done.answer, outbox)
 
-        second = await agent.run("Ask ACME again.", user="ada", thread="mail-2")
+        second = await agent.run(
+            "Email supplier@acme.test: send 50 more units.", user="ada", thread="mail-2"
+        )
         assert second.interrupt is not None
         held = await agent.resume(
             second.interrupt.interrupt_id, "reject", answer="the order is on hold", reviewer="lead"

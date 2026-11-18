@@ -76,7 +76,10 @@ async def main() -> None:
 
         # ReAct: a wrapped agent in subagents= is a tool whose call is a child run
         planner = ReAct(
-            system_prompt="Ask stock about stock.",
+            system_prompt=(
+                "Ask stock (your stock tool) every stock question and answer with what it says; "
+                "never look stock up yourself."
+            ),
             model=react_model([("stock", {"message": QUESTION}), "3 left"]),
             subagents=[stock],
         )
@@ -111,7 +114,10 @@ async def main() -> None:
             model=langchain_model(
                 [("task", {"description": QUESTION, "subagent_type": "counter"}), "3 left"]
             ),
-            system_prompt="Hand stock questions to the counter.",
+            system_prompt=(
+                "Hand every stock question to the counter sub-agent (the task tool) and answer "
+                "with what it says; never look stock up yourself."
+            ),
             subagents=[
                 {
                     "name": "counter",
@@ -127,7 +133,10 @@ async def main() -> None:
         counter = Agent(name="counter", model=openai_agents_model(["3 units"]))
         desk_agent = Agent(
             name="desk",
-            instructions="Ask the counter about stock.",
+            instructions=(
+                "Ask the counter (the count tool) every stock question and answer with what it "
+                "says; never look stock up yourself."
+            ),
             model=openai_agents_model([("count", {"input": QUESTION}), "3 left"]),
             tools=[counter.as_tool(tool_name="count", tool_description="Count units of a SKU.")],
         )
@@ -139,7 +148,10 @@ async def main() -> None:
             {"text": "3 left"},
         ]
         options = ClaudeAgentOptions(
-            system_prompt="Hand stock questions to the counter.",
+            system_prompt=(
+                "Hand every stock question to the counter subagent and answer with what it "
+                "says; never look stock up yourself."
+            ),
             agents={"counter": AgentDefinition(description="Counts units.", prompt="Count.")},
             disallowed_tools=sorted(CLAUDE_SHELLS),  # no shell on this machine
             **claude_cli(script, "trellis"),

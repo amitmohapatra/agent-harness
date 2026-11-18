@@ -107,7 +107,9 @@ context bound to the run, with all its verbs.
 After each attempt — whether it succeeded, paused or failed — in the background except where
 said:
 
-* the transcript, in one batch (`history.add`) — the question, then what the agent said: its
+* the transcript, in one batch (`history.add`) — the question (a child run's, which the agent
+  above it wrote, as an `AGENT` message: never the person's words, and no window replays it),
+  then what the agent said: its
   tool calls (on the assistant message, `tool_calls`) and their results (`TOOL` messages naming
   their call) with its answers, where the framework reports them (LangGraph, the OpenAI Agents
   SDK) — each message named by the harness (`source_system: trellis-harness`,

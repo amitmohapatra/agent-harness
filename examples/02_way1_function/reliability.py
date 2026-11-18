@@ -41,10 +41,13 @@ async def buy(sku: str, agent: Runtime) -> list[str]:
 
 
 pondering: list[str] = []
+#: set when a run of ``ponder`` has started working (its store took it)
+started = asyncio.Event()
 
 
 async def ponder(question: str, agent: Runtime) -> str:
     pondering.append(agent.run_id)
+    started.set()
     await asyncio.sleep(10)
     return "an answer, too late"
 
@@ -62,8 +65,9 @@ async def main() -> None:
         assert timed.error is not None
         print(timed.status.value, timed.error.code, timed.error.message)
 
+        started.clear()
         running = asyncio.create_task(thinker.run("And now?", user="ada"))
-        await asyncio.sleep(0.1)
+        await started.wait()  # the run is working: cancel it
         record = await thinker.cancel(pondering[-1], reason="nobody is waiting any more")
         print(record.status.value, (await running).status.value)
 

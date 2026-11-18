@@ -370,7 +370,7 @@ def _unended(record: RunRecord | None) -> Helper | None:
     if record is None or record.status.final:
         return None
     name = str((record.metadata.get(HELPER) or {}).get("name", ""))
-    said = [Said(Speaker.USER, str(record.input))]
+    said = [Said(Speaker.USER, str(record.input), delegated=True)]  # the parent's hand-off
     return Helper(record.run_id, record.parent_run_id or "", name, said, kind=Kind.ASYNC_TASK)
 
 
