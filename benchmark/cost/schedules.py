@@ -320,6 +320,80 @@ def or_asks_zone(check: Check) -> Check:
     return either
 
 
+def says_any(check: Check, *alternatives: str) -> Check:
+    """``check``, and the last answer says one of ``alternatives`` (the time it chose, in words
+    the user cannot misread)."""
+
+    def both(chat: Chat) -> list[str]:
+        text = chat.answers[-1].lower()
+        said = any(a.lower() in text for a in alternatives)
+        return check(chat) + ([] if said else [f"answer says none of {list(alternatives)}"])
+
+    return both
+
+
+def or_asks(check: Check, *about: str) -> Check:
+    """``check``, or nothing written and the user asked (options, or a question naming one of
+    ``about``): the model may settle what the words leave open itself, or ask."""
+
+    def either(chat: Chat) -> list[str]:
+        problems = check(chat)
+        options = (chat.asked[-1] if chat.asked else None) or []
+        text = (chat.answers[-1] + " " + " ".join(options)).lower()
+        asked = asked_in(chat) and any(a.lower() in text for a in about)
+        return [] if problems and asked and not chat.made() else problems
+
+    return either
+
+
+def covered(cron: str) -> Check:
+    """The schedules made fire at ``cron``'s instants in the user's zone together (one
+    schedule, or one a day of the week)."""
+
+    def check(chat: Chat) -> list[str]:
+        made = chat.made()
+        if not made:
+            return ["0 schedules made"]
+        zone = chat.zone or "UTC"
+        got = sorted({t for s in made for t in instants(s.cadence, s.timezone, chat.now)})
+        want = instants(cron, zone, chat.now)
+        return [] if got[: len(want)] == want else [f"fire at {got[:4]}, not '{cron}' {zone}"]
+
+    return check
+
+
+def hours(first: int, last: int, *, once: bool = False) -> Check:
+    """One schedule (``once`` as said) whose first run is between ``first`` and ``last``
+    o'clock in the user's zone: a time of day the user named only in words."""
+
+    def check(chat: Chat) -> list[str]:
+        s, problems = one_made(chat)
+        if s is None:
+            return problems
+        local = instants(s.cadence, s.timezone, chat.now)[0].astimezone(
+            ZoneInfo(chat.zone or "UTC")
+        )
+        if not first <= local.hour <= last:
+            problems.append(f"first run at {local:%H:%M}, not between {first}:00 and {last}:00")
+        if bool(s.metadata[TASK].get("once")) != once:
+            problems.append(f"once={s.metadata[TASK].get('once')}")
+        return problems
+
+    return check
+
+
+def ends(check: Check) -> Check:
+    """``check``, and the schedule made keeps an end (``end_at``, or the task's ``until``)."""
+
+    def both(chat: Chat) -> list[str]:
+        problems = check(chat)
+        made = chat.made()
+        kept = made and (getattr(made[0], "end_at", None) or made[0].metadata[TASK].get("until"))
+        return problems + ([] if kept else ["no end date kept"])
+
+    return both
+
+
 def unscheduled(*says: str, tools: Sequence[str] = ()) -> Check:
     """No schedule written to; the answer says each of ``says`` (a figure: digits compared
     without separators) and the turn called each of ``tools``."""
@@ -520,6 +594,10 @@ def cases() -> list[Case]:
         "value": f"When the user turns on stock watch, schedule a check of {SKU} every Monday "
         "at 9:00 that reports only when its total stock is under 15.",
     }
+    team = {
+        "description": "team instructions",
+        "value": "Our reports go out at 8:00 in the morning, the user's time.",
+    }
     S, N, M, F, L, K, C = CATEGORIES
     hour = (timedelta(minutes=118), timedelta(minutes=123))
     return [
@@ -575,7 +653,44 @@ def cases() -> list[Case]:
              or_asks_zone(scheduled(once=True, at=_tomorrow_at(9))), zone=None),
         Case("skill", S, ("Turn on stock watch.",),
              scheduled("0 9 * * 1", condition=("15",), checked=(str(stock),)), context=(skill,)),
+        # --- the time the words leave open, settled from context or asked
+        Case("ampm-9", S, ("Every day at 9 send me yesterday's sales summary.",),
+             or_asks(says_any(scheduled("0 9 * * *"), "am", "a.m.", "09:00", "morning"),
+                     "am", "pm", "morning", "evening")),
+        Case("ampm-7", S, (f"Remind me at 7 every day to check the stock of {SKU}.",),
+             or_asks(says_any(scheduled("0 7 * * *"), "am", "a.m.", "07:00", "morning"),
+                     "am", "pm", "morning", "evening")),
+        Case("own-time", S, ("Every day at 9 send me the sales summary.",
+                             "Make it 8:30 in the evening instead."),
+             scheduled("30 20 * * *")),
+        Case("noon", S, (f"Every day at noon send me the stock of {SKU}.",),
+             scheduled("0 12 * * *")),
+        Case("midnight", S, ("Every night at midnight send me the day's revenue.",),
+             scheduled("0 0 * * *")),
+        Case("24h", S, ("Every weekday at 18:30 send me the day's revenue.",),
+             scheduled("30 18 * * 1-5")),
+        Case("mon-thu", S, ("Every Monday and Thursday at 9am send me the sales summary.",),
+             covered("0 9 * * 1,4")),
+        Case("last-day", S, ("On the last day of every month at 6pm send me its revenue.",),
+             covered("0 18 L * *")),
+        Case("every-other-week", S, ("Every other Monday at 9am send me the sales summary.",),
+             or_asks(says_any(scheduled(weekday=0), "every week", "weekly", "every monday",
+                              "can't", "cannot", "not able", "every two"),
+                     "every week", "weekly", "every other", "two weeks")),
+        Case("morning", S, ("Tomorrow morning remind me to call supplier SUP-03.",),
+             says_any(hours(6, 11, once=True), "am", ":00", ":30")),
+        Case("end-of-day", S, ("Every day at the end of the day send me the revenue.",),
+             says_any(hours(17, 21), "pm", ":00", ":30")),
+        Case("wait-20", S, (f"Check the stock of {SKU} again in 20 minutes.",),
+             scheduled(once=True, within=(timedelta(minutes=18), timedelta(minutes=23)))),
+        Case("end-of-month", S,
+             (f"Every day at 9am until the end of this month, send me the stock of {SKU}.",),
+             ends(scheduled("0 9 * * *"))),
+        Case("team-time", S, ("Send me the sales summary every day.",),
+             says_any(scheduled("0 8 * * *"), "8"), context=(team,)),
         # --- should not schedule
+        Case("skill-unasked", N, (f"What is the stock of {SKU} now?",),
+             unscheduled(str(stock), tools=("stock_level",)), context=(skill,)),
         Case("now-stock", N, (f"What is the stock of {SKU} now?",),
              unscheduled(str(stock), tools=("stock_level",))),
         Case("habit-restock", N, (f"Do we restock {SKU} every Monday?",), unscheduled()),

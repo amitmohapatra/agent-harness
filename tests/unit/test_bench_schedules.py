@@ -65,6 +65,39 @@ def test_a_zone_not_known_may_be_asked_and_nothing_written() -> None:
     assert check(chat(answer="Which report?")) == ["0 schedules made, not 1"]
 
 
+def test_a_time_the_words_leave_open_is_settled_and_said_or_asked() -> None:
+    nine = b.or_asks(b.says_any(b.scheduled("0 9 * * *"), "am", "09:00"), "am", "pm")
+    assert nine(chat(made("0 9 * * *"), answer="Set for 9:00 AM daily.")) == []
+    assert nine(chat(answer="9 in the morning or the evening, AM or PM?")) == []
+    # a silent guess fails: scheduled, but the time not said in words the user cannot misread
+    assert nine(chat(made("0 9 * * *"), answer="Done.")) == ["answer says none of ['am', '09:00']"]
+    assert nine(chat(made("0 21 * * *"), answer="Set for 9 PM.")) != []
+    # asked, but a schedule made anyway is not a question
+    assert nine(chat(made("0 21 * * *"), answer="Set for 21:00; AM instead?")) != []
+
+
+def test_schedules_together_and_a_time_of_day_in_words() -> None:
+    both = b.covered("0 9 * * 1,4")
+    assert both(chat(made("0 9 * * 1,4"))) == []
+    assert both(chat(made("0 9 * * 1", sid="a"), made("0 9 * * 4", sid="b"))) == []
+    assert both(chat(made("0 9 * * 1"))) != []
+    assert both(chat()) == ["0 schedules made"]
+    morning = b.hours(6, 11, once=True)
+    assert morning(chat(made("0 9 4 11 *", once=True))) == []
+    assert morning(chat(made("0 14 4 11 *", once=True))) == [
+        "first run at 14:00, not between 6:00 and 11:00"
+    ]
+    assert b.hours(17, 21)(chat(made("0 18 * * *", once=True))) == ["once=True"]
+    assert b.hours(17, 21)(chat()) == ["0 schedules made, not 1"]
+
+
+def test_an_end_date_is_kept() -> None:
+    until = made("0 9 * * *")
+    until.metadata[TASK]["until"] = "2026-11-30"
+    assert b.ends(b.scheduled("0 9 * * *"))(chat(until)) == []
+    assert b.ends(b.scheduled("0 9 * * *"))(chat(made("0 9 * * *"))) == ["no end date kept"]
+
+
 def test_no_schedule_cancel_all_and_fired_runs() -> None:
     answered = b.unscheduled("1234", tools=("stock_level",))  # said as 1,234 too
     assert answered(chat(answer="1,234 units", calls=[("stock_level", {}, "")])) == []
