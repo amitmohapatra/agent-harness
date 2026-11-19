@@ -33,8 +33,10 @@ A turn whose transcript write took longer than the run waits (memory slow or ove
 queued, and the conversation's next turn, written at once, reached memory before it: memory
 keeps a conversation's messages in the order they arrive, so the window replayed them out of
 order. A turn is written at once only when no earlier turn of its conversation is still on its
-way; otherwise it is queued and sent after them (waiting at most `TURN_ORDER_SECONDS`, 60 s,
-for a turn given up on).
+way; otherwise its queued write sends those earlier turns first, each under its own key (memory
+stores a message once), then its own: whichever write lands first, the conversation is in
+order, and no write waits for another (a first design that waited held the write queue's
+workers under load, and turns were lost when the process stopped).
 
 ### Fixed: a run served under load is no longer ended for a missed heartbeat
 

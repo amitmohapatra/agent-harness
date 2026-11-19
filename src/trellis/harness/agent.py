@@ -183,10 +183,6 @@ TURN_WRITE_SECONDS: Final = 5.0
 #: How many tool records a run's journal keeps while they are on their way to memory
 #: (``Journal.unrecorded``): past it a record goes as before (queued, spooled), not saved.
 UNRECORDED_MAX: Final = 64
-#: How long a queued turn's transcript waits for its conversation's earlier turns still on
-#: their way to memory before it is sent all the same: memory keeps a conversation's messages
-#: in the order they arrive, so a turn sent past an earlier one would be stored before it.
-TURN_ORDER_SECONDS: Final = 60.0
 #: How many conversations' last framework sessions an agent keeps in this process
 #: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
 #: and its next turn starts a new one.
@@ -449,9 +445,9 @@ class Agent:
         #: turn says them (:meth:`unwritten_said`), as a messages window's reads them from the
         #: run store (:meth:`caught_up`)
         self.unwritten: LRU[str, dict[str, list[Said]]] = LRU(SESSIONS_KEPT)
-        #: for those turns, by conversation and run id: set once each is in memory, so the
-        #: conversation's later turns are sent after it (:func:`_after`)
-        self.landing: LRU[str, dict[str, asyncio.Event]] = LRU(SESSIONS_KEPT)
+        #: the attempt each of those turns was said in, by conversation and run id: a later
+        #: turn's write sends them again under their own keys (:meth:`_queued_turn`)
+        self.attempts_of: LRU[str, dict[str, int]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -1595,22 +1591,27 @@ class Agent:
         messages: Sequence[Said],
         on_its_way: dict[str, list[Said]],
     ) -> None:
-        """The turn's transcript queued (``writes``: retried, spooled), sent after the
-        conversation's earlier turns still on their way (:func:`_after`); until memory has
-        it, the conversation's next turns read it from here (:attr:`unwritten`)."""
+        """The turn's transcript queued (``writes``: retried, spooled); until memory has it,
+        the conversation's next turns read it from here (:attr:`unwritten`). Memory keeps a
+        conversation's messages in the order they arrive, so the write sends the earlier turns
+        still on their way first, each as its own write again (memory stores a message once):
+        whichever write lands first, the conversation is in order, and no write waits for
+        another."""
         run_id, attempt, conversation_key = runtime.run_id, runtime.attempt, runtime.conversation
-        earlier = [r for r in on_its_way if r != run_id]  # in the order they were said
+        attempts = self.attempts_of.get(conversation_key) or {}
+        attempts[run_id] = attempt
+        self.attempts_of[conversation_key] = attempts
         on_its_way[run_id] = list(messages)
         self.unwritten[conversation_key] = on_its_way
-        landed = self.landing.get(conversation_key) or {}
-        landed[run_id] = asyncio.Event()
-        self.landing[conversation_key] = landed
+        # in the order they were said, this one last
+        turns = [(r, said, attempts.get(r, 1)) for r, said in on_its_way.items()]
 
         async def written() -> None:
-            await _after(landed, earlier)
-            await memory.record_messages(messages, run_id, attempt)
-            on_its_way.pop(run_id, None)  # memory has it: its window says it from now on
-            landed.pop(run_id, asyncio.Event()).set()  # the turns after it may go
+            for turn_id, said, said_in in turns:
+                if turn_id in on_its_way:  # else in memory already
+                    await memory.record_messages(said, turn_id, said_in)
+                    on_its_way.pop(turn_id, None)  # its window says it from now on
+                    attempts.pop(turn_id, None)
 
         await self.harness.writes.submit(
             "memory.transcript",
@@ -2057,19 +2058,6 @@ class RunHandle:
                 if record.status is RunStatus.PAUSED or record.final:
                     return self._agent.hooks.answer(Result.of(record))
                 await asyncio.sleep(POLL_SECONDS)
-
-
-async def _after(landed: Mapping[str, asyncio.Event], earlier: Sequence[str]) -> None:
-    """Until the conversation's ``earlier`` turns are in memory (each sets its event in
-    ``landed`` once written), at most :data:`TURN_ORDER_SECONDS`: a turn is stored after them.
-    A turn given up on (lost, or kept in the spool) leaves its later ones to go after the
-    bound."""
-    with contextlib.suppress(TimeoutError):
-        async with asyncio.timeout(TURN_ORDER_SECONDS):
-            for run_id in earlier:
-                event = landed.get(run_id)
-                if event is not None:
-                    await event.wait()
 
 
 __all__ = ["Agent", "RunHandle", "Throttled"]

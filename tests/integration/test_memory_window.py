@@ -371,14 +371,38 @@ async def test_a_later_turn_is_stored_after_an_earlier_one_still_on_its_way(
         assert [m["content"] for m in service.threads[KEPT]] == ["one", "1", "two", "2"]
 
 
-async def test_a_turn_given_up_on_holds_the_later_ones_only_so_long(
+async def test_a_later_turn_never_waits_for_a_stuck_earlier_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The first turn's own write never answers (its worker stuck on it): the second turn's
+    write sends the first turn again, then its own, so both are in memory in order without
+    waiting for it; the stuck write, when it comes, stores nothing twice."""
     from trellis.harness import agent as agent_module
+    from trellis.harness.clients.memory import RunMemory
 
-    landed: dict[str, asyncio.Event] = {"lost": asyncio.Event()}
-    monkeypatch.setattr(agent_module, "TURN_ORDER_SECONDS", 0.05)
-    await agent_module._after(landed, ["lost", "gone already"])  # returns at the bound
+    service = FakeMemoryService()
+    plain = RunMemory.record_messages
+    stuck = asyncio.Event()
+    calls: list[str] = []
+
+    async def first_one_stuck(self: RunMemory, messages: Any, run_id: str, attempt: int) -> None:
+        calls.append(messages[0].content)
+        if messages[0].content == "one" and calls.count("one") == 1:
+            await stuck.wait()  # the first write of the first turn never answers
+        await plain(self, messages, run_id, attempt)
+
+    monkeypatch.setattr(RunMemory, "record_messages", first_one_stuck)
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.05)
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        agent = h.wrap(create_agent(ScriptedChat(["1", "2"]), tools=[]), id="unstuck")
+        for said in ("one", "two"):
+            assert (await agent.run(said, user="u1", thread=THREAD)).status is RunStatus.SUCCESS
+        async with asyncio.timeout(5):
+            while [m["content"] for m in service.threads.get(KEPT, [])] != ["one", "1", "two", "2"]:  # noqa: ASYNC110 - the write queue's own workers
+                await asyncio.sleep(0.01)
+        stuck.set()
+        await h.writes.drain()
+        assert [m["content"] for m in service.threads[KEPT]] == ["one", "1", "two", "2"]
 
 
 async def test_a_turn_stored_but_answered_past_the_deadline_is_stored_once(
