@@ -251,7 +251,9 @@ async def scheduled(w: World) -> None:
 
     async def handle(job: Job) -> None:
         record = job.record
-        ran.append((record.on_behalf_of, record.priority, record.concurrency_key, record.metadata))
+        told = dict(record.metadata)
+        assert told.pop("fire_time")
+        ran.append((record.on_behalf_of, record.priority, record.concurrency_key, told))
         await job.finish(RunStatus.SUCCESS, output="briefed")
 
     spec = ScheduleSpec(
@@ -271,7 +273,12 @@ async def scheduled(w: World) -> None:
         update={"next_fire_at": datetime.now(UTC) - timedelta(seconds=1)}
     )
     assert await RunsWorker(w.store, handle, [AGENT]).run_once()
-    fired = {**chosen, "schedule_id": schedule.schedule_id}
+    fired = {
+        **chosen,
+        "schedule_id": schedule.schedule_id,
+        "schedule_name": "briefing",
+        "created_by": None,
+    }
     assert ran == [(USER, 5, "briefing", fired)], ran
 
 

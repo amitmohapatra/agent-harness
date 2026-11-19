@@ -5,6 +5,9 @@ checkpoint lists."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import functools
 import json
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -20,11 +23,13 @@ from tests.support.journals import CHECKPOINT_BOUND
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, current, middleware, tool
 from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
+from trellis.harness import budget
 from trellis.harness import runtime as runtime_module
 from trellis.harness.events import PREVIEW_CHARS
 from trellis.harness.journal import apply, content_key
 from trellis.harness.runs import LocalRuns
 from trellis.runs import (
+    RELEASED,
     DependencyUnavailableError,
     Job,
     Lease,
@@ -183,6 +188,107 @@ async def test_a_resumed_react_run_replays_its_model_steps_and_its_writes(
     assert done.answer == "paid 3" and paid == [3]
     # the first model step (it chose pay) came from the checkpoint: only the steps after it
     assert len(model.requests) - asked_before == 2
+
+
+async def test_the_model_calls_a_dead_worker_made_since_its_last_save_are_spent(
+    harness: Harness,
+) -> None:
+    crashes = [Crash()]
+
+    @tool(side_effects="read")
+    def boom() -> str:
+        """Crash the worker."""
+        if crashes:
+            raise crashes.pop()
+        return "fine"
+
+    # every reply 110 tokens: the step that chose boom was made after pay's save, and the
+    # worker died before any later one — its tokens are the provider's all the same
+    model = ScriptedChatModel(turns=[("pay", {"amount": 3}), ("boom", {})], spends=(100, 10))
+    agent = arm(harness.wrap(ReAct("You pay.", model), id="payer"), [pay, boom])
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    handle = await agent.start("pay 3", user="u")
+    await crash_once(store, agent, handle)
+    record = await handle.status()  # segments alone: how agent-runs keeps a checkpoint's
+    assert record.checkpoint is not None and set(record.checkpoint) == {SEGMENTS}
+    model.turns = [("boom", {}), "paid 3"]
+    seen: list[Any] = []
+
+    async def watch() -> None:
+        seen.extend([e async for e in agent.events(handle.id)])
+
+    watching = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # following the run before its next attempt
+    assert await harness.worker([agent]).run_once()
+    assert (await handle.result(wait=5)).answer == "paid 3"
+    await asyncio.wait_for(watching, 5)
+    spent = seen[-1].data["spent"]
+    assert (spent["model_calls"], spent["tokens"]) == (4, 440)  # two calls on each worker
+
+
+@pytest.mark.parametrize("ending", ["release", "pause"])
+async def test_a_spending_save_under_way_is_answered_before_the_attempt_writes_its_end(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    """A heartbeat already sent can be applied after the attempt's end — after its pause, or
+    after the run was handed back and the same worker claimed it again — and put back the
+    checkpoint that attempt left behind: the attempt waits for the answer to the spending save
+    under way before it writes its pause or end, or its worker hands the run back."""
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    writes: list[str] = []
+    sent, late = asyncio.Event(), asyncio.Event()
+    applying: list[asyncio.Task[Any]] = []
+    heartbeat, release, pause = store.heartbeat, store.release, store.pause
+
+    async def applied(run_id: str, worker_id: str, kw: dict[str, Any]) -> Lease:
+        await late.wait()  # agent-runs applies it when it comes, however long the client waits
+        writes.append("heartbeat")
+        return await heartbeat(run_id, worker_id, **kw)
+
+    async def slow(run_id: str, worker_id: str, **kw: Any) -> Lease:
+        if sent.is_set():
+            return await heartbeat(run_id, worker_id, **kw)
+        sent.set()  # the save of what the reply spent: answered late
+        applying.append(asyncio.ensure_future(applied(run_id, worker_id, kw)))
+        return await asyncio.shield(applying[0])
+
+    async def written(write: Any, name: str, *args: Any, **kw: Any) -> Any:
+        writes.append(name)
+        late.set()
+        return await write(*args, **kw)
+
+    monkeypatch.setattr(store, "heartbeat", slow)
+    monkeypatch.setattr(store, "release", functools.partial(written, release, "release"))
+    monkeypatch.setattr(store, "pause", functools.partial(written, pause, "pause"))
+
+    async def spender(input: str, agent: Runtime) -> str:
+        budget.account(agent, model="m", input_tokens=5, output_tokens=5)
+        await sent.wait()  # its save sent
+        if ending == "pause":
+            return str(await agent.ask("go on?"))
+        await asyncio.Event().wait()  # works until its worker hands the run back
+        return "never"
+
+    agent = harness.wrap(spender, id="spender")
+    handle = await agent.start("x", user="u")
+    claimed = await store.claim("w1", [agent.id])
+    assert claimed is not None
+    job = Job(record=claimed.run, worker_id="w1", lease_seconds=60, store=store)
+    execution = asyncio.ensure_future(agent.execute(job))
+    await sent.wait()
+    if ending == "release":
+        execution.cancel(RELEASED)  # its worker stops: the run goes back on the queue
+    # the attempt ends at once, unless it waits for the heartbeat's answer (then given)
+    if not (await asyncio.wait({execution}, timeout=0.2))[0]:
+        late.set()
+    await asyncio.gather(execution, return_exceptions=True)
+    if ending == "release":
+        await store.release(handle.id, "w1", tenant=claimed.run.tenant_id)
+    with contextlib.suppress(Exception):
+        await applying[0]
+    assert writes == ["heartbeat", ending]
 
 
 async def test_reads_are_saved_at_most_every_progress_interval(
@@ -563,3 +669,78 @@ async def test_a_write_that_asks_or_fails_runs_again_on_resume(harness: Harness)
     # neither the failed call nor the one that asked reads as interrupted by a crash
     assert done.answer == ["post failed: the board is read-only", "posted yes"]
     assert ran == ["draft", "hi", "draft", "hi"]
+
+
+async def test_a_tool_record_a_crash_left_unsent_is_sent_by_the_next_attempt(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    """The write ran and the journal was saved, but its tool record was still queued in the
+    process that died: the record was saved with the call (``Journal.unrecorded``), and the
+    next attempt sends it — once, as the service stores it once."""
+    crashes = [Crash()]
+
+    async def billing(input: str, agent: Runtime) -> str:
+        receipt = await agent.tools.call("pay", amount=5)
+        if crashes:
+            raise crashes.pop()
+        return receipt
+
+    store = memory_harness.runs
+    assert isinstance(store, LocalRuns)
+    writes = memory_harness.writes
+    submit = writes.submit
+    queued: list[str] = []
+
+    async def lost_with_the_process(label: str, work: Any, **kw: Any) -> None:
+        queued.append(label)  # queued, never sent: the process dies first
+
+    agent = arm(memory_harness.wrap(billing, id="billing"), [pay])
+    handle = await agent.start("invoice 9", user="u")
+    writes.submit = lost_with_the_process  # type: ignore[method-assign]
+    try:
+        await crash_once(store, agent, handle)
+    finally:
+        writes.submit = submit  # type: ignore[method-assign]
+    assert "memory.record_tool" in queued and not memory_service.named("record_tool")
+    assert await memory_harness.worker([agent]).run_once()  # the next attempt
+    done = await handle.result(wait=5)
+    assert done.status is RunStatus.SUCCESS and paid == [5]
+    await writes.drain()
+    sent = [c.body["args"] for c in memory_service.named("record_tool") if c.body["tool"] == "pay"]
+    assert sent == [{"amount": 5}]  # the lost record, sent once by the attempt after the crash
+
+
+async def test_past_the_bound_a_record_is_not_kept_and_memory_off_sends_nothing(
+    memory_harness: Harness, harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal keeps at most ``UNRECORDED_MAX`` records on their way (past it a record goes
+    as before: queued, spooled); a harness with memory off has nothing to send one to."""
+    from types import SimpleNamespace
+
+    from trellis.harness import agent as agent_module
+    from trellis.harness.journal import Journal
+
+    monkeypatch.setattr(agent_module, "UNRECORDED_MAX", 0)
+
+    async def paying(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("pay", amount=1)
+
+    async def nothing(input: str, agent: Runtime) -> str:
+        return "ok"
+
+    agent = arm(memory_harness.wrap(paying, id="b"), [pay])
+    seen: list[dict[str, Any]] = []
+    plain = agent_module.Agent.record_tool
+
+    async def watching(self: Any, runtime: Runtime, call: Any, outcome: Any) -> None:
+        await plain(self, runtime, call, outcome)
+        seen.append(dict(runtime.replay.journal.unrecorded))
+
+    monkeypatch.setattr(agent_module.Agent, "record_tool", watching)
+    assert (await agent.run("go", user="u")).status is RunStatus.SUCCESS
+    assert seen == [{}]  # past the bound: not kept
+    journal = Journal(unrecorded={"k": {"op": "record_tool", "scope": {}, "args": {}}})
+    off = harness.wrap(nothing, id="off")
+    standing_in: Any = SimpleNamespace(replay=SimpleNamespace(journal=journal), events=None)
+    await off.resent_records(standing_in)
+    assert list(journal.unrecorded) == ["k"]  # memory off: kept, sent nowhere

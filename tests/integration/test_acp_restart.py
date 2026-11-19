@@ -2,7 +2,7 @@
 store: the next attempt resumes the agent's session (the journal holds it) and, no person
 having been asked since, tells it only that the task goes on — to call again a call that has
 no result yet, or whose result says the run ended before it finished
-(``adapters.claude.RESUMED``): the call the worker died in is made again, once; the write a
+(``bridges.resumed.RESUMED``): the call the worker died in is made again, once; the write a
 person approved before is not made again."""
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from tests.integration.test_acp import fake, recorded
 from tests.support.arm import arm
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus
-from trellis.harness.adapters.claude import RESUMED
+from trellis.harness.bridges.resumed import RESUMED
 from trellis.harness.runs import LocalRuns
 from trellis.harness.worker import Job
 

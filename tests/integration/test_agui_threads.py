@@ -155,7 +155,9 @@ async def test_one_poller_and_one_listing_per_tick_serve_every_open_thread(
         assert texts(await events(stream, 4)) == ["Only 4 left."]
     threads = chat.threads
     assert threads.polling is not None and not threads.polling.done()
-    ticks = [k for k in listings[replays:] if "thread_id" not in k and "status" not in k]
+    # (not a run's own listing of its children as it ends: ``children.end_children``)
+    theirs = ("thread_id", "status", "parent_run_id")
+    ticks = [k for k in listings[replays:] if not any(name in k for name in theirs)]
     assert ticks and all(k.get("max_pages") for k in ticks)  # one tenant listing per tick
     # no listing per stream (the run's own turn order reads its thread, as any run does)
     assert not [k for k in listings[replays:] if k.get("limit") == 20]

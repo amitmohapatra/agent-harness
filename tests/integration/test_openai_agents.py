@@ -16,7 +16,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus, ToolCall
 from trellis.harness import budget
-from trellis.harness.adapters.claude import RESUMED_ASKED
+from trellis.harness.bridges.resumed import RESUMED_ASKED
 from trellis.harness.events import WARNING
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from typing import Any
 
 from trellis.contracts import RunEvent, RunRecord, RunStatus
 from trellis.harness.runs import LocalRuns
 from trellis.runs import (
     ConflictError,
     EventsAppended,
+    Lease,
     NotFoundError,
     RunEventEntry,
     ValidationError,
@@ -31,6 +33,8 @@ class LoggedRuns(LocalRuns):
         self.appends: list[tuple[str, str | None, int]] = []
         #: the reason of the cancel that ended each run it ended (agent-runs' ``cancel_reason``)
         self.cancelled: dict[str, str | None] = {}
+        #: every heartbeat that carried events, as (run id, how many it carried)
+        self.beats_with_events: list[tuple[str, int]] = []
 
     async def cancel(
         self,
@@ -58,6 +62,25 @@ class LoggedRuns(LocalRuns):
         record = self._fenced(run_id, worker_id, tenant)
         if record.status is not RunStatus.RUNNING or (worker_id is None and run_id in self._leases):
             raise ConflictError(f"run {run_id} takes no events now", code="CONFLICT", status=409)
+        added, position = self._logged(run_id, events)
+        self.appends.append((run_id, worker_id, added))
+        return EventsAppended(appended=added, position=position)
+
+    async def heartbeat(
+        self, run_id: str, worker_id: str, *, events: Sequence[RunEvent] | None = None, **kw: Any
+    ) -> Lease:
+        """As agent-runs: the events a heartbeat carries go in with its checkpoint."""
+        if events and any(e.run_id != run_id for e in events):
+            raise ValidationError("an event of another run", code="VALIDATION", status=422)
+        lease = await super().heartbeat(run_id, worker_id, **kw)
+        if events:
+            self._logged(run_id, events)
+            self.beats_with_events.append((run_id, len(events)))
+        return lease
+
+    def _logged(self, run_id: str, events: Sequence[RunEvent]) -> tuple[int, int]:
+        """``events`` added to the run's log, each once per attempt and sequence: how many,
+        and the log's last position."""
         log = self.logs.setdefault(run_id, [])
         seen = {(entry.event.attempt, entry.event.sequence) for entry in log}
         added = 0
@@ -66,10 +89,10 @@ class LoggedRuns(LocalRuns):
                 raise ValidationError("an event of another run", code="VALIDATION", status=422)
             if (event.attempt, event.sequence) in seen:
                 continue
+            seen.add((event.attempt, event.sequence))
             log.append(RunEventEntry(position=len(log) + 1, event=event))
             added += 1
-        self.appends.append((run_id, worker_id, added))
-        return EventsAppended(appended=added, position=len(log))
+        return added, len(log)
 
     async def events(
         self, run_id: str, *, after: int = 0, limit: int = 50, tenant: str | None = None

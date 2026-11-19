@@ -10,12 +10,14 @@ events (``INTERRUPT``, ``RUN_FINISHED``...) before it records the pause or the e
 the log takes nothing after. A run kept in process (``LocalRuns``) has no log: its events go
 to whoever listens, as always.
 
-Best-effort: an append agent-runs refuses or cannot take (it already retried) drops those
-events with one warning (logged, counted ``trellis.run_events.undelivered``, and a ``warning``
-event to whoever listens) — the run goes on. A lost lease stops the log, and so does a run that
-no longer runs (cancelled from another process): the attempt is told (``ended``), and one
-cancelled stops. A repeated append is safe: agent-runs adds an event once per attempt and
-sequence.
+Best-effort: an append agent-runs cannot be reached for (``DependencyUnavailableError``, its
+client's own retries spent: a restart takes longer) is tried again, with backoff, for up to
+:data:`UNREACHABLE_SECONDS` — the later events wait behind it, in order. One it refuses, or
+still cannot take by then, drops those events with one warning (logged, counted
+``trellis.run_events.undelivered``, and a ``warning`` event to whoever listens) — the run goes
+on. A lost lease stops the log, and so does a run that no longer runs (cancelled from another
+process): the attempt is told (``ended``), and one cancelled stops. A repeated append is safe:
+agent-runs adds an event once per attempt and sequence.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 from trellis.contracts import RunEvent
 from trellis.harness.telemetry import metrics
-from trellis.runs import ConflictError, LeaseLostError, RunEventEntry
+from trellis.runs import ConflictError, DependencyUnavailableError, LeaseLostError, RunEventEntry
 
 if TYPE_CHECKING:
     from trellis.harness.events import RunEvents
@@ -36,6 +38,12 @@ log = logging.getLogger("trellis.run")
 
 #: The most events one append carries (agent-runs takes 1 to 500).
 BATCH: Final = 500
+#: How long an append agent-runs cannot be reached for is tried again before its events are
+#: dropped: long enough for agent-runs to restart.
+UNREACHABLE_SECONDS: Final = 60.0
+#: The first wait before such an append is tried again, doubled up to :data:`RETRY_MAX_SECONDS`.
+RETRY_SECONDS: Final = 0.5
+RETRY_MAX_SECONDS: Final = 5.0
 
 
 @runtime_checkable
@@ -90,6 +98,13 @@ class RunLog:
         if self._sending is None or self._sending.done():
             self._sending = asyncio.get_running_loop().create_task(self._send())
 
+    def unsent(self) -> list[RunEvent]:
+        """The events not in the log yet (at most one append's worth, oldest first): a
+        progress save sends them with its checkpoint (``Runtime``), so a worker killed right
+        after a step leaves both or neither. They stay queued here: sent again, agent-runs
+        adds each once."""
+        return [] if self.closed else self._pending[:BATCH]
+
     async def flush(self) -> None:
         """Wait until every event so far is in the log (or dropped)."""
         while self._sending is not None and not self._sending.done():
@@ -101,12 +116,22 @@ class RunLog:
         self.closed = True
 
     async def _send(self) -> None:
+        loop = asyncio.get_running_loop()
+        down_since: float | None = None
+        wait = RETRY_SECONDS
         while self._pending and not self.closed:
             batch = self._pending[:BATCH]
             try:
                 await self.store.append_events(
                     self.run_id, batch, worker_id=self.worker_id, tenant=self.tenant
                 )
+            except DependencyUnavailableError as exc:
+                down_since = loop.time() if down_since is None else down_since
+                if loop.time() - down_since < UNREACHABLE_SECONDS:
+                    await asyncio.sleep(wait)  # agent-runs is not there now: the batch waits
+                    wait = min(wait * 2, RETRY_MAX_SECONDS)
+                    continue
+                self._dropped(len(batch), f"{type(exc).__name__}: {exc}")
             except LeaseLostError:
                 self.closed = True  # another worker has the run: write nothing more
                 self._pending.clear()
@@ -120,6 +145,7 @@ class RunLog:
             except Exception as exc:
                 self._dropped(len(batch), f"{type(exc).__name__}: {exc}")
             del self._pending[: len(batch)]
+            down_since, wait = None, RETRY_SECONDS
 
     def _dropped(self, count: int, why: str) -> None:
         metrics.events_undelivered(count)

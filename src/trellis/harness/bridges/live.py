@@ -56,11 +56,10 @@ from collections.abc import (
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from trellis.contracts import Interrupt, InterruptResolution, RunStatus
+from trellis.harness import stopping
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges.helpers import ended
-from trellis.harness.journal import content_key
-from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.journal import Pending
@@ -377,22 +376,19 @@ class Kept:
             self.turn.queue.put_nowait(None)
         elif self._answer is not None and not self._answer.done():
             try:
-                with contextlib.suppress(ConflictError):  # it ended meanwhile
-                    await self.agent.harness.runs.cancel(
-                        self.run_id, reason=why, tenant=self.tenant
-                    )
+                await stopping.unless_ended(  # (or it ended meanwhile)
+                    self.agent.harness.runs.cancel(self.run_id, reason=why, tenant=self.tenant)
+                )
             finally:  # it waits no more, whether or not the run store took the cancel
                 if self._answer is not None and not self._answer.done():
                     self._answer.set_result(None)
 
     def cancel(self, reason: str) -> None:
-        """The run cancelled with the run that started it: its attempt under way as
-        ``Agent.cancel`` cancels a run's, and one that has not begun to serve it does not."""
-        self.stopped = reason
-        runtime = self.agent.running.get(self.run_id)
-        if runtime is not None and runtime.running_in is not None:
-            runtime.cancelled = reason
-            runtime.running_in.cancel()
+        """The run cancelled with the run that started it: its attempt under way stops as any
+        run's does (``Agent.stop``: the first reason given stands), and one that has not begun
+        to serve it does not (:meth:`served` reads why)."""
+        self.stopped = self.stopped or reason
+        self.agent.stop(self.run_id, reason)
 
     # ------------------------------------------------------------------ an attempt
     async def served(self, turn: Turn) -> AsyncGenerator[Any, None]:
@@ -585,15 +581,11 @@ class Keeper[K: Kept]:
             )
 
     def _detach(self, turn: Turn) -> None:
-        """``turn`` is served no more: a cancelled run's background children are cancelled with
-        it, and the session rests."""
+        """``turn`` is served no more, and the session rests. (A cancelled run's background
+        children are cancelled with it by the run's own ending: ``children.stop_kept``.)"""
         for call in list(turn.calls):
             call.cancel()
         self.turn = None
-        for found in self.background.values():
-            cancelled: str | None = turn.runtime.cancelled
-            if cancelled is not None and found.parent_run_id == turn.runtime.run_id:
-                found.cancel(cancelled)
         if not self.closed:
             self._rested = asyncio.get_running_loop().time()
             self._rest()
@@ -614,7 +606,7 @@ class Keeper[K: Kept]:
         run — a turn of the conversation, before its prompt is sent — as a sub-agent's
         question is asked through its parent (``subagents.child_run``): the turn pauses with
         each, and its answer is handed to the run that asked."""
-        from trellis.harness.subagents import ASKED, SUBAGENT
+        from trellis.harness.subagents import asked_for_background
 
         for found in list(self.background.values()):
             asked = found.question
@@ -623,22 +615,10 @@ class Keeper[K: Kept]:
             record = await found.agent.harness.runs.get(asked.run_id, tenant=found.tenant)
             if record is None or record.status is not RunStatus.PAUSED:
                 continue  # cancelled where it waited: nothing to ask any more
-            named = {
-                "agent_id": found.name,
-                "run_id": asked.run_id,
-                "interrupt_id": asked.interrupt_id,
-                "background": True,
-            }
-            answered = await runtime.interrupt(
-                content_key("subagent", asked.run_id, asked.interrupt_id),
-                payload={**(asked.payload or {}), SUBAGENT: named},
-                **{name: getattr(asked, name) for name in ASKED},
+            answered = await asked_for_background(
+                runtime, asked, agent_id=found.name, run_id=asked.run_id
             )
-            found.answered(
-                answered.model_copy(
-                    update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
-                )
-            )
+            found.answered(answered)
 
     # ------------------------------------------------------------------ its background
     def _of(self, call_id: Any) -> K | None:
@@ -799,6 +779,18 @@ class LiveSessions:
     def keep(self, session: Keeper[Any]) -> None:
         """``session`` is its conversation's (:meth:`place` took a place for it)."""
         self._open[session.key] = session
+
+    def kept_for(self, parent_run_id: str) -> list[str]:
+        """The background subagents' runs kept here that ``parent_run_id`` started."""
+        return [r for r, kept in self.attended.items() if kept.parent_run_id == parent_run_id]
+
+    def cancel(self, run_id: str, reason: str) -> None:
+        """The run ``run_id`` ended with the run that started it (``children.stop_kept``):
+        when it is a background subagent's a session keeps here, it is cancelled for
+        ``reason`` (``Kept.cancel``); any other run is no change."""
+        found = self.attended.get(run_id)
+        if found is not None:
+            found.cancel(reason)
 
     def forget(self, session: Keeper[Any], why: str) -> None:
         """``session`` is no longer the conversation's; the work that ends with it is what

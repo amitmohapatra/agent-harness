@@ -129,8 +129,8 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    is_pause_signal,
 )
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # every model call accounted, and a reply cut at the output limit noted
     budget,
@@ -159,10 +159,11 @@ from trellis.harness.outbound import TargetRefused
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
+from trellis.harness.schedules import schedule_tools
 from trellis.harness.skills import serves_skills
 from trellis.harness.telemetry import failed, gateway_headers, model_span, tool_span, usage
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools import bridge, query, results, stored
+from trellis.harness.tools import ask, bridge, query, results, stored
 from trellis.harness.tools.base import (
     CUT_SHORT,
     FAILED,
@@ -531,7 +532,7 @@ async def _remote_tasks(runtime: Runtime, call: Any, own: Any, args: Mapping[str
     the chain of outcomes, or a webhook that leads somewhere private, fails the call, and its
     server is sent nothing.
     ``None`` for any other call."""
-    tasks = getattr(runtime.agent.adapter, "tasks", None)
+    tasks = runtime.agent.adapter.tasks
     if tasks is None or call["name"] not in task_tools.TOOLS or not framework_made(own):
         return None
     try:
@@ -1777,8 +1778,38 @@ def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelReques
     tools of the run's set alike; a tool outside the set (the graph's state tools) stays."""
     if runtime is None:
         return request
-    kept = [t for t in request.tools if _offers(runtime, t)]
-    return request if len(kept) == len(request.tools) else request.override(tools=kept)
+    now = _said_now(runtime, request.tools)
+    kept = [now.get(_named(t), t) for t in request.tools if _offers(runtime, t)]
+    unchanged = len(kept) == len(request.tools) and not now
+    return request if unchanged else request.override(tools=kept)
+
+
+#: The features of the harness's own tools whose words are the run's (:func:`_said_now`).
+BUILT_IN: Final = frozenset({"schedules", "ask"})
+
+
+def _said_now(
+    runtime: Runtime, tools: Sequence[BaseTool | dict[str, Any]]
+) -> dict[str, BaseTool | dict[str, Any]]:
+    """The harness's own tools a graph was built with (``h.harness_tools()``) as the run offers
+    them now, by name, where they say more than when they were bound: ``schedule_task`` when it
+    is in the user's zone, ``ask_user`` the app's own controls — each as ``Agent.tools_for``
+    gives it to every other target (``schedules.schedule_tools``, ``ask.for_run``)."""
+    bound = {
+        t.name: t
+        for t in tools
+        if isinstance(t, BaseTool) and (t.metadata or {}).get(converted.FEATURE) in BUILT_IN
+    }
+    if not bound:
+        return {}
+    run = {t.name: t.spec for t in (*schedule_tools(runtime), ask.for_run(runtime))}
+    return {
+        name: tool.model_copy(
+            update={"description": spec.description, "args_schema": spec.input_schema}
+        )
+        for name, tool in bound.items()
+        if (spec := run.get(name)) is not None and spec.description != tool.description
+    }
 
 
 def _offers(runtime: Runtime, tool: BaseTool | dict[str, Any]) -> bool:

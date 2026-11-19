@@ -5,6 +5,7 @@ reads a message the user did not type (``history``, ``adapters.langgraph``)."""
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +34,8 @@ from trellis.harness.adapters.langgraph import (
     langchain_message,
     notified,
 )
+from trellis.harness.agent import Agent
+from trellis.harness.conversation import Turns
 from trellis.harness.history import (
     NOTIFICATION,
     Said,
@@ -43,6 +46,7 @@ from trellis.harness.history import (
     recorded,
     said_of,
 )
+from trellis.harness.line import Followers, Line
 from trellis.harness.runs import LocalRuns
 from trellis.memory.models import WindowMessage
 
@@ -165,10 +169,15 @@ def test_a_notification_is_recorded_as_one_and_replayed_as_one() -> None:
     noted = {"source": "async_subagent", "data": {"task_id": "task_1"}}
     said = Said(Speaker.USER, "update", notified=noted, facts={"status": "SUCCESS"})
     stored = recorded(said)
-    assert stored["custom_metadata"]["run_record"] == {"status": "SUCCESS", NOTIFICATION: noted}
+    # its JSON text: the service's custom_metadata nests two levels at most
+    assert stored["custom_metadata"]["run_record"] == {
+        "status": "SUCCESS",
+        NOTIFICATION: json.dumps(noted),
+    }
     back = said_of(stored)
     assert (back.notified, back.facts) == (noted, {"status": "SUCCESS"})
-    window = WindowMessage(id="m", role="USER", text="update", run_record={NOTIFICATION: noted})
+    kept = {NOTIFICATION: json.dumps(noted)}
+    window = WindowMessage(id="m", role="USER", text="update", run_record=kept)
     [replayed] = from_window([window])
     assert replayed.notified == noted and replayed.facts is None
     message = langchain_message(replayed)
@@ -584,6 +593,92 @@ async def test_arch_7_an_attempt_that_ended_forgets_only_itself(
     await first
     assert tasks.at_work("run_1")
     await tasks.aclose()
+
+
+async def test_a_tasks_run_waiting_its_turn_here_leaves_the_line_as_it_is_stopped() -> None:
+    """A follow-up's run queued behind the task's run at work, stopped (``Tasks.stop``),
+    takes no turn and leaves its conversation's line now: it does not wait for the run ahead
+    of it to leave first."""
+    runs = LocalRuns()
+    ahead = await stored(runs, run_id="run_0", concurrency_key="thread:task_1")
+    behind = await stored(runs, concurrency_key="thread:task_1")
+    turns, followers = Turns(), Followers(lambda: None)
+    agent: Any = SimpleNamespace(running={}, turns=turns)
+    agent.stop = functools.partial(Agent.stop, agent)  # an agent's own stop, over these parts
+    tasks = background.Tasks()
+    tasks._agents[behind.run_id] = agent
+    took: list[tuple[str, bool]] = []
+
+    async def in_line(record: RunRecord) -> None:
+        its_line = Line(runs, record, turns.seen, followers)
+        async with turns.taken("task_1", record.run_id, line=its_line) as live:
+            took.append((record.run_id, live is not None))
+            if live is not None:
+                await asyncio.Event().wait()  # at work until the test ends
+
+    first = asyncio.create_task(in_line(ahead))
+    while not took:  # noqa: ASYNC110 - the first run taking its turn
+        await asyncio.sleep(0)
+    second = asyncio.create_task(in_line(behind))
+    await asyncio.sleep(0.05)
+    assert not second.done()  # it waits its turn behind the run at work
+    tasks.stop(behind.run_id, "cancelled by the agent that started it")
+    await asyncio.wait_for(second, 5)
+    assert took == [("run_0", True), ("run_1", False)] and not first.done()
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+
+
+async def test_an_attempt_that_left_its_run_working_hands_nothing_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt that ended with its run neither over nor waiting on a person (another
+    process works on it) has no outcome to hand on."""
+    runs = LocalRuns()
+    record = await stored(runs)  # RUNNING after the attempt, too
+    handed: list[RunRecord] = []
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def then(found: RunRecord) -> None:
+        handed.append(found)  # pragma: no cover - the point is that it is never called
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    agent = runtime(runs).agent
+    agent.running = {}
+    tasks = agent.harness.background
+    tasks.run(agent, record, then=then)
+    await tasks._at_work["run_1"]
+    assert handed == [] and not tasks.at_work("run_1")
+
+
+async def test_a_run_store_that_fails_as_the_outcome_is_read_is_said_not_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The read of the run after its attempt is the task's own: a store that fails there is
+    logged, and the task ends with no exception nobody retrieves."""
+    runs = LocalRuns()
+    record = await stored(runs, RunStatus.SUCCESS)
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        async def down(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("the run store is down")
+
+        monkeypatch.setattr(runs, "get", down)
+
+    async def then(found: RunRecord) -> None:
+        raise AssertionError("nothing was read to hand on")  # pragma: no cover
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    agent = runtime(runs).agent
+    agent.running = {}
+    tasks = agent.harness.background
+    tasks.run(agent, record, then=then)
+    task = tasks._at_work["run_1"]
+    await task
+    assert task.exception() is None
+    assert "its outcome not delivered" in caplog.text
 
 
 # --------------------------------------------------------------------------- SEC-R-2: admission

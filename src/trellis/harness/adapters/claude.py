@@ -101,11 +101,13 @@ from trellis.contracts import (
     ToolStatus,
     stable_id,
 )
-from trellis.harness import budget, skills
+from trellis.harness import budget, children, skills
 from trellis.harness.adapters.base import (
+    HELPER,
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     Output,
     ToolFormat,
@@ -121,6 +123,7 @@ from trellis.harness.bridges.claude import (
     TaskEnded,
     TaskStarted,
     after_theirs,
+    caller_sent,
     deciding_matcher,
     harness_matcher,
     session_store,
@@ -137,13 +140,15 @@ from trellis.harness.bridges.claude_live import (
     LiveSession,
     opened,
 )
-from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, naming
+from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, helping, naming
 from trellis.harness.bridges.live import LiveSessions, Turn
+from trellis.harness.bridges.resumed import RESUMED, resumed_call
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.governance.shell import SHELLS, Shell, moves
+from trellis.harness.governance.shell import EDITORS, SHELLS, Shell, file_of, moves
 from trellis.harness.history import Called, Said, Speaker
+from trellis.harness.hooks import Deny, denied
 from trellis.harness.host import CLAUDE_SHELLS
-from trellis.harness.journal import Pending, approvals_read, call_key
+from trellis.harness.journal import Journal, Pending, approvals_read, call_key, content_key
 from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.telemetry import gateway_headers, lasting_headers
@@ -257,6 +262,23 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: person answers when it asks, as for a write — unless the tool catalog has a rule for the
 #: tool that lets it run (``tools.bridge.asked``).
 CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "Skill"})
+#: Claude Code's plan mode (``permission_mode="plan"``: the options', or a run's
+#: ``framework_options``), held by the harness's own hook: the hook's word on a harness tool
+#: is final for the CLI, so the CLI's plan mode alone would let a write of the harness's run.
+#: Until Claude presents its plan (:data:`PLAN_TOOL`) and it runs — a person approved it, as
+#: Claude Code asks — a call runs only if it reads (governance rates it a read, as
+#: ``plan_mode.PlanMode`` does for ``ReAct``; a command ``governance.shell`` reads as
+#: read-only) or writes Claude's plan in its own plans folder (:data:`PLANS`, in the run's
+#: config folder); any other is refused with :data:`PLAN_WAITS` and recorded so. Approved,
+#: the plan is in the run's journal (``Journal.plan_approved``): every attempt after governs
+#: its calls as ever.
+PLAN_MODE: Final = "plan"
+PLAN_TOOL: Final = "ExitPlanMode"
+PLANS: Final = "plans"
+PLAN_WAITS: Final = (
+    f"plan mode is on: present your plan with {PLAN_TOOL} and wait for its approval; until "
+    "then only a call that reads runs"
+)
 #: Claude Code's built-in tools that reach the network outside the deployment: the tool
 #: catalog decides them (``tools.bridge.outbound``: refused until an administrator gives them a
 #: risk or an ``approve_when``), never a question to the run's user; published with no risk of
@@ -378,43 +400,6 @@ OWN_PROCESS: Final = "this query runs in a process of its own"
 #: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
 #: would let a call whose hook failed through to its own permission check.
 UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
-#: What a resumed session is told: the run goes on, and the call it paused on is made again —
-#: or the call its process stopped in, which the session may hold with the harness's
-#: ``tools.convert.mcp.STOPPED`` as its result (the worker died while it ran, and the session
-#: was resumed on the same machine): a model told only "no result yet" read that error as the
-#: call's result and never made it.
-RESUMED: Final = (
-    "This task was paused (a person was asked, or the process stopped) and goes on now. If "
-    "your last tool call has no result yet, or its result says the run ended before it "
-    "finished, call that tool again with the same arguments: it runs once. Then carry on "
-    "with the task."
-)
-#: What a session resumed after a person answered about one tool call — its approval, or a
-#: question it asked while it ran — is told: that call, by the name Claude knows it by. The
-#: session holds the call's result as "waiting for a person's approval", which :data:`RESUMED`'s
-#: "no result yet" does not describe: a model told only that took the waiting call for a
-#: failure and tried other tools instead (or asked the person again itself).
-RESUMED_CALL: Final = (
-    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
-    "the person has answered. Call {tool} again now with the same arguments: it runs once and "
-    "returns its result. Then carry on with the task."
-)
-#: ... and after a person answered a question that call asked while it ran
-#: (``Pending.inside``): named with its arguments, which a session whose transcript ends
-#: before the call does not hold (told to repeat a call it had no record of, Claude made none).
-#: Whatever arguments it is made again with, it runs as it was (``Replay.made``).
-RESUMED_ASKED: Final = (
-    "This task was paused at your call to {tool} with the arguments {args}: it was waiting for "
-    "a person's answer, and the person has answered. Call {tool} again now with those "
-    "arguments: it runs once and returns its result. Then carry on with the task."
-)
-#: ... and after a person denied that call: it does not run, so it returns no result to wait
-#: for, and the session is told so instead of being told to expect one.
-RESUMED_DENIED: Final = (
-    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
-    "the person denied it. That call will not run; do not make it again. Carry on with the "
-    "task without it."
-)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -440,7 +425,7 @@ class ClaudeRunError(RuntimeError):
     """The CLI reported the run as failed."""
 
 
-class ClaudeAdapter:
+class ClaudeAdapter(Keeps):
     name: ClassVar[str] = "claude_agent_sdk"
     tool_format: ToolFormat = "claude"
     fixed_tools: bool = False
@@ -466,6 +451,14 @@ class ClaudeAdapter:
     async def aclose(self) -> None:
         """The agent is closing: every conversation's live session ends."""
         await self.live.aclose()
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        """The run ``run_id`` ended with the run that started it: when it is a background
+        subagent's a live session keeps here, it stops (``LiveSessions.cancel``)."""
+        self.live.cancel(run_id, reason or children.PARENT_ENDED)
+
+    def kept_children(self, run_id: str) -> list[str]:
+        return self.live.kept_for(run_id)
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
@@ -522,7 +515,7 @@ class ClaudeAdapter:
                 said = text or said
             # the result of the turn's own prompt: one of a turn the session injected (a
             # finished background task's notification) is not the user's answer
-            if isinstance(message, ResultMessage) and _own(message):
+            if isinstance(message, ResultMessage) and caller_sent(message):
                 if message.subtype == MAX_TURNS:  # what it said before the limit: PARTIAL
                     answer = said
                 elif message.is_error:
@@ -601,27 +594,20 @@ class ClaudeAdapter:
     ) -> AsyncGenerator[Any, None]:
         """The query's messages (:meth:`_messages`), each subagent Claude runs a helper of the
         run (``bridges.helpers``) from its ``Agent`` call to that call's result."""
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
-        # a background subagent's run has no query of its own: its task works in a session
-        found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
-        if found is not None:  # the calls its subagent makes are this run's own
-            helpers.attribute(found.task_id, None)
-        source = (
-            self._messages(target, native_input, run)
-            if found is None
-            else self._attended(target, run, found)
-        )
-        try:
+        async with helping(run.runtime, self.name) as helpers:
+            # a background subagent's run has no query of its own: its task works in a session
+            found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
+            if found is not None:  # the calls its subagent makes are this run's own
+                helpers.attribute(found.task_id, None)
+            source = (
+                self._messages(target, native_input, run)
+                if found is None
+                else self._attended(target, run, found)
+            )
             async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     await _subagents(helpers, message)
                     yield message
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
 
     async def _attended(
         self, target: Any, run: Invocation, found: Background
@@ -897,13 +883,6 @@ def _own_process(options: Any) -> bool:
         name != SERVER and isinstance(config, Mapping) and config.get("type") == "sdk"
         for name, config in configured_servers(options.mcp_servers).items()
     )
-
-
-def _own(result: Any) -> bool:
-    """Whether a ``ResultMessage`` ends a turn its caller submitted (the SDK's
-    ``MessageOrigin``: none, or ``human``) — not one the session injected by itself."""
-    origin = getattr(result, "origin", None)
-    return origin is None or origin.get("kind") == "human"
 
 
 def _turn(run: Invocation, options: Any) -> Turn:
@@ -1302,14 +1281,6 @@ def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     return resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
 
 
-def resumed_call(call: ToolCall, name: str, *, denied: bool, asked: bool) -> str:
-    """What a session resumed after a person answered about ``call`` is told (``name``: the
-    tool as its agent calls it): the call was denied, or asked them a question, or was
-    approved."""
-    told = RESUMED_DENIED if denied else RESUMED_ASKED if asked else RESUMED_CALL
-    return told.format(tool=name, args=json.dumps(call.args, default=str))
-
-
 class Steps:
     """One query's steps as the stall watchdog sees them (``Runtime.model_started``): Claude is
     waited on from one message to the next, except while a tool call runs (from its
@@ -1323,6 +1294,7 @@ class Steps:
         "calls",
         "closed",
         "helped",
+        "plans",
         "runtime",
         "served",
         "settling",
@@ -1353,6 +1325,9 @@ class Steps:
         #: CLI names the subagent in the ``PreToolUse`` hook by its task's id (``agent_id``),
         #: and its permission request (``can_use_tool``) for the same call is the same helper's
         self.helped: dict[str, Helper] = {}
+        #: the folder Claude keeps its plan in, when the query is in plan mode (``_options``:
+        #: :data:`PLAN_MODE`); ``None``: it is not
+        self.plans: Path | None = None
 
     async def helper_of(self, call_id: str, given: Mapping[str, Any]) -> Helper | None:
         """The helper whose work the call ``call_id`` is, from the ``PreToolUse`` hook's input
@@ -1432,6 +1407,8 @@ def _options(
     # word in the options' ``env`` stands)
     env.setdefault(CONFIG_ENV, config_folder(runtime.tenant, runtime.user))
     env.setdefault(AUTO_MEMORY_ENV, "1")
+    if options.permission_mode == PLAN_MODE:
+        steps.plans = Path(env[CONFIG_ENV]) / PLANS
     shell = _shell(options, env)
     hooks = _with_governance(options.hooks, steps, shell)
     prompt, context = _told(options.system_prompt, context)
@@ -1565,7 +1542,7 @@ def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps, shell: Shell
     (:func:`_recorded`) after theirs — registered after them, and answering after them
     (``after_theirs``)."""
     given = dict(hooks or {})
-    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps)]
+    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps, shell)]
     recorded = _recorded(steps, shell)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
@@ -1588,13 +1565,13 @@ def _steering() -> Any:
     return harness_matcher(steered)
 
 
-def _governance(steps: Steps) -> Any:
+def _governance(steps: Steps, shell: Shell) -> Any:
     """The ``PreToolUse`` hook every tool call goes through, in every permission mode
-    (:func:`_decide`). A call it cannot decide — the catalog or the run store out of reach —
-    is refused, saying why; were the refusal to fail too, Claude Code blocks the call (the
-    matcher's ``on_failure``)."""
+    (:func:`_decide`; in plan mode, :func:`_unplanned` first). A call it cannot decide — the
+    catalog or the run store out of reach — is refused, saying why; were the refusal to fail
+    too, Claude Code blocks the call (the matcher's ``on_failure``)."""
 
-    from trellis.harness.tools.convert.claude import WAITING
+    from trellis.harness.tools.convert.claude import WAITING, bare
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         if steps.settling:  # the run paused: the model's reply to the pause takes no step
@@ -1603,6 +1580,11 @@ def _governance(steps: Steps) -> Any:
             refused = await _offline(given["tool_name"])
             if refused is not None:  # the network the catalog does not allow
                 return _decided("deny", refused)
+            held = await _unplanned(steps, shell, given, tool_use_id, bare(given["tool_name"]))
+            if held is not None:  # plan mode, and no plan approved yet
+                return _decided("deny", held)
+            if given["tool_name"] == PLAN_TOOL and _planning(steps):
+                return await _presented(steps, given, tool_use_id, WAITING)
             return await _decide(steps, given, tool_use_id)
         except Exception as exc:
             log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
@@ -1621,6 +1603,93 @@ async def _offline(name: str) -> str | None:
     runtime = current()
     assert runtime is not None  # the CLI asks inside the run it works for
     return await bridge.outbound(_spec(runtime, name))
+
+
+async def _unplanned(
+    steps: Steps, shell: Shell, given: Any, tool_use_id: str | None, tool: str | None
+) -> str | None:
+    """What a call is refused with while the query is in plan mode with no plan approved
+    (:data:`PLAN_MODE`), recorded as the run's rejected call: one that does more than read,
+    other than presenting the plan and writing it in Claude's plans folder. ``None``: it is
+    decided as ever (:func:`_decide`). ``tool``: the harness tool it calls, when it calls one
+    (``bare``)."""
+    runtime = steps.runtime
+    name, args = given["tool_name"], dict(given.get("tool_input") or {})
+    plans = steps.plans
+    if plans is None or runtime.replay.journal.plan_approved or name == PLAN_TOOL:
+        return None
+    written = Path(file_of(args))
+    if name in EDITORS and ".." not in written.parts and plans in written.parents:
+        return None  # its plan, where Claude keeps it (written out: no `..` climbs out)
+    if shell.read_only(name, args):
+        return None
+    found = runtime.toolbox.get(tool) if tool is not None else None
+    spec = found.spec if found is not None else _spec(runtime, name)
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    decision = await governance.check(
+        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
+    if decision.risk == "read" and HELPER not in spec.tags:
+        return None
+    outcome = denied(ToolCall(tool=spec.name, args=args), Deny(PLAN_WAITS))
+    ref = tool_use_id or str(given.get("tool_use_id") or name)
+    await bridge.observed(runtime, spec, args, outcome, ref=ref, started=time.time())
+    return str(outcome.output)
+
+
+#: The answers that let a presented plan through.
+PLAN_APPROVALS: Final = frozenset({InterruptDecision.APPROVE.value, InterruptDecision.EDIT.value})
+
+
+def _planning(steps: Steps) -> bool:
+    """Whether the query is in plan mode with no plan approved yet."""
+    return steps.plans is not None and not steps.runtime.replay.journal.plan_approved
+
+
+async def _presented(
+    steps: Steps, given: Any, tool_use_id: str | None, waiting: str
+) -> SyncHookJSONOutput:
+    """Claude presents its plan (``ExitPlanMode``) in plan mode: a person approves it here,
+    as Claude Code would ask its user — the CLI presents it unasked when an SDK drives it.
+    Approved, plan mode is over and it runs; rejected, Claude reads
+    why and stays in plan mode; unanswered, the run pauses (Claude reads ``waiting``)."""
+    runtime = steps.runtime
+    args = dict(given.get("tool_input") or {})
+    call_id = tool_use_id or str(given.get("tool_use_id") or PLAN_TOOL)
+    journal = runtime.replay.journal
+    if not _plan_approved(journal):
+        # resumed, the CLI presents its plan again (another id, worded again): a person's
+        # approval of any plan the run presented lets it through (:func:`_plan_approved`)
+        if (asked := content_key("approve", PLAN_TOOL, args)) not in journal.plans:
+            journal.plans.append(asked)
+        assert runtime.helpers is not None  # the query runs with the attempt's helpers
+        try:
+            with runtime.helpers.working(await steps.helper_of(call_id, given)):
+                # always a person's: the catalog's word on the tool (it only reads) is no
+                # approval
+                decided = await bridge.asked(
+                    _spec(runtime, PLAN_TOOL), args, CLAUDE_CODE, kept=True, always=True
+                )
+        except Paused:  # the run pauses: Claude stops here, and the resume goes on
+            steps.helped.pop(call_id, None)
+            return {**_decided("deny", waiting), "continue_": False, "stopReason": waiting}
+        if isinstance(decided, ToolOutcome):
+            steps.helped.pop(call_id, None)
+            return _decided("deny", str(decided.output))
+    else:
+        decided = ToolCall(tool=PLAN_TOOL, args=args)
+    # approved: plan mode is over, whatever the CLI then makes of the tool (driven by an SDK,
+    # it may answer it as failed, and Claude presents it again)
+    journal.plan_approved = True
+    steps.approved(tool_use_id or given.get("tool_use_id"))
+    steps.started(call_id, PLAN_TOOL, decided.args)
+    return _decided("allow", updated=decided.args)
+
+
+def _plan_approved(journal: Journal) -> bool:
+    """Whether a person approved a plan the run presented (``Journal.plans``)."""
+    filed = (a for key in journal.plans for a in journal.answers.get(key, []))
+    return any(a.get("decision") in PLAN_APPROVALS for a in filed)
 
 
 async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
@@ -1707,11 +1776,13 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
     may be in, none known while another call that may move it is under way) —, so does the
     shell (:data:`CLAUDE_SHELLS`: in its sandbox, or on a host the deployment allows it on —
     the deployment's decision, announced in the hook) and the network the catalog let through
-    (:data:`CLAUDE_NETWORK`), and any other asks a person (``bridge.asked``); Claude's
+    (:data:`CLAUDE_NETWORK`), and a harness tool (its hook decided it, and the bridge governs
+    its call: Claude Code asks about one in plan mode all the same), and any other asks a
+    person (``bridge.asked``); Claude's
     question to its user is the run's (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-    from trellis.harness.tools.convert.claude import WAITING
+    from trellis.harness.tools.convert.claude import WAITING, bare
 
     async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
         this = str(getattr(context, "tool_use_id", None) or name)
@@ -1735,6 +1806,9 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif (
             steps.carries(getattr(context, "tool_use_id", None))
+            # a harness tool: the hook decided it (in plan mode too, where the CLI still
+            # asks), and the bridge governs its call as ever
+            or bare(name) is not None
             # the shell in its sandbox, or on a host the deployment allows it on, and the
             # network as the catalog let it through: the deployment's, never the user's
             or name in CLAUDE_SHELLS
@@ -1824,6 +1898,8 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         if name in SHELLS and "agent_id" not in given:
             shell.ran(args)
         failed = given.get("hook_event_name") == FAILED_EVENT
+        if name == PLAN_TOOL and not failed:  # the plan was let through: plan mode is over
+            steps.runtime.replay.journal.plan_approved = True
         # a workflow agent's call says who made it (several workflows at once: the run's own)
         agent = (
             {k: given[k] for k in AGENT_KEYS} if given.get("agent_type") == WORKFLOW_AGENT else {}

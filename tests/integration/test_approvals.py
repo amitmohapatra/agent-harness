@@ -269,8 +269,11 @@ async def test_only_an_approval_of_a_tool_call_is_remembered(harness: Harness) -
     assert paused.interrupt is not None
     with pytest.raises(ConfigurationError, match="only an approval is remembered"):
         await agent.resume(paused.interrupt.interrupt_id, "answer", reviewer="a", remember="run")
-    with pytest.raises(ConfigurationError, match="of a tool call is remembered"):
-        await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="a", remember="run")
+    for beyond in ("run", "always"):
+        with pytest.raises(ConfigurationError, match="of a tool call is remembered beyond"):
+            await agent.resume(
+                paused.interrupt.interrupt_id, "approve", reviewer="a", remember=beyond
+            )
     by_run = await agent.resume(paused.run_id, "answer", answer="that", reviewer="a")
     assert by_run.answer == "that"  # the run's id answers what it waits on
 

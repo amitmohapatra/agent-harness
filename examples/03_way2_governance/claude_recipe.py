@@ -32,6 +32,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     PermissionResultAllow,
     PermissionResultDeny,
+    ResultError,
     ResultMessage,
     ToolPermissionContext,
     create_sdk_mcp_server,
@@ -95,12 +96,18 @@ def permission(gov: Governance, asked: list[Decision], approved: list[ToolCall])
     return can_use_tool
 
 
-async def claude(prompt: str, options: ClaudeAgentOptions) -> ResultMessage:
-    """One query, to its result."""
-    result = None
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, ResultMessage):
-            result = message
+async def claude(prompt: str, options: ClaudeAgentOptions, asked: list[Decision]) -> ResultMessage:
+    """One query, to its result. A query that governance stopped (``asked`` one more) ends with
+    the CLI's error result, which the SDK raises once the CLI exits: that result is the
+    query's (its session is the checkpoint); any other error is raised."""
+    before, result = len(asked), None
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                result = message
+    except ResultError:
+        if result is None or len(asked) == before:
+            raise
     assert result is not None
     return result
 
@@ -188,7 +195,7 @@ async def main() -> None:
 
     async with scope or contextlib.nullcontext():  # what close_ticket records in
         asked: list[Decision] = []
-        result = await claude(question, options(system, permission(gov, asked, []), script))
+        result = await claude(question, options(system, permission(gov, asked, []), script), asked)
         if asked:  # governance asked: the run waits in agent-runs
             decision = asked[0]
             pending = ToolCall(tool=decision.tool, args=dict(decision.args))
@@ -221,7 +228,7 @@ async def main() -> None:
             follow_up = f"The reviewer {verdict} {decision.tool}. Go on."
             again = permission(gov, asked, [pending] if approved else [])
             session = record.checkpoint["session_id"]
-            result = await claude(follow_up, options(system, again, script, session))
+            result = await claude(follow_up, options(system, again, script, session), asked)
 
     answer = result.result or ""
     await finish(

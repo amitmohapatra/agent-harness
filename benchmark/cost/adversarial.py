@@ -1042,7 +1042,9 @@ def cases() -> tuple[Any, ...]:
         dear = sum(1 for k in w.skus.values() if k.category == category and k.price > 100)
         filler.append(
             Turn(f"How many {category} SKUs are priced above £100?",
-                 ((("sku_catalog", {"category": category}),),), reply=f"{dear} of them.")
+                 ((("sku_catalog", {"category": category}),),),
+                 Expect("number", dear, reference=f"{dear} of them.",  # count(dear), said so
+                        truth=f"sku_catalog: {category} SKUs with price > 100"))
         )  # fmt: skip
     window = 6_000
     add(

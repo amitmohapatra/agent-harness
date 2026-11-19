@@ -754,7 +754,11 @@ def test_the_budget_stops_a_run_at_its_limit_across_a_reset() -> None:
 
     journal = Journal()
     runtime = SimpleNamespace(
-        replay=SimpleNamespace(journal=journal), budget=budget.Budget(max_cost=1.0), parent=None
+        replay=SimpleNamespace(journal=journal),
+        budget=budget.Budget(max_cost=1.0),
+        parent=None,
+        spent_more=lambda: None,
+        running_in=None,
     )
     costs: LRU[str, SessionCost] = LRU()
     spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
@@ -818,3 +822,45 @@ async def test_a_sandbox_capabilitys_own_tools_carry_their_risk() -> None:
     assert own_spec(runtime, loads).side_effects == "read"  # type: ignore[arg-type]
     assert own_spec(runtime, runs).side_effects == "write"  # type: ignore[arg-type]
     assert own_spec(runtime, mine).side_effects == UNDECLARED  # type: ignore[arg-type]
+
+
+async def test_only_the_sdks_shell_capability_makes_a_sandbox_shell() -> None:
+    """``shell_of_sandbox``: the SDK ``Shell`` capability's ``exec_command`` runs unasked and
+    announced, and keeps that mark as the harness hands the tool on (governed, held). Another
+    capability's ``exec_command`` (a team's own, reaching a real machine) and a function of the
+    agent's own of the same name are not the sandbox shell."""
+    from agents import function_tool
+    from agents.sandbox.capabilities import Capability, Filesystem, Shell
+
+    from trellis.harness.tools.convert.openai_agents import (
+        CAPABILITY_TOOL,
+        governed,
+        held,
+        own_spec,
+        shell_of_sandbox,
+    )
+
+    def exec_command(cmd: str) -> str:
+        """Run a command."""
+        return cmd
+
+    by_shell, by_files, by_own, mine = (function_tool(exec_command) for _ in range(4))
+    setattr(by_shell, CAPABILITY_TOOL, Shell)
+    setattr(by_files, CAPABILITY_TOOL, Filesystem)
+    setattr(by_own, CAPABILITY_TOOL, Capability)  # a capability of the team's own
+    assert shell_of_sandbox(by_shell)
+    assert not any(shell_of_sandbox(t) for t in (by_files, by_own, mine))
+    spec = own_spec(SimpleNamespace(native={}), by_shell)  # type: ignore[arg-type]
+    for copy in (governed(by_shell), held(governed(by_shell), spec, confined=True)):
+        assert copy is not by_shell and shell_of_sandbox(copy)
+
+
+async def test_an_adapter_that_keeps_nothing_answers_every_capability_with_nothing() -> None:
+    """``adapters.base.Keeps``: what the pipeline asks of every adapter, answered by one whose
+    framework keeps no tasks, no process and no session of its own."""
+    adapter = FunctionAdapter()
+    assert adapter.tasks is None
+    assert adapter.wrapped(None, {}, None) is None
+    assert adapter.session_gone("s") is None
+    assert await adapter.aclose() is None
+    assert await adapter.child_cancelled("run_1", None) is None

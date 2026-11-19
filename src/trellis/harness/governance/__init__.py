@@ -19,6 +19,7 @@ suggestions from.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -141,8 +142,10 @@ class Governance:
     ) -> Decision:
         """The decision for a call of ``tool`` with ``args``. ``side_effects`` is what the tool
         says it does (``read``, ``write``, ``irreversible``; not given, nothing is known of it:
-        the call asks); the catalog's risk, where someone declared one there, overrides it,
-        and while the catalog cannot be read every tool that does more than read asks.
+        the call asks); the catalog's risk, where someone declared one there, overrides it (it
+        is an administrator's word — ``Decision.declared`` — where it differs from the tool's
+        own: the harness publishes the tool's own risk to the catalog itself), and while the
+        catalog cannot be read every tool that does more than read asks.
         ``agent_id`` is the agent making the call (else this governance's own): the approval
         rules learned from people's decisions on its calls are accepted for it."""
         if self._rules is not None:
@@ -151,7 +154,9 @@ class Governance:
                 if side_effects != "read":
                     return decide(tool, side_effects, CATALOG_UNREAD, args)
             elif (rule := rules.get(tool)) is not None:
-                return decide(tool, rule.risk or side_effects, rule.approve_when, args)
+                decided = decide(tool, rule.risk or side_effects, rule.approve_when, args)
+                said = rule.risk is not None and rule.risk != side_effects
+                return dataclasses.replace(decided, declared=said)
         return decide(tool, side_effects, None, args)
 
     async def rules(

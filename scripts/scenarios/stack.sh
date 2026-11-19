@@ -15,6 +15,9 @@
 #   SCEN_SVC_PY (the memory service's python)  SCEN_RUNS_PY (agent-runs' python)  SCEN_PY (this repository's)
 #   SCEN_MODELS                      the memory service's frozen models folder (embedding, NLI)
 #   SCEN_RUNS_PER_MINUTE=30000 SCEN_RUNS_BURST=5000   agent-runs' request budget for the tenant
+#   SCEN_MEM_CONNECTIONS=56         the memory process's PostgreSQL connections (API and jobs in one
+#                                   process here: the default 28 is one API process's share, too few
+#                                   for the stress scenario's 100 chats on three servers)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
 # this script by its absolute path: `runs` changes directory before `start` relaunches it
@@ -43,6 +46,7 @@ memory() {  # memory [migrate]: the memory API and its job worker (tests/scenari
     MEMORY__SERVICE__ENVIRONMENT=dev MEMORY__SERVICE__PORT=$SCEN_MEM_PORT MEMORY__SERVICE__WORKERS=1
     MEMORY__SERVICE__LOG_JSON=false MEMORY__AUTHENTICATION__BOOTSTRAP_ADMIN_KEY="$SCEN_BOOTSTRAP_KEY"
     MEMORY__DATABASE__URL="$url" MEMORY__DATABASE__DIRECT_URL="$url"
+    MEMORY__DATABASE__CONNECTION_BUDGET="${SCEN_MEM_CONNECTIONS:-56}"
     MEMORY__CACHE__URL="redis://127.0.0.1:$SCEN_REDIS_PORT/0" MEMORY__BLOB__FILESYSTEM_ROOT="$w/blob"
     MEMORY__TASKS__METRICS_PORT=$((SCEN_MEM_PORT+100)) MH_QDRANT_PATH="$w/qdrant")
   if [ "${1:-}" = migrate ]; then
@@ -123,6 +127,8 @@ case "${1:-status}" in
     for v in SCEN_HOME SCEN_PG_PORT SCEN_REDIS_PORT SCEN_MEM_PORT SCEN_RUNS_PORT SCEN_MEM_ROOT \
              SCEN_RUNS_ROOT SCEN_CONTRACTS SCEN_BIFROST SCEN_SVC_PY SCEN_RUNS_PY SCEN_PY SCEN_MODELS \
              SCEN_DB_MEM SCEN_DB_RUNS SCEN_TENANT; do settings+=("$v=${!v}"); done
+    # the scenarios' own knobs, when set (SCEN_SEED, SCEN_STRESS_CHATS: tests/scenarios)
+    for v in SCEN_SEED SCEN_STRESS_CHATS; do [ -n "${!v:-}" ] && settings+=("$v=${!v}"); done
     cd "$HERE" && env -i "${settings[@]}" PATH="$PATH" HOME="$H/home" LANG=C.UTF-8 NO_PROXY='*' TMPDIR="$H/tmp" HF_HUB_OFFLINE=1 \
       PYTHONPATH="$HERE/src:$SCEN_MEM_ROOT/sdk/python/src:$SCEN_RUNS_ROOT/sdk/python/src:$SCEN_CONTRACTS:$SCEN_BIFROST" \
       MEMORY_URL=http://127.0.0.1:$SCEN_MEM_PORT RUNS_URL=http://127.0.0.1:$SCEN_RUNS_PORT \

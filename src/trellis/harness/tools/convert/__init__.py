@@ -8,7 +8,13 @@ differs between formats.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Final
+
+#: The name of the harness's own MCP server, in every format that serves its tools through
+#: one (Claude's in-process server, the HTTP server an ACP agent is given).
+SERVER: Final = "trellis"
+#: How an agent names a tool of that server: this before the tool's own name.
+MCP_PREFIX: Final = f"mcp__{SERVER}__"
 
 
 def text_of(output: Any) -> str:

@@ -27,7 +27,7 @@ from trellis.contracts import (
     ToolCall,
     ToolSpec,
 )
-from trellis.harness import host, telemetry
+from trellis.harness import host, stopping, telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
@@ -59,6 +59,7 @@ from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.schedules import LimitsHook, schedule_tools
 from trellis.harness.settings import Settings, default_files_url, deployment_spool
 from trellis.harness.subagents import asked_by
+from trellis.harness.tools import ask
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.mcp import MCPSource
 from trellis.harness.tools.toolbox import Toolbox
@@ -80,11 +81,6 @@ _Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
 
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
-#: The reason a run cancelled from another process ends with here (the store keeps the one
-#: it was cancelled with).
-CANCELLED_ELSEWHERE: Final = "cancelled from another process"
-#: Why a run the run store ended meanwhile (its hold lapsed: ``holder_lost``) stops here.
-ENDED_ELSEWHERE: Final = "ended in the run store while it worked here"
 #: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
 #: again; while the service cannot be reached the last answer is kept (asked again after the
 #: retry interval).
@@ -204,6 +200,9 @@ class Harness:
         self._endpoints_told: set[tuple[str, str]] = set()
         #: the memory service takes no model endpoints, or refused this one: none is told again
         self._endpoints_off = False
+        #: agent-runs refused a heartbeat that carried events (a release before it took them):
+        #: progress is saved without them from then on, the events appended as before
+        self._saves_without_events = False
         #: governance per tenant (:meth:`governance`), the least recently used forgotten past
         #: the bound; ``_governance_given`` replaces it for every tenant (tests)
         self._governances: LRU[str, Governance] = LRU()
@@ -503,8 +502,8 @@ class Harness:
         except RunsError as exc:
             log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
             return
-        if record is not None and record.status.final:
-            why = CANCELLED_ELSEWHERE if record.status is RunStatus.CANCELLED else ENDED_ELSEWHERE
+        why = stopping.ended_elsewhere(record)
+        if why is not None:
             for agent in self.agents.values():
                 agent.stop(run_id, why)
 
@@ -643,10 +642,14 @@ class Harness:
         scope of the run making it (its user, thread and run; a call outside a run is refused)
         and is governed and recorded like any tool of the run. Memory off: none. ``tenant``
         is the runs', named by a platform key only."""
+        return convert("langchain", await self._pulled(tenant)) or []
+
+    async def _pulled(self, tenant: str | None) -> list[Tool]:
+        """The memory service's agent tools in ``tenant`` (:meth:`memory_tools`); none with
+        memory off."""
         if self.memory is None:
             return []
-        scope = self.memory.scoped(await self._tenant(tenant))
-        return convert("langchain", await self._pull_tools(scope))
+        return await self._pull_tools(self.memory.scoped(await self._tenant(tenant)))
 
     def schedule_tools(self) -> list[Any]:
         """The schedule tools (``schedule_task``, ``list_schedules``, ``update_schedule``,
@@ -654,6 +657,22 @@ class Harness:
         yourself with its tools bound, as :meth:`memory_tools`; every other target gets them
         on its own. Each call is the run's, governed and recorded like any tool of it."""
         return convert("langchain", schedule_tools())
+
+    async def harness_tools(self, *, tenant: str | None = None) -> list[Any]:
+        """The tools the harness gives every agent by itself, as LangChain tools, for a graph
+        you build yourself: bind them to its model and put them in its ``ToolNode`` when it is
+        built (``HarnessTools`` gives a ``create_agent`` graph the same per model call). They
+        are the MCP tools the virtual key allows (each as a tool of its own: no Code Mode),
+        the memory tools (:meth:`memory_tools`), the schedule tools (:meth:`schedule_tools`)
+        and ``ask_user`` (``tools/ask.py``). Each call is the harness's own tool, run as the
+        run making it: governed, journaled and recorded; ``ask_user`` pauses the run and its
+        answer is the call's result; a part the run is without (``without=["mcp"]``,
+        ``["memory"]``, ``["schedules"]``, ``["ask"]``) answers that it is off in this run, and
+        a schedule tool answers so in a run a schedule fired. Outside a run a call is refused
+        (``ToolError``). ``tenant`` as :meth:`memory_tools`'s."""
+        box = self._toolbox([], tenant=await self._tenant(tenant))
+        tools = [*await box.tools(code_mode=False), *await self._pulled(tenant)]
+        return convert("langchain", [*tools, *schedule_tools(), ask.offered()])  # type: ignore[no-any-return]
 
     async def _pull_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""

@@ -27,7 +27,7 @@ from trellis.harness.journal import (
     delta,
 )
 from trellis.harness.runs import LocalRuns
-from trellis.runs.payloads import SEGMENTS
+from trellis.runs.payloads import SEGMENTS, PayloadRef, adecode
 
 
 def resolution(answer: str) -> InterruptResolution:
@@ -651,7 +651,7 @@ async def test_progress_after_reads_is_saved_at_most_every_20_s(
     class Changing:  # a journal that always has something new to save
         async def save(self, *args: Any, **kwargs: Any) -> Any:
             saves.append(clock[0])
-            return SimpleNamespace(checkpoint={})
+            return SimpleNamespace(checkpoint={}, dumped={})
 
         def saved(self, save: Any) -> None:
             return None
@@ -665,11 +665,18 @@ async def test_progress_after_reads_is_saved_at_most_every_20_s(
         run_id="run_1",
         tenant="t",
         _saved_at=None,
+        _spent_count=0,
+        _carried=lambda counted: None,
         replay=SimpleNamespace(journal=Changing()),
         agent=SimpleNamespace(
-            harness=SimpleNamespace(runs=SimpleNamespace(artifacts=None, heartbeat=heartbeat))
+            harness=SimpleNamespace(
+                runs=SimpleNamespace(artifacts=None, heartbeat=heartbeat),
+                _saves_without_events=False,
+            )
         ),
+        events=SimpleNamespace(unsent=None),  # no event log: the progress alone
     )
+    run._beat = lambda checkpoint: Runtime._beat(run, checkpoint)
     for step in (0.0, 19.5, 0.5, 5.0):  # 19.5 s on: not yet; 20 s on: saved
         clock[0] += step
         await Runtime._saved(run, now=False)
@@ -713,3 +720,427 @@ def test_an_attempt_that_goes_on_takes_the_record_made_for_its_call_by_id() -> N
     goes_on = Replay(journal, goes_on=True)
     with goes_on.calling("k", ident="call_b"):
         assert goes_on.occurrence("k") == 1
+
+
+async def _spending_saved(journal: Journal, runs: LocalRuns, run_id: str) -> Any:
+    save = await journal.save_spending(runs.artifacts, run_id, worker_id=None, tenant="acme")
+    if save is not None:
+        journal.spending_saved(save)
+    return save
+
+
+async def test_a_spending_save_is_one_segment_that_the_next_replaces(tmp_path: Path) -> None:
+    """A spending save adds one segment of what the run and its sub-agents' runs spent to
+    the segments the last whole save left — a checkpoint of segments alone, as agent-runs
+    keeps one (any other key and it stores the checkpoint whole, letting the segments go) —
+    and the next spending save replaces it; a whole save goes on from it. Read back, each
+    gives the spending it saved (a sub-agent's run the segments did not hold yet: a journal
+    of its spending alone)."""
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal(spent={"tokens": 10}, children={"kid": Journal(spent={"tokens": 4})})
+    assert not journal.spends_alone()  # nothing saved yet: a whole save first
+    saved = await _saved(journal, runs, run_id)
+    assert saved is not None and journal.spends_alone()
+    assert await _spending_saved(journal, runs, run_id) is None  # nothing spent since
+    journal.spent["tokens"] = 30
+    journal.children["kid"].spent["tokens"] = 9
+    journal.children["kid"].children["grandkid"] = Journal(spent={"tokens": 5})
+    first = await _spending_saved(journal, runs, run_id)
+    assert set(first.checkpoint) == {SEGMENTS}
+    assert first.checkpoint[SEGMENTS][:-1] == saved[SEGMENTS]
+    journal.spent["tokens"] = 40
+    journal.children["new"] = Journal(spent={"tokens": 7})
+    second = await _spending_saved(journal, runs, run_id)
+    assert set(second.checkpoint) == {SEGMENTS}
+    assert second.checkpoint[SEGMENTS][:-1] == saved[SEGMENTS]  # the first one replaced
+    assert second.checkpoint[SEGMENTS][-1] != first.checkpoint[SEGMENTS][-1]
+    resumed = await Journal.read(second.checkpoint, runs.artifacts, tenant="acme")
+    assert resumed.spent == {"tokens": 40}
+    assert resumed.children["kid"].spent == {"tokens": 9}
+    assert resumed.children["kid"].children["grandkid"].spent == {"tokens": 5}
+    assert resumed.children["new"].spent == {"tokens": 7}
+    journal.files.append({"name": "f"})  # a whole save after: the journal as it is
+    whole = await _saved(journal, runs, run_id)
+    assert whole is not None and whole[SEGMENTS][:-1] == second.checkpoint[SEGMENTS]
+    reread = await Journal.read(whole, runs.artifacts, tenant="acme")
+    assert reread.dump() == journal.dump()
+    journal.spent["tokens"] = 50  # the whole save's segments are kept: one added after them
+    third = await _spending_saved(journal, runs, run_id)
+    assert third.checkpoint[SEGMENTS][:-1] == whole[SEGMENTS]
+
+
+class _Artifacts:
+    """A run store's artifacts that keep what a spending save uploads, decoded."""
+
+    def __init__(self) -> None:
+        self.put: list[Any] = []
+
+    async def put_payload(self, run_id: str, data: bytes, **kw: Any) -> PayloadRef:
+        self.put.append(await adecode(data))
+        n = len(self.put)
+        return PayloadRef(ref=f"s{n}", size=len(data), sha256=f"{n:064d}")
+
+
+def _worker_run(heartbeat: Any) -> Any:
+    from types import SimpleNamespace
+
+    from trellis.contracts import AgentExecutionContext
+    from trellis.harness.events import RunEvents
+    from trellis.harness.identity import Identity
+    from trellis.harness.runtime import Runtime
+
+    runs = SimpleNamespace(heartbeat=heartbeat, artifacts=_Artifacts())
+    agent: Any = SimpleNamespace(
+        without=frozenset(), harness=SimpleNamespace(runs=runs, _saves_without_events=False)
+    )
+    identity = Identity(tenant="t", agent_id="a", run_id="run_1", user="u")
+    events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="a"))
+    journal = Journal()
+    journal._segments = (PayloadRef(ref="r", size=1, sha256="0" * 64),)
+    journal._saved = journal.dump()
+    runtime = Runtime(identity=identity, agent=agent, events=events, replay=Replay(journal))
+    runtime.worker_id, runtime.lease_seconds = "w", 60
+    return runtime
+
+
+def _tokens_put(run: Any) -> list[int]:
+    return [node["$d"]["spent"]["$r"]["tokens"] for node in run.agent.harness.runs.artifacts.put]
+
+
+async def test_a_reply_accounted_on_a_workers_run_is_saved_once_at_a_time() -> None:
+    """Each reply accounted on a worker's run sends what the run spent with a heartbeat, as
+    a segment after the saved ones; replies accounted while one is under way go with the
+    next, which replaces it; a reply of a sub-agent's run is saved by the run it works
+    inside; an in-process run sends nothing."""
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+    going = asyncio.Event()
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw["checkpoint"])
+        await going.wait()
+
+    run = _worker_run(heartbeat)
+    child = _worker_run(heartbeat)
+    child.parent, child.worker_id = run, None
+    budget.account(child, model="m", input_tokens=1, output_tokens=1)
+    await asyncio.sleep(0)
+    budget.account(run, model="m", input_tokens=2, output_tokens=2)
+    budget.account(run, model="m", input_tokens=3, output_tokens=3)
+    going.set()
+    await run.spent_saved()
+    assert _tokens_put(run) == [2, 12]
+    assert [set(c) for c in sent] == [{SEGMENTS}, {SEGMENTS}]
+    assert [[r["ref"] for r in c[SEGMENTS]] for c in sent] == [["r", "s1"], ["r", "s2"]]
+    await run.spent_saved()  # nothing under way
+    run.worker_id = None
+    budget.account(run, model="m", input_tokens=1, output_tokens=0)
+    assert run._spending.done() and len(sent) == 2
+
+
+async def test_a_reply_accounted_in_a_thread_is_saved_on_the_runs_loop() -> None:
+    sent: list[Any] = []
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw["checkpoint"])
+
+    run = _worker_run(heartbeat)
+    run.running_in = asyncio.current_task()
+    run.replay.journal.spent["tokens"] = 1
+    await asyncio.to_thread(run.spent_more)
+    await asyncio.sleep(0)
+    await run.spent_saved()
+    assert len(sent) == 1
+
+
+async def test_a_spending_save_refused_is_not_tried_again_and_a_lost_lease_is_said() -> None:
+    """A refused save leaves the journal's saves as they were (the next carries the
+    spending); a lost lease is said, and no more spending is sent."""
+    from trellis.harness import budget
+    from trellis.runs import LeaseLostError
+
+    tries: list[str] = []
+
+    async def lost(run_id: str, worker_id: str, **kw: Any) -> None:
+        tries.append("lost")
+        raise LeaseLostError("gone", code="LEASE_LOST", status=409)
+
+    async def down(run_id: str, worker_id: str, **kw: Any) -> None:
+        raise RuntimeError("agent-runs is down")
+
+    run = _worker_run(lost)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    with pytest.raises(LeaseLostError):
+        await run.spent_saved()
+    assert run.lease_lost and tries == ["lost"]
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    with pytest.raises(LeaseLostError):
+        await run.spent_saved()
+    assert tries == ["lost"] and len(_tokens_put(run)) == 1
+    run = _worker_run(down)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await run.spent_saved()
+    journal = run.replay.journal
+    assert not run.lease_lost and len(journal._segments) == 1 and journal._saved["spent"] == {}
+
+
+def _gated(sent: list[Any]) -> tuple[Any, asyncio.Queue[asyncio.Event]]:
+    """A heartbeat that is answered when the test says (each its own gate, handed out in
+    order), and what each sent."""
+    gates: asyncio.Queue[asyncio.Event] = asyncio.Queue()
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw["checkpoint"])
+        gate = asyncio.Event()
+        gates.put_nowait(gate)
+        await gate.wait()
+
+    return heartbeat, gates
+
+
+async def test_a_spending_save_under_way_when_the_attempt_ends_is_answered_first() -> None:
+    """The attempt ends (``unwatched``): no spending save starts any more — the pause or the
+    end records what was spent — and the one under way is not cut off (a heartbeat already
+    sent may be applied after the run's end, or after another attempt claimed it): the
+    attempt's end waits for its answer (``spending_ended``) before it writes."""
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+    heartbeat, gates = _gated(sent)
+    run = _worker_run(heartbeat)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    gate = await gates.get()
+    run.unwatched()
+    ending = asyncio.create_task(run.spending_ended())
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)  # after the end: not sent
+    await asyncio.sleep(0)
+    assert not ending.done() and not run._spending.cancelled()
+    gate.set()
+    await ending
+    assert len(sent) == 1 and run._spending.done() and not run._spending.cancelled()
+    await run.spending_ended()  # nothing under way
+
+
+async def test_a_reply_accounted_after_the_attempt_ended_starts_no_save() -> None:
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw)
+
+    run = _worker_run(heartbeat)
+    run.unwatched()
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await run.spent_saved()
+    assert sent == [] and run.replay.journal.spent["tokens"] == 2
+
+
+async def test_a_read_waits_for_the_save_of_what_was_spent_before_it_alone() -> None:
+    """A call that only reads waits for the spending save that carries the replies accounted
+    before it — at most one save, never those of replies accounted while it waits — and not
+    at all once a save carried them."""
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+    heartbeat, gates = _gated(sent)
+    run = _worker_run(heartbeat)
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    first = await gates.get()
+    read = asyncio.create_task(run.spent_saved())
+    await asyncio.sleep(0)  # the read waits for what was spent before it
+    budget.account(run, model="m", input_tokens=2, output_tokens=2)  # while the read waits
+    assert not read.done()
+    first.set()
+    second = await gates.get()  # the next save, of the reply accounted during the read
+    try:
+        await asyncio.wait({read}, timeout=5)
+        assert read.done() and not second.is_set()
+    finally:
+        second.set()
+    await run.spent_saved()
+    assert _tokens_put(run) == [2, 6]
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    third = await gates.get()
+    third.set()
+    await run.spent_saved()
+    budget.account(run, model="m", input_tokens=0, output_tokens=0, calls=0)  # spent nothing
+    await run.spent_saved()
+    assert len(sent) == 3  # the spending saved already: nothing sent
+    run._spending = asyncio.get_running_loop().create_future()  # a save under way, of nothing new
+    await run.spent_saved()  # saved already: not waited for
+
+
+async def test_a_progress_save_carries_the_spending_a_read_waits_for() -> None:
+    """A whole save made while a spending save waits its turn carries what was spent: the
+    spending save sends nothing, and a read does not wait for it."""
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw["checkpoint"])
+
+    run = _worker_run(heartbeat)
+    async with run._saving:
+        budget.account(run, model="m", input_tokens=1, output_tokens=1)
+        await run._saved(now=True)  # a progress save, while the spending save waits
+    await run.spent_saved()
+    assert not run._spending.done()  # not waited for: the progress save carried it
+    await run._spending
+    assert len(sent) == 1 and run.replay.journal._saved["spent"]["tokens"] == 2
+    await run._saved(now=True)  # nothing changed since: nothing sent
+    assert len(sent) == 1
+
+
+async def test_a_spending_save_that_fails_is_a_warning_once_per_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A spending save refused for any reason but a lost lease (an assertion that did not
+    hold among them) is said as a progress save that failed is — a ``warning`` event and a
+    log line — once in the run: the next progress save carries the spending."""
+    from trellis.harness import budget
+
+    async def down(run_id: str, worker_id: str, **kw: Any) -> None:
+        raise AssertionError("not as it should be")
+
+    run = _worker_run(down)
+    warned: list[Any] = []
+    run.events.listen(lambda e: warned.append((e.data or {}).get("code")))
+    for _ in range(2):
+        budget.account(run, model="m", input_tokens=1, output_tokens=1)
+        await run.spent_saved()
+    said = [r for r in caplog.records if r.levelname == "WARNING" and "run_1" in r.message]
+    assert len(said) == 1 and "AssertionError" in said[0].message
+    assert [code for code in warned if code] == ["progress_unsaved"]
+
+
+async def test_a_lease_a_spending_save_lost_stops_the_next_read_and_model_call() -> None:
+    from trellis.harness import budget
+    from trellis.runs import LeaseLostError
+
+    async def lost(run_id: str, worker_id: str, **kw: Any) -> None:
+        raise LeaseLostError("gone", code="LEASE_LOST", status=409)
+
+    run = _worker_run(lost)
+    child = _worker_run(lost)
+    child.parent, child.worker_id = run, None
+    run.model_started("k")
+    run.model_ended("k")
+    budget.account(child, model="m", input_tokens=1, output_tokens=1)
+    with pytest.raises(LeaseLostError):
+        await child.spent_saved()
+    with pytest.raises(LeaseLostError):
+        run.model_started("k")
+    with pytest.raises(LeaseLostError):
+        child.model_started("k")
+    assert not run._watched
+
+
+async def test_a_reply_accounted_in_a_thread_is_counted_on_the_runs_loop() -> None:
+    """A sync graph node's model replies in a thread: what it spent is counted on the run's
+    loop, never while the loop reads the spending to save it."""
+    import threading
+
+    from trellis.harness import budget
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        return None
+
+    counted: list[int] = []
+
+    class Watched(dict[str, Any]):
+        def __setitem__(self, key: str, value: Any) -> None:
+            counted.append(threading.get_ident())
+            super().__setitem__(key, value)
+
+    run = _worker_run(heartbeat)
+    run.running_in = asyncio.current_task()
+    run.replay.journal.__dict__["spent"] = Watched()
+    await asyncio.to_thread(budget.account, run, model="m", input_tokens=1, output_tokens=2)
+    await asyncio.sleep(0)
+    assert counted and set(counted) == {threading.get_ident()}
+    assert run.replay.journal.spent["tokens"] == 3
+    await run.spent_saved()
+    no_loop = _worker_run(heartbeat)  # no run's task to hand it to: counted where it is
+    no_loop.worker_id = None
+    await asyncio.to_thread(budget.account, no_loop, model="m", input_tokens=1, output_tokens=0)
+    assert no_loop.replay.journal.spent["tokens"] == 1
+
+
+async def test_a_spending_save_back_at_the_whole_saves_spending_sends_its_segments() -> None:
+    """The spending is again what the last whole save took (a tool call counted no more: it
+    asked a person): the spending segment the run store holds goes, and nothing is uploaded
+    for it — the whole save's segments alone are sent."""
+    artifacts = _Artifacts()
+    ref = PayloadRef(ref="r", size=1, sha256="0" * 64)
+    journal = Journal(spent={"tool_calls": 1})
+    journal._segments, journal._saved = (ref,), journal.dump()
+    journal.spent["tool_calls"] = 2
+    first = await journal.save_spending(artifacts, "run_1", worker_id=None, tenant="t")  # type: ignore[arg-type]
+    assert first is not None and len(artifacts.put) == 1
+    journal.spending_saved(first)
+    journal.spent["tool_calls"] = 1
+    back = await journal.save_spending(artifacts, "run_1", worker_id=None, tenant="t")  # type: ignore[arg-type]
+    assert back is not None and len(artifacts.put) == 1
+    assert back.checkpoint == {SEGMENTS: [ref.model_dump()]} and back.segments == [ref]
+    journal.spending_saved(back)
+    journal.spent["tool_calls"] = 3
+    again = await journal.save_spending(artifacts, "run_1", worker_id=None, tenant="t")  # type: ignore[arg-type]
+    assert again is not None and [r.ref for r in again.segments] == ["r", "s2"]
+
+
+@pytest.mark.parametrize("segments", [0, journal_module.MAX_SEGMENTS])
+async def test_a_reply_accounted_with_no_segment_to_add_to_saves_the_journal_whole(
+    segments: int,
+) -> None:
+    """With no segments yet, or as many as a save keeps (:data:`MAX_SEGMENTS`), there are
+    none to add a spending segment to: the journal is saved whole (a progress save), and
+    no spending save is sent."""
+    from trellis.harness import budget
+
+    sent: list[Any] = []
+    saves: list[bool] = []
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        sent.append(kw)
+
+    async def saved(*, now: bool) -> None:
+        saves.append(now)
+
+    run = _worker_run(heartbeat)
+    ref = PayloadRef(ref="r", size=1, sha256="0" * 64)
+    run.replay.journal._segments = (ref,) * segments
+    run._saved = saved
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await run.spent_saved()
+    assert saves == [True] and sent == []
+
+
+async def test_a_progress_save_behind_a_spending_save_keeps_its_interval() -> None:
+    """A spending save under way saves no journal: a progress save that waits for it is
+    put off as its interval says, not made at once as one behind a whole save is."""
+    from trellis.harness import budget
+
+    going = asyncio.Event()
+
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> None:
+        await going.wait()
+
+    saves: list[bool] = []
+
+    async def saved(*, now: bool) -> None:
+        saves.append(now)
+
+    run = _worker_run(heartbeat)
+    run._saved = saved
+    budget.account(run, model="m", input_tokens=1, output_tokens=1)
+    await asyncio.sleep(0)
+    assert run._saving.locked()
+    behind = asyncio.create_task(run.progress(now=False))
+    await asyncio.sleep(0)
+    going.set()
+    await behind
+    assert saves == [False]

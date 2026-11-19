@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -264,6 +265,124 @@ async def ask_user_form(w: World) -> None:
     assert [f["name"] for f in asked.props["fields"]] == ["units", "supplier"]
     assert asked.expects is not None and asked.expects["properties"]["units"]["default"] == 200
     assert o.answer == 'Done. {"units": 200, "supplier": "SUP-07"}', o.answer
+
+
+#: An agent's question with two options, as each asks it: ``ask_user``'s arguments, and its
+#: own ``AskUserQuestion``'s (Claude's and Kimi's: one question, an option a label).
+SUPPLIERS: Final = ["SUP-04 (Lyon Mills)", "SUP-07 (Prato Knit)"]
+WHICH: Final = "Which supplier?"
+
+
+def _own_question(several: str) -> dict[str, Any]:
+    """Claude's (``multiSelect``) or Kimi's (``multi_select``) ``AskUserQuestion`` arguments."""
+    options = [{"label": label, "description": ""} for label in SUPPLIERS]
+    asked = {"question": WHICH, "header": "Supplier", "options": options, several: False}
+    return {"questions": [asked]}
+
+
+#: The answers a person may give, and what the model reads of each: an option handed back
+#: (its case and spacing aside) is that option; anything else their words, never refused and
+#: never read as an option ("SUP-04", "not SUP-04", "the second one" are the model's to read).
+IN_WORDS: Final = [
+    (" sup-04  (LYON mills) ", "SUP-04 (Lyon Mills)"),
+    *((said, said) for said in ("SUP-04", "not SUP-04", "the second one", "neither")),
+]
+#: What Kimi is told of an answer in words (``adapters.acp.ANSWERED``), up to the words.
+TOLD: Final = f'The user answered your question "{WHICH}" with: '
+#: The answer Kimi's ``AskUserQuestion`` gives its model (its result's ``answers``).
+PICKED: Final = re.compile(r'"Which supplier\?":\s*"([^"]*)"')
+
+
+def _own_asker(w: World, n: int) -> Any:
+    """The agent under test asking with its own ``AskUserQuestion`` after the cell's plan (the
+    ``elsewhere`` mode's first call): Claude's scripted CLI (each answer it read kept in
+    ``asked-<n>.jsonl``), Kimi itself on an endpoint that asks until it reads an answer."""
+
+    async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
+        if w.adapter == "kimi":
+            return await _kimi_asker(h, w, plan), tools
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        from tests.support.adapters import CLI
+
+        asking = {"builtin": "AskUserQuestion", "args": _own_question("multiSelect")}
+        script = [*({"tool": t, "args": a} for t, a in plan), asking, {"text": "Done."}]
+        env = {
+            "FAKE_CLAUDE_SCRIPT": json.dumps(script),
+            "FAKE_CLAUDE_RECORD": str(w.tmp / f"cli-asks-{n}.json"),
+            "FAKE_CLAUDE_BUILTINS": str(w.tmp / f"asked-{n}.jsonl"),
+        }
+        options = ClaudeAgentOptions(
+            cli_path=CLI, system_prompt="You work.", env=env, sandbox={"enabled": True}
+        )
+        return options, tools
+
+    return target
+
+
+async def _kimi_asker(h: Harness, w: World, plan: list[Call]) -> Any:
+    """Kimi Code on an endpoint that makes the plan's calls, then asks with its own
+    ``AskUserQuestion`` — again while it has no answer (a pause cuts its call short) — and
+    answers with what it read: the answer, or the person's words it was told."""
+    from tests.support.adapters import allow_host
+    from tests.support.kimi import PlannedEndpoint, kimi_name, kimi_target, result_text, text_of
+
+    def turn(body: dict[str, Any]) -> Any:
+        messages = body["messages"]
+        told = [text_of(m.get("content")) for m in messages if m.get("role") == "user"]
+        results = [result_text(m.get("content")) for m in messages if m.get("role") == "tool"]
+        for said in told:
+            if TOLD in said:
+                return "Done. " + said[said.index(TOLD) :]
+        if results and PICKED.search(results[-1]):
+            return "Done. " + results[-1]
+        if len(results) < len(plan):
+            return (kimi_name(plan[len(results)][0]), plan[len(results)][1])
+        return ("AskUserQuestion", _own_question("multi_select"))
+
+    endpoint = await PlannedEndpoint(turns=turn).attached()
+    allow_host(h)
+    return kimi_target(endpoint, w.tmp / f"kimi-asks-{len(w.outcomes)}")
+
+
+def _read(w: World, n: int, o: Any) -> str:
+    """What the agent's model read of the person's answer: the question tool's result."""
+    if w.adapter == "claude":
+        lines = (w.tmp / f"asked-{n}.jsonl").read_text().splitlines()
+        return json.loads(lines[-1])["args"]["answers"][WHICH]
+    said = str(o.answer).removeprefix("Done. ")
+    if w.adapter == "kimi":
+        picked = PICKED.search(said)
+        return said.removeprefix(TOLD) if picked is None else picked[1]
+    return said
+
+
+async def answered_in_words(w: World) -> None:
+    """One rule for every answer to every agent's question, on every adapter: ``ask_user``'s,
+    Claude's and Kimi's own ``AskUserQuestion``. An option handed back in another case or
+    spacing is that option; any other answer reaches the model as the person's words — never
+    refused, never read as an option it does not name."""
+    from trellis import ask_user
+
+    # each answer is a run of its own: Kimi's (a process each) takes two of them within the
+    # cell's time, an option handed back and words that name one (every answer: test_acp.py)
+    answers = [IN_WORDS[0], IN_WORDS[2]] if w.adapter == "kimi" else IN_WORDS
+    for n, (given, read) in enumerate(answers):
+
+        def answer(interrupt: Any, given: str = given) -> tuple[str, Any]:
+            if interrupt.reason is InterruptReason.APPROVAL:
+                return approve_all(interrupt)
+            return "answer", given
+
+        if w.adapter in ("claude", "kimi"):
+            o = await w.go([], [], answer=answer, target=_own_asker(w, n))
+        else:
+            asking = {"question": WHICH, "options": SUPPLIERS}
+            o = await w.go([ask_user()], [("ask_user", asking)], answer=answer)
+        o.succeeded()
+        [asked] = o.pauses
+        assert [x if isinstance(x, str) else x.value for x in asked.options] == SUPPLIERS
+        assert _read(w, n, o) == read, (given, o.answer)
 
 
 async def ask_user_offered(w: World) -> None:
@@ -648,15 +767,45 @@ async def abstains(w: World) -> None:
 
 
 async def asking_note(w: World) -> None:
-    """When and how to ask: the note reaches the model with the memory context, in every
-    adapter, whatever the question."""
+    """When and how to ask: the note reaches the model with the memory context, and — memory
+    on or off — wherever the model has a question tool (``ask_user``, offered by itself to a
+    chat front end's run; Claude's and Kimi's own ``AskUserQuestion``), said once; with
+    neither, never."""
     d = Desk()
     o = (await w.go([d.lookup()], [("lookup", {"topic": "contact"})])).succeeded()
-    if w.on:
+    offered = w.adapter in ("claude", "kimi") or any(
+        "ask_user" in names for names in w.models.offered()
+    )
+    if w.on or offered:
         assert json.dumps(ASKING)[1:-1] in w.said() or ASKING in w.said(), "no note arrived"
+        assert _first_said(w).count("## Asking the user") == 1, "said more than once"
     else:
         assert "## Asking the user" not in w.said()
     assert o.answer == "Done. facts about contact"
+
+
+async def asking_note_offered(w: World) -> None:
+    """Memory or none, a model given a question tool is told when and how to ask (its
+    ``ask_user`` declared; Claude's and Kimi's own ``AskUserQuestion``), once."""
+    from trellis import ask_user
+
+    o = (await w.go([ask_user(), Desk().lookup()], [("lookup", {"topic": "x"})])).succeeded()
+    assert json.dumps(ASKING)[1:-1] in w.said() or ASKING in w.said(), "no note arrived"
+    assert _first_said(w).count("## Asking the user") == 1, "said more than once"
+    assert o.answer == "Done. facts about x"
+
+
+def _first_said(w: World) -> str:
+    """What the first model request of the cell was sent (Claude's CLI: what it started with
+    and its prompt's context; Kimi's: its endpoint's first request)."""
+    from tests.support.kimi import attached_endpoints
+
+    if w.models.calls:
+        return w.models.calls[0][0]
+    if w.claude_records():
+        return json.dumps(w.claude_records()[0])
+    first = next(e for e in attached_endpoints() if e.requests)
+    return json.dumps(first.requests[0]["messages"])
 
 
 async def push_function(w: World) -> None:
@@ -888,7 +1037,8 @@ async def credentials(w: World) -> None:
         router.get("http://erp.test/orders/7").mock(side_effect=answer)
         erp = openapi(ERP_DOC, headers={"Authorization": "Bearer fixed"})
         o = (await w.go([Desk().lookup(), erp], [("get_order", {"id": "7"})])).succeeded()
-    assert sent == [f"Bearer t-erp.test-{o.record.user_id}"], sent
+    user = o.record.user_id or o.record.on_behalf_of  # a fired run's user is who it acts for
+    assert sent == [f"Bearer t-erp.test-{user}"], sent
     assert "t-erp.test" not in json.dumps(o.record.model_dump(mode="json"))
 
 
@@ -1268,6 +1418,15 @@ FEATURES: Final[list[Feature]] = [
         way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(
+        "F36w",
+        "an answer to an agent's question: an option handed back is that option, any other "
+        "the user's words its model reads (ask_user, Claude's and Kimi's AskUserQuestion)",
+        "F36 (answers in words)",
+        "tools=[ask_user()]; Claude's and Kimi's own question tool",
+        answered_in_words,
+        way2=NA("an agent's question asks through a harness run's pause"),
+    ),
+    Feature(
         "F36a",
         "ask_user by itself: a chat front end's run is given it with nothing declared",
         "F36 (backlog: ask_user where a person answers)",
@@ -1596,11 +1755,21 @@ FEATURES: Final[list[Feature]] = [
     ),
     Feature(
         "F41q",
-        "when and how to ask: the note reaches the model with the memory context",
+        "when and how to ask: the note reaches the model with the memory context (and with "
+        "a question tool, F41t), once",
         "F41, F36",
         "the memory service (always with its context)",
         asking_note,
         needs=frozenset({"memory"}),
+        adapters={"function": NA("its code reads agent.context: no model is told anything")},
+        way2=NA("the harness's note: Way 2 builds its own context"),
+    ),
+    Feature(
+        "F41t",
+        "when and how to ask: the note reaches a model given a question tool, memory or none",
+        "F41, F36",
+        "tools=[ask_user()]; Claude's and Kimi's own question tool",
+        asking_note_offered,
         adapters={"function": NA("its code reads agent.context: no model is told anything")},
         way2=NA("the harness's note: Way 2 builds its own context"),
     ),

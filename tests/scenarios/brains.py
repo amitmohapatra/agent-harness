@@ -279,17 +279,7 @@ class _BrainScript(Script):
         answered = super().reply(body)
         for call in answered["choices"][0]["message"].get("tool_calls") or []:
             call["id"] = f"call_{self.prefix}_{call['id'].removeprefix('call_')}"
-        # the request's size, as a model's usage says it (a token per 4 characters of what it
-        # was sent): the harness fits its later requests by what replies say theirs were, and
-        # a fixed 10 taught it each was a fifth of its count (``middleware._calibrated``)
-        sent = len(json.dumps(body.get("messages") or [])) + len(
-            json.dumps(body.get("tools") or [])
-        )
-        answered["usage"] = {
-            "prompt_tokens": sent // 4,
-            "completion_tokens": 5,
-            "total_tokens": sent // 4 + 5,
-        }
+        answered["usage"] = usage_of(body)
         return answered
 
     def next(self, body: dict[str, Any]) -> Any:
@@ -298,6 +288,15 @@ class _BrainScript(Script):
         return (
             turned.call if turned.call and offered else turned.answer or "ANS NONE SEEN  MEM  LAST "
         )
+
+
+def usage_of(body: dict[str, Any]) -> dict[str, int]:
+    """What the brain's model reports it used for the request ``body``: the request's size (a
+    token per 4 characters of what it was sent) and a reply of 5. The harness fits its later
+    requests by what replies say theirs were, and a fixed 10 taught it each was a fifth of
+    its count (``middleware._calibrated``)."""
+    sent = len(json.dumps(body.get("messages") or [])) + len(json.dumps(body.get("tools") or []))
+    return {"prompt_tokens": sent // 4, "completion_tokens": 5, "total_tokens": sent // 4 + 5}
 
 
 class BrainChat(ScriptedChat):

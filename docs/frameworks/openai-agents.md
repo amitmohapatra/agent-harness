@@ -137,8 +137,14 @@ A `SandboxAgent` is wrapped the same way: the SDK runs it only with `RunConfig(s
 (else `UserError: SandboxAgent execution requires RunConfig(sandbox=...)`), so give its sandbox
 client there. Its capabilities' tools (`exec_command`, `write_stdin`, `view_image`,
 `apply_patch`, `load_skill`) are the SDK's, made inside its run, and governed like your own
-function tools: the catalog's risk (one that declares nothing asks a person), approvals, the
-journal, the record and the stream. Say their risk in the catalog.
+function tools: the catalog's risk, approvals, the journal, the record and the stream. Its
+shell (`exec_command`, `write_stdin`) is the run's sandbox shell, as Claude Code's and Kimi
+Code's `Bash`, Deep Agents' `execute` and `sandbox_exec` are: a command runs unasked and is
+announced, whatever it does ([governance.md](../governance.md)); `load_skill` and `view_image`
+read; `apply_patch` writes files and asks, as their `Write` does. A risk the catalog declares
+overrides each (`write`: the shell asks once a conversation; `irreversible`: at every
+command), and so does an `approve_when`. Only the SDK's own `Shell` capability's tools are the
+sandbox shell: a capability of your own whose tool has the same name says what it does itself.
 
 A sandbox is one conversation's. `SandboxRunConfig(client=...)` on `h.wrap` makes a sandbox per
 run. A live `SandboxRunConfig(session=...)` or a `session_state` on `h.wrap` would be one

@@ -278,7 +278,7 @@ sequenceDiagram
   Agent->>AR: POST /v1/schedules ScheduleSpec{cadence, timezone, input, timeout_seconds, priority, concurrency_key, agent_version, metadata: {without, framework_options}}
   AR-->>Agent: Schedule (an upsert: same agent, person, cadence, input → the same one)
   Note over AR: at 07:00 Europe/Paris (or POST /v1/schedules/{id}/fire)
-  AR->>AR: RunStart{on_behalf_of: ada, metadata: the schedule's + schedule_id, timeout_seconds, priority} → QUEUED
+  AR->>AR: RunStart{on_behalf_of: ada, user_id: none, idempotency_key: schedule_id@fire_time, metadata: the schedule's + schedule_id, schedule_name, fire_time, created_by, timeout_seconds, priority} → QUEUED
   Wk->>AR: claim (highest priority first)
   AR-->>Wk: the run
   Wk->>P: agent.execute(job)

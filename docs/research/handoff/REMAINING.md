@@ -473,7 +473,26 @@ Measured this round: `/v1/context` p95 used 7–14% of its 5 s deadline at 1 con
 
 ---
 
-## 8. Cleanup refactor (not started; last, by the owner's order)
+## 8. Cleanup refactor (first part done on `claude/amazing-meitner-22ul02`)
+
+Done there, by `docs/research/refactor-plan-2026-11-15.md`: one owner of stopping an attempt
+and of "ended elsewhere" (`stopping.py`), one cascade for a run's children (`children.py`),
+one `helping()` for the adapters' helpers, adapter capabilities on the `Adapter` protocol
+with their defaults in `adapters.base.Keeps` (no `getattr` probes, no framework names
+outside `adapters/`), and three budgets in the unit suite that only go down: complexity,
+duplicate blocks, and packages that import each other (`tests/unit/test_*_budget.py`).
+
+Open from the architecture review of that branch:
+
+- **Split `middleware.py`** (4,096 lines: nine middleware classes, the checkpointer, three
+  error types) into a package `middleware/`, one module per class, the same import names —
+  as a move-only change of its own, so its diff can be checked by moving alone.
+- **Bring the import budget down**: 8 pairs of packages import each other at module level
+  and 141 imports of another package sit inside functions
+  (`tests/unit/test_import_budget.py`).
+
+What is left of the original list:
+
 
 A pure refactor: test ids, matrix cells and the ReAct golden requests unchanged; no public
 argument or signature change. Target: one mechanism per job (table in

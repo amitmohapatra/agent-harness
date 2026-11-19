@@ -266,11 +266,8 @@ async def test_an_openai_sandbox_agent_runs_wrapped_with_its_run_config_as_an_op
     agent = arm(
         harness.wrap(target, id="boxed", framework_options={"run_config": config}), [lookup]
     )
-    # its shell is governed as the agent's own tools: undeclared, its call asks a person
-    asked = await agent.run("tides?", user="u")
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "exec_command"
-    result = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u")
+    # its shell is the run's sandbox shell: it runs unasked, announced
+    result = await agent.run("tides?", user="u")
     assert result.status is RunStatus.SUCCESS and "boxed" in str(result.answer), result
 
 
@@ -307,7 +304,14 @@ async def test_a_schedule_takes_what_start_takes_and_every_fired_run_carries_it(
     fired = [r for r in store._runs.values() if r.metadata.get("schedule_id")]
     assert len(fired) == 1
     run = fired[0]
-    assert run.metadata == {**schedule.metadata, "schedule_id": schedule.schedule_id}
+    assert run.metadata == {
+        **schedule.metadata,
+        "schedule_id": schedule.schedule_id,
+        "schedule_name": schedule.name,
+        "fire_time": run.metadata["fire_time"],
+        "created_by": None,
+    }
+    assert run.idempotency_key == f"{schedule.schedule_id}@{run.metadata['fire_time']}"
     assert (run.timeout_seconds, run.priority, run.concurrency_key) == (30, 5, "nightly")
     assert run.status is RunStatus.PARTIAL, run.error  # its options reached it: the limit's
     assert len(seen[-1].inputs) == 1  # the SDK's one turn, no call past it

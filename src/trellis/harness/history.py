@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -165,6 +166,10 @@ class Said:
     #: task's update): its notification metadata — langchain-core's ``NotificationMetadata``,
     #: ``{"source", "data"}`` — kept with it wherever it goes (:data:`NOTIFICATION`)
     notified: Mapping[str, Any] | None = None
+    #: a user-role message an agent wrote, not the person: a sub-agent's question (the hand-off
+    #: of the agent above it). The memory service keeps it as an agent's message
+    #: (:data:`DELEGATED`), never the person's words, and no window replays it
+    delegated: bool = False
 
 
 #: The memory service's role of each speaker, and the reverse.
@@ -175,6 +180,9 @@ MEMORY_ROLES: Final[Mapping[Speaker, str]] = {
     Speaker.SYSTEM: "SYSTEM",
 }
 SPEAKERS: Final[Mapping[str, Speaker]] = {role: speaker for speaker, role in MEMORY_ROLES.items()}
+#: The memory service's role of a user-role message an agent wrote (``Said.delegated``): one
+#: of the roles the service never forms the person's memories from, and a window leaves out.
+DELEGATED: Final = "AGENT"
 #: The kind the memory service keeps a tool result as: not chat, but replayed with its call.
 INTERNAL: Final = "INTERNAL"
 #: The ``custom_metadata`` key the memory service reads a message's run-record facts under.
@@ -183,7 +191,9 @@ RUN_RECORD: Final = "run_record"
 MESSAGE_ID: Final = "message_id"
 #: The run-record key a message the user did not type keeps its notification metadata under
 #: (``Said.notified``): in the run record, which the service gives back with the window, so a
-#: replayed notification is one again, never the user's words.
+#: replayed notification is one again, never the user's words. Kept as its JSON text: the
+#: service's ``custom_metadata`` nests two levels at most, and ``{"source", "data": {...}}``
+#: under the run record is four.
 NOTIFICATION: Final = "notification"
 
 
@@ -222,6 +232,11 @@ def _noted(said: Said, record: Mapping[str, Any] | None) -> Said:
     notification metadata (:data:`NOTIFICATION`), apart from them."""
     facts = {k: v for k, v in (record or {}).items() if k != NOTIFICATION}
     notified = (record or {}).get(NOTIFICATION)
+    if isinstance(notified, str):
+        try:
+            notified = json.loads(notified)
+        except ValueError:
+            notified = None
     return dataclasses.replace(
         said,
         facts=facts or None,
@@ -295,9 +310,12 @@ def _said_by_client(message: Any) -> Any:
 
 def recorded(said: Said) -> dict[str, Any]:
     """``said`` as the memory service's message: a tool result is INTERNAL, as the service
-    keeps every tool step; the rest is the visible chat."""
-    message: dict[str, Any] = {"role": MEMORY_ROLES[said.role], "content": said.content}
-    if said.role is Speaker.TOOL:
+    keeps every tool step, and so is a sub-agent's question (:data:`DELEGATED`: an agent's
+    message is never visible chat); the rest is the visible chat."""
+    delegated = said.delegated and said.role is Speaker.USER
+    role = DELEGATED if delegated else MEMORY_ROLES[said.role]
+    message: dict[str, Any] = {"role": role, "content": said.content}
+    if said.role is Speaker.TOOL or delegated:
         message["kind"] = INTERNAL
     if said.tool_calls:
         message["tool_calls"] = [
@@ -311,7 +329,7 @@ def recorded(said: Said) -> dict[str, Any]:
         # in its run record too: the one part of a message the window gives back (``from_window``)
         facts[MESSAGE_ID] = said.id
     if said.notified:
-        facts[NOTIFICATION] = dict(said.notified)
+        facts[NOTIFICATION] = json.dumps(dict(said.notified), default=str)
     if facts:
         metadata[RUN_RECORD] = facts
     if said.id is not None:
@@ -327,8 +345,9 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
     if not isinstance(stored, Mapping):
         role, content = stored
         return Said(Speaker(role), content)
+    delegated = stored["role"] == DELEGATED
     said = Said(
-        role=SPEAKERS[stored["role"]],
+        role=Speaker.USER if delegated else SPEAKERS[stored["role"]],
         content=stored["content"],
         tool_calls=tuple(
             Called(c["id"], c["name"], c.get("arguments") or {})
@@ -336,12 +355,14 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
         ),
         tool_call_id=stored.get("tool_call_id"),
         id=(stored.get("custom_metadata") or {}).get(MESSAGE_ID),
+        delegated=delegated,
     )
     return _noted(said, _named((stored.get("custom_metadata") or {}).get(RUN_RECORD))[0])
 
 
 __all__ = [
     "ASKED_WITH",
+    "DELEGATED",
     "INTERNAL",
     "IN_RAM",
     "MEMORY_THREAD",

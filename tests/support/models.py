@@ -33,6 +33,10 @@ class Script:
         self.arrived = asyncio.Event()
 
     def next(self, body: dict[str, Any]) -> Turn:
+        if not self.turns:
+            # an IndexError, as an emptied list raised: tests script "no reply" as a failing call
+            planned = len(self.requests) - 1
+            raise IndexError(f"the script planned {planned} model calls; another was asked")
         return self.turns.pop(0)
 
     def handle(self, request: httpx.Request) -> httpx.Response:

@@ -235,15 +235,13 @@ class _Surface:
         if (result := body.tool_result()) is not None:
             answer = await self._tool_answer(body, result, user, tenant)
             return await self._resume(body, answer, user, tenant)
+        stale = HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
         if body.run_id and (
             safe_id(body.run_id) != body.run_id
             or self.hub.get(body.run_id)
             or body.run_id in self._starting
-            # one the run store has (another replica's, one the hub forgot): never attempted
-            # again under this caller's name
-            or await agent.harness.runs.get(body.run_id, tenant=tenant) is not None
         ):
-            raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
+            raise stale
         try:
             mode = Mode(body.forwarded.mode)
         except ValueError as exc:
@@ -252,9 +250,13 @@ class _Surface:
         if payload is None or payload in ("", {}):  # an empty message and no state
             raise HTTPException(422, "a blank message opens no run: say something")
         claimed = body.run_id
-        if claimed:
+        if claimed:  # claimed before the first await: the same runId sent twice at once is one run
             self._starting.add(claimed)
         try:
+            # one the run store has (another replica's, one the hub forgot): never attempted
+            # again under this caller's name
+            if claimed and await agent.harness.runs.get(claimed, tenant=tenant) is not None:
+                raise stale
             attached = await self._attached(body, user, tenant)
             try:
                 record = await agent._opened(

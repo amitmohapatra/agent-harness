@@ -138,8 +138,11 @@ MODES = {
 }
 #: What a harness call the run's end cut short returns (``tools.convert.mcp.STOPPED``), and
 #: the words of a resumed prompt that tell the model to make such a call again
-#: (``adapters.claude.RESUMED``): told so, the step runs again, as a paused one does.
+#: (``bridges.resumed.RESUMED``): told so, the step runs again, as a paused one does.
 CUT_SHORT = "The run ended before this tool finished."
+#: What a prompt starts with that tells it the user answered its question in words
+#: (``adapters.acp.ANSWERED``): what they said is the question's result.
+ANSWERED_IN_WORDS = "The user answered your question"
 REMAKE_CUT = "its result says the run ended before it finished"
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
 
@@ -284,6 +287,7 @@ class FakeAgent:
             raise RequestError.auth_required({"why": "log in first"})
         session = f"session_{uuid.uuid4().hex[:8]}"
         self.servers[session] = list(mcp_servers or [])
+        await self.connected(session)
         save(session, state(session))
         if CONFIG.get("default_permission_mode"):
             mode = CONFIG["default_permission_mode"]
@@ -308,6 +312,7 @@ class FakeAgent:
         if not (session_dir(session_id) / "state.json").exists():
             raise RequestError.resource_not_found(session_id)
         self.servers[session_id] = list(mcp_servers or [])
+        await self.connected(session_id)
         record("sessions", {"how": "resume", "id": session_id})
         return ResumeSessionResponse(modes=modes())
 
@@ -318,6 +323,7 @@ class FakeAgent:
             raise RequestError.resource_not_found(session_id)
         forked = f"session_{uuid.uuid4().hex[:8]}"
         self.servers[forked] = list(mcp_servers or [])
+        await self.connected(forked)
         save(forked, state(session_id))
         record("sessions", {"how": "fork", "id": forked, "from": session_id})
         return ForkSessionResponse(session_id=forked, modes=modes())
@@ -328,6 +334,7 @@ class FakeAgent:
         if not (session_dir(session_id) / "state.json").exists():
             raise RequestError.resource_not_found(session_id)
         self.servers[session_id] = list(mcp_servers or [])
+        await self.connected(session_id)
         for said in state(session_id)["said"]:  # the history, replayed
             await self.conn.session_update(
                 session_id,
@@ -388,8 +395,10 @@ class FakeAgent:
         self.cancelled[session_id] = asyncio.Event()
         data = state(session_id)
         edited = EDITED.search(text)
-        told = ("rejected" in (data.get("stopped") or "") and "was not run" in text) or (
-            "denied it" in text
+        told = (
+            ("rejected" in (data.get("stopped") or "") and "was not run" in text)
+            or "denied it" in text
+            or ANSWERED_IN_WORDS in text  # its question answered in words: what they said
         )
         if data.get("stopped") and not edited and data["done"] < len(SCRIPT) and told:
             data["done"] += 1  # the step was rejected: what the prompt says is its result
@@ -812,6 +821,21 @@ class FakeAgent:
         if text == CUT_SHORT:  # the run ended while it ran: the turn ends with it
             raise Stopped(text)
         return text
+
+    async def connected(self, session_id: str) -> None:
+        """The harness's MCP server reached as the session opens, as Kimi Code connects to its
+        servers before answering (nothing recorded); never with ``FAKE_ACP_CONNECT=never``, a
+        Kimi whose connection failed."""
+        from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        server = next((s for s in self.servers[session_id] if s.name == "trellis"), None)
+        if server is None or os.environ.get("FAKE_ACP_CONNECT") == "never":
+            return
+        http = create_mcp_http_client(headers={h.name: h.value for h in server.headers})
+        async with http, Client(streamable_http_client(server.url, http_client=http)):
+            pass
 
     async def called(
         self, session_id: str, tool: str, args: dict[str, Any], *, listed: bool = False

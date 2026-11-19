@@ -64,8 +64,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
 from opentelemetry import propagate, trace
 
-from trellis.contracts import ConfigurationError
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import ConfigurationError, is_pause_signal
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.redaction import redact_attributes
 from trellis.harness.settings import (

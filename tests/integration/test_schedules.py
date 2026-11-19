@@ -251,7 +251,8 @@ async def test_a_fired_run_is_the_same_user_and_thread_and_no_report_is_not_deli
         service.calls.clear()
         chat.fired.append("NO_REPORT")
         quiet = await fire(h, agent, sid)
-        assert quiet.thread_id == THREAD and quiet.user_id == "ada"
+        # nobody is present at a fire: the run acts for the person the schedule is for
+        assert (quiet.thread_id, quiet.user_id, quiet.on_behalf_of) == (THREAD, None, "ada")
         assert quiet.status is RunStatus.SUCCESS and quiet.output == NO_REPORT
         assert "under 5" in chat.inputs[-1] and "check stock of A-1" in chat.inputs[-1]
         await h.writes.drain()

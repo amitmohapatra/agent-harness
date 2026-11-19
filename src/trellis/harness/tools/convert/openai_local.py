@@ -31,8 +31,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Hashable, Sequence
 from typing import Any, Final, cast
 
-from trellis.contracts import ToolError, ToolSpec
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import ToolError, ToolSpec, is_pause_signal
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool, not_run
@@ -112,9 +111,14 @@ def with_fields(tool: Any, **fields: Any) -> Any:
     """A copy of ``tool`` (one of the SDK's tool dataclasses) with ``fields`` changed: made
     again as the SDK makes it (``dataclasses.replace``), or — a subclass whose constructor
     takes fields of its own (a sandbox capability's ``exec_command``, its ``apply_patch``) —
-    copied as it is."""
+    copied as it is. What the harness marked on the tool itself (not a field: which capability
+    made it) stays on the copy."""
     if dataclasses.is_dataclass(type(tool)) and type(tool).__module__ == "agents.tool":
-        return dataclasses.replace(tool, **fields)
+        made = dataclasses.replace(tool, **fields)
+        marks = vars(tool).keys() - {f.name for f in dataclasses.fields(tool)}
+        for name in marks:
+            setattr(made, name, getattr(tool, name))
+        return made
     made = copy.copy(tool)
     for name, value in fields.items():
         setattr(made, name, value)

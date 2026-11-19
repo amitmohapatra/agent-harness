@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +16,7 @@ from claude_agent_sdk import HookMatcher, PermissionResultDeny
 from claude_agent_sdk._internal.message_parser import parse_message
 
 from trellis.contracts import RunStatus
+from trellis.harness.agent import Agent
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import claude_live, live
 from trellis.harness.bridges.claude import harness_matcher
@@ -29,6 +31,7 @@ from trellis.harness.bridges.claude_live import (
 )
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.bridges.live import NUDGE, OVER, UNATTENDED, Left, LiveSessions, Turn
+from trellis.harness.conversation import Turns
 from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
@@ -199,6 +202,8 @@ def runtime_of(agent: Any, run_id: str) -> Any:
         pending=None,
         cancelled=None,
         replay=SimpleNamespace(journal=Journal()),
+        spent_more=lambda: None,
+        running_in=None,
     )
 
 
@@ -212,12 +217,14 @@ async def background() -> tuple[LiveSession, Background, Store]:
     """A session with one background subagent's run (``child``, task ``t1``), started by the
     turn ``turn``, whose own attempt has not begun (its record is still being read)."""
     store = Store()
-    agent = SimpleNamespace(
+    agent: Any = SimpleNamespace(
         harness=SimpleNamespace(runs=store, holds=Holds(lambda: store)),
         running={},
         sessions=LRU(),
         adapter=SimpleNamespace(name="claude"),
+        turns=Turns(),
     )
+    agent.stop = functools.partial(Agent.stop, agent)  # an agent's own stop, over these parts
     session = LiveSession("conversation", (), LiveSessions(), owner="u")
     session.turn = turn_of(agent, "turn")
     helper = SimpleNamespace(
@@ -316,6 +323,22 @@ async def test_an_attempt_left_with_a_request_under_way_ends_it_first() -> None:
     assert found.turn is None and not turn.calls
     with pytest.raises(Left):
         await asked
+    await ended(session, found, store)
+
+
+async def test_a_kept_run_stopped_twice_ends_with_the_first_reason() -> None:
+    """A background subagent's run is stopped as any run is (``Agent.stop``): cancelled with
+    its turn and then for another reason, its attempt under way is cancelled once and ends
+    with the reason given first."""
+    session, found, store = await background()
+    cancels: list[str] = []
+    working: Any = SimpleNamespace(cancel=lambda: cancels.append("cancelled"))
+    attempt = SimpleNamespace(cancelled=None, running_in=working)
+    found.agent.running["child"] = attempt
+    found.cancel("the turn was cancelled")
+    found.cancel("its session was closed")
+    assert attempt.cancelled == "the turn was cancelled" and cancels == ["cancelled"]
+    del found.agent.running["child"]
     await ended(session, found, store)
 
 
@@ -688,3 +711,13 @@ async def test_closing_a_session_cancels_what_it_left_running_aside() -> None:
     await session.close()
     await asyncio.sleep(0)
     assert aside.cancelled()
+
+
+async def test_with_no_context_the_prompt_hook_adds_nothing() -> None:
+    """``bridges.claude.with_context``: with no context to add, the harness's own
+    ``UserPromptSubmit`` hook answers nothing, so the prompt goes as it is."""
+    from trellis.harness.bridges.claude import PROMPT_EVENT, with_context
+
+    [matcher] = with_context(None, "")[PROMPT_EVENT]
+    [hook] = matcher.hooks
+    assert await hook({}, None, {}) == {}

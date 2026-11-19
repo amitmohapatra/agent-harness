@@ -25,7 +25,7 @@ to delegate at once. Calling the tool runs a *child run* of the sub-agent, insid
   one that failed is an error the parent's model reads; one that pauses pauses the parent with
   its question — the interrupt's payload names the child (:data:`SUBAGENT`) — and the parent's
   ``resume`` hands the answer to the child and continues both;
-* cancelling the parent cancels its children (:func:`cancel_children`).
+* cancelling the parent cancels its children (``children.end_children``).
 
 ``agent.run(...)`` called inside a run — from a tool, a node, a function target's code — is the
 same child run (:func:`child_run`): its id derived from where the parent called it (the tool
@@ -39,7 +39,6 @@ id, its description the agent's (``h.wrap(description=)``, else its function's d
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
@@ -55,7 +54,6 @@ from trellis.contracts import (
     stable_id,
 )
 from trellis.harness import admission, pipeline
-from trellis.harness.adapters.langgraph import bound_tools
 from trellis.harness.admission import Branch
 from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
@@ -63,7 +61,6 @@ from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import SideEffects, Tool
 from trellis.harness.tools.mcp import side_effects_of
 from trellis.harness.tools.toolbox import listed
-from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -209,19 +206,38 @@ async def child_run(
         while result.status is RunStatus.PAUSED:
             assert result.interrupt is not None
             asked = result.interrupt
-            named = {
-                "agent_id": agent.id,
-                "run_id": asked.run_id,
-                "interrupt_id": asked.interrupt_id,
-            }
-            answered = await parent.interrupt(
-                content_key("subagent", asked.run_id, asked.interrupt_id),
-                payload={**(asked.payload or {}), SUBAGENT: named},
-                **{name: getattr(asked, name) for name in ASKED},
-            )
+            answered = await asked_through(parent, asked, agent_id=agent.id, run_id=asked.run_id)
             result = await _answered(agent, parent, asked, answered, branch)
         branch.ended(result.status.value.lower(), error=_why(result))
         return result
+
+
+async def asked_through(
+    turn: Runtime, asked: Interrupt, *, agent_id: str, run_id: str, background: bool = False
+) -> InterruptResolution:
+    """``asked`` — the question the run ``run_id`` of ``agent_id`` waits on — asked in
+    ``turn``'s run, which pauses with it (``background``: the run is a background one's, not a
+    call of this turn's): the answer the turn is given."""
+    named: dict[str, Any] = {
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "interrupt_id": asked.interrupt_id,
+        **({"background": True} if background else {}),
+    }
+    return await turn.interrupt(
+        content_key("subagent", run_id, asked.interrupt_id),
+        payload={**(asked.payload or {}), SUBAGENT: named},
+        **{name: getattr(asked, name) for name in ASKED},
+    )
+
+
+async def asked_for_background(
+    turn: Runtime, asked: Interrupt, *, agent_id: str, run_id: str
+) -> InterruptResolution:
+    """A background run's question asked through ``turn`` (:func:`asked_through`), and its
+    answer as one to hand that run: addressed to its question, not to the turn's."""
+    answered = await asked_through(turn, asked, agent_id=agent_id, run_id=run_id, background=True)
+    return answered.model_copy(update={"interrupt_id": asked.interrupt_id, "run_id": run_id})
 
 
 def _why(result: Result) -> str | None:
@@ -246,7 +262,7 @@ async def _answered(
 ) -> Result:
     """The parent's answer to the child's question, the child's own: resumed with it (in this
     process: a child is never queued, and a cancel never reaches it this way — the parent's
-    ends the parent, and :func:`cancel_children` the child)."""
+    ends the parent, and ``children.end_children`` the child)."""
     record = await agent.harness.runs.get(asked.run_id, tenant=parent.tenant)
     assert record is not None
     resolution = answer.model_copy(
@@ -299,52 +315,16 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
     return named if isinstance(named, dict) else None
 
 
-async def cancel_children(agent: Agent, run_id: str, *, reason: str | None, tenant: str) -> None:
-    """Cancel the children of ``agent``'s run ``run_id`` that have not ended, and theirs: a
-    child paused for a person waits on nobody once its parent is cancelled, and the work its
-    framework keeps going for one outside any attempt stops (the adapter's ``child_cancelled``:
-    a Deep Agents async task, ``bridges.async_tasks``; a harness background task at work in this
-    process, ``background.Tasks.stop``)."""
-    runs = agent.harness.runs
-    stop = getattr(agent.adapter, "child_cancelled", None)
-    async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
-        if child.status.final:
-            continue
-        with contextlib.suppress(ConflictError):  # it ended meanwhile
-            await runs.cancel(child.run_id, reason=reason, tenant=tenant)
-        if stop is not None:
-            await stop(child.run_id, reason)
-        agent.harness.background.stop(child.run_id, reason or "its parent was cancelled")
-        await cancel_children(agent, child.run_id, reason=reason, tenant=tenant)
-
-
 async def _side_effects(agent: Agent) -> SideEffects:
     """``read`` when every tool ``agent`` declares (its own, and the MCP tools its key allows)
-    only reads and none escapes the harness; else ``write``."""
-    if _unseen(agent):
+    only reads and none escapes the harness (its framework's own tools, whose effects the
+    harness does not know: ``Adapter.own_tools``); else ``write``."""
+    if agent.adapter.own_tools(agent.target, agent.sources):
         return "write"
     listing = await listed(agent.sources, gateway=agent.harness.gateway)
     effects = [t.spec.side_effects for t in listing.local]
     effects.extend(side_effects_of(d.annotations) for d in listing.defs)
     return "read" if all(effect == "read" for effect in effects) else "write"
-
-
-def _unseen(agent: Agent) -> bool:
-    """Whether the target has tools of its framework's own, whose effects the harness does not
-    know: a function target's (its code's calls), Claude's built-in tools, an OpenAI Agents
-    agent's own tools or handoffs, a graph's own tools (a ``ReAct``'s are only the harness's
-    own read tools)."""
-    from trellis.harness.middleware import STATE_TOOLS  # noqa: PLC0415 - react
-
-    target, framework = agent.target, agent.adapter.name
-    if framework == "function":  # its code calls what it calls (``agent.tools.call``)
-        return not agent.sources
-    if framework == "claude_agent_sdk":
-        return True
-    if framework == "openai_agents":
-        return bool(target.tools or target.handoffs)
-    harness_own = STATE_TOOLS
-    return any(getattr(t, "name", None) not in harness_own for t in bound_tools(target))
 
 
 def described(agent: Agent) -> str:

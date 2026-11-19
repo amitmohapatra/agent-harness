@@ -43,7 +43,7 @@ from starlette.routing import Route
 from tests.support.planned import CUT, CUT_REPLY, FINAL, Call, worded
 from trellis.contracts import stable_id
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
-from trellis.harness.adapters.claude import RESUMED
+from trellis.harness.bridges.resumed import RESUMED
 from trellis.harness.tools.bridge import STALLED, TURN_STALLED
 from trellis.harness.tools.convert.mcp import STOPPED
 
@@ -74,6 +74,9 @@ NOT_RUN: Final = (
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
 _REJECTED = re.compile(r"^Your call to \S+ was not run: ")
 _DENIED = "the person denied it"
+#: A prompt that tells it the user answered its question in words (``adapters.acp.ANSWERED``):
+#: what they said is the question's result.
+_ANSWERED = "The user answered your question"
 #: The harness's prompts at a step limit (``budget.TURN_LIMIT``) and after a loop
 #: (``bridge.TURN_STALLED``): a model told so answers.
 _TOLD_TO_ANSWER = ("This turn has reached its limit", TURN_STALLED)
@@ -158,7 +161,7 @@ class PlannedEndpoint:
                 matched = _EDITED.search(said)
                 if matched:
                     edited = (matched["tool"], json.loads(matched["args"]))
-                elif users > 1 and (_REJECTED.match(said) or _DENIED in said):
+                elif users > 1 and (_REJECTED.match(said) or _DENIED in said or _ANSWERED in said):
                     results.append(said)
         if _told_to_answer(body):  # told its turn is stopped: it answers, calling nothing
             return self.final.replace("{last}", results[-1] if results else "")
@@ -399,7 +402,7 @@ _STALLED: Final = re.compile(
 
 
 def _remade(messages: list[dict[str, Any]]) -> bool:
-    """Whether the harness's resumed prompt (``adapters.claude.RESUMED``) is among
+    """Whether the harness's resumed prompt (``bridges.resumed.RESUMED``) is among
     ``messages``: told to make again a call whose result says the run ended before it
     finished (``tools.convert.mcp.STOPPED``), the model makes it again."""
     return any(m.get("role") == "user" and RESUMED in text_of(m.get("content")) for m in messages)

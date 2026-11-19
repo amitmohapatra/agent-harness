@@ -207,6 +207,42 @@ def test_every_speaker_goes_both_ways(role: Speaker) -> None:
     assert langchain_message(said).content == "text"
 
 
+def test_a_user_role_message_an_agent_wrote_is_kept_as_the_agents() -> None:
+    """A sub-agent's question (its parent's hand-off) is the service's AGENT message: never the
+    person's words. Through the spool and back it is the same message; a window leaves it
+    out (it is not a turn of the person's conversation)."""
+    handed = Said(Speaker.USER, "Count SKU-1.", id="q1", delegated=True)
+    stored = recorded(handed)
+    # an agent's message is never visible chat: the service refuses a visible AGENT one
+    assert (stored["role"], stored["kind"]) == ("AGENT", "INTERNAL")
+    assert said_of(json.loads(json.dumps(stored))) == handed
+    assert from_window([WindowMessage(id="m1", role="AGENT", text="Count SKU-1.")]) == []
+
+
+def _depth(value: Any) -> int:
+    """Nesting depth as the memory service counts it (a flat object is 1)."""
+    if isinstance(value, dict):
+        return 1 + max((_depth(v) for v in value.values()), default=0)
+    if isinstance(value, list | tuple):
+        return 1 + max((_depth(v) for v in value), default=0)
+    return 0
+
+
+def test_a_notification_fits_the_services_metadata_and_comes_back() -> None:
+    """A notification's metadata (``{"source", "data": {...}}``) is kept in the run record as
+    its JSON text: the service's ``custom_metadata`` nests two levels at most. It comes back
+    as it was, and one stored as a mapping before is read as well."""
+    noted = {"source": "async_task", "data": {"task": {"id": "t1", "status": "success"}}}
+    said = Said(Speaker.USER, "update", id="n1", notified=noted, facts={"status": "SUCCESS"})
+    stored = recorded(said)
+    assert _depth(stored["custom_metadata"]) <= 2
+    assert said_of(json.loads(json.dumps(stored))) == said
+    earlier = {**stored, "custom_metadata": {"run_record": {"notification": noted}}}
+    assert said_of(earlier).notified == noted
+    broken = {**stored, "custom_metadata": {"run_record": {"notification": "{not json"}}}
+    assert said_of(broken).notified is None
+
+
 def test_no_store_leaves_the_history_to_memory() -> None:
     assert owner(None, agent_id="a") is Owner.MEMORY
 

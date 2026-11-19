@@ -115,3 +115,36 @@ async def test_closing_ends_every_hold() -> None:
     held = len(store.beats)
     await asyncio.sleep(0.25)
     assert len(store.beats) == held
+
+
+async def test_heartbeats_keep_their_time_whatever_a_slow_store_or_reader_does(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Under load: a heartbeat the store does not answer is given up within a third of the
+    hold and the next is on time; what is read after each (``renewed``) never delays the next;
+    a failure of any kind is said and the heartbeats go on."""
+
+    class Stuck(Store):
+        async def heartbeat(self, run_id: str, worker_id: str, **given: Any) -> None:
+            await super().heartbeat(run_id, worker_id, **given)
+            if len(self.beats) == 1:
+                await asyncio.sleep(10)  # never answers in time
+
+    reads: list[str] = []
+
+    async def renewed(run_id: str, tenant: str) -> None:
+        reads.append(run_id)
+        if len(reads) == 1:
+            raise RuntimeError("the line could not be read")
+        await asyncio.sleep(10)  # a reader slower than the hold
+
+    store = Stuck()
+    store.answers = [None, ValueError("garbled answer")]
+    holds = Holds(lambda: store, name="h1", renewed=renewed)
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        async with holds.holding("run_1", "t"):
+            await beats(store, 5)
+    assert "run run_1 not held: TimeoutError" in caplog.text  # the stuck one, given up
+    assert "not held: garbled answer" in caplog.text
+    assert "after its heartbeat: the line could not be read" in caplog.text
+    assert len(reads) < len(store.beats)  # one read at a time, the heartbeats on time

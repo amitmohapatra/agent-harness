@@ -6,21 +6,25 @@ from __future__ import annotations
 import asyncio
 import gc
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from trellis.contracts import (
     AgentError,
+    ErrorCategory,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
+    RunRecord,
     RunStart,
     RunStatus,
     ScheduleSpec,
 )
 from trellis.harness import runs as local_runs
+from trellis.harness.identity import Identity
 from trellis.harness.runs import LocalRuns
 from trellis.runs import ConflictError, Lease, LeaseLostError, NotFoundError
 
@@ -272,6 +276,26 @@ async def test_listing_filters_and_stops_after_its_pages() -> None:
     assert len([s async for s in runs.iterate(limit=2, max_pages=2)]) == 4
 
 
+async def test_a_parents_children_are_listed_from_its_own_index_and_leave_it_when_forgotten() -> (
+    None
+):
+    """``iterate(parent_run_id=)`` reads the parent's children only (a run's ending asks it
+    every time: it must not scan every run kept), and a child the store forgets leaves it."""
+    runs = LocalRuns(keep_finished=1)
+    await runs.start(start("parent"))
+    for child in ("kid_1", "kid_2"):
+        await runs.start(start(child).model_copy(update={"parent_run_id": "parent"}))
+    await runs.start(start("other"))
+    listed = {s.run_id async for s in runs.iterate(parent_run_id="parent")}
+    assert listed == {"kid_1", "kid_2"}
+    await runs.finish("kid_1", RunStatus.SUCCESS, output="ok")
+    await runs.finish("kid_2", RunStatus.SUCCESS, output="ok")  # kid_1 is forgotten: cap 1
+    assert [s.run_id async for s in runs.iterate(parent_run_id="parent")] == ["kid_2"]
+    await runs.finish("other", RunStatus.SUCCESS, output="ok")  # and now kid_2
+    assert [s.run_id async for s in runs.iterate(parent_run_id="parent")] == []
+    assert runs._children == {}
+
+
 async def test_a_due_schedule_queues_a_run_when_a_worker_claims() -> None:
     runs = LocalRuns()
     schedule = await runs.schedules.create(
@@ -291,8 +315,107 @@ async def test_a_due_schedule_queues_a_run_when_a_worker_claims() -> None:
         update={"next_fire_at": datetime.now(UTC) - timedelta(seconds=1)}
     )
     fired = await runs.claim("w", ["a"])
-    assert fired is not None and fired.run.input == "report" and fired.run.user_id == "u"
+    assert fired is not None and fired.run.input == "report"
     assert fired.run.metadata["schedule_id"] == schedule.schedule_id
+
+
+async def test_a_fired_run_is_the_one_the_contracts_build_for_the_schedule() -> None:
+    """``Schedule.run_start``'s run, as agent-runs queues it: nobody is present at a fire
+    (``user_id`` is ``None``) and the run acts for ``on_behalf_of``, which is its user to the
+    harness (``Identity.of``); it carries the fire's key and the fire's own metadata."""
+    runs = LocalRuns()
+    spec = ScheduleSpec(
+        tenant_id="t",
+        agent_id="a",
+        name="daily",
+        cadence="manual",
+        on_behalf_of="u",
+        input="report",
+        priority=3,
+        concurrency_key="k",
+        metadata={"thread_id": "c-1", "schedule_id": "not this one"},
+    )
+    schedule = await runs.schedules.create(spec)
+    tick = datetime(2026, 1, 2, 9, tzinfo=timezone(timedelta(hours=2)))
+    fired = await runs.schedules.fire(schedule.schedule_id, at=tick)
+    record = await runs.get(fired.run_id)
+    assert record is not None
+    built = schedule.run_start(fire_time=tick, thread_id="c-1", run_id=record.run_id)
+    assert RunStart.model_validate(record.model_dump(include=set(RunStart.model_fields))) == built
+    assert (record.user_id, record.on_behalf_of, record.thread_id) == (None, "u", "c-1")
+    assert Identity.of(record).user == "u"
+    assert (record.priority, record.concurrency_key) == (3, "k")
+    assert record.idempotency_key == fired.idempotency_key
+    assert record.idempotency_key == f"{schedule.schedule_id}@2026-01-02T07:00:00+00:00"
+    assert record.metadata == {
+        "thread_id": "c-1",
+        "schedule_id": schedule.schedule_id,
+        "schedule_name": "daily",
+        "fire_time": "2026-01-02T07:00:00+00:00",
+        "created_by": schedule.created_by,
+    }
+
+
+@pytest.mark.parametrize("was", list(RunStatus))
+@pytest.mark.parametrize("to", list(RunStatus))
+async def test_a_move_is_the_contracts_own(was: RunStatus, to: RunStatus) -> None:
+    """The store moves a run as ``RunRecord.moved`` does, and so as agent-runs does: the same
+    moves refused (a status never becomes itself), as the store's own ``ConflictError``, and
+    the same clearing of what the run waited on and of its checkpoint."""
+    runs = LocalRuns()
+    begun = RunRecord.from_start(start())
+    waiting = {"awaiting": interrupt()} if was is RunStatus.PAUSED else {}
+    record = begun.model_copy(update={"status": was, "checkpoint": {"k": 1}, **waiting})
+    runs._runs[record.run_id] = record
+    changes = {"awaiting": interrupt()} if to is RunStatus.PAUSED else {}
+    for keep in (False, True):
+        try:
+            wanted = record.moved(to, keep_checkpoint=keep, **changes)
+        except ValueError:
+            with pytest.raises(ConflictError, match=f"cannot become {to.value}") as refused:
+                runs._move(record, to, keep_checkpoint=keep, **changes)
+            assert (refused.value.code, refused.value.status) == ("CONFLICT", 409)
+            assert runs._runs[record.run_id] is record
+            continue
+        moved = runs._move(record, to, keep_checkpoint=keep, **changes)
+        assert moved.model_dump(exclude={"updated_at", "worked_seconds"}) == wanted.model_dump(
+            exclude={"updated_at", "worked_seconds"}
+        )
+
+
+async def test_a_repeated_ending_is_refused_and_changes_nothing() -> None:
+    runs = LocalRuns()
+    await runs.start(start())
+    done = await runs.finish("run_1", RunStatus.SUCCESS, output="ok")
+    with pytest.raises(ConflictError, match="a SUCCESS run cannot become SUCCESS"):
+        await runs.finish("run_1", RunStatus.SUCCESS, output="other")
+    assert await runs.get("run_1") == done
+
+
+async def test_a_record_the_contract_refuses_is_not_a_conflict() -> None:
+    """A move the status allows whose record is refused (an error on a run that did not
+    fail) is the contract's ``ValidationError``, not a conflict to read away."""
+    runs = LocalRuns()
+    await runs.start(start())
+    failed = AgentError(code="x", category=ErrorCategory.TOOL, message="m", retryable=False)
+    with pytest.raises(ValidationError) as refused:
+        await runs.finish("run_1", RunStatus.SUCCESS, error=failed)
+    assert not isinstance(refused.value, ConflictError)
+    assert (await runs.get("run_1")).status is RunStatus.RUNNING  # type: ignore[union-attr]
+
+
+async def test_a_saved_checkpoint_moves_nothing() -> None:
+    """A heartbeat's checkpoint is kept on the run as it is: no move, its status and its
+    working time as they were."""
+    runs = LocalRuns()
+    await runs.start(start(), queue=True)
+    claimed = await runs.claim("w", ["a"])
+    assert claimed is not None
+    await runs.heartbeat("run_1", "w", checkpoint={"k": 1})
+    kept = await runs.get("run_1")
+    assert kept is not None and kept.status is RunStatus.RUNNING
+    assert kept.checkpoint == {"k": 1} and kept.updated_at >= claimed.run.updated_at
+    assert kept.worked_seconds == 0 and "run_1" in runs._running_since
 
 
 async def test_local_schedules_upsert_on_agent_person_cadence_and_input() -> None:

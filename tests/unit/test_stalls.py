@@ -178,3 +178,28 @@ async def test_a_failure_after_the_clients_own_retries_is_counted_as_retried() -
         assert runtime.model_failures == 1
     finally:
         _current.reset(token)
+
+
+async def test_a_lost_lease_stops_a_langchain_model_call_at_its_start() -> None:
+    """The run's lease is gone (a save found it lost): LangChain's model call stops where the
+    callbacks watch it start — the one error of theirs LangChain raises, not logs."""
+    from langchain_core.callbacks.manager import ahandle_event, handle_event
+
+    from trellis.runs import LeaseLostError
+
+    runtime, _ = _runtime()
+    runtime.lease_lost = True
+    callbacks = accounting.UsageAccounting()
+    assert not callbacks.raise_error
+    token = _current.set(runtime)
+    try:
+        with pytest.raises(LeaseLostError):
+            handle_event([callbacks], "on_chat_model_start", None, {}, [[]], run_id=uuid.uuid4())
+        with pytest.raises(LeaseLostError):
+            await ahandle_event([callbacks], "on_llm_start", None, {}, ["p"], run_id=uuid.uuid4())
+        runtime.lease_lost = False
+        # any other error of a callback's is logged, not raised (a call it never saw start)
+        handle_event([callbacks], "on_llm_error", None, RuntimeError("down"), run_id=uuid.uuid4())
+    finally:
+        _current.reset(token)
+    assert not runtime._watched

@@ -62,8 +62,8 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    is_pause_signal,
 )
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget, snapshots
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.bounded import SAID_ONCE, LRUSet
@@ -145,6 +145,10 @@ TURN_STALLED: Final = (
 #: again (:func:`_repeated`, the model reading :data:`STALLED` instead of its result): a model
 #: looping on one call, whatever its framework.
 MAX_REPEATS: Final = 3
+#: What a schedule tool answers in a run a schedule fired: such a run does its task, no more
+#: (``Agent.tools_for`` offers it none; a graph built with them bound, ``h.harness_tools()``,
+#: is refused at the call: :func:`_off`).
+FIRED: Final = "{tool} is not for a run a schedule started: do its task, no more"
 #: The ``error_class`` of that call, and the warning on the run's stream (once).
 REPEATED: Final = "Repeated"
 #: The error class of a call not run because its start could not be saved (:func:`_unsaved`).
@@ -280,19 +284,20 @@ async def asked(
     *,
     call_id: str | None = None,
     kept: bool = False,
+    always: bool = False,
 ) -> ToolCall | ToolOutcome:
     """A call ``framework`` asks its user about before it runs it (its own permission check:
     Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
     :func:`permitted` let it through: a person is asked, as governance asks — answered from the
     journal when the run resumes, not asked again when the tool was approved for the rest of the
     run — and the call to let through (perhaps edited), or the outcome of one rejected. The
-    tool catalog's word on the tool decides first, as for any call (:func:`_catalog_decides`).
-    A pause propagates."""
+    tool catalog's word on the tool decides first, as for any call (:func:`_catalog_decides`),
+    unless the question is ``always`` a person's (a plan to approve). A pause propagates."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
-    if await _catalog_decides(runtime, spec, args):
+    if not always and await _catalog_decides(runtime, spec, args):
         return call
     why = FRAMEWORK_ASKS.format(framework=framework)
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
@@ -359,17 +364,20 @@ def remembered(runtime: Runtime, tool: str) -> bool:
     return reach(tool, None) in runtime.replay.journal.remembered
 
 
-async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
+async def asks_first(spec: ToolSpec, args: dict[str, Any], *, confined: bool = False) -> bool:
     """For a framework that holds a call at its own approval gate before it runs it (OpenAI
     Agents' ``needs_approval``): whether governance asks a person about this call, as it would
     when the call runs — and if so, asked now (the run's pause, governance's question), so the
     framework keeps its run where it paused and its resume runs the call, instead of a new
     attempt that asks the model again. Not for a call governance lets run, one allowed for the
     conversation (or its schedule), or one already approved or answered: the call decides those
-    as ever. Only a tool the harness runs is held (never a confined one: ``_gated``)."""
+    as ever. A ``confined`` tool (a sandbox's shell) asks only where its rule or its risk past
+    a write does, as when it runs (``Decision.unasked``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     decision = await _checked(runtime, spec, args)
+    if confined:
+        decision = decision.unasked()
     journal = runtime.replay.journal
     if (
         not decision.asks
@@ -490,7 +498,7 @@ async def _called(
         budget.count_tool_call(runtime)
         _started(runtime, ref, tool.name, tool_call.args)
         if decision.risk != "read":  # what a rewind past this step would make again
-            runtime.replay.effected(content_key("call", tool.name, tool_call.args))
+            runtime.replay.effected(call_key(tool.name, tool_call.args))
     try:
         outcome, owed = await _ran(
             runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
@@ -536,7 +544,9 @@ async def _ran(
         runtime.code_mode_scripts.append((datetime.now(UTC), tool_call.step))
     runtime.used.add(tool.name)
     reads = decision.risk == "read"
-    if not reads:
+    if reads:  # the model's spending saved first: a worker that dies in the call has it said
+        await runtime.spent_saved()
+    else:
         # saved before it runs: the attempt after a crash knows it was running
         runtime.replay.start(key)
         if not await runtime.saved_start():
@@ -701,17 +711,15 @@ def _refused(
 ) -> ToolOutcome | None:
     """Why a call is not run at all, as the model reads it: the run's budget is spent, the
     same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
-    feature this run is without, or arguments that do not fit its schema (nothing runs,
-    nothing is journaled: the model corrects them)."""
+    feature this run is without (:func:`_off`), or arguments that do not fit its schema
+    (nothing runs, nothing is journaled: the model corrects them)."""
     over = _over_budget(runtime, tool) or _repeated(runtime, tool, key, decision)
     if over is not None:
         return over
-    if tool.feature is not None and not runtime.uses(tool.feature):
+    off = _off(runtime, tool)
+    if off is not None:
         return ToolOutcome(
-            tool=tool.name,
-            status=ToolStatus.ERROR,
-            output=f"{tool.name} is off in this run (without {tool.feature})",
-            error_class="FeatureOff",
+            tool=tool.name, status=ToolStatus.ERROR, output=off, error_class="FeatureOff"
         )
     problem = arguments_problem(tool.spec.input_schema or {}, args)
     if problem is None:
@@ -722,6 +730,19 @@ def _refused(
         output=not_run(tool.name, problem),
         error_class=INVALID_ARGUMENTS,
     )
+
+
+def _off(runtime: Runtime, tool: Tool) -> str | None:
+    """Why a tool the framework was built with is not this run's (``h.harness_tools()``, bound
+    when a graph is built): a part the run is without, or a schedule tool in a run a schedule
+    fired (:data:`FIRED`: every other target is offered none there)."""
+    if tool.feature is None:
+        return None
+    if not runtime.uses(tool.feature):
+        return f"{tool.name} is off in this run (without {tool.feature})"
+    if tool.feature == "schedules" and runtime.scheduled is not None:
+        return FIRED.format(tool=tool.name)
+    return None
 
 
 async def _record(
@@ -741,10 +762,12 @@ async def _record(
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     runtime.replay.record_step(call, outcome)
+    metrics.tool_called(call.tool, outcome.status.value)
+    # queued before the save, so it is on its way while the save is: a worker killed right
+    # after the call (which the journal then keeps from running again) leaves its record
+    await runtime.agent.record_tool(runtime, call, outcome)
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
-    metrics.tool_called(call.tool, outcome.status.value)
-    await runtime.agent.record_tool(runtime, call, outcome)
 
 
 async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall, Deny | Ask | None]:
@@ -873,7 +896,7 @@ def _rewound_past(
     decision asks a person whatever was allowed for the run or the conversation — with the
     call's key there; any other call: its decision as it is, and no key."""
     repeats = runtime.replay.journal.repeats
-    key = content_key("call", spec.name, call.args) if repeats else None
+    key = call_key(spec.name, call.args) if repeats else None
     if decision.risk == "read" or key not in repeats:
         return decision, None
     return decision.asking(REWOUND_PAST.format(tool=spec.name)), key

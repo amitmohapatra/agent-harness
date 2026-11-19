@@ -46,6 +46,7 @@ from trellis.contracts import (
 )
 from trellis.harness import (
     background,
+    children,
     compat,
     conversation,
     frontend,
@@ -54,6 +55,7 @@ from trellis.harness import (
     pipeline,
     sandbox,
     snapshots,
+    stopping,
     telemetry,
 )
 from trellis.harness.adapters import detect
@@ -106,13 +108,13 @@ from trellis.harness.governance.decision import chosen as choice
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key, queued_with
-from trellis.harness.journal import Journal
+from trellis.harness.journal import Journal, content_key
 from trellis.harness.line import INTERRUPTS, Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, principal, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
-from trellis.harness.subagents import asked_by, cancel_children, child_run
+from trellis.harness.subagents import asked_by, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools import ask, query
 from trellis.harness.tools.ask import ASK_USER
@@ -122,7 +124,7 @@ from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox, said_undeclared
 from trellis.memory.models import PromptContext
 from trellis.runs import Job, RateLimitedError
-from trellis.runs.answers import answer_problem
+from trellis.runs.answers import answer_problem, meant
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
@@ -178,6 +180,9 @@ UNREACHED_FIX: Final = {
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
+#: How many tool records a run's journal keeps while they are on their way to memory
+#: (``Journal.unrecorded``): past it a record goes as before (queued, spooled), not saved.
+UNRECORDED_MAX: Final = 64
 #: How many conversations' last framework sessions an agent keeps in this process
 #: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
 #: and its next turn starts a new one.
@@ -218,7 +223,8 @@ EARLIER_CHATS: Final = (
     'with kinds ["message"]) before you say a detail is missing.'
 )
 #: When and how the model asks its user, for every adapter and every topic, sent with every
-#: memory context (as the notes above): a "which one" is asked, never guessed or answered for
+#: memory context (as the notes above) and, memory on or off, to every run whose model has a
+#: question tool (``Agent.push``), said once: a "which one" is asked, never guessed or answered for
 #: each (as an app's own "ask which one is meant" says); else ask only when the model cannot
 #: find out itself, the choice is the user's and a wrong guess costs; otherwise act and say the
 #: assumption. The shape of each question is the model's: the
@@ -387,9 +393,7 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
-        wrapped = getattr(self.adapter, "wrapped", None)  # what the framework checks of its own
-        if wrapped is not None:
-            wrapped(target, self.framework_options, harness.model_gateway)
+        self.adapter.wrapped(target, self.framework_options, harness.model_gateway)
         #: the model's window when it is known, and the pushed context's token budget: a share
         #: of it
         self.model_window = context_window(target)
@@ -441,6 +445,9 @@ class Agent:
         #: turn says them (:meth:`unwritten_said`), as a messages window's reads them from the
         #: run store (:meth:`caught_up`)
         self.unwritten: LRU[str, dict[str, list[Said]]] = LRU(SESSIONS_KEPT)
+        #: the attempt each of those turns was said in, by conversation and run id: a later
+        #: turn's write sends them again under their own keys (:meth:`_queued_turn`)
+        self.attempts_of: LRU[str, dict[str, int]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -450,17 +457,13 @@ class Agent:
         """End what the agent's framework keeps running between runs in this process (the
         Claude Agent SDK's live sessions: ``bridges.claude_live``; an ACP agent's, and the
         files of the sessions kept for a conversation's next turn), where it keeps any."""
-        close = getattr(self.adapter, "aclose", None)
-        if close is not None:
-            await close()
+        await self.adapter.aclose()
 
     def _session_gone(self, _conversation: str, kept: tuple[str, Any]) -> None:
         """The session ``kept`` for a conversation's next turn is kept no more (its place
         given to another conversation's, or dropped): the framework lets go of what it keeps
         of it, where it keeps any (an ACP agent's files: ``ACPAdapter.session_gone``)."""
-        gone = getattr(self.adapter, "session_gone", None)
-        if gone is not None:
-            gone(kept[0])
+        self.adapter.session_gone(kept[0])
 
     @property
     def evals(self) -> EvalServices:
@@ -676,7 +679,10 @@ class Agent:
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
-        await cancel_children(self, run_id, reason=reason, tenant=tenant)
+        # the run is cancelled whatever its children's endings: one that fails is in the log
+        await children.children_ended(
+            self, run_id, tenant, status=RunStatus.CANCELLED, reason=reason
+        )
         return record
 
     async def _stopped(self, run_id: str, reason: str | None) -> asyncio.Future[Any] | None:
@@ -700,11 +706,7 @@ class Agent:
         runtime = self.running.get(run_id)
         if runtime is None:
             return self.turns.cancel(run_id, reason)
-        assert runtime.running_in is not None
-        if runtime.cancelled is None:
-            runtime.cancelled = reason
-            runtime.running_in.cancel()
-        return runtime.running_in
+        return stopping.stop_attempt(runtime, reason)
 
     async def resume(
         self,
@@ -932,6 +934,8 @@ class Agent:
             )
         chosen = InterruptDecision(str(decision).upper())
         awaiting = record.awaiting
+        if chosen is InterruptDecision.ANSWER:  # an option handed back is that option
+            answer = meant(awaiting, answer)
         picked = choice(answer) if answer in awaiting.option_values else None
         if chosen is InterruptDecision.ANSWER and awaiting.tool_call is not None and picked:
             (chosen, remember), answer = picked, None  # an approval's choice: what it names
@@ -999,11 +1003,12 @@ class Agent:
         (a surface's resume: the front end's current state)."""
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
-            await cancel_children(
+            await children.children_ended(
                 self,
                 record.run_id,
+                record.tenant_id,
+                status=RunStatus.CANCELLED,
                 reason=reason_of(resolution),
-                tenant=record.tenant_id,
             )
             # a background task's question, cancelled: the task with it
             await background.abandoned(self, record.awaiting, reason_of(resolution))
@@ -1194,8 +1199,7 @@ class Agent:
             named = {t.name for t in tools}
             tools.extend(t for t in schedule_tools(runtime) if t.name not in named)
             if runtime.attended and ASK_USER not in named and not self.adapter.asks(self.target):
-                apps = runtime.frontend.tools if runtime.frontend is not None else ()
-                tools.append(ask.offered([t["name"] for t in apps]))
+                tools.append(ask.for_run(runtime))
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})
@@ -1239,7 +1243,9 @@ class Agent:
         conversation's earlier turns (:meth:`recalled`) — and after it the front end's
         context and state (``frontend.rendered``), which take at most
         :data:`~trellis.harness.frontend.SHARE` of the context's token budget, the memory
-        context the rest."""
+        context the rest; and when to ask (:data:`ASKING`) where the model has a question
+        tool (:meth:`offers_a_question`) and the memory context did not say it already —
+        once, memory on or off."""
         app, used = frontend.rendered(
             runtime.frontend, runtime.state, int(self.context_budget * frontend.SHARE)
         )
@@ -1250,7 +1256,15 @@ class Agent:
             pushed = await self.remembered(runtime, budget=self.context_budget - used)
         if app:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, app) if p)
+        if ASKING not in (runtime.pushed_context or "") and self.offers_a_question(runtime):
+            # when to ask reaches the model wherever it has a question tool, memory or none
+            runtime.context = "\n\n".join(p for p in (runtime.pushed_context, ASKING) if p)
         return pushed
+
+    def offers_a_question(self, runtime: Runtime) -> bool:
+        """Whether the run's model has a question tool: ``ask_user`` among the run's tools, or
+        its framework's own (``Adapter.asks``: Claude's and Kimi's ``AskUserQuestion``)."""
+        return ASK_USER in runtime.toolbox or self.adapter.asks(self.target)
 
     async def recalled(self, runtime: Runtime) -> None:
         """With memory off (or unreachable where it replays the conversation), the
@@ -1498,16 +1512,44 @@ class Agent:
         the framework spawned works (``bridges.helpers.inside``), under the helper's run."""
         helper = helpers.inside(runtime)
         memory = helper.memory if helper is not None else runtime.run_memory
-        if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
+        if memory is None or not runtime.uses("records") or call.tool in _pull(self):
+            return
+        record = memory.record(
+            "record_tool",
+            call=call.model_dump(mode="json"),
+            outcome=outcome.model_dump(mode="json"),
+        )
+        # kept in the journal until it lands: a process killed before then leaves it to the
+        # attempt after it (``resent_records``)
+        kept = runtime.replay.journal.unrecorded
+        key = content_key("record_tool", record["args"]["call"])
+        if len(kept) < UNRECORDED_MAX:
+            kept[key] = record
+
+        async def sent() -> None:
+            await memory.record_tool(call, outcome)
+            kept.pop(key, None)
+
+        await self.harness.writes.submit(
+            "memory.record_tool", sent, events=runtime.events, record=record
+        )
+
+    async def resent_records(self, runtime: Runtime) -> None:
+        """The tool records an earlier attempt queued and did not see land (its process died
+        first; ``Journal.unrecorded``), queued again: each is the same write, which the
+        service stores once."""
+        kept = runtime.replay.journal.unrecorded
+        for key, record in list(kept.items()):
+            work = self.harness._replay(record)
+            if work is None:  # memory off here: nothing to send it to
+                continue
+
+            async def sent(work: Callable[[], Awaitable[object]] = work, key: str = key) -> None:
+                await work()
+                kept.pop(key, None)
+
             await self.harness.writes.submit(
-                "memory.record_tool",
-                lambda: memory.record_tool(call, outcome),
-                events=runtime.events,
-                record=memory.record(
-                    "record_tool",
-                    call=call.model_dump(mode="json"),
-                    outcome=outcome.model_dump(mode="json"),
-                ),
+                "memory.record_tool", sent, events=runtime.events, record=record
             )
 
     async def recorded_run(self, runtime: Runtime, messages: Sequence[Said]) -> None:
@@ -1526,7 +1568,11 @@ class Agent:
                 self.results.said(runtime.conversation, runtime.run_id, messages)
             return
         run_id, attempt = runtime.run_id, runtime.attempt
-        if self.owner(runtime) is history.Owner.MEMORY:
+        conversation_key = runtime.conversation
+        on_its_way = self.unwritten.get(conversation_key) or {}
+        # written now only when no earlier turn of the conversation is still on its way: past
+        # one, it would be stored before it — it goes behind them instead
+        if self.owner(runtime) is history.Owner.MEMORY and not on_its_way:
             try:
                 async with asyncio.timeout(TURN_WRITE_SECONDS):
                     await memory.record_messages(messages, run_id, attempt)
@@ -1536,14 +1582,36 @@ class Agent:
                     "the turn could not be written before the run returned; it is queued",
                     extra={"run_id": run_id, "error_class": type(exc).__name__},
                 )
-        conversation_key = runtime.conversation
-        on_its_way = self.unwritten.get(conversation_key) or {}
+        await self._queued_turn(runtime, memory, messages, on_its_way)
+
+    async def _queued_turn(
+        self,
+        runtime: Runtime,
+        memory: RunMemory,
+        messages: Sequence[Said],
+        on_its_way: dict[str, list[Said]],
+    ) -> None:
+        """The turn's transcript queued (``writes``: retried, spooled); until memory has it,
+        the conversation's next turns read it from here (:attr:`unwritten`). Memory keeps a
+        conversation's messages in the order they arrive, so the write sends the earlier turns
+        still on their way first, each as its own write again (memory stores a message once):
+        whichever write lands first, the conversation is in order, and no write waits for
+        another."""
+        run_id, attempt, conversation_key = runtime.run_id, runtime.attempt, runtime.conversation
+        attempts = self.attempts_of.get(conversation_key) or {}
+        attempts[run_id] = attempt
+        self.attempts_of[conversation_key] = attempts
         on_its_way[run_id] = list(messages)
         self.unwritten[conversation_key] = on_its_way
+        # in the order they were said, this one last
+        turns = [(r, said, attempts.get(r, 1)) for r, said in on_its_way.items()]
 
         async def written() -> None:
-            await memory.record_messages(messages, run_id, attempt)
-            on_its_way.pop(run_id, None)  # memory has it: its window says it from now on
+            for turn_id, said, said_in in turns:
+                if turn_id in on_its_way:  # else in memory already
+                    await memory.record_messages(said, turn_id, said_in)
+                    on_its_way.pop(turn_id, None)  # its window says it from now on
+                    attempts.pop(turn_id, None)
 
         await self.harness.writes.submit(
             "memory.transcript",

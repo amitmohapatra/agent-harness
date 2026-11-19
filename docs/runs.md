@@ -152,6 +152,27 @@ the model reads that it was interrupted and may or may not have taken effect, an
 tool that is idempotent runs again with the same idempotency key
 ([reliability.md](reliability.md#unknown-outcomes)). A read that was in flight simply runs
 again.
+What the run has spent (`RUN_FINISHED`'s `spent`) is saved as each model reply is accounted,
+so the replies a dead worker was paid for since its last save stay counted: a heartbeat whose
+checkpoint adds one small segment, the spending of the run and its sub-agents' runs, to the
+journal's segments — the next spending save replaces it, the next progress save adds to it,
+and the checkpoint stays segments alone; one save under way at a time, the replies accounted
+meanwhile sent with the next (none when a progress save carried them). A call that only reads
+waits, before it runs, for the one save that carries the replies accounted before it — not
+for the saves of replies accounted while it waits, not at all when a save already carried
+them, and not past a save that failed. A spending save that fails is a `warning` once in the
+run (the next progress save carries the spending); one that finds the lease lost stops the
+run at its next model call or read. Each spending save uploads one content-addressed segment:
+a run writes one per model reply at most (none when the spending is already saved, or back at
+what the last progress save holds), and one a later save replaced stays in agent-runs'
+payload store until its sweep deletes it, as it deletes any object no record refers to, 24 h
+after it was written. The attempt's end starts no
+more spending saves: its pause or ending — or its worker handing the run back — is written
+only once the spending save under way has its answer, so a heartbeat already sent cannot land
+after it (after the same worker claimed the run again, it would put back the earlier
+attempt's checkpoint). A model call still under way when the worker died is not counted: the
+harness never saw its reply, though the provider may have charged it; nor is a reply a
+framework reports only later (when its turn or query ends) before it does.
 A save that fails is a `warning` event and a log line — the run goes on, and the next save
 tries again; a save refused with `409` (the lease is gone) stops the run without writing
 anything more. Runs started in process (`run`, `stream`) save no progress: nobody resumes them
@@ -398,9 +419,17 @@ takes nothing after) — and whoever watches in process hears `RUN_FINISHED` onl
 recorded. A worker's appends name it (fenced by its lease). Without `RUNS_URL` nothing is kept:
 `agent.events` follows the run's attempts in this process from now on.
 
-**On failure.** Best-effort: events agent-runs refuses or cannot take (after its SDK's retries)
-are dropped with one `warning` event (`events_undelivered`, logged, counted
-`trellis.run_events.undelivered`); the run goes on. A lost lease stops the log.
+**With progress.** A worker's progress save (the heartbeat after a step with side effects)
+carries the events not in the log yet, and agent-runs keeps them in the same transaction as the
+checkpoint: a worker killed right after a step leaves both the step and the events that show
+it, or neither — never a step the next attempt will not repeat that its log never shows. An
+agent-runs from before heartbeats took events refuses them once; progress is then saved alone
+and the events go as appends.
+
+**On failure.** Best-effort: while agent-runs cannot be reached (a restart), an append is tried
+again, in order, for up to a minute; events it refuses or still cannot take are dropped with one
+`warning` event (`events_undelivered`, logged, counted `trellis.run_events.undelivered`); the
+run goes on. A lost lease stops the log.
 
 ## Admission: agent-runs' rate limit
 
@@ -430,9 +459,13 @@ run options as `start`, and every fired run gets them — agent-runs and `LocalR
 | `priority=` | `RunStart.priority` | `ScheduleSpec.priority` | `priority` |
 | `concurrency_key=` (`start`: by default `thread:<conversation>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
 
-agent-runs copies a schedule's `metadata` into each fired run's `RunStart.metadata`, its own
-keys (`schedule_id`...) laid over it, so a worker reads a scheduled run's choices exactly as a
-started run's. `priority=` and `concurrency_key=` need trellis-contracts 0.6.1 or later: with an
+A fired run is the one the contracts build for its schedule (`Schedule.run_start`), from
+agent-runs and from `LocalRuns` alike: the schedule's `metadata` is copied into the run's
+`RunStart.metadata`, the fire's own keys (`schedule_id`, `schedule_name`, `fire_time` in UTC,
+`created_by`) laid over it, so a worker reads a scheduled run's choices exactly as a started
+run's; its `idempotency_key` is `<schedule_id>@<fire_time in UTC>`; and its `user_id` is
+`None` — nobody is present at a fire — while it acts for `on_behalf_of`, which is the run's
+user to the harness (`Runtime.user`, memory, files). `priority=` and `concurrency_key=` need trellis-contracts 0.6.1 or later: with an
 older one `schedule` refuses them (`ConfigurationError`) rather than drop them. In Way 2 the
 same keys work without a harness: `runs.schedules.create(ScheduleSpec(..., priority=,
 metadata={"without": [...], "framework_options": {...}}))`, and whatever executes the fired run
@@ -448,7 +481,8 @@ for work; in agent-runs its ticker queues the run.
 "change it to 9", "pause it", "cancel it": every agent has four built-in tools for this
 (`trellis/harness/schedules.py`), on agent-runs' schedules (`RUNS_URL`) or `LocalRuns`'. Nothing
 to configure; `without=["schedules"]` turns them off (for the agent or one run). A graph built
-with its tools bound takes them as it takes the memory tools: `h.schedule_tools()`.
+with its tools bound takes them when it is built, with the harness's other tools: `await h.harness_tools()`
+([frameworks/langgraph.md](frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build); `h.schedule_tools()` alone). A run a schedule fired is offered none: a graph's bound ones answer that they are not for it.
 
 | Tool | What it does |
 |---|---|

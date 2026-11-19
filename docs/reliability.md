@@ -500,7 +500,10 @@ line naming both versions.
   attempt is working on (the attempts themselves still stop on time). It keeps the last 1,000
   finished runs, each for an hour (`LocalRuns(keep_finished=, keep_finished_seconds=)`), with
   their artifacts, so a long-lived process does not grow; paused, queued and running runs are
-  always kept. agent-runs (`RUNS_URL`) is the durable store for production.
+  always kept. A run moves by the contracts' own rule (`RunRecord.moved`), as in agent-runs;
+  a finish repeated to the status the run already ended in is refused (`ConflictError`),
+  where agent-runs answers its own worker's repeat with the stored record. agent-runs
+  (`RUNS_URL`) is the durable store for production.
 * **The harness's own state is bounded** (`trellis.harness.bounded`): what it keeps per
   tenant, tool, prompt, skill or thread is the most recently used, up to a bound, and the
   spool stops at 64 MB (`writes.MAX_SPOOL_BYTES`); what is forgotten is read, sent or said

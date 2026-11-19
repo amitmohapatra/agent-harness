@@ -37,7 +37,7 @@ from trellis.contracts import (
     Option,
 )
 from trellis.harness.journal import content_key
-from trellis.runs.answers import schema_problem
+from trellis.runs.answers import meant, schema_problem
 
 
 class RunCancelled(Exception):
@@ -182,10 +182,15 @@ class Question:
 
     # ------------------------------------------------------------------ the answer
     def answer(self, resolution: InterruptResolution) -> Any:
-        """What the person answered: the answer (a list of values for ``multiple``), the
-        corrected value of a review, read into ``form`` when there is one. A cancel raises
+        """What the person answered: the answer (a list of values for ``multiple``; an option
+        handed back in another case or spacing as that option's value), the corrected value
+        of a review, read into ``form`` when there is one. A cancel raises
         :class:`RunCancelled`."""
         value = answer_of(resolution)
+        if resolution.decision is InterruptDecision.ANSWER:
+            # an option handed back in another case or spacing is that option; any other
+            # answer is as it was given, for the asker to read (``answers.meant``)
+            value = meant(self.interrupt(tenant="-", run_id="-"), value)
         if self.form is None or value is None or isinstance(value, bool):
             return value
         try:

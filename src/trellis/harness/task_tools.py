@@ -30,6 +30,9 @@ TOOLS: Final[Mapping[str, SideEffects]] = {
 #: The notification source of a task's outcome (Deep Agents' ``lc_source``): its data is the
 #: ``TaskEvent``.
 SOURCE: Final = "async_subagent"
+#: The statuses of a task that has not ended (Deep Agents' ``AsyncTask.status``), in the order
+#: a task goes through them.
+UNFINISHED: Final = ("pending", "running", "waiting")
 
 
 def result_of(name: str) -> Mapping[str, Any]:

@@ -54,8 +54,8 @@ def with_governance[H: Harness](harness: H, governance: Governance) -> H:
 
 def declaring[H: Harness](harness: H, **risks: Any) -> H:
     """``harness`` with a catalog in process that says each named tool's risk (``read``,
-    ``write``, ``irreversible``)."""
-    rules = {name: Rule(risk) for name, risk in risks.items()}
+    ``write``, ``irreversible``), or its whole ``Rule`` (an ``approve_when`` too)."""
+    rules = {name: r if isinstance(r, Rule) else Rule(r) for name, r in risks.items()}
     return with_governance(harness, Governance(FakeCatalog(rules)))
 
 

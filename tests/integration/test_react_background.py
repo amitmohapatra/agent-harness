@@ -1058,7 +1058,7 @@ def test_an_update_strategy_is_deep_agents_own() -> None:
 async def test_cancelling_a_paused_parent_with_no_framework_work_cancels_its_child(
     harness: Harness,
 ) -> None:
-    """``subagents.cancel_children`` on an agent whose framework keeps nothing going for a
+    """``children.end_children`` on an agent whose framework keeps nothing going for a
     child (a function's: no ``child_cancelled``): the child's run is cancelled all the same."""
 
     async def asks(input: str, agent: Runtime) -> str:

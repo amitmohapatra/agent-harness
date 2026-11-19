@@ -1086,7 +1086,7 @@ row is the library's own class or tool and, for `ReAct`, the code and its test.
 | Many sub-agents at once | `Workflow` | `AgentSwarm` | no | `Send` | yes: the `Send` recipe, each a child run | [above](#fan-out-many-sub-agents-at-once-a-recipe); `test_react_fan_out.py` |
 | Handoffs | no | no | `handoffs=` | `langgraph-swarm` | yes: `create_handoff_tool` | `middleware._hands_off`, `adapters.langgraph.ACTIVE_AGENT`; `test_react_handoffs.py` |
 | Planning (a todo list) | `TodoWrite` | `TodoList` | no | `TodoListMiddleware` | yes: on a long task | `automatic.Planning`; `test_react_long_tasks.py` |
-| Plan mode | `permission_mode="plan"`, on request | `mode=plan`, on request | no | no | yes: `PlanMode()`, on request | `plan_mode.py`; `test_react_plan_mode.py` |
+| Plan mode | `permission_mode="plan"`, on request, held by the harness's hook ([claude-agent-sdk.md](claude-agent-sdk.md)) | `mode=plan`, on request | no | no | yes: `PlanMode()`, on request | `plan_mode.py`; `test_react_plan_mode.py` |
 | Skills | yes | yes | sandbox | Deep Agents `SkillsMiddleware` | yes: `skills=`, the helper too | `skills.py`; `test_skills.py` |
 | Memory files (`AGENTS.md`) | `CLAUDE.md` | `AGENTS.md` | no | Deep Agents `MemoryMiddleware` | yes: `memory_files=` | `react.ReAct`; `test_react_deep_agents.py` |
 | Long-term memory | auto memory | no | sandbox memory | store | yes: the memory service | [memory.md](../memory.md); `test_memory_pipeline.py` |

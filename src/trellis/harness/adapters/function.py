@@ -18,6 +18,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     Output,
     ToolFormat,
@@ -27,7 +28,7 @@ from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 
 
-class FunctionAdapter:
+class FunctionAdapter(Keeps):
     name: ClassVar[str] = "function"
     tool_format: ToolFormat = "none"
     fixed_tools: bool = False
@@ -50,6 +51,9 @@ class FunctionAdapter:
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
+
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        return not sources  # its code calls what it calls (``agent.tools.call``)
 
     def steers(self, target: Any) -> bool:
         return False  # a function has no step the harness sees between its calls

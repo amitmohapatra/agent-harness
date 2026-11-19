@@ -5,6 +5,268 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: an OpenAI `SandboxAgent`'s shell runs unasked, as every framework's shell does
+
+A `SandboxAgent`'s `exec_command` and `write_stdin` asked a person as any write, while Claude
+Code's and Kimi Code's `Bash`, Deep Agents' `execute` and the harness's `sandbox_exec` run in
+the run's sandbox unasked and announced. On the skills benchmark the OpenAI agent's chats
+waited on a person to `cat` a skill file (5 of 30 cases right). They now run as the others do:
+announced, recorded, unasked — a command that reads and one that writes alike; on a host
+`TRELLIS_HOST_EXECUTION=deny` still refuses the SDK's local sandbox. A risk the catalog declares
+still asks as it says, for this shell and for every tool announced this way (Deep Agents'
+`execute`, `sandbox_exec`, a framework's own write) where it is not the tool's own risk (which
+the harness publishes to the catalog itself): `irreversible` at every call (held at the SDK's
+own gate, its approved call continuing the paused run), and so does an `approve_when`. Only the
+SDK's own `Shell` capability's tools are the sandbox shell, and the mark survives the harness's
+copies of the tool. `apply_patch` asks as a write, as `Write` does.
+### Fixed: a conversation's transcript is no longer refused by the memory service
+
+A sub-agent's question (stored as the agent's message, below) went as visible chat, which the
+service refuses: the whole turn's transcript was lost. It is now an internal message, which a
+window leaves out. A background task's notification kept its metadata four levels deep where
+the service allows two, and was refused the same way: it is kept as its JSON text (one stored
+before still reads).
+
+### Fixed: a conversation's turns are stored in the order they were said
+
+A turn whose transcript write took longer than the run waits (memory slow or overloaded) was
+queued, and the conversation's next turn, written at once, reached memory before it: memory
+keeps a conversation's messages in the order they arrive, so the window replayed them out of
+order. A turn is written at once only when no earlier turn of its conversation is still on its
+way; otherwise its queued write sends those earlier turns first, each under its own key (memory
+stores a message once), then its own: whichever write lands first, the conversation is in
+order, and no write waits for another (a first design that waited held the write queue's
+workers under load, and turns were lost when the process stopped).
+
+### Fixed: a run served under load is no longer ended for a missed heartbeat
+
+A run a server keeps in its own process is held by a heartbeat every 20 s for a 60 s hold. Each
+heartbeat waited for the store and then for the conversation's line read before the next could
+start, so under load (a slow agent-runs, a slow line read) they fell behind until the hold
+lapsed and agent-runs ended a run that was still working (`holder_lost`). Heartbeats now keep
+their time: one not answered within 20 s is given up, the line is read in a task of its own,
+and a failure of any kind is logged without stopping them.
+
+### Fixed: a brief agent-runs outage no longer loses a run's events
+
+An append of events agent-runs could not be reached for was dropped once its client's own
+retries (about two seconds) were spent, so a restart lost the events of every run in flight.
+It is now tried again, in order, for up to a minute, then dropped with one warning as before.
+A tool call's record is kept in the run's journal until it lands (`Journal.unrecorded`), so a
+process killed after the call, its record still queued, leaves it to the next attempt, which
+sends it again (the service stores it once); and the progress save carries the events not in the log
+yet: agent-runs keeps them in the checkpoint's transaction (its heartbeat's `events`), so a
+worker killed right after a step leaves the step and the events that show it, or neither. An
+agent-runs from before that refuses them once; progress is then saved alone, as before.
+
+### Fixed: a run a dead worker left keeps what that worker's model calls spent
+
+A queued run whose worker died and another finished reported, in `RUN_FINISHED`'s `spent`
+(and so in its record), only what its journal held at its last progress save: the model
+replies the dead worker was charged for after it — those followed by calls that only read,
+saved at most every 20 s — were lost (the accuracy benchmark's restart case, `long-flow-04`:
+32,978 tokens reported against 40,723 metered). Each reply accounted on a worker's run now
+saves what the run has spent at once, on a heartbeat: one small segment of the spending after
+the journal's segments, which the next spending save replaces (`Journal.save_spending`) — a
+checkpoint of segments alone, as agent-runs keeps one, and as a worker of an earlier release
+reads it. One save under way at a time; a call that only reads waits, before it runs, for the
+one save that carries the replies accounted before it (not for later ones, and not at all
+when a save already carried them). The attempt's pause, end or hand-back is written only after
+the spending save under way is answered, and none starts after it, so a late heartbeat cannot
+put back an earlier attempt's checkpoint; a failed spending save is a warning once per run, and
+one that finds the lease lost stops the run's next model call or read. Each save uploads one
+small segment; one a later save replaced is deleted by agent-runs' payload sweep 24 h after it
+was written. A
+model call still under way when the worker died is not counted (its reply never came).
+### Added: `h.harness_tools()`: the harness's own tools for a graph you build
+
+A graph whose model binds its tools when it is built (a hand-built `StateGraph`, a
+`create_agent` graph without `middleware()`) never had `ask_user` and had the schedule tools
+only by asking for them (`h.schedule_tools()`): in the accuracy run such a graph asked in its
+reply and never made a schedule. `await h.harness_tools()` gives it, as LangChain tools for its
+`ToolNode` and `model.bind_tools`, what every other target is offered by itself: the MCP tools
+the virtual key allows, the memory tools, the schedule tools and `ask_user` — the same tools,
+not copies. Each call is the run's that makes it: governed, journaled and recorded;
+`ask_user` pauses the run and its answer is the call's result; a part the run is without
+answers that it is off in this run; outside a run a call is refused. A schedule tool called in
+a run a schedule fired now answers that it is not for that run (every other target is offered
+none there). A `create_agent` graph is offered them in the run's words at each model call
+(`schedule_task` saying the hour in the user's zone, `ask_user` naming the app's own controls).
+The benchmark's `graph` adapter binds them as the docs say: asking 59 to 71 of 80, schedules
+20 to 57 of 61, skills 28 to 29 of 30
+([frameworks/langgraph.md](docs/frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build)).
+### Fixed: a sub-agent's question is no longer kept as the person's own words
+
+A child run's question (a `subagents=` call, a nested `run()`, a framework's own sub-agent or
+async task) is what the agent above it wrote. It was written to the memory service as the
+person's message, in their conversation: the service formed their memories from it (a planner's
+"Research only; never reorder" became the user's standing rule, steering every later run of
+theirs) and the conversation's window replayed it as a turn of theirs. It is now kept as an
+agent's message (the service's `AGENT` role, `Said.delegated`): in the transcript, never the
+person's words, and no window replays it. The person's own question stays theirs.
+
+### Fixed: a harness served from another thread closes from the main one
+
+A harness whose agents serve AG-UI or A2A from uvicorn in a thread does its background
+writes on that thread's event loop. `h.aclose()` from the main loop then failed with a
+`RuntimeError` ("attached to a different loop"), and when uvicorn was told to exit first,
+with that loop's `CancelledError`. The writes are now drained and their workers stopped on
+their own loop while it runs; a loop that has ended stopped them already. Only a close that
+is itself cancelled says so (`examples/05_features/serve_agui_and_a2a.py`,
+`examples/02_way1_react/subagents.py` against the real services).
+### Fixed: an answer in words to an agent's question reaches its model, on every adapter
+
+An answer to a question with options was refused unless it was an option's exact value:
+answering Kimi Code's own `AskUserQuestion` (options `SUP-04 (Lyon Mills)`, `SUP-07 (Prato
+Knit)`) with "SUP-04" failed `resume` with `the answer 'SUP-04' is not one of the options`,
+and the run stayed paused; in the asking benchmark seven Kimi cases ended there. One rule now
+holds for every answer, on every surface (`agent.resume`, AG-UI, A2A: `Agent._resolution`,
+and a queued run's worker through `Question.answer`) and every adapter: an option handed back
+— its value or label, case and spacing aside — is that option
+(`trellis.runs.answers.meant`, which agent-runs checks with too); any other answer is never
+refused and never guessed into an option ("SUP-04", "not SUP-04", "the second one" are the
+model's to read). `ask_user` took words already. Kimi's question now takes them
+(`expects` a string, or a form's object or words): its question is dismissed and Kimi told
+`The user answered your question "…" with: …` in the resumed turn (`adapters.acp.ANSWERED`).
+Claude's `AskUserQuestion` reads the words as its answer, as before. An approval's choice
+handed back by its label (`"Allow for this conversation"`) is that choice. Needs agent-runs'
+SDK with `answers.meant`.
+
+### Fixed: when to ask reaches the model wherever it has a question tool, memory or none
+
+The note on when and how to ask (`agent.ASKING`) came only with a memory context: a run with
+memory off (or unreachable) never told its model when to ask, though it had `ask_user` or its
+own `AskUserQuestion`. `Agent.push` now adds it, after the context, to every run whose model
+has a question tool (`Agent.offers_a_question`: `ask_user` among its tools, or the
+framework's own, `Adapter.asks`), through the same context every adapter already takes its
+memory context in — and only when the memory context did not say it already, so it is said
+once.
+
+### Fixed: the asking benchmark scores Kimi's own question as its question tool
+
+`benchmark/cost/asking.py` scored a question Kimi asked with its own `AskUserQuestion`
+"asked via ask, not ask_user", though `ASKING` names that tool as the model's question tool
+and Claude's same tool counted (it is asked as `ask_user`). A question an agent asks with its
+own tool now counts as asked with its question tool, its shape checked as that tool shows it
+(options, several picks, a form, the option labelled "(Recommended)").
+
+### Fixed: a Kimi that never reached the harness's tools no longer answers without them
+
+In the accuracy run, a Kimi Code session now and then opened without its connection to the
+harness's MCP server: its model was offered none of the run's tools, searched the machine with
+its own shell, and answered wrong as if the data did not exist. The harness's server now says
+when Kimi reached it (`Served.reached`), and an agent that connects to its MCP servers as a
+session opens (`Profile.connects`, Kimi's) has 10 seconds after that to have done so
+(`CONNECT_SECONDS`). One that did not is started again, said on the run as an `acp_tools`
+warning; when the next one does not connect either the run fails saying why
+(`CONNECT_TRIES`). An ACP agent that connects only at its first call is not held to it.
+
+### Fixed: a run's end no longer scans every run the in-process store keeps
+
+Ending a run asks the store for its open children, once for each open status. `LocalRuns`
+answered by scanning every run it keeps (up to `keep_finished`), so each run paid two full
+scans at its end, and more the longer a process ran. It now keeps each parent's children in
+an index of their own: `iterate(parent_run_id=)` reads only those, and a child the store
+forgets leaves the index. On the overhead benchmark this branch is again level with or faster
+than the release before it (a run with one tool call about 8% faster, a stream about 20%, a
+run that starts a child about 15%).
+
+### Fixed: Claude Agent SDK plan mode holds until a person approves the plan
+
+A run with `permission_mode="plan"` (the options', or a run's `framework_options`) looked
+things up, then closed an account and notified the customer without ever presenting a plan.
+The harness's `PreToolUse` hook answers `allow` for every harness tool (the bridge decides
+it), and the hook's word is final for the CLI: its own plan mode never saw those calls.
+The hook now holds plan mode itself: until a person approves the plan Claude presents
+(`ExitPlanMode`) only a call that reads runs (governance's
+risk, as `PlanMode` for `ReAct`; a shell command that only reads) or Claude's write of its
+plan in its plans folder. Any other — a harness tool that writes, `Write`, `Edit`, a command
+that changes something, a hand-over to another harness agent — is refused, Claude reading
+why, and recorded as a rejected call. The approval is kept in the run's journal
+(`Journal.plan_approved`), so a resume on any worker goes on governed as ever. A run that
+set plan mode and relied on its writes running sees them refused until the plan is approved.
+
+Checked against the real CLI with Haiku, three more holes are closed. The CLI presents its
+plan unasked when an SDK drives it, so the hook asks the person itself — always, whatever the
+tool catalog says of `ExitPlanMode` (it only reads, so the catalog's word on it would have let
+every later plan through). In plan mode the CLI asks about every harness tool after the hook
+allowed it; `can_use_tool` now lets a harness tool through (the hook decided it, the bridge
+governs its call), so a lookup no longer waits for a person. Resumed, the CLI presents the
+plan again, worded again and under another id: the plans a run presented are kept in its
+journal (`Journal.plans`), and a person's approval of any of them ends plan mode.
+
+### Fixed: the same AG-UI `runId` sent twice at once opens one run
+
+`POST /agui/run` claimed a caller's `runId` only after asking the run store whether it was
+new, so two requests with the same `runId` arriving together both passed the check; against
+agent-runs, which answers a second start of a `run_id` with the run, both were answered 200
+and the run was attempted twice. The `runId` is now claimed before the store is asked: the
+second request is a 422.
+
+### Changed: the in-process run store follows the contracts' rules (`LocalRuns`)
+
+Built on trellis-contracts' unreleased `main` (0.8.0 to be) and the agent-runs SDK beside it;
+each rule below was a copy in `runs.py` and is now read from the contracts.
+
+* **A schedule fired in process queues the run agent-runs queues** (`Schedule.run_start`).
+  Three things change on such a run's record: `user_id` is `None`, where it was
+  `on_behalf_of` (the run still acts for `on_behalf_of`: `Runtime.user`, its memory and its
+  files are that person's, as on agent-runs); it carries the fire's `idempotency_key`
+  (`<schedule_id>@<fire_time in UTC>`, the key `FireResult.idempotency_key` already gave);
+  and its `metadata` gains `schedule_name`, `fire_time` (UTC) and `created_by` beside
+  `schedule_id`. Code that read `record.user_id` of a scheduled run reads
+  `record.on_behalf_of`.
+* **A run moves as `RunRecord.moved` moves it**, the rule agent-runs follows. A status never
+  becomes itself: a repeated `finish` to the status the run already ended in is a
+  `ConflictError` (`a SUCCESS run cannot become SUCCESS`) and changes nothing, where
+  `LocalRuns` took it and wrote the second output over the first. The pipeline already reads
+  such a refusal back and goes on with the run as recorded. A checkpoint an attempt saves (a
+  heartbeat's, a release's) is kept without a move. The refusal's message is the contracts'
+  (`run <id>: a <STATUS> run cannot become <STATUS>`).
+* `is_pause_signal` is imported from `trellis.contracts`.
+* Nothing to change for the dependencies' other changes: the harness emits an `error` only
+  on `RUN_ERROR` and a failed `RUN_FINISHED`, its deadlines are timezone-aware, and it reads
+  no stored record itself (the SDK reads agent-runs' with `RunRecord.read` and
+  `Schedule.read`). `agent.resume(..., remember="always")` on an interrupt with no tool call
+  is refused (`ConfigurationError`: `only an approval of a tool call is remembered beyond its
+  call`), as `remember="run"` was, by the SDK's `answer_problem`.
+
+### Fixed: a run's children end with it, each on its own
+
+* **Children:** every place a run ends — answered, failed, out of time, cancelled, its hold
+  lost — ends its children through one cascade (`children.end_children`). A child whose
+  ending fails (the run store's error, a Deep Agents server that fails its cancel) is said in
+  the log and no longer leaves the run's other children working; the first such error is
+  raised once every child was tried; a cancel (`agent.cancel`, a cancelled resume) and a run's
+  own end only log it. A child the store ended first, or another worker holds, is left to
+  whoever ended or holds it, its own children too. What this process keeps for a child (its
+  background task, its live session's background subagent, its Deep Agents task) stops
+  whether or not the store took the child's end, and through the keepers of the child's own
+  agent; what the adapter keeps for a run stops even when the store cannot list its children.
+* **A paused child of a failed run** ends: cancelled with the parent's error message (a paused
+  run cannot fail), where it was left waiting for an answer that went nowhere. A child that
+  fails with its parent's error is never put back on the queue for a retry.
+* **A run whose caller went away** (a closed stream) leaves the children it queued for a
+  worker to work; only a cancel ends those. A run's end lists only its open children.
+* **Sub-agents:** an ACP agent wrapped as a tool (`tools=[h.wrap(ACPAgent(...))]`) is `write`
+  unless `side_effects=` says otherwise: it runs its own tools in its own process. It was
+  `read` when the harness tools it declared only read. An adapter says whether its framework
+  has tools of its own (`Adapter.own_tools`); one that does not say is taken to have them.
+* **Cancel:** a run stopped for a reason (`agent.cancel(reason=)`, a newer message) ends with
+  that reason on its `RUN_FINISHED` event when its framework's session then reports a cancel
+  of its own; the session's wording replaced it.
+
+### Changed: one owner each for stopping, children and helpers (no behaviour change)
+
+* Stopping an attempt and reading "the run store ended it" live in `stopping.py`; the
+  adapters' six copies of opening and closing an attempt's helpers are
+  `bridges.helpers.helping()`; what an adapter may leave undefined has its default in
+  `adapters.base.Keeps`.
+* The unit suite holds three budgets at what the source has today: the highest and mean
+  function complexity, duplicate blocks, and packages that import each other
+  (`tests/unit/test_complexity_budget.py`, `test_duplication_budget.py`,
+  `test_import_budget.py`).
+
 ### Fixed: security audit — scope, approvals and what reaches the service's own files
 
 * **AG-UI:** the data a paused run's question carries (`GET .../runs/{run_id}/artifacts/{id}`)
@@ -169,6 +431,18 @@ switch uid. `sandbox(DockerSandbox())` keeps a container per run. `ExecResult` g
   `background.left`). An outcome told while a turn of the chat holds its turn in the process is
   now told again by that turn's own task once it lets go (`background.delivered`), by a turn of
   the chat's own; one that finds the outcome told already stays quiet.
+* **Cost benchmark: every turn of the comparison's case lists is strictly scored.** Of the
+  139 turns of a run (`benchmark/cost/results/haiku-2026-11-15/sets/`), 119 were: 18 filler
+  turns carried only a scripted reply and 2 explain follow-ups were judge-only. Each filler
+  turn now has an exact answer from the data — `conversation-08`'s supplier name, the Silk
+  Scarf Navy's unit cost (its gold calls now read `sku_details`), the south's store count,
+  August's top category by revenue (the question now says "by revenue": by units it is
+  another), S12's empty audit, SKU-00042's price; `advconv-05`'s 12 counts of SKUs priced
+  above £100. `explain-01`'s "Where did that number come from?" is scored on the source it
+  names (the sales summary tool, outerwear, 1 July to 30 September 2026) and `explain-04`'s
+  "Why do you think that's the right number?" on the figure and every input of its formula
+  (units, lead time, on hand): a `tools` or `steps` check would want the tool names verbatim
+  and a call count, which neither question asks for.
 
 ### Fixed: gaps the SDK full-stack pass found
 

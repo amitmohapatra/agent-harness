@@ -13,8 +13,8 @@ a server (``AsyncSubAgent``) or here.
   pipeline as any run's — its tool calls governed, recorded under its run, its budget and time
   its agent's — and held in the run store meanwhile (``holding``): a server killed with it
   leaves a run the store ends (``holder_lost``), the harness closing cuts it off
-  (:data:`CUT_OFF`), and cancelling the turn cancels it (``pipeline._children_ended``,
-  ``subagents.cancel_children``: :meth:`Tasks.stop` ends its attempt here); cancelled on
+  (:data:`CUT_OFF`), and cancelling the turn cancels it (``children.end_children``:
+  :meth:`Tasks.stop` ends its attempt here); cancelled on
   another replica, its hold here is refused and its attempt stops (``Harness._lost``). Its
   record is the run store's, so a check, the list, an update or a cancel reads it from any
   replica.
@@ -64,14 +64,13 @@ from trellis.contracts import (
     safe_id,
     stable_id,
 )
-from trellis.harness import admission, task_tools
+from trellis.harness import admission, children, stopping, task_tools
 from trellis.harness.adapters.langgraph import ASKED
 from trellis.harness.bounded import LRU, MAXSIZE
-from trellis.harness.conversation import Mode
+from trellis.harness.conversation import INTERRUPTED, Mode
 from trellis.harness.frontend import FRONTEND
 from trellis.harness.identity import conversation_key, queued_with
-from trellis.harness.journal import Journal, content_key
-from trellis.runs import ConflictError, LeaseLostError
+from trellis.harness.journal import Journal
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -100,7 +99,7 @@ STATUS: Final[Mapping[RunStatus, str]] = {
     RunStatus.REJECTED: "error",  # refused (its policy, a rule): it failed, as Deep Agents says
 }
 #: The statuses that can still change: what a pull reads again.
-UNFINISHED: Final = frozenset({"pending", "running", "waiting"})
+UNFINISHED: Final = frozenset(task_tools.UNFINISHED)
 #: What every notification says first (Deep Agents' words): not the user's message.
 NOTE: Final = (
     "An async subagent task you started has an update. This is not a message from the user: "
@@ -401,29 +400,25 @@ class Tasks:
             )
         except Exception:
             log.exception("background task %s", record.run_id)
-        found = None if then is None else await runs.get(record.run_id, tenant=tenant)
-        if found is not None and found.final:
-            self._ended[record.run_id] = found
-        if (
-            then is not None
-            and found is not None
-            and (found.final or found.status is RunStatus.PAUSED)
-        ):
-            try:
+        if then is None:
+            return
+        try:  # the read too: a run store that fails here must not end this task unheard
+            found = await runs.get(record.run_id, tenant=tenant)
+            if found is not None and found.final:
+                self._ended[record.run_id] = found
+            if found is not None and (found.final or found.status is RunStatus.PAUSED):
                 await then(found)
-            except Exception:
-                log.exception("background task %s: its outcome not delivered", record.run_id)
+        except Exception:
+            log.exception("background task %s: its outcome not delivered", record.run_id)
 
     def stop(self, run_id: str, reason: str) -> None:
-        """The attempt of ``run_id`` at work here stopped, when one is, as ``Agent.cancel``
-        stops one (its run is ended in the store already, or ends ``CANCELLED`` with
-        ``reason``)."""
+        """What this process does for the task's run ``run_id`` stopped, when it is at work
+        here, as any run's is (``Agent.stop``): its attempt under way stops (its run is ended
+        in the store already, or ends ``CANCELLED`` with ``reason``), and one waiting its turn
+        behind the task's earlier run leaves the line now, not once that run does."""
         agent = self._agents.get(run_id)
-        runtime = None if agent is None else agent.running.get(run_id)
-        if runtime is None or runtime.running_in is None:
-            return
-        runtime.cancelled = runtime.cancelled or reason
-        runtime.running_in.cancel()
+        if agent is not None:
+            agent.stop(run_id, reason)
 
     async def aclose(self) -> None:
         """The harness closes: each task still at work is cut off — its run ended ``ERROR``
@@ -433,10 +428,11 @@ class Tasks:
             agent = self._agents[run_id]
             runtime = agent.running.get(run_id)
             if runtime is not None:
-                with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
-                    await agent.harness.runs.finish(
+                await stopping.unless_ended(  # (or it ended meanwhile)
+                    agent.harness.runs.finish(
                         run_id, RunStatus.ERROR, error=error, tenant=runtime.tenant
                     )
+                )
             task.cancel()
         await asyncio.gather(*self._at_work.values(), return_exceptions=True)
 
@@ -527,8 +523,9 @@ async def follow_up(
             raise Refused(NO_ROOM)
         if mode is Mode.INTERRUPT and not latest.final and not tasks.at_work(latest.run_id):
             # at work on another replica, or waiting for a person: stopped there
-            with contextlib.suppress(ConflictError):  # it ended meanwhile
-                await agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
+            await stopping.unless_ended(  # (or it ended meanwhile)
+                agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
+            )
         record = await _started(
             runtime, agent, message, run_id=run_id, thread=task["task_id"], origin=origin
         )
@@ -537,11 +534,6 @@ async def follow_up(
     if mode is Mode.QUEUE and not latest.final:
         updated["superseded_run_ids"] = [*task.get("superseded_run_ids", []), task["run_id"]]
     return updated
-
-
-#: Why a task's run a follow-up replaced ended (``conversation``'s words for a run a newer
-#: message interrupted).
-INTERRUPTED: Final = "interrupted by a newer message of the conversation"
 
 
 async def _started(
@@ -592,12 +584,13 @@ async def stop(runtime: Runtime, agent: Agent, task: Mapping[str, Any], latest: 
     for record in [latest, *[await owned(runtime, t) for t in earlier]]:
         if record is None:
             continue
-        with contextlib.suppress(ConflictError):  # it ended already
-            await agent.cancel(
+        await stopping.unless_ended(  # (or it ended already)
+            agent.cancel(
                 record.run_id,
                 reason="cancelled by the agent that started it",
                 tenant=runtime.tenant,
             )
+        )
 
 
 # --------------------------------------------------------------------------- whose it is
@@ -867,39 +860,30 @@ async def ask(runtime: Runtime, record: RunRecord) -> InterruptResolution | None
     """The question ``record``'s task run waits on asked in ``runtime``'s turn — the chat's, as
     a sub-agent's question is asked through its parent: the turn pauses with it, and its
     answer, once given, is returned (``None``: the run waits on nothing now)."""
-    from trellis.harness.subagents import ASKED, SUBAGENT  # noqa: PLC0415 - it imports this
+    from trellis.harness.subagents import asked_for_background  # noqa: PLC0415 - it imports this
 
     asked: Interrupt | None = record.awaiting
     if record.status is not RunStatus.PAUSED or asked is None:
         return None
     origin = record.metadata.get(BACKGROUND) or {}
-    named = {
-        "agent_id": str(origin.get("name") or record.agent_id),
-        "run_id": record.run_id,
-        "interrupt_id": asked.interrupt_id,
-        "background": True,
-    }
-    answered = await runtime.interrupt(
-        content_key("subagent", record.run_id, asked.interrupt_id),
-        payload={**(asked.payload or {}), SUBAGENT: named},
-        **{name: getattr(asked, name) for name in ASKED},
-    )
-    return answered.model_copy(update={"interrupt_id": asked.interrupt_id, "run_id": record.run_id})
+    name = str(origin.get("name") or record.agent_id)
+    return await asked_for_background(runtime, asked, agent_id=name, run_id=record.run_id)
 
 
 async def abandoned(parent: Agent, asked: Interrupt | None, reason: str | None) -> None:
     """The question a chat's turn asked for a task (:func:`ask`, ``asked``) answered with a
     cancel: the task's run is cancelled with the turn, as a sub-agent's is when its question,
-    asked through its parent, is."""
+    asked through its parent, is — its attempt here stopped, and its own children ended with
+    it (``children.end_child``)."""
     from trellis.harness.subagents import asked_by  # noqa: PLC0415 - it imports this
 
     named = asked_by(asked) if asked is not None else None
     if asked is None or not named or not named.get("background"):
         return
     run_id = str(named["run_id"])
-    with contextlib.suppress(ConflictError):  # it ended meanwhile
-        await parent.harness.runs.cancel(run_id, reason=reason, tenant=asked.tenant_id)
-    parent.harness.background.stop(run_id, reason or "its question was cancelled")
+    await children.end_child(
+        parent, run_id, asked.tenant_id, status=RunStatus.CANCELLED, reason=reason
+    )
 
 
 async def answered(

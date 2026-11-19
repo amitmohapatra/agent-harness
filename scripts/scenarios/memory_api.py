@@ -64,9 +64,10 @@ async def durable(provider, path=TUPLES):
 
 
 async def build_container(settings, version, *, overrides=None, **kw):
-    # role="worker": the connection pools are sized for the worker's pools as well
+    # role="combined": one process serves the API and runs the worker's pools, so its
+    # connection pools are sized for both
     container = await build(
-        settings, version, overrides=overrides or TUNED, **{**kw, "role": "worker"}
+        settings, version, overrides=overrides or TUNED, **{**kw, "role": "combined"}
     )
     await durable(container.authorization)
     pools = worker_pools_for(settings)

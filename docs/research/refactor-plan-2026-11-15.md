@@ -316,7 +316,7 @@ async def helping(runtime: Runtime, framework: str) -> AsyncIterator[Helpers]:
         raise
     finally:
         if error is not None or not helpers.left_open:
-            await helpers.closed(error, paused=helpers.suspended(error))
+            await helpers.closed(error)
 ```
 
 `Helpers` gains one attribute, `left_open: bool = False`, which replaces `_closed`. An async

@@ -6,12 +6,14 @@
   such file);
 * ``query_result(save_as="csv")`` over a large result keeps the rows it selected as a file, and
   a later run of the same user, in another process, is told of it and reads it back;
-* the sandbox needs Docker, which this machine does not have: skipped with the reason (the
-  plan's L20); its in-process proofs are tests/integration/test_sandbox*.py and the matrix F73.
+* a run's sandbox on a real Docker daemon: a file written and a command run in a container of
+  the run's own, labelled with it while it works and deleted at its end (in process:
+  tests/integration/test_sandbox*.py and the matrix F73).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +24,12 @@ from fastapi import FastAPI
 from tests.features.conftest import harness
 from tests.features.kit import armed, big_report
 from tests.features.test_surf import Served, identity
-from trellis import Runtime
+from trellis import Runtime, sandbox
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.journal import content_key
+from trellis.harness.sandbox import DockerSandbox
+from trellis.harness.sandbox.base import RUN
+from trellis.harness.tools.convert import text_of
 
 pytestmark = pytest.mark.timeout(300)
 
@@ -130,9 +135,29 @@ async def test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_ba
 
 
 @pytest.mark.plan("FS", "F73")
-@pytest.mark.skip(
-    reason="the sandbox needs a Docker daemon, which this machine has not (plan "
-    "L20); in process: tests/integration/test_sandbox*.py and matrix F73"
-)
-async def test_sandbox() -> None:  # pragma: no cover
-    ...
+async def test_a_runs_commands_run_in_a_container_of_its_own_deleted_at_its_end(uid: str) -> None:
+    """A run's sandbox on a real Docker daemon: the file it writes is there for the command
+    that follows, the command's output is the tool's result, the container is labelled with
+    the run while it works and gone once the run ended."""
+    provider = DockerSandbox()
+    box = sandbox(provider)
+    while_running: list[list[str]] = []
+
+    async def analyse(input: Any, agent: Runtime) -> str:
+        await agent.tools.use(box.tools())
+        await agent.tools.call("sandbox_write", path="units.csv", content="sku,qty\nA-1,3\nB-2,7\n")
+        ran = await agent.tools.call(
+            "sandbox_exec",
+            command="python3 -c \"print(sum(int(l.split(',')[1]) for l in list(open('units.csv'))[1:]))\"",
+        )
+        mine = await provider.labelled({RUN: agent.run_id})
+        while_running.append([ref.id for ref in mine])
+        return text_of(ran)
+
+    async with harness() as h:
+        agent = h.wrap(analyse, id=f"analyst-{uid}")
+        result = await agent.run("How many units?", user=f"sam-{uid}", thread="t")
+    assert result.status is RunStatus.SUCCESS, result
+    assert json.loads(result.answer)["stdout"].strip() == "10", result.answer
+    assert [len(found) for found in while_running] == [1], while_running
+    assert await provider.labelled({RUN: result.run_id}) == []

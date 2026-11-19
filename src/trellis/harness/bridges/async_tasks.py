@@ -23,12 +23,12 @@ turn, as the task does — kept as a Claude subagent working in the background i
   model cancels it (``cancel_async_task``) — or a read of it, above. Its run ends ``SUCCESS``
   with the task's result, ``ERROR`` saying why it failed, or ``CANCELLED``, on the stream of the
   run that learned it;
-* **cancelled with its turn** — as a cancelled run's other children are: the turn's attempt
-  cancelled while it runs (``Runtime.cancelled``: :meth:`AsyncTasks.cancelled`), or the turn
-  cancelled where it waits for a person (``subagents.cancel_children``:
-  :meth:`AsyncTasks.stopped`). The task is cancelled on its server by Deep Agents' own
-  ``cancel_async_task`` (the Agent Protocol's cancel of the task's run of now), and its run
-  ends ``CANCELLED``.
+* **cancelled with its turn** — as a cancelled run's other children are, by the one cascade
+  (``children.end_children``): the turn cancelled while it runs, or where it waits for a
+  person, stops what this process keeps for the task's run (``children.stop_kept`` → the
+  adapter's ``child_cancelled`` → :meth:`AsyncTasks.stopped`). The task is cancelled on its
+  server by Deep Agents' own ``cancel_async_task`` (the Agent Protocol's cancel of the task's
+  run of now), and its run ends ``CANCELLED``.
 """
 
 from __future__ import annotations
@@ -45,12 +45,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import AgentError, RunRecord, RunStatus, ToolError, stable_id
+from trellis.harness import stopping
 from trellis.harness.bounded import MAXSIZE
 from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
 from trellis.harness.outbound import checked
 from trellis.harness.task_tools import CANCEL, CHECK, START, UPDATE
-from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -280,15 +280,15 @@ class AsyncTasks:
         self._kept.pop(run_id, None)
         self._released(kept)
         runs, tenant = kept.agent.harness.runs, kept.tenant
-        with contextlib.suppress(ConflictError, LeaseLostError):  # ended meanwhile
-            if status is RunStatus.CANCELLED:
-                await runs.cancel(run_id, reason=said or None, tenant=tenant)
-            elif status is RunStatus.SUCCESS:
-                await runs.finish(run_id, status, output=said or None, tenant=tenant)
-            else:
-                why = said or ENDED_THERE.format(status=status.value.lower())
-                error = AgentError(code=UNFINISHED, message=why)
-                await runs.finish(run_id, status, error=error, tenant=tenant)
+        if status is RunStatus.CANCELLED:
+            write = runs.cancel(run_id, reason=said or None, tenant=tenant)
+        elif status is RunStatus.SUCCESS:
+            write = runs.finish(run_id, status, output=said or None, tenant=tenant)
+        else:
+            why = said or ENDED_THERE.format(status=status.value.lower())
+            error = AgentError(code=UNFINISHED, message=why)
+            write = runs.finish(run_id, status, error=error, tenant=tenant)
+        await stopping.unless_ended(write)  # (or it ended meanwhile)
 
     async def _ended(
         self, runtime: Runtime, run_id: str, status: RunStatus, told: str, record: RunRecord | None
@@ -311,14 +311,9 @@ class AsyncTasks:
         else:
             await helpers.finished(helper, error=why, cancelled=status is RunStatus.CANCELLED)
 
-    async def cancelled(self, runtime: Runtime) -> None:
-        """``runtime``'s attempt was cancelled (``Runtime.cancelled``): the tasks its run started
-        are stopped with it (:meth:`stopped`)."""
-        if runtime.cancelled is None:
-            return
-        for run_id, kept in list(self._kept.items()):
-            if kept.helper.parent_run_id == runtime.run_id:
-                await self.stopped(run_id, runtime.cancelled)
+    def kept_for(self, parent_run_id: str) -> list[str]:
+        """The tasks' runs this process holds that ``parent_run_id`` started."""
+        return [r for r, kept in self._kept.items() if kept.helper.parent_run_id == parent_run_id]
 
     async def stopped(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` was cancelled with the run that started it (``reason``: why):
@@ -336,10 +331,9 @@ class AsyncTasks:
         )
         if isinstance(said, str):  # Deep Agents' word of a cancel that failed
             log.warning("async task %s not cancelled on its server: %s", task_id, said)
-        with contextlib.suppress(ConflictError):  # cancelled already, with its parent
-            await agent.harness.runs.cancel(
-                run_id, reason=reason or CANCELLED_WITH, tenant=kept.tenant
-            )
+        await stopping.unless_ended(  # (or cancelled already, with its parent)
+            agent.harness.runs.cancel(run_id, reason=reason or CANCELLED_WITH, tenant=kept.tenant)
+        )
 
 
 def _tool_runtime(task: Mapping[str, Any], tool: str) -> Any:
@@ -376,7 +370,7 @@ def _unended(record: RunRecord | None) -> Helper | None:
     if record is None or record.status.final:
         return None
     name = str((record.metadata.get(HELPER) or {}).get("name", ""))
-    said = [Said(Speaker.USER, str(record.input))]
+    said = [Said(Speaker.USER, str(record.input), delegated=True)]  # the parent's hand-off
     return Helper(record.run_id, record.parent_run_id or "", name, said, kind=Kind.ASYNC_TASK)
 
 

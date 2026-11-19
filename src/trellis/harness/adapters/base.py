@@ -39,7 +39,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol
 
 from trellis.contracts import ConfigurationError, InterruptResolution, ToolSpec
 from trellis.harness.history import Said
@@ -48,6 +48,9 @@ from trellis.harness.runtime import BUILTIN as BUILTIN_TAG
 from trellis.harness.runtime import HELPER as HELPER_TAG
 from trellis.harness.runtime import Runtime
 from trellis.harness.tools.base import Tool
+
+if TYPE_CHECKING:
+    from trellis.harness.bridges.async_tasks import AsyncTasks
 
 #: The ``RunStart.metadata`` key a run's own ``framework_options=`` is kept under (its JSON
 #: values: what a later attempt — a resume, a worker's — runs with).
@@ -160,6 +163,36 @@ class Invocation:
     native_tools: Any = None
 
 
+class Keeps:
+    """What an adapter whose framework keeps nothing of the kind answers with: no background
+    tasks of its own, nothing checked where it is wrapped, nothing running between runs,
+    nothing kept of a session, nothing going for a cancelled child. An adapter that keeps
+    one of these says so by defining it. And what one that does not say otherwise is taken
+    to have: tools of its framework's own (:meth:`own_tools`)."""
+
+    @property
+    def tasks(self) -> AsyncTasks | None:
+        return None
+
+    def wrapped(self, target: Any, options: Mapping[str, Any], gateway: Any) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    def session_gone(self, session: str) -> None:
+        return None
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        return None
+
+    def kept_children(self, run_id: str) -> list[str]:
+        return []
+
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        return True  # Claude's built-in tools, an ACP agent's own: the safe answer
+
+
 class Adapter(Protocol):
     name: ClassVar[str]
     tool_format: ToolFormat
@@ -178,7 +211,45 @@ class Adapter(Protocol):
     #: conversation's next turn continues (``Agent.sessions``, ADR 0005)
     sessions: bool
 
+    @property
+    def tasks(self) -> AsyncTasks | None:
+        """The framework's own background tasks this process holds the runs of (Deep
+        Agents' async tasks: ``bridges.async_tasks``); ``None`` for a framework with none."""
+        ...
+
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None: ...
+
+    def wrapped(self, target: Any, options: Mapping[str, Any], gateway: Any) -> None:
+        """Where the agent is wrapped (``h.wrap``), with the options every one of its runs
+        is given and the harness's model route: what the framework checks of its own."""
+        ...
+
+    async def aclose(self) -> None:
+        """The agent is closing: what the framework keeps running between runs in this
+        process ends."""
+        ...
+
+    def session_gone(self, session: str) -> None:
+        """``session`` is kept for no conversation's next turn any more (``Agent.sessions``):
+        the framework lets go of what it keeps of it."""
+        ...
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        """The run ``run_id`` ended with the run that started it: what the framework keeps
+        going for it outside any attempt stops (``children.stop_kept``)."""
+        ...
+
+    def kept_children(self, run_id: str) -> list[str]:
+        """The children of run ``run_id`` the framework keeps at work in this process (a live
+        session's background subagents, Deep Agents' async tasks): what stops with the run
+        even when the run store cannot list its children (``children.end_children``)."""
+        ...
+
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        """Whether ``target`` has tools of its framework's own, whose effects the harness does
+        not know (``sources``: the harness tools it declares): wrapped as a tool, the agent
+        then writes whatever its declared tools say (``subagents``)."""
+        ...
 
     def steers(self, target: Any) -> bool:
         """Whether ``target`` takes a message between two of its steps (``mode="steer"``,

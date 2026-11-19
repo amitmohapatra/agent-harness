@@ -50,14 +50,13 @@ import contextlib
 import logging
 import time
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import AgentError, RunStart, RunStatus, stable_id
-from trellis.contracts.errors import is_pause_signal
+from trellis.contracts import AgentError, RunStart, RunStatus, is_pause_signal, stable_id
 from trellis.harness import telemetry
 from trellis.harness.history import Said, Speaker, recorded
 from trellis.harness.identity import AGENT_GROUP
@@ -215,6 +214,9 @@ class Helpers:
         self._learning: dict[str, asyncio.Event] = {}
         #: the helper whose work holds an approval of the framework's own (:func:`held`)
         self.held: Helper | None = None
+        #: the attempt's answer leaves the helpers open (:func:`helping`): the run pauses on an
+        #: approval of the framework's own that one of them waits on
+        self.left_open = False
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
     async def start(
@@ -281,7 +283,9 @@ class Helpers:
             )
         )
         parent.agent.harness.holds.hold(run_id, parent.tenant)
-        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)], kind=kind)
+        # its task is what the agent above it wrote: the hand-off, not the person's words
+        handed = [Said(Speaker.USER, task, delegated=True)]
+        helper = Helper(run_id, parent.run_id, name, handed, kind=kind)
         helper.span = telemetry.helper_span(
             name, run_id, parent.run_id, task, framework=self.framework, kind=kind.value
         )
@@ -492,23 +496,23 @@ class Helpers:
 
     def suspended(self, error: BaseException | None) -> bool:
         """Whether the attempt that ended with ``error`` did not end its run itself (what
-        :meth:`closed` is told as ``paused``): it asked a person — a question waits
+        :meth:`closed` goes by): it asked a person — a question waits
         (``Runtime.pending``), or ``error`` is the pause's signal — or it was stopped from
         outside (its task cancelled: a cancel, the run's clock, a stalled model call, its
         worker letting it go), where the pipeline ends the run's open children as it ends the
-        run, whatever its final status (``pipeline._children_ended``), or the next attempt
+        run, whatever its final status (``children.end_children``), or the next attempt
         takes them up."""
         return self.runtime.pending is not None or (
             error is not None and (not isinstance(error, Exception) or is_pause_signal(error))
         )
 
-    async def closed(self, error: BaseException | None, *, paused: bool) -> None:
+    async def closed(self, error: BaseException | None) -> None:
         """The attempt ended (``error``: how, ``None`` with its answer): the helpers still open
-        end with it — except when it is ``paused`` (:meth:`suspended`: they wait with the run,
-        for the next attempt or for the pipeline, which ends them with the run); and, after an
-        earlier attempt, the helpers it left open that this one did not take up again (the
-        framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
-        if paused:  # they wait with the run: let go of in the store, not left to lapse
+        end with it — except when it did not end its run itself (:meth:`suspended`: they wait
+        with the run, for the next attempt or for the pipeline, which ends them with the run);
+        and, after an earlier attempt, the helpers it left open that this one did not take up
+        again (the framework went on without them) end ``ERROR`` (:data:`NOT_CONTINUED`)."""
+        if self.suspended(error):  # they wait with the run: let go of in the store, not lapsed
             for helper in self._open.values():
                 _span_ended(helper, RunStatus.PAUSED.value, error="it waits with its run")
                 await self.runtime.agent.harness.holds.release(helper.run_id, self.runtime.tenant)
@@ -548,7 +552,8 @@ class Helpers:
                 tenant=parent.tenant,
             )
             name = str((record.metadata.get(HELPER) or {}).get("name", ""))
-            left = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, str(record.input))])
+            handed = [Said(Speaker.USER, str(record.input), delegated=True)]
+            left = Helper(run_id, parent.run_id, name, handed)
             left.memory = self._memory(run_id)
             await self._recorded(left)
             await self._outcome(left, NOT_CONTINUED)
@@ -625,6 +630,25 @@ class Helpers:
             events=parent.events,
             record=scoped.record("run_feedback", **feedback),
         )
+
+
+@contextlib.asynccontextmanager
+async def helping(runtime: Runtime, framework: str) -> AsyncIterator[Helpers]:
+    """The attempt's helpers, open while the block runs (``runtime.helpers``) and closed as it
+    ends (:meth:`Helpers.closed`): with the error it ended with — a pause or a stop leaves them
+    to the next attempt (:meth:`Helpers.suspended`) — or with none, unless the block left them
+    open (:attr:`Helpers.left_open`: the run pauses on an approval of the framework's own that
+    one of them waits on)."""
+    helpers = Helpers(runtime, framework)
+    error: BaseException | None = None
+    try:
+        yield helpers
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        if error is not None or not helpers.left_open:
+            await helpers.closed(error)
 
 
 def _span_ended(

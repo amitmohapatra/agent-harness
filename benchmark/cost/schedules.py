@@ -46,7 +46,7 @@ from croniter import croniter
 from benchmark.cost import prices
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
-from benchmark.cost.complex import ADAPTERS, target_of
+from benchmark.cost.complex import ADAPTERS, bound_of, target_of
 from trellis import Hooks
 from trellis.contracts import (
     Interrupt,
@@ -728,7 +728,8 @@ async def run_case(
         h.schedule_limits = hook
     async with h:
         assert isinstance(h.runs, LocalRuns)
-        target, options = target_of(model, "thread", None, max_steps, adapter=adapter)
+        bound = await bound_of(h, adapter)
+        target, options = target_of(model, "thread", None, max_steps, adapter=adapter, bound=bound)
         trace = Calls()
         agent = h.wrap(target, id=f"sched-{case.id}", hooks=[trace], run_timeout=300, **options)
         user, thread = f"sched-{tag}-{case.id}", f"sched-{tag}-{case.id}"

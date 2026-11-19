@@ -46,6 +46,7 @@ from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
 from tests.live import shards
+from tests.support.stack import env as _env
 from trellis import Harness, Settings
 from trellis.harness import agent as agent_module
 from trellis.harness import evals, telemetry
@@ -85,11 +86,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if dropped:
         config.hook.pytest_deselected(items=dropped)
         items[:] = [i for i in items if i not in dropped]
-
-
-def _env(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
 
 
 def _reachable(url: str | None, path: str) -> bool:
@@ -450,3 +446,13 @@ def ops_key(ops: str) -> Iterator[str]:
     yield from _virtual_key(
         "trellis-live-ops", [{"mcp_client_name": ops, "tools_to_execute": ["*"]}]
     )
+
+
+@pytest.fixture
+def engine(request: pytest.FixtureRequest) -> str:
+    """The engine a model-driven test runs on (``tests/live/engines.py``, parametrized
+    ``indirect``): Claude Code's is run as a deployment runs the CLI (:func:`cli_home`)."""
+    name = str(request.param)
+    if name == "claude_agent_sdk":
+        request.getfixturevalue("cli_home")
+    return name

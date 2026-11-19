@@ -48,16 +48,16 @@ from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
-    RESUMED_CALL,
     UNHELD_AGENTS,
     ClaudeAdapter,
 )
-from trellis.harness.agent import Agent
+from trellis.harness.agent import ASKING, Agent
 from trellis.harness.bridges import claude_live
 from trellis.harness.bridges import live as shared
 from trellis.harness.bridges.claude_live import SHARED, SHARED_SAID, LiveSession
 from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.bridges.live import UNATTENDED
+from trellis.harness.bridges.resumed import RESUMED_CALL
 from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
@@ -1046,17 +1046,17 @@ async def test_a_live_session_with_nothing_to_tell_adds_nothing_to_its_prompts(
     harness: Harness, tmp_path: Path
 ) -> None:
     """A turn a live session may serve keeps a prompt hook for the context its later turns
-    bring; with no memory and no ``schedule_task`` there is none, and the hook adds nothing
-    to any turn's prompt."""
+    bring; with no memory and no ``schedule_task`` it adds only when to ask (Claude has its
+    question tool: ``Agent.push``), the same each turn."""
     scripts = [[{"text": "one: {context}"}], [{"text": "two: {context}"}]]
     target = options(tmp_path, scripts, system_prompt="You help.")  # told of outputs/ there
     agent = harness.wrap(target, id="quiet", without={"schedules"})
     first = await agent.run("hello", user="u1", thread="t1")
     second = await agent.run("again", user="u1", thread="t1")
-    assert (first.answer, second.answer) == ("one: ", "two: ")
+    assert (first.answer, second.answer) == (f"one: {ASKING}", f"two: {ASKING}")
     one, two = served(tmp_path)
     assert two["pid"] == one["pid"]  # the same process, its hook asked each turn
-    assert one["context"] == two["context"] == ""
+    assert one["context"] == two["context"] == ASKING
 
 
 async def test_each_turn_of_a_live_session_is_told_the_day_and_hour_it_is(

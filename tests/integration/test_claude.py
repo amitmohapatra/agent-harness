@@ -34,12 +34,10 @@ from trellis.contracts import (
 from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
-    RESUMED_ASKED,
-    RESUMED_CALL,
-    RESUMED_DENIED,
     native_spec,
 )
-from trellis.harness.agent import NARROW_FROM
+from trellis.harness.agent import ASKING, NARROW_FROM
+from trellis.harness.bridges.resumed import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
@@ -395,7 +393,9 @@ def test_a_results_cache_writes_are_counted_apart_from_its_other_input() -> None
     from trellis.harness.bounded import LRU
     from trellis.harness.journal import Journal, Replay
 
-    runtime: Any = SimpleNamespace(replay=Replay(Journal()), parent=None, budget=None)
+    runtime: Any = SimpleNamespace(
+        replay=Replay(Journal()), parent=None, budget=None, spent_more=lambda: None, running_in=None
+    )
     spending = claude_adapter.Spending(runtime, SimpleNamespace(model="m"), LRU(), None)
     used = {"input_tokens": 10, "output_tokens": 5}
     used |= {"cache_read_input_tokens": 50, "cache_creation_input_tokens": 1000}
@@ -694,8 +694,10 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
     assert (work / "outputs" / "sub" / "x.txt").exists()
     # no system prompt of its own stays none (the SDK's default): told with the context
+    # (when to ask, then its outputs/)
     started = started_with(tmp_path)
-    assert started["system_prompt"] == "" and started["context"] == boxes.DELIVERS_HERE
+    told = f"{ASKING}\n\n{boxes.DELIVERS_HERE}"
+    assert started["system_prompt"] == "" and started["context"] == told
     await harness.aclose()
 
 
@@ -856,13 +858,15 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     assert available == sorted(available) and {"Read", "Bash", "Skill"} <= set(available)
 
 
-async def test_without_memory_no_context_hook_is_registered(
+async def test_without_memory_the_context_is_when_to_ask_alone(
     harness: Harness, tmp_path: Path
 ) -> None:
+    """No memory: the context hook says only when to ask (Claude has its question tool,
+    ``AskUserQuestion``: ``Agent.push``)."""
     script = [{"text": "told: {context}"}]
     target = options(tmp_path, script, system_prompt="You help.")  # told of outputs/ there
     result = await harness.wrap(target, id="helper").run("reach me how?", user="u1")
-    assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
+    assert result.answer == f"told: {ASKING}" and started_with(tmp_path)["context"] == ASKING
 
 
 def lookups(n: int) -> list[Any]:
@@ -1303,6 +1307,149 @@ async def test_built_in_tools_are_governed_in_every_permission_mode(
     result = await agent.run("work", user="u1")
     assert result.answer == "said: Bash was not run: nothing runs here"
     assert built_ins(tmp_path) == []  # neither ran
+
+
+closed: list[str] = []
+
+
+@tool(side_effects="read")
+def look_up(account: str) -> str:
+    """Look an account up."""
+    return f"{account} is open"
+
+
+@tool(side_effects="write")
+def close_account(account: str) -> str:
+    """Close an account."""
+    closed.append(account)
+    return f"closed {account}"
+
+
+@pytest.mark.parametrize("given", ["options", "run"])
+async def test_in_plan_mode_nothing_that_changes_anything_runs_until_a_plan_is_approved(
+    harness: Harness, tmp_path: Path, given: str
+) -> None:
+    """``permission_mode="plan"`` (the options', or a run's ``framework_options``): reads run;
+    a harness tool that writes, Claude's own ``Write`` and a command that does more than read
+    are refused — the hook decides every call, and its word on a harness tool is final for
+    the CLI, so the CLI's own plan mode would not hold them — until Claude presents its plan
+    (``ExitPlanMode``) and a person approves it. Then the run goes on, governed as ever."""
+    closed.clear()
+    plans = Path(claude_adapter.config_folder("default", "u1")) / "plans" / "plan.md"
+    script = [
+        {"tool": "look_up", "args": {"account": "a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"builtin": "Write", "args": {"file_path": "notes.txt"}},
+        {"builtin": "Bash", "args": {"command": "touch made.txt"}},
+        {"builtin": "Bash", "args": {"command": "ls"}},
+        {"builtin": "Write", "args": {"file_path": str(plans)}},  # its plan, where Claude keeps it
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    mode = {"permission_mode": "plan"}
+    # the CLI's own plan mode lets its plan be written unasked: here, the team's allowlist
+    own = {"allowed_tools": ["Write"], **(mode if given == "options" else {})}
+    agent = arm(
+        harness.wrap(options(tmp_path, script, **own), id=f"plans-{given}"),
+        [look_up, close_account],
+    )
+    paused = await agent.run(
+        "close a1", user="u1", framework_options=mode if given == "run" else None
+    )
+    assert closed == [], "a write ran before a plan was approved"
+    assert [c["tool"] for c in built_ins(tmp_path)] == ["Bash", "Write"]  # `ls`, the plan
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.tool == "ExitPlanMode"
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert closed == ["a1"] and done.answer == "said: closed a1"
+
+
+async def test_a_plan_a_person_rejects_leaves_the_run_in_plan_mode(
+    harness: Harness, tmp_path: Path
+) -> None:
+    closed.clear()
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-rejected"), [close_account])
+    paused = await agent.run("close a1", user="u1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="u1")
+    assert closed == [] and "plan mode is on" in str(done.answer), done.answer
+
+
+async def test_a_plan_is_a_persons_to_approve_whatever_the_catalog_says_of_its_tool(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ExitPlanMode`` only reads, and the catalog says so once the tool was seen: that
+    lets no plan through — a person approves each one."""
+    closed.clear()
+
+    async def says_it_reads(*args: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(claude_adapter.bridge, "_catalog_decides", says_it_reads)
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-catalogued"), [close_account])
+    paused = await agent.run("close a1", user="u1")
+    assert closed == [] and paused.status is RunStatus.PAUSED, paused
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.tool == "ExitPlanMode"
+
+
+async def test_a_plan_approved_ends_plan_mode_however_the_resumed_cli_presents_it_again(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Resumed, the CLI presents its plan again (another call, its plan worded again): the
+    person's approval of the plan it presented when the run paused lets it through, unasked."""
+    closed.clear()
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"builtin": "ExitPlanMode", "args": {"plan": "close the account a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-again"), [close_account])
+    paused = await agent.run("close a1", user="u1")
+    assert paused.interrupt is not None and closed == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done
+    assert closed == ["a1"] and done.answer == "said: closed a1"
+
+
+async def test_a_plan_approved_without_a_pause_ends_plan_mode_at_once(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan whose approval needs no pause (a person's approval remembered elsewhere) lets
+    the run go on at once, governed as ever."""
+    closed.clear()
+
+    async def approved(spec: Any, args: dict[str, Any], *_: Any, **__: Any) -> ToolCall:
+        return ToolCall(tool=spec.name, args=args)
+
+    monkeypatch.setattr(claude_adapter.bridge, "asked", approved)
+    script = [
+        {"builtin": "ExitPlanMode", "args": {"plan": "close a1"}},
+        {"tool": "close_account", "args": {"account": "a1"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, permission_mode="plan")
+    agent = arm(harness.wrap(target, id="plan-at-once"), [close_account])
+    done = await agent.run("close a1", user="u1")
+    assert done.status is RunStatus.SUCCESS, done
+    assert closed == ["a1"] and done.answer == "said: closed a1"
 
 
 async def test_a_call_governance_cannot_decide_is_refused_never_let_through(

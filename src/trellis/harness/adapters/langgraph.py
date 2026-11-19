@@ -88,6 +88,7 @@ from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
     Invocation,
+    Keeps,
     Narrowing,
     NativePause,
     Output,
@@ -99,7 +100,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.asking import answer_of
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.bridges.async_tasks import AsyncTasks
-from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.bridges.helpers import helping
 from trellis.harness.events import STREAMED
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
@@ -159,7 +160,7 @@ ACTIVE_AGENT: Final = "active_agent"  # langgraph-swarm's ``SwarmState.active_ag
 CARRIED: Final = ("async_tasks", "files", "todos", ACTIVE_AGENT)
 
 
-class LangGraphAdapter:
+class LangGraphAdapter(Keeps):
     name: ClassVar[str] = "langgraph"
 
     replays_history = True
@@ -193,12 +194,25 @@ class LangGraphAdapter:
         self._native: list[ToolSpec] | None = None
         #: the async tasks (Deep Agents' ``start_async_task``) its runs started that this
         #: process holds the runs of (``bridges.async_tasks``)
-        self.tasks = AsyncTasks()
+        self._tasks = AsyncTasks()
+
+    @property
+    def tasks(self) -> AsyncTasks:
+        return self._tasks
 
     async def child_cancelled(self, run_id: str, reason: str | None) -> None:
-        """The run ``run_id`` was cancelled with the run that started it: an async task's
-        that this process holds is cancelled on its server (``subagents.cancel_children``)."""
+        """The run ``run_id`` ended with the run that started it: an async task's that this
+        process holds is cancelled on its server (``children.stop_kept``)."""
         await self.tasks.stopped(run_id, reason)
+
+    def kept_children(self, run_id: str) -> list[str]:
+        return self.tasks.kept_for(run_id)
+
+    def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
+        """A graph's own tools; a ``ReAct``'s are only the harness's own read tools."""
+        from trellis.harness.middleware import STATE_TOOLS
+
+        return any(getattr(t, "name", None) not in STATE_TOOLS for t in bound_tools(target))
 
     def steers(self, target: Any) -> bool:
         """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
@@ -244,11 +258,9 @@ class LangGraphAdapter:
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
         from langgraph.types import GraphOutput
 
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
         values: Any = None
         interrupts: list[Any] = []
-        try:
+        async with helping(run.runtime, self.name):
             given = await _continued(target, native_input, run)
             graph, config = self._graph(target, run.runtime), self._config(target, run)
             try:
@@ -270,12 +282,6 @@ class LangGraphAdapter:
                 values, interrupts[:] = await _asked_again(graph, config, exc)
             _ended_with(target, run.runtime, values)
             return GraphOutput(value=values, interrupts=tuple(interrupts))
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
-            await self.tasks.cancelled(run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         """The run streamed as LangGraph streams a graph to its consumers. A graph given
@@ -290,10 +296,8 @@ class LangGraphAdapter:
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
         text = _Text()
-        try:
+        async with helping(run.runtime, self.name):
             given = await _continued(target, native_input, run)
             graph, config = self._graph(target, run.runtime), self._config(target, run)
             source = _transformed if transforms(graph) else _streamed
@@ -311,12 +315,6 @@ class LangGraphAdapter:
             except Exception as exc:
                 values, again = await _asked_again(graph, config, exc)
                 interrupts = tuple(again)
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error, paused=helpers.suspended(error))
-            await self.tasks.cancelled(run.runtime)
         _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 

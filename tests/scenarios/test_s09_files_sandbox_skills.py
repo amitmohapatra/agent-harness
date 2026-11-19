@@ -127,14 +127,12 @@ async def test_an_uploaded_document_is_its_users_only(h: Harness, uid: str, tmp_
         assert refused.status_code == 404, refused.text
 
 
-@pytest.mark.parametrize("adapter", ADAPTERS)
+# not "claude_agent_sdk": the scripted Claude CLI's script is fixed per agent, so it cannot
+# write each user's own text
+@pytest.mark.parametrize("adapter", [a for a in ADAPTERS if a != "claude_agent_sdk"])
 async def test_a_sandbox_per_run_two_users_at_once(
     h: Harness, adapter: str, uid: str, tmp_path: Path
 ) -> None:
-    if adapter == "claude_agent_sdk":
-        pytest.skip(
-            "the scripted Claude CLI's script is fixed per agent: it cannot write each user's own text"
-        )
     provider = FakeSandboxes()
     agent, _ = await wrapped(
         h, adapter, [*TOOLS, sandbox(provider).tools()], tmp_path, id=f"s9s-{adapter}-{uid}"
