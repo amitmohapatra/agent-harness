@@ -459,7 +459,7 @@ async def _attempt(
         ),
     )
     events.trace_run = runtime.trace_run
-    await _earlier_results(agent, runtime)
+    await _earlier_results(agent, runtime, crashed=resolution is None and record.attempt > 1)
     decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
@@ -586,10 +586,12 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
         agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
 
 
-async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
-    """What earlier attempts and turns left this one. The tool records an earlier attempt of
-    the run queued and did not see land go again (``Agent.resent_records``: its process died
-    first). A conversation's turn reads the large results its earlier turns saved in this process
+async def _earlier_results(agent: Agent, runtime: Runtime, *, crashed: bool) -> None:
+    """What earlier attempts and turns left this one. On an attempt that follows a crash
+    (``crashed``: the run claimed again, not resumed by an answer), the tool records the
+    attempt before it queued and did not see land go again (``Agent.resent_records``: its
+    process died first; a run resumed after a pause had its process deliver them). A
+    conversation's turn reads the large results its earlier turns saved in this process
     (``Agent.results``) as its own (``tools.query.saved``): its history names their paths, and
     a follow-up's ``read_file`` or ``query_result`` on one finds it — as Deep Agents keeps its
     files in the thread's state — and starts with the graph state its last turn ended with
@@ -597,7 +599,8 @@ async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
     ``adapters.langgraph.CARRIED``): what this process kept of it, and over it what the file
     store keeps (:func:`_carried`), which has the turns other servers ran. A run with no
     conversation of its own, or a child run, has none."""
-    await agent.resent_records(runtime)
+    if crashed:
+        await agent.resent_records(runtime)
     if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
     runtime.earlier_results, tools = agent.results.of(runtime.conversation)
