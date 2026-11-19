@@ -272,7 +272,11 @@ has to. In order of preference:
    parameters' descriptions (the model reads every tool's schema; the lint warns about a
    parameter with no description);
 2. **`query_result`**: offered with `read_file` whenever a result is kept, on every adapter
-   (ReAct with or without a backend, `middleware()`, Deep Agents, OpenAI Agents, Claude, Kimi):
+   (ReAct with or without a backend, `middleware()`, Deep Agents, OpenAI Agents, Claude, Kimi).
+   Where the harness runs the loop (ReAct, `middleware()`), every call that offers a tool is
+   told up front, in one fixed line after the instructions, that a large result is kept whole
+   and computed over exactly: told nothing until one was, Haiku declined "which of the 50,000
+   sales lines had the highest revenue?" without calling the tool that returns them. It is
    a read-only SQL `SELECT` over every row, in process, no sandbox (`tools/query.py`). It runs
    on DuckDB, a required dependency ([ADR 0007](adr/0007-query-engine.md); `trellis doctor`
    fails when it cannot be imported); the description names the engine, so the model writes

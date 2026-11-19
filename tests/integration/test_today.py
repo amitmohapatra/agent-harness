@@ -107,7 +107,7 @@ async def test_the_day_is_the_users_when_their_app_says_their_zone(
     }
     async with served(agent) as http:
         assert (await http.post(f"{PATH}/run", json=body)).status_code == 200
-    assert instructions(model.requests[0]) == f"You answer.\n\n{IN_KOLKATA}"
+    assert instructions(model.requests[0]) == f"You answer.\n\n{ours.KEPT_SAID}\n\n{IN_KOLKATA}"
 
 
 @pytest.mark.parametrize("given", ["middleware", "hooks", "none"])
@@ -123,7 +123,9 @@ async def test_a_create_agent_graph_is_told_the_day_once(
     graph = create_agent(model, system_prompt="You help.", middleware=stack)
     await harness.wrap(graph, id=f"today-graph-{given}").run("what day is it?", user="u1")
     [system] = [m for m in model.seen[0] if isinstance(m, SystemMessage)]
-    assert system.text == f"You help.\n\n{IN_UTC}"
+    # what a run whose results the harness keeps is told (``middleware()``), then the day
+    kept = f"{ours.KEPT_SAID}\n\n" if given == "middleware" else ""
+    assert system.text == f"You help.\n\n{kept}{IN_UTC}"
 
 
 async def test_instructions_given_as_blocks_keep_their_blocks(clock: list[datetime]) -> None:

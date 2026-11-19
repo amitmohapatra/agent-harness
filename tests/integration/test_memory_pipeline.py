@@ -25,7 +25,7 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.memory import pushed as with_note
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
-from tests.support.today import dated
+from tests.support.today import kept_dated
 from tests.unit.test_toolbox import Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
@@ -134,7 +134,7 @@ async def test_push_sends_the_context_with_the_question(
     result = await agent.run("how many a?", user="u1", thread="t1")
     assert result.answer == "7 units"
     instructions, question = model.requests[0]["messages"][:2]
-    assert instructions == {"role": "system", "content": dated("You answer stock questions.")}
+    assert instructions == {"role": "system", "content": kept_dated("You answer stock questions.")}
     # after the history a prompt cache keeps: the question's first part (audit K1)
     assert question == {
         "role": "user",

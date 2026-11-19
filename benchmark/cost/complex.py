@@ -2786,9 +2786,10 @@ _CITED: Final = re.compile(r"https?://\S+")
 _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
     r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
-    r"in the data|exist)|isn't (?:available|tracked)|only (?:covers?|goes|from|has|the current)|"
+    r"in the data|exist)|isn't (?:available|tracked|in the (?:data|list|\w+ list))|"
+    r"only (?:covers?|goes|from|has|the current)|"
     r"(?:can't|cannot|couldn't|could not|unable to) (?:find|answer|provide|give|tell|see|get|"
-    r"retrieve|fetch)|outside|"
+    r"retrieve|fetch|report)|outside|"
     r"before the data|unknown",
     re.IGNORECASE,
 )
@@ -2865,7 +2866,9 @@ def _claimed(pattern: str, answer: str) -> re.Match[str] | None:
 #: A sentence that names a value as the earlier one ("down from the 40 I reported earlier",
 #: "has dropped from 40 since my last check").
 _EARLIER: Final = re.compile(
-    r"\b(?:earlier|previously|before|(?:down|up|dropped|fell|fallen|rose|risen) from)\b",
+    r"\b(?:earlier|previous(?:ly)?|before|(?:down|up|dropped|fell|fallen|rose|risen) from|"
+    r"(?:my|the) last (?:check|count|reading|figure|answer)|a moment ago|I gave you|"
+    r"changed since|different (?:reading|figure|count) from)\b",
     re.IGNORECASE,
 )
 #: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").

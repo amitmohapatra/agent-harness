@@ -21,7 +21,7 @@ from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService, pushed
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
-from tests.support.today import dated
+from tests.support.today import dated, kept_dated
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import snapshots
@@ -137,9 +137,11 @@ async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_w
         result = await agent.run(text, user="u1", thread=THREAD)
         assert result.status is RunStatus.SUCCESS, result.error
         firsts.append(model.script.requests[before]["messages"])
+    # a ReAct is told what the harness keeps of a large result; a graph of its own is not
+    said = kept_dated("s") if kept == "window" else dated("s")
     for messages, text in zip(firsts, questions, strict=True):
         assert [m["role"] for m in messages].count("system") == 1  # the instructions alone
-        assert messages[0] == {"role": "system", "content": dated("s")}
+        assert messages[0] == {"role": "system", "content": said}
         context, question = messages[-1]["content"]
         assert messages[-1]["role"] == "user" and question == {"type": "text", "text": text}
         assert context["text"].startswith(OPENED + f"Facts for: {text}")

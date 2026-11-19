@@ -1224,6 +1224,33 @@ _OFFERED: Final = {
 _PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
 
+#: What a run whose results the harness keeps (:data:`_PAGED`) is told before any result is
+#: there: ``read_file`` and ``query_result`` are offered only once one is kept
+#: (``results.kept``), and a model told nothing of them declined a question over more rows
+#: than it thought it could read, never calling the tool that returns them. A fact, as each of
+#: Claude Code's tools states its own limits: worded as an order ("never decline"), it also
+#: fetched every match of an ambiguous request instead of asking which one.
+KEPT_SAID: Final = (
+    "A tool result too large to read is kept whole: query_result ranks, sums or counts all "
+    "its rows exactly."
+)
+
+
+def _kept_said(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with :data:`KEPT_SAID` after its instructions, said once, where it offers
+    a tool: the same line for every call, so the instructions stay one cached prefix."""
+    system = request.system_message
+    if not request.tools or (system is not None and KEPT_SAID in system.text):
+        return request
+    given = system.content if system is not None else ""
+    content: str | list[str | dict[Any, Any]] = (
+        [*given, {"type": "text", "text": KEPT_SAID}]
+        if isinstance(given, list)
+        else "\n\n".join(part for part in (given, KEPT_SAID) if part)
+    )
+    return request.override(system_message=SystemMessage(content=content))
+
+
 async def _helped(
     runtime: Runtime,
     name: str,
@@ -1607,7 +1634,8 @@ class HarnessTools(AgentMiddleware):
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         offered.extend(_readers(runtime, request.state, {_named(t) for t in own}))
-        return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
+        tools = sorted([*own, *offered], key=_named)
+        return await handler(_kept_said(request.override(tools=tools)))
 
     def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:
         """The run's tools as LangChain's, by name: its tool set's, converted once."""
@@ -2975,6 +3003,10 @@ class FitWindow(AgentMiddleware):
         self.turns = turns
         #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
         self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
+        #: and every tool it offered, whole or by signature (``shown``): no other is added later
+        self._shown: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = (
+            weakref.WeakKeyDictionary()
+        )
 
     async def awrap_model_call(
         self,
@@ -3087,7 +3119,7 @@ class FitWindow(AgentMiddleware):
         request: ModelRequest[Any],
         budget: int,
         runtime: Runtime | None,
-        before: Collection[str],
+        before: tuple[Collection[str], Collection[str]],
         given: Sequence[BaseTool | dict[str, Any]],
         *,
         refit: bool,
@@ -3109,7 +3141,8 @@ class FitWindow(AgentMiddleware):
             runtime,
             least=0,
             signed=0 if refit else FIT_KEEP,
-            before=before,
+            before=before[0],
+            shown=before[1],
             given=given,
         )
 
@@ -3118,13 +3151,16 @@ class FitWindow(AgentMiddleware):
     ) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
+        shown = self._shown.get(runtime, frozenset()) if runtime is not None else frozenset()
         given = request.tools
         taken: list[str] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
-            lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before, given=given),
+            lambda r, b: _narrowed(
+                r, b, runtime, least=FIT_KEEP, before=before, shown=shown, given=given
+            ),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
             lambda r, b: self._results(r, b, refit=refit),
-            lambda r, b: self._turns(r, b, runtime, before, given, refit=refit),
+            lambda r, b: self._turns(r, b, runtime, (before, shown), given, refit=refit),
             lambda r, b: _steps_said(r, b) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
@@ -3149,6 +3185,7 @@ class FitWindow(AgentMiddleware):
             )
         if runtime is not None and ("tools" in taken or "turns" in taken):
             self._kept[runtime] = frozenset(_named(t) for t in request.tools if _whole(t))
+            self._shown[runtime] = frozenset(_named(t) for t in request.tools)
         said = (
             f"the request was made to fit the model's window ({budget} tokens): {', '.join(taken)}"
         )
@@ -3221,12 +3258,14 @@ def _narrowed(
     least: int,
     signed: int = FIT_KEEP,
     before: Collection[str] = (),
+    shown: Collection[str] = (),
     given: Sequence[BaseTool | dict[str, Any]] | None = None,
 ) -> ModelRequest[Any]:
     """The request's tools ranked — those it must keep (the run's used ones, the graph's own
     state tools, the readers of a result the run keeps, :data:`SAVING`, which its preview says
     to call, and what finds a held tool, ``tool_search``), those an earlier call of the run
-    kept (``before``: the same set call after call, so a prompt cache keeps its prefix), those
+    kept whole (``before``: the same set call after call, so a prompt cache keeps its prefix;
+    a tool none offered, ``shown``, is not offered later unless the hints choose it), those
     the tool hints chose, then by the words they share with the user's latest message — and
     kept in that order while they fit what the messages leave, ``least`` of them at least
     besides those it must keep — which are set aside first by their first sentence
@@ -3272,8 +3311,8 @@ def _narrowed(
     more = 0  # kept, or offered by signature, beside those it must keep
     for n, tool in ranked:
         name = _named(tool)
-        if n in musts:
-            continue
+        if n in musts or (shown and name not in shown and name not in hinted):
+            continue  # a tool an earlier call held back stays held: the same set call after call
         cost = count_tokens_approximately([], tools=[tool]) - aside.get(name, 0)
         if more < least or cost <= room:
             kept[n] = tool
