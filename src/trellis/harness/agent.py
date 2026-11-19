@@ -1555,6 +1555,19 @@ class Agent:
                     "the turn could not be written before the run returned; it is queued",
                     extra={"run_id": run_id, "error_class": type(exc).__name__},
                 )
+        await self._queued_turn(runtime, memory, messages, on_its_way)
+
+    async def _queued_turn(
+        self,
+        runtime: Runtime,
+        memory: RunMemory,
+        messages: Sequence[Said],
+        on_its_way: dict[str, list[Said]],
+    ) -> None:
+        """The turn's transcript queued (``writes``: retried, spooled), sent after the
+        conversation's earlier turns still on their way (:func:`_after`); until memory has
+        it, the conversation's next turns read it from here (:attr:`unwritten`)."""
+        run_id, attempt, conversation_key = runtime.run_id, runtime.attempt, runtime.conversation
         earlier = [r for r in on_its_way if r != run_id]  # in the order they were said
         on_its_way[run_id] = list(messages)
         self.unwritten[conversation_key] = on_its_way
@@ -1566,9 +1579,7 @@ class Agent:
             await _after(landed, earlier)
             await memory.record_messages(messages, run_id, attempt)
             on_its_way.pop(run_id, None)  # memory has it: its window says it from now on
-            done = landed.pop(run_id, None)
-            if done is not None:
-                done.set()  # the turns after it may go
+            landed.pop(run_id, asyncio.Event()).set()  # the turns after it may go
 
         await self.harness.writes.submit(
             "memory.transcript",
