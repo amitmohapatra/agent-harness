@@ -741,5 +741,6 @@ async def test_past_the_bound_a_record_is_not_kept_and_memory_off_sends_nothing(
     assert seen == [{}]  # past the bound: not kept
     journal = Journal(unrecorded={"k": {"op": "record_tool", "scope": {}, "args": {}}})
     off = harness.wrap(nothing, id="off")
-    await off.resent_records(SimpleNamespace(replay=SimpleNamespace(journal=journal), events=None))
+    standing_in: Any = SimpleNamespace(replay=SimpleNamespace(journal=journal), events=None)
+    await off.resent_records(standing_in)
     assert list(journal.unrecorded) == ["k"]  # memory off: kept, sent nowhere
