@@ -91,6 +91,15 @@ def test_schedules_together_and_a_time_of_day_in_words() -> None:
     assert b.hours(17, 21)(chat()) == ["0 schedules made, not 1"]
 
 
+def test_every_other_week_is_a_weekly_schedule_that_skips_weeks_or_says_so() -> None:
+    skips = made("0 9 * * 1", condition="the ISO week number is even")
+    assert b.alternate_weeks(chat(skips)) == []
+    assert b.alternate_weeks(chat(made("0 9 * * 1"), answer="Set weekly: every Monday.")) == []
+    assert b.alternate_weeks(chat(made("0 9 * * 1"), answer="Done.")) != []  # said nothing
+    assert b.alternate_weeks(chat(made("0 9 * * 2", condition="even week"))) != []
+    assert b.alternate_weeks(chat()) == ["0 schedules made, not 1"]
+
+
 def test_an_end_date_is_kept() -> None:
     until = made("0 9 * * *")
     until.metadata[TASK]["until"] = "2026-11-30"

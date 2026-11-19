@@ -382,6 +382,20 @@ def hours(first: int, last: int, *, once: bool = False) -> Check:
     return check
 
 
+def alternate_weeks(chat: Chat) -> list[str]:
+    """Every other Monday, which a cron cannot say: weekly on Monday with a condition that
+    skips the other weeks, or weekly and the answer saying it is every week instead."""
+    weekly = scheduled(weekday=0)
+    s, problems = one_made(chat)
+    if s is None:
+        return problems
+    condition = (s.metadata[TASK].get("condition") or "").lower()
+    if "week" in condition:  # the run checks the week itself
+        return [p for p in weekly(chat) if not p.startswith("a condition nobody asked for")]
+    said = ("every week", "weekly", "every monday", "can't", "cannot", "not able", "every two")
+    return says_any(weekly, *said)(chat)
+
+
 def ends(check: Check) -> Check:
     """``check``, and the schedule made keeps an end (``end_at``, or the task's ``until``)."""
 
@@ -665,22 +679,20 @@ def cases() -> list[Case]:
              scheduled("30 20 * * *")),
         Case("noon", S, (f"Every day at noon send me the stock of {SKU}.",),
              scheduled("0 12 * * *")),
-        Case("midnight", S, ("Every night at midnight send me the day's revenue.",),
+        Case("midnight", S, (f"Every night at midnight send me the stock of {SKU}.",),
              scheduled("0 0 * * *")),
-        Case("24h", S, ("Every weekday at 18:30 send me the day's revenue.",),
+        Case("24h", S, (f"Every weekday at 18:30 send me the stock of {SKU}.",),
              scheduled("30 18 * * 1-5")),
         Case("mon-thu", S, ("Every Monday and Thursday at 9am send me the sales summary.",),
              covered("0 9 * * 1,4")),
         Case("last-day", S, ("On the last day of every month at 6pm send me its revenue.",),
              covered("0 18 L * *")),
         Case("every-other-week", S, ("Every other Monday at 9am send me the sales summary.",),
-             or_asks(says_any(scheduled(weekday=0), "every week", "weekly", "every monday",
-                              "can't", "cannot", "not able", "every two"),
-                     "every week", "weekly", "every other", "two weeks")),
+             or_asks(alternate_weeks, "every week", "weekly", "every other", "two weeks")),
         Case("morning", S, ("Tomorrow morning remind me to call supplier SUP-03.",),
              says_any(hours(6, 11, once=True), "am", ":00", ":30")),
-        Case("end-of-day", S, ("Every day at the end of the day send me the revenue.",),
-             says_any(hours(17, 21), "pm", ":00", ":30")),
+        Case("end-of-day", S, (f"Every day at the end of the day send me the stock of {SKU}.",),
+             or_asks(says_any(hours(17, 23), "pm", ":00", ":30"), "time", "when", "what")),
         Case("wait-20", S, (f"Check the stock of {SKU} again in 20 minutes.",),
              scheduled(once=True, within=(timedelta(minutes=18), timedelta(minutes=23)))),
         Case("end-of-month", S,
