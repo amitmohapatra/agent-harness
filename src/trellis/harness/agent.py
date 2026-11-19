@@ -108,7 +108,7 @@ from trellis.harness.governance.decision import chosen as choice
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key, queued_with
-from trellis.harness.journal import Journal
+from trellis.harness.journal import Journal, content_key
 from trellis.harness.line import INTERRUPTS, Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
@@ -180,6 +180,9 @@ UNREACHED_FIX: Final = {
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
+#: How many tool records a run's journal keeps while they are on their way to memory
+#: (``Journal.unrecorded``): past it a record goes as before (queued, spooled), not saved.
+UNRECORDED_MAX: Final = 64
 #: How long a queued turn's transcript waits for its conversation's earlier turns still on
 #: their way to memory before it is sent all the same: memory keeps a conversation's messages
 #: in the order they arrive, so a turn sent past an earlier one would be stored before it.
@@ -1513,16 +1516,44 @@ class Agent:
         the framework spawned works (``bridges.helpers.inside``), under the helper's run."""
         helper = helpers.inside(runtime)
         memory = helper.memory if helper is not None else runtime.run_memory
-        if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
+        if memory is None or not runtime.uses("records") or call.tool in _pull(self):
+            return
+        record = memory.record(
+            "record_tool",
+            call=call.model_dump(mode="json"),
+            outcome=outcome.model_dump(mode="json"),
+        )
+        # kept in the journal until it lands: a process killed before then leaves it to the
+        # attempt after it (``resent_records``)
+        kept = runtime.replay.journal.unrecorded
+        key = content_key("record_tool", record["args"]["call"])
+        if len(kept) < UNRECORDED_MAX:
+            kept[key] = record
+
+        async def sent() -> None:
+            await memory.record_tool(call, outcome)
+            kept.pop(key, None)
+
+        await self.harness.writes.submit(
+            "memory.record_tool", sent, events=runtime.events, record=record
+        )
+
+    async def resent_records(self, runtime: Runtime) -> None:
+        """The tool records an earlier attempt queued and did not see land (its process died
+        first; ``Journal.unrecorded``), queued again: each is the same write, which the
+        service stores once."""
+        kept = runtime.replay.journal.unrecorded
+        for key, record in list(kept.items()):
+            work = self.harness._replay(record)
+            if work is None:  # memory off here: nothing to send it to
+                continue
+
+            async def sent(work: Callable[[], Awaitable[object]] = work, key: str = key) -> None:
+                await work()
+                kept.pop(key, None)
+
             await self.harness.writes.submit(
-                "memory.record_tool",
-                lambda: memory.record_tool(call, outcome),
-                events=runtime.events,
-                record=memory.record(
-                    "record_tool",
-                    call=call.model_dump(mode="json"),
-                    outcome=outcome.model_dump(mode="json"),
-                ),
+                "memory.record_tool", sent, events=runtime.events, record=record
             )
 
     async def recorded_run(self, runtime: Runtime, messages: Sequence[Said]) -> None:

@@ -587,7 +587,9 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
 
 
 async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
-    """A conversation's turn reads the large results its earlier turns saved in this process
+    """What earlier attempts and turns left this one. The tool records an earlier attempt of
+    the run queued and did not see land go again (``Agent.resent_records``: its process died
+    first). A conversation's turn reads the large results its earlier turns saved in this process
     (``Agent.results``) as its own (``tools.query.saved``): its history names their paths, and
     a follow-up's ``read_file`` or ``query_result`` on one finds it — as Deep Agents keeps its
     files in the thread's state — and starts with the graph state its last turn ended with
@@ -595,6 +597,7 @@ async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
     ``adapters.langgraph.CARRIED``): what this process kept of it, and over it what the file
     store keeps (:func:`_carried`), which has the turns other servers ran. A run with no
     conversation of its own, or a child run, has none."""
+    await agent.resent_records(runtime)
     if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
     runtime.earlier_results, tools = agent.results.of(runtime.conversation)

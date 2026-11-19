@@ -364,6 +364,11 @@ class Journal(BaseModel):
     #: ``bridges.helpers.Helpers.detached``): whoever keeps each going ends it, never a later
     #: attempt — on any worker
     handed_on: list[str] = Field(default_factory=list)
+    #: the tool records queued for the memory service and not known to have landed yet, by
+    #: call, as the write spool keeps them (``Agent.record_tool``): saved with the call, so
+    #: the attempt after a crash sends them again (``Agent.resent_records``) — the service
+    #: stores a record once per run, step, tool and arguments, and these are the same
+    unrecorded: dict[str, dict[str, Any]] = Field(default_factory=dict)
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None

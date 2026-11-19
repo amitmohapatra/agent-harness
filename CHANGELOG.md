@@ -50,8 +50,9 @@ and a failure of any kind is logged without stopping them.
 An append of events agent-runs could not be reached for was dropped once its client's own
 retries (about two seconds) were spent, so a restart lost the events of every run in flight.
 It is now tried again, in order, for up to a minute, then dropped with one warning as before.
-A tool call's record is queued before the run's progress is saved, so a worker killed right
-after the call leaves its record too, and the progress save carries the events not in the log
+A tool call's record is kept in the run's journal until it lands (`Journal.unrecorded`), so a
+process killed after the call, its record still queued, leaves it to the next attempt, which
+sends it again (the service stores it once); and the progress save carries the events not in the log
 yet: agent-runs keeps them in the checkpoint's transaction (its heartbeat's `events`), so a
 worker killed right after a step leaves the step and the events that show it, or neither. An
 agent-runs from before that refuses them once; progress is then saved alone, as before.

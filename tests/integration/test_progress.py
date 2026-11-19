@@ -669,3 +669,77 @@ async def test_a_write_that_asks_or_fails_runs_again_on_resume(harness: Harness)
     # neither the failed call nor the one that asked reads as interrupted by a crash
     assert done.answer == ["post failed: the board is read-only", "posted yes"]
     assert ran == ["draft", "hi", "draft", "hi"]
+
+
+async def test_a_tool_record_a_crash_left_unsent_is_sent_by_the_next_attempt(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    """The write ran and the journal was saved, but its tool record was still queued in the
+    process that died: the record was saved with the call (``Journal.unrecorded``), and the
+    next attempt sends it — once, as the service stores it once."""
+    crashes = [Crash()]
+
+    async def billing(input: str, agent: Runtime) -> str:
+        receipt = await agent.tools.call("pay", amount=5)
+        if crashes:
+            raise crashes.pop()
+        return receipt
+
+    store = memory_harness.runs
+    assert isinstance(store, LocalRuns)
+    writes = memory_harness.writes
+    submit = writes.submit
+    queued: list[str] = []
+
+    async def lost_with_the_process(label: str, work: Any, **kw: Any) -> None:
+        queued.append(label)  # queued, never sent: the process dies first
+
+    agent = arm(memory_harness.wrap(billing, id="billing"), [pay])
+    handle = await agent.start("invoice 9", user="u")
+    writes.submit = lost_with_the_process  # type: ignore[method-assign]
+    try:
+        await crash_once(store, agent, handle)
+    finally:
+        writes.submit = submit  # type: ignore[method-assign]
+    assert "memory.record_tool" in queued and not memory_service.named("record_tool")
+    assert await memory_harness.worker([agent]).run_once()  # the next attempt
+    done = await handle.result(wait=5)
+    assert done.status is RunStatus.SUCCESS and paid == [5]
+    await writes.drain()
+    sent = [c.body["args"] for c in memory_service.named("record_tool") if c.body["tool"] == "pay"]
+    assert sent == [{"amount": 5}]  # the lost record, sent once by the attempt after the crash
+
+
+async def test_past_the_bound_a_record_is_not_kept_and_memory_off_sends_nothing(
+    memory_harness: Harness, harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal keeps at most ``UNRECORDED_MAX`` records on their way (past it a record goes
+    as before: queued, spooled); a harness with memory off has nothing to send one to."""
+    from types import SimpleNamespace
+
+    from trellis.harness import agent as agent_module
+    from trellis.harness.journal import Journal
+
+    monkeypatch.setattr(agent_module, "UNRECORDED_MAX", 0)
+
+    async def paying(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("pay", amount=1)
+
+    async def nothing(input: str, agent: Runtime) -> str:
+        return "ok"
+
+    agent = arm(memory_harness.wrap(paying, id="b"), [pay])
+    seen: list[dict[str, Any]] = []
+    plain = agent_module.Agent.record_tool
+
+    async def watching(self: Any, runtime: Runtime, call: Any, outcome: Any) -> None:
+        await plain(self, runtime, call, outcome)
+        seen.append(dict(runtime.replay.journal.unrecorded))
+
+    monkeypatch.setattr(agent_module.Agent, "record_tool", watching)
+    assert (await agent.run("go", user="u")).status is RunStatus.SUCCESS
+    assert seen == [{}]  # past the bound: not kept
+    journal = Journal(unrecorded={"k": {"op": "record_tool", "scope": {}, "args": {}}})
+    off = harness.wrap(nothing, id="off")
+    await off.resent_records(SimpleNamespace(replay=SimpleNamespace(journal=journal), events=None))
+    assert list(journal.unrecorded) == ["k"]  # memory off: kept, sent nowhere
