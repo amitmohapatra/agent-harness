@@ -53,6 +53,14 @@ On a fixed machine (staging, or a 16-core VM), never this 4-core container:
   event-log paging;
 * end to end: many users at once with tools, memory and schedules; a soak of several hours.
 
+The stress scenario (`test_s14::test_stress_many_chats_on_three_servers`, 100 chats on three
+servers; `SCEN_STRESS_CHATS`) fails on this 4-core container on main and on this branch: with
+three servers, the memory service, agent-runs and PostgreSQL on four cores, `/v1/context` and
+`/v1/verify` pass their deadlines and agent-runs answers late, so a turn runs without its
+history (said as `memory_unavailable`). The bugs it uncovered are fixed (agent-runs' key cache,
+hold heartbeats, turn order, memory's hot thread cache, the answer check's own circuit, the
+write queue); run it here on a sized machine.
+
 Known items to settle here: the memory pipeline's model call inside a database transaction
 (conflict adjudication in LLM mode); a rare "bundle not found" when the cache write times out;
 verify capacity (about 2 s per real verify on 4 cores); the spending-segment write cost per
