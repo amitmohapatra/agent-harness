@@ -2,7 +2,7 @@
   {
     "messages": [
       {
-        "content": "You answer stock questions.\n\nA tool result too large to read is kept whole: query_result ranks, sums or counts all its rows exactly. Fetch many rows; never decline for their number.\n\nIt is now <day, hour> (UTC; the user's zone is not known).",
+        "content": "You answer stock questions.\n\nA tool result too large to read is kept whole: query_result ranks, sums or counts all its rows exactly.\n\nIt is now <day, hour> (UTC; the user's zone is not known).",
         "role": "system"
       },
       {
@@ -269,7 +269,7 @@
   {
     "messages": [
       {
-        "content": "You answer stock questions.\n\nA tool result too large to read is kept whole: query_result ranks, sums or counts all its rows exactly. Fetch many rows; never decline for their number.\n\nIt is now <day, hour> (UTC; the user's zone is not known).",
+        "content": "You answer stock questions.\n\nA tool result too large to read is kept whole: query_result ranks, sums or counts all its rows exactly.\n\nIt is now <day, hour> (UTC; the user's zone is not known).",
         "role": "system"
       },
       {

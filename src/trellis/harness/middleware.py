@@ -1226,11 +1226,13 @@ _PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
 #: What a run whose results the harness keeps (:data:`_PAGED`) is told before any result is
 #: there: ``read_file`` and ``query_result`` are offered only once one is kept
-#: (``results.kept``), and a model told nothing of them declines a question over more rows
-#: than it thinks it can read, never calling the tool that returns them.
+#: (``results.kept``), and a model told nothing of them declined a question over more rows
+#: than it thought it could read, never calling the tool that returns them. A fact, as each of
+#: Claude Code's tools states its own limits: worded as an order ("never decline"), it also
+#: fetched every match of an ambiguous request instead of asking which one.
 KEPT_SAID: Final = (
     "A tool result too large to read is kept whole: query_result ranks, sums or counts all "
-    "its rows exactly. Fetch many rows; never decline for their number."
+    "its rows exactly."
 )
 
 
