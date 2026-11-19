@@ -16,7 +16,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import SecretStr
 
 from tests.support.gateway import URL, FakeGateway, completion
-from tests.support.today import dated
+from tests.support.today import dated, kept_dated
 from trellis import Harness, ReAct, Runtime, Settings, stored, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import fresh
@@ -108,7 +108,7 @@ async def test_a_prompt_with_variables_is_rendered_into_the_instructions(
         assert "x-bf-prompt-id" not in sent.headers
         assert completion(sent)["messages"][0] == {
             "role": "system",
-            "content": dated("You help the EU team."),
+            "content": kept_dated("You help the EU team."),
         }
     assert events_of(events, "prompt") == [
         {"name": "prompt", "prompt": "greet", "version": "1", "source": "Bifrost"}

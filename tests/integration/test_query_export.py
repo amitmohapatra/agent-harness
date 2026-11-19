@@ -16,7 +16,7 @@ from typing import Any, Final
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from openpyxl import load_workbook
@@ -193,15 +193,45 @@ async def test_react_offers_the_variant_per_model_call(run: tuple[Run, bool]) ->
     async def handler(request: Any) -> Any:
         sent.extend(request.tools)
 
-    request = SimpleNamespace(
-        tools=[],
-        messages=[],
-        state={},
-        override=lambda **c: SimpleNamespace(**{"state": {}, "messages": [], **c}),
-    )
+    def made(**fields: Any) -> SimpleNamespace:
+        given = {"tools": [], "messages": [], "state": {}, "system_message": None, **fields}
+        return SimpleNamespace(**given, override=lambda **c: made(**{**given, **c}))
+
+    request = made()
     await ours.HarnessTools().awrap_model_call(request, handler)  # type: ignore[arg-type]
     [found] = [t for t in sent if t.name == "query_result"]
     assert found is (ours.SAVING if saving else ours.READERS)["query_result"]
+
+
+def test_a_run_is_told_before_any_result_that_a_large_one_is_kept_whole() -> None:
+    """``read_file`` and ``query_result`` are offered only once a result is kept, so a model
+    told nothing of them declined a question over many rows (all of a year's sales lines)
+    without calling the tool that returns them: every call that offers a tool is told, after
+    its instructions and once, in the same words (a prompt cache keeps them); one offering no
+    tool is not."""
+    look = {"type": "function", "function": {"name": "look", "parameters": {}}}
+
+    def made(**fields: Any) -> Any:
+        given = {"tools": [look], "system_message": SystemMessage("You help."), **fields}
+        return SimpleNamespace(**given, override=lambda **c: made(**{**given, **c}))
+
+    def said(request: Any) -> Any:  # the instructions sent
+        return ours._kept_said(request).system_message
+
+    told = ours._kept_said(made())
+    assert said(told).text == f"You help.\n\n{ours.KEPT_SAID}"
+    assert ours._kept_said(told) is told  # said once
+    blocks: list[str | dict[Any, Any]] = [
+        {"type": "text", "text": "You help.", "cache_control": {"type": "ephemeral"}}
+    ]
+    given = made(system_message=SystemMessage(content=blocks))
+    assert said(given).content == [
+        *blocks,
+        {"type": "text", "text": ours.KEPT_SAID},
+    ]
+    assert said(made(system_message=None)).content == ours.KEPT_SAID
+    bare = made(tools=[])
+    assert ours._kept_said(bare) is bare
 
 
 def test_saving_adds_a_few_dozen_tokens_to_query_result_only() -> None:

@@ -1813,6 +1813,29 @@ def test_a_current_figure_may_name_the_earlier_one_as_earlier() -> None:
         said = f"The current total is **{now} units**. The total has {moved} from {old} since."
         assert cx.score(expect, said, [], turn.text)["correct"], said
     assert not cx.score(expect, f"The total is {old}, dropped from 55.", [], turn.text)["correct"]
+    # the earlier figure as the last check, or as what was given a moment ago (ReAct on Deep
+    # Agents, and ReAct on main: both said 29 and named the 40 as the earlier reading)
+    for earlier in (
+        f"The figure has changed since my last check, which returned {old} units.",
+        f"That is a different reading from the {old} I gave you a moment ago.",
+    ):
+        said = f"The current total is {now} units.\n\n{earlier}"
+        assert cx.score(expect, said, [], turn.text)["correct"], said
+    assert not cx.score(expect, f"It is {old}, the same as my last check.", [], turn.text)[
+        "correct"
+    ]
+
+
+def test_a_store_not_in_the_list_is_said_to_be_missing() -> None:
+    """nodata-02 (ReAct on Deep Agents): "Store S55 isn't in the store list, so I can't report
+    its Q3 2026 units" says the data is not there; a figure for it still does not."""
+    case = next(c for c in cx.cases() if c.id == "nodata-02")
+    turn = case.turns[0]
+    expect = turn.expect
+    assert expect is not None and expect.kind == "abstain"
+    said = "Store S55 isn't in the store list, so I can't report its Q3 2026 units."
+    assert cx.score(expect, said, [], turn.text)["correct"], said
+    assert not cx.score(expect, "S55 sold 1,240 units in Q3 2026.", [], turn.text)["correct"]
 
 
 def test_a_scan_that_is_timing_out_says_what_went_wrong() -> None:
