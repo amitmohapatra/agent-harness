@@ -32,6 +32,7 @@ from trellis.harness.schedules import (
     TOUCHED,
     UPDATE,
     ScheduleLimits,
+    runs_said,
 )
 from trellis.harness.tools.convert import text_of
 from trellis.runs import ScheduleUpdate
@@ -152,6 +153,38 @@ async def test_a_task_set_in_chat_is_the_users_in_its_thread_with_the_agents_lim
         assert schedule.schedule_id in answer and "check stock of A-1" in answer
 
 
+#: A schedule's next runs, as the model and the user read them: the day, the date, the hour.
+NEXT_RUNS = re.compile(
+    r"next Mon \d{1,2} \w{3}, 09:00, then Mon \d{1,2} \w{3}, 09:00 \(Europe/Berlin\)"
+)
+
+
+async def test_a_schedule_is_said_by_its_next_runs_in_the_users_zone_never_its_cron() -> None:
+    """The user never reads a cron (handoff 2.4): what the model is told it scheduled, and what
+    it lists, say the next two runs as dates in the schedule's zone; the cron stays inside."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "weekly stock report", "when": "0 9 * * 1", "timezone": "Europe/Berlin"}
+        answer = await said(agent, chat, "ada", ("schedule_task", args))
+        assert "0 9 * * 1" not in answer and NEXT_RUNS.search(answer), answer
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert "0 9 * * 1" not in listed and NEXT_RUNS.search(listed), listed
+        assert len(local(h)._schedules) == 1  # said once, made once
+        assert only(h).cadence == "0 9 * * 1"  # the cron is kept, only not said
+
+
+def test_a_one_time_run_says_its_one_date_and_its_year_when_not_this_one() -> None:
+    after = datetime(2026, 12, 30, 12, tzinfo=UTC)
+    assert (
+        runs_said("0 9 4 1 *", "UTC", once=True, after=after) == "next Mon 4 Jan 2027, 09:00 (UTC)"
+    )
+    assert runs_said("0 9 * * *", "Asia/Kolkata", after=after) == (
+        "next Thu 31 Dec, 09:00, then Fri 1 Jan 2027, 09:00 (Asia/Kolkata)"
+    )
+    assert runs_said("not a cron", "UTC") == "'not a cron' (UTC)"
+
+
 @pytest.mark.parametrize(
     ("when", "said_"),
     [
@@ -229,7 +262,8 @@ async def test_each_user_lists_and_changes_only_their_own() -> None:
             ("update_schedule", {"id": ada, "when": "0 9 * * 1", "enabled": False}),
         )
         kept = local(h)._schedules[ada]
-        assert kept.cadence == "0 9 * * 1" and kept.enabled is False and "0 9 * * 1" in changed
+        assert kept.cadence == "0 9 * * 1" and kept.enabled is False
+        assert '"status": "paused"' in changed and "0 9 * * 1" not in changed  # never its cron
         assert "paused" in await said(agent, chat, "ada", ("list_schedules", {}))
         await said(agent, chat, "ada", ("update_schedule", {"id": ada, "task": "ada's new"}))
         assert local(h)._schedules[ada].metadata[TASK]["task"] == "ada's new"
@@ -546,6 +580,10 @@ async def test_a_vague_ask_is_choices_the_user_picks_one_of() -> None:
         interrupt = await asked(agent)
         assert interrupt.question == "Which should I set up?"
         assert [o.value for o in interrupt.options] == ["0", "1", NEITHER]
+        # each button says when it would run, never its cron
+        labels = [str(o.label) for o in interrupt.options[:2]]
+        assert not [label for label in labels if "* *" in label], labels
+        assert all(re.search(r"next \w{3} \d{1,2} \w{3}, 09:00", label) for label in labels)
         assert "Scheduled" in await picked(agent, interrupt, "1")
         assert [s.cadence for s in local(h)._schedules.values()] == ["0 9 * * 1"]
         none = await planned(h, ("schedule_task", {"task": "x", "choices": choices}), name="no")

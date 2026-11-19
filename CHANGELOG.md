@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a schedule is said by its next runs, never its cron
+
+What the model is told it scheduled, what `list_schedules` and `update_schedule` return, and
+the labels of the buttons a user picks a schedule with said its cron (`'0 9 * * 1' (UTC)`) and
+its next run as a UTC timestamp, so a 09:00 Berlin schedule read `08:00:00+00:00`. They now say
+its next two runs as dates in its zone (`next Mon 24 Nov, 09:00, then Mon 1 Dec, 09:00
+(Europe/Berlin)`; a one-time schedule its one run, the year when it is not this one). The cron
+is kept inside (`schedules.runs_said`); `list_schedules` returns `runs` for `when` and `next`.
+
 ### Changed: an OpenAI `SandboxAgent`'s shell runs unasked, as every framework's shell does
 
 A `SandboxAgent`'s `exec_command` and `write_stdin` asked a person as any write, while Claude
