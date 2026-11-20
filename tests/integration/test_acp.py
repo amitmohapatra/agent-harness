@@ -733,6 +733,22 @@ async def test_a_question_answered_with_no_option_it_offers_is_skipped(
     assert answer.outcome.outcome == "cancelled"  # no option of that kind: the question dismissed
 
 
+@pytest.mark.usefixtures("attended")
+async def test_its_question_call_with_no_question_is_its_calls_error(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An ``AskUserQuestion`` call that asks nothing asks nobody: the form is refused saying
+    why, the agent's call fails with it, and the run goes on."""
+    script = [{"questions": []}, {"text": "got {last}"}]
+    agent = harness.wrap(fake(tmp_path, script), id="asks-none")
+    done = await agent.run("set it up", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
+    assert (
+        done.answer
+        == "got AskUserQuestion failed: AskUserQuestion asks no question: give it one or more"
+    )
+
+
 # --------------------------------------------------------------------------- helpers
 LONG = "rm -rf build && echo this-command-is-longer-than-the-fifty-characters-kimi-shows"
 

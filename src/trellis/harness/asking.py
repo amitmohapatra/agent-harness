@@ -191,11 +191,14 @@ class Question:
         handed back in another case or spacing as that option's value), the corrected value
         of a review, read into ``form`` when there is one. A cancel raises
         :class:`RunCancelled`."""
-        value = answer_of(resolution)
-        if resolution.decision is InterruptDecision.ANSWER:
+        decision = resolution.decision
+        # a choice approved or rejected saying what was picked is answered with that
+        said = bool(self.options) and decision in DECIDED and resolution.answer is not None
+        value = resolution.answer if said else answer_of(resolution)
+        if said or decision is InterruptDecision.ANSWER:
             # an option handed back in another case or spacing is that option; any other
-            # answer is as it was given, for the asker to read (``answers.meant``)
-            value = meant(self.interrupt(tenant="-", run_id="-"), value)
+            # answer is as it was given, for the asker to read (:func:`picked`)
+            value = picked(self.interrupt(tenant="-", run_id="-"), value)
         if self.form is None or value is None or isinstance(value, bool):
             return value
         try:
@@ -211,6 +214,53 @@ class Question:
 SOURCE: Final = "source"
 #: What of a graph's ``interrupt(value)`` dict goes on the interrupt, as ``ask`` takes it.
 DESCRIBED: Final = ("options", "multiple", "expects", "ui_schema", "component", "props", "assignee")
+
+
+#: The decisions that say yes or no, not what was picked.
+DECIDED: Final = (InterruptDecision.APPROVE, InterruptDecision.REJECT)
+
+
+def asked_by_model(interrupt: Interrupt) -> bool:
+    """Whether a model asked ``interrupt`` (its payload names who: :data:`SOURCE`)."""
+    return isinstance(interrupt.payload, Mapping) and SOURCE in interrupt.payload
+
+
+def picked(interrupt: Interrupt, value: Any) -> Any:
+    """``value`` with each option it hands back as that option's value, by the one matcher
+    (``answers.meant``: an option's value or label, its case and spacing aside): with several
+    picks, a lone string naming an option is a list of it; a form's answer, each field that
+    picks (its schema's ``enum`` or ``oneOf`` values, an array of them for several picks) so.
+    Anything else is as it was given."""
+    if isinstance(value, Mapping) and not interrupt.options:
+        properties = (interrupt.expects or {}).get("properties") or {}
+        fields = {name: _picking(schema) for name, schema in properties.items()}
+        return {name: _picked_by(fields.get(name), given) for name, given in value.items()}
+    found = meant(interrupt, value)
+    if interrupt.multiple and isinstance(found, str):
+        one = meant(interrupt.model_copy(update={"multiple": False}), found)
+        return [one] if one in interrupt.option_values else found
+    return found
+
+
+def _picked_by(field: Interrupt | None, value: Any) -> Any:
+    return value if field is None else picked(field, value)
+
+
+def _picking(schema: Any) -> Interrupt | None:
+    """A form field's schema as the choice it is (:func:`picked`), ``None`` when it picks
+    from no values."""
+    several = isinstance(schema, Mapping) and schema.get("type") == "array"
+    given = schema.get("items") if several else schema
+    if not isinstance(given, Mapping):
+        return None
+    titled = [o for o in given.get("oneOf") or () if isinstance(o, Mapping) and "const" in o]
+    values = [(v, None) for v in given.get("enum") or ()] or [
+        (o["const"], o.get("title")) for o in titled
+    ]
+    if not values or not all(isinstance(v, str) for v, _ in values):
+        return None
+    options = [Option(value=v, label=t if isinstance(t, str) else None) for v, t in values]
+    return Question("-", options=options, multiple=several).interrupt(tenant="-", run_id="-")
 
 
 def answer_of(resolution: InterruptResolution) -> Any:
@@ -232,4 +282,4 @@ def _jsonable(option: Option | str) -> Any:
     return option if isinstance(option, str) else option.model_dump(mode="json", exclude_none=True)
 
 
-__all__ = ["SOURCE", "Question", "RunCancelled", "answer_of"]
+__all__ = ["DECIDED", "SOURCE", "Question", "RunCancelled", "answer_of", "asked_by_model", "picked"]

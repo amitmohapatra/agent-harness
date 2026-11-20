@@ -93,8 +93,9 @@ async def test_a_choice_of_labelled_options_with_several_picks_on_every_adapter(
         {"customer": "acme"},
         "role:sales",
     )
+    # a lone pick is a list of it ("a" is ["a"]); a string naming no option is no list of them
     with pytest.raises(ConfigurationError, match="not a list of the options"):
-        await agent.resume(asked.interrupt_id, "answer", answer="a", reviewer="lee")
+        await agent.resume(asked.interrupt_id, "answer", answer="z", reviewer="lee")
     with pytest.raises(ConfigurationError, match="not among the options"):
         await agent.resume(asked.interrupt_id, "answer", answer=["a", "z"], reviewer="lee")
     done = await Reviewer({"plan-picker": ["a", "c"]}).settle(agent, paused)

@@ -76,6 +76,7 @@ from trellis.harness.adapters.langgraph import (
     is_hitl,
     run_scoped,
 )
+from trellis.harness.asking import DECIDED, asked_by_model, picked
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
 from trellis.harness.budget import BUDGET, Budget
@@ -124,7 +125,7 @@ from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox, said_undeclared
 from trellis.memory.models import PromptContext
 from trellis.runs import Job, RateLimitedError
-from trellis.runs.answers import answer_problem, meant
+from trellis.runs.answers import answer_problem
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
@@ -934,11 +935,22 @@ class Agent:
             )
         chosen = InterruptDecision(str(decision).upper())
         awaiting = record.awaiting
+        question = awaiting.tool_call is None
+        model = question and asked_by_model(awaiting)
+        if chosen in DECIDED and (model or (question and awaiting.options and answer is not None)):
+            # a model's question, and a choice saying what was picked, is answered with what is
+            # picked or said: yes or no tells the model nothing
+            if answer is None:
+                raise ConfigurationError(
+                    f"not an answer to {interrupt_id}: it is answered with what is picked or "
+                    "said, not approved or rejected"
+                )
+            chosen = InterruptDecision.ANSWER
         if chosen is InterruptDecision.ANSWER:  # an option handed back is that option
-            answer = meant(awaiting, answer)
-        picked = choice(answer) if answer in awaiting.option_values else None
-        if chosen is InterruptDecision.ANSWER and awaiting.tool_call is not None and picked:
-            (chosen, remember), answer = picked, None  # an approval's choice: what it names
+            answer = picked(awaiting, answer)
+        named = choice(answer) if answer in awaiting.option_values else None
+        if chosen is InterruptDecision.ANSWER and awaiting.tool_call is not None and named:
+            (chosen, remember), answer = named, None  # an approval's choice: what it names
         edited = chosen is InterruptDecision.EDIT
         try:
             resolution = InterruptResolution(

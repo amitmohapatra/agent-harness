@@ -891,14 +891,23 @@ class FakeAgent:
         client that takes forms (``elicitation.form``) is sent every question in one form, a
         field each; any other the first question only, as a permission request. What the call
         answers: the answers by question (the one answer, of ``"question"``)."""
-        questions = step.get("questions") or [
-            {"question": step["question"], "options": [{"label": o} for o in step["options"]]}
-        ]
+        questions = (
+            step["questions"]
+            if "questions" in step
+            else [
+                {"question": step["question"], "options": [{"label": o} for o in step["options"]]}
+            ]
+        )
         call_id = self.call_id()
         await self.started(session_id, call_id, "AskUserQuestion", {"questions": questions})
         forms = self.client is not None and self.client.elicitation is not None
         if forms and os.environ.get("FAKE_ACP_FORMS", "1") == "1":
-            answers = await self.formed(session_id, call_id, questions)
+            try:
+                answers = await self.formed(session_id, call_id, questions)
+            except RequestError as exc:  # the client refused the form: the call fails
+                failed = f"AskUserQuestion failed: {(exc.data or {}).get('why', exc)}"
+                await self.progress(session_id, call_id, status="failed", raw_output=failed)
+                return failed
         else:
             answers = await self.first(session_id, call_id, questions[0])
         output = json.dumps({"answers": answers}) if answers else "dismissed"

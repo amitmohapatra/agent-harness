@@ -96,6 +96,7 @@ from trellis.contracts import (
     InterruptDecision,
     InterruptResolution,
     ToolCall,
+    ToolError,
     ToolOutcome,
     ToolSpec,
     ToolStatus,
@@ -1808,6 +1809,8 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
                 verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
+            except ToolError as exc:  # a call that cannot be asked: Claude reads why
+                verdict = PermissionResultDeny(message=exc.message)
         elif (
             steps.carries(getattr(context, "tool_use_id", None))
             # a harness tool: the hook decided it (in plan mode too, where the CLI still

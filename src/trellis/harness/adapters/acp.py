@@ -1939,6 +1939,10 @@ class Attempt:
         except Paused:
             await self._stop()
             return unfilled()
+        except ToolError as exc:  # a call that cannot be asked (no question): the agent reads why
+            from acp import RequestError
+
+            raise RequestError.invalid_params({"why": exc.message}) from exc
         if filled is None:  # answered in words: the agent's model reads them
             await self._in_words(message, answer)
             return unfilled()

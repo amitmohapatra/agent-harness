@@ -183,3 +183,54 @@ async def test_a_question_in_a_run_someone_reads_has_no_deadline(harness: Harnes
     agent = asking(harness, {"question": "Which size?", "options": ["S", "L"]}, "ask-open")
     paused = await agent.run("go", user="u1")
     assert paused.interrupt is not None and paused.interrupt.deadline is None
+
+
+async def test_a_forms_option_in_another_case_is_that_option(harness: Harness) -> None:
+    """A form's field that picks reads an answer as a single question's choice does (the one
+    matcher, ``answers.meant``): an option in another case or spacing is that option — of a
+    field with several picks too — and the form's schema takes it."""
+    agent = harness.wrap(own(QUESTIONS), id="own-case")
+    given = {"Which size?": " l", "Which colour?": "RED", "Which extras?": ["card"]}
+    done = await agent.resume(await paused_on(agent), "answer", answer=given, reviewer="u1")
+    assert json.loads(str(done.answer)) == {
+        "Which size?": "L",
+        "Which colour?": "Red",
+        "Which extras?": ["Card"],
+    }
+
+
+@pytest.mark.parametrize(("answer", "read"), [(" east", ["East"]), ("east and west", None)])
+async def test_one_pick_said_alone_of_several_is_a_list_of_it(
+    harness: Harness, answer: str, read: list[str] | None
+) -> None:
+    """With several picks, a lone answer naming an option is that one pick; other words stay
+    the person's, for the model to read."""
+    args = {"question": "Which regions?", "options": ["North", "East"], "multiple": True}
+    agent = asking(harness, args, "ask-one-of-several")
+    done = await agent.resume(await paused_on(agent), "answer", answer=answer, reviewer="u1")
+    assert done.answer == f"Done. {json.dumps(read) if read else answer}"
+    multi = harness.wrap(own([QUESTIONS[2]]), id="own-one-of-several")
+    done = await multi.resume(await paused_on(multi), "answer", answer="gift WRAP", reviewer="u1")
+    assert json.loads(str(done.answer)) == {"Which extras?": ["Gift wrap"]}
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_a_models_question_is_answered_with_what_was_picked_never_true_or_false(
+    harness: Harness, decision: str
+) -> None:
+    """Approving or rejecting a question says nothing the model can read: one that says what
+    was picked is that answer; one that says nothing is refused, and the run still waits."""
+    agent = asking(harness, {"question": "Which size?", "options": ["S", "L"]}, "ask-decided")
+    asked = await paused_on(agent)
+    with pytest.raises(ConfigurationError, match="what is picked or said"):
+        await agent.resume(asked, decision, reviewer="u1")
+    done = await agent.resume(asked, decision, answer="l", reviewer="u1")
+    assert done.answer == "Done. L"
+
+
+async def test_a_frameworks_call_with_no_question_is_a_tool_error(harness: Harness) -> None:
+    async def fn(input: Any, agent: Runtime) -> str:
+        return json.dumps(await ask_own("AskUserQuestion", []))
+
+    done = await harness.wrap(fn, id="own-none").run("go", user="u1")
+    assert done.error is not None and "asks no question" in done.error.message, done

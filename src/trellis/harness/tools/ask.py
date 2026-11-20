@@ -289,7 +289,10 @@ async def ask_own(tool: str, questions: Sequence[Mapping[str, Any]]) -> dict[str
     description why — several picks with ``multiSelect``, Kimi's ``multi_select``), asked as
     ``ask_user`` asks (:func:`ask_fields`), all of them in one pause: one question its choice,
     several one form (:data:`SEVERAL`). The answer by question — the label picked, the labels
-    of several picks — or, when it picks none of the options, the person's words."""
+    of several picks — or, when it picks none of the options, the person's words. A call that
+    asks no question asks nobody: a ``ToolError`` saying so, the call's error."""
+    if not questions:
+        raise ToolError(f"{tool} asks no question: give it one or more", source="tools")
     fields = [_own(asked) for asked in questions]
     said = fields[0].name if len(fields) == 1 else SEVERAL.format(count=len(fields))
     answer = await ask_fields(said, fields, tool=tool)

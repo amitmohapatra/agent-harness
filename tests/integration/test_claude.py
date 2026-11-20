@@ -1706,3 +1706,17 @@ async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_durat
     assert [r["tool"] for r in results] == ["Read", "Grep", "lookup"]
     assert native_spec("mcp__crm__find").server == "crm"
     assert native_spec("Bash").side_effects == "write"  # Claude Code's own check asks first
+
+
+@pytest.mark.usefixtures("attended")
+async def test_claudes_question_call_with_no_question_is_its_tool_error(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An ``AskUserQuestion`` call that asks nothing asks nobody: Claude reads why as the
+    call's error, and the run goes on."""
+    asks = {"builtin": "AskUserQuestion", "args": {"questions": []}}
+    agent = harness.wrap(options(tmp_path, [asks, {"text": "went on: {last}"}]), id="asks-none")
+    done = await agent.run("set it up", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done
+    assert "AskUserQuestion asks no question" in str(done.answer)
+    assert built_ins(tmp_path) == []
