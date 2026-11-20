@@ -56,10 +56,10 @@ Kind = Literal["text", "date", "date_range", "number"]
 ASK_USER: Final = "ask_user"
 _DATE: Final = {"type": "string", "format": "date"}
 #: The answer's JSON Schema for each kind: the structured value, or — so plain chat can
-#: answer — text.
+#: answer — text (a date's value is a string too: a date, or any words).
 EXPECTS: Final[dict[str, dict[str, Any]]] = {
     "text": {"type": "string"},
-    "date": _DATE,
+    "date": {"anyOf": [_DATE, {"type": "string"}]},
     "date_range": {
         "type": ["object", "string"],
         "properties": {"start": _DATE, "end": _DATE},
@@ -68,10 +68,15 @@ EXPECTS: Final[dict[str, dict[str, Any]]] = {
     "number": {"type": ["number", "string"]},
 }
 #: A choice's answer: an option's value, or another answer in words ("Other"); with
-#: ``multiple``, a list of them.
+#: ``multiple``, a list of them, one or more, each picked once (as the contracts read a pick).
 CHOSEN: Final[dict[bool, dict[str, Any]]] = {
     False: EXPECTS["text"],
-    True: {"type": ["array", "string"], "items": {"type": "string"}},
+    True: {
+        "type": ["array", "string"],
+        "items": {"type": "string"},
+        "minItems": 1,
+        "uniqueItems": True,
+    },
 }
 #: The widget hints for each kind (react-jsonschema-form's ``uiSchema``).
 WIDGETS: Final[dict[str, dict[str, Any]]] = {

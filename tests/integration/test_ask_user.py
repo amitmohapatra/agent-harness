@@ -431,7 +431,8 @@ async def test_several_values_are_one_form_filled_in_with_what_is_remembered(
                              "description": "your order of 2026-11-02"},
                 "supplier": {"type": "string", "title": "Supplier", "enum": ["SUP-04", "SUP-07"],
                              "default": "SUP-04", "description": "your usual supplier"},
-                "deliver_on": {"type": "string", "format": "date", "title": "Delivery date"},
+                "deliver_on": {"anyOf": [{"type": "string", "format": "date"},
+                                         {"type": "string"}], "title": "Delivery date"},
             },
             "required": [],  # each required one is filled in: its default stands
         }  # fmt: skip

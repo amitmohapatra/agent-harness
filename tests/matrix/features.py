@@ -242,7 +242,7 @@ async def ask_user_tool(w: World) -> None:
     [asked] = o.pauses
     assert asked.props == {"kind": "date", "options": []}, asked
     assert asked.question == "Which day? (a date, YYYY-MM-DD)"  # what plain chat reads
-    assert asked.expects == {"type": "string", "format": "date"}
+    assert asked.expects == {"anyOf": [{"type": "string", "format": "date"}, {"type": "string"}]}
     assert o.answer == "Done. 2026-11-05", o.answer
 
 

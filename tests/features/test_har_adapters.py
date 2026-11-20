@@ -53,7 +53,9 @@ async def test_ask_user_pauses_in_agent_runs_and_the_answer_resumes_elsewhere(
         paused = await agent.run("Book the delivery.", user=user, thread="c")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
         assert paused.interrupt.component == "ask_user"
-        assert paused.interrupt.expects == {"type": "string", "format": "date"}
+        assert paused.interrupt.expects == {
+            "anyOf": [{"type": "string", "format": "date"}, {"type": "string"}]
+        }
         inbox = await h.inbox(f"user:{user}")
         assert [s.run_id for s in inbox] == [paused.run_id]  # waits on the run's user
     stored = await record(paused.run_id)
