@@ -99,9 +99,10 @@ PROGRESS_SECONDS: Final = 20.0
 #: without an answer when nothing tighter bounds it (a ``call_timeout``, the run's time left):
 #: past it the step has stalled, and the run ends with a :class:`ModelTimeout`.
 STALL_SECONDS: Final = 600.0
-#: The most a run its schedule fired waits for its user's answer, when its schedule waits for
-#: what nobody approved (``schedules.UNAPPROVED``): past it the run ends ``TIMEOUT``, nobody
-#: answered (the interrupt's ``deadline``, which agent-runs and ``LocalRuns`` keep).
+#: The most a run its schedule fired waits for its user's answer — to a question its agent
+#: asks, or when its schedule waits for what nobody approved (``schedules.UNAPPROVED``): past
+#: it the run ends ``TIMEOUT``, nobody answered (the interrupt's ``deadline``, which
+#: agent-runs and ``LocalRuns`` keep).
 UNANSWERED: Final = timedelta(hours=24)
 #: The message a stalled step's watchdog cancels the attempt with.
 STALLED: Final = "trellis: the model call stalled"
@@ -937,7 +938,8 @@ class Runtime:
         schema, ``ui_schema`` its widget hints). ``component`` names your own screen and
         ``props`` its data: a surface that has it renders it, any other the control above. A
         table or diff with ``expects`` is a review. It is the run's user's to answer unless
-        ``assignee`` names someone else (``user:…``, ``role:…``); ``source`` says who asked
+        ``assignee`` names someone else (``user:…``, ``role:…``), by ``deadline`` (in a run
+        its schedule fired, :data:`UNANSWERED` from now unless given); ``source`` says who asked
         (the payload's ``asking.SOURCE``: ``ask_user``'s, a framework's own question tool's).
         A question that cannot be asked as given (an ``expects`` that is not a JSON Schema,
         ``props`` without a ``component``...) is refused here (``ConfigurationError``, saying
@@ -954,7 +956,7 @@ class Runtime:
             component=component,
             props=props,
             assignee=assignee or principal(self.user),
-            deadline=deadline,
+            deadline=deadline or self._answered_by(),
             escalate_to=escalate_to,
             source=source,
         )
@@ -992,8 +994,8 @@ class Runtime:
         return resolution
 
     def _answered_by(self) -> datetime | None:
-        """When an approval in an unattended run must be answered (:data:`UNANSWERED` from
-        now): in a run its schedule fired, ``None`` in any other."""
+        """When a question or an approval in an unattended run must be answered
+        (:data:`UNANSWERED` from now): in a run its schedule fired, ``None`` in any other."""
         root = self
         while root.parent is not None:  # a child run waits as its parent's schedule does
             root = root.parent
