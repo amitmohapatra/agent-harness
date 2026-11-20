@@ -445,18 +445,20 @@ async def test_a_write_inside_a_git_working_tree_is_kimis_own_to_approve(
 async def test_kimis_schedule_tools_leave_the_models_list_when_kimis_config_disables_them(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    """Kimi's scheduling is off under the harness (``KIMI_DISABLE_CRON``), but Kimi still
-    lists ``CronCreate``, ``CronList`` and ``CronDelete`` to its model: no environment switch
-    and nothing in ACP takes a built-in off. Kimi's own ``[tools] disabled`` does."""
+    """Kimi's scheduling is off under the harness (``KIMI_DISABLE_CRON``), and its model is not
+    offered ``CronCreate``, ``CronList`` or ``CronDelete``: no environment switch and nothing
+    in ACP takes a built-in off, but Kimi's own ``[tools] disabled`` does, which the harness
+    sets in the user's copy of the team's config. A team's own ``[tools]`` stays as it is
+    (the tools are then listed and refused: ``KIMI_DISABLE_CRON``)."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
-    await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron-listed").run("hi", user="u1")
-    assert {"CronCreate", "CronList", "CronDelete"} <= set(endpoint.offered()[0])
-    (home / "config.toml").write_text(
-        '[tools]\ndisabled = ["CronCreate", "CronList", "CronDelete"]\n'
-    )
     await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron-hidden").run("hi", user="u1")
-    assert not [name for name in endpoint.offered()[-1] if name.startswith("Cron")]
+    assert not [name for name in endpoint.offered()[0] if name.startswith("Cron")]
+    assert "schedule_task" in str(endpoint.offered()[0])  # the harness's schedules instead
+    (home / "config.toml").write_text('[tools]\ndisabled = ["CronCreate"]\n')
+    await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron-team").run("hi", user="u1")
+    listed = {name for name in endpoint.offered()[-1] if name.startswith("Cron")}
+    assert listed == {"CronList", "CronDelete"}  # the team's own list, as it wrote it
 
 
 async def test_a_write_allowed_for_the_conversation_is_approved_for_kimis_session(

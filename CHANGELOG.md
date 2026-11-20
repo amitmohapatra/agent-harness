@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: Kimi's own schedule tools are not offered to its model
+
+Kimi's `CronCreate`, `CronList` and `CronDelete` were refused when called
+(`KIMI_DISABLE_CRON`: a schedule Kimi made would never fire) but still listed to its model, so
+it could reach for them and read "Cron scheduling is disabled". The harness now sets Kimi's own
+`[tools] disabled` for them in the user's copy of the team's `config.toml`
+(`acp.cron_hidden`): the model is offered the harness's `schedule_task` alone. A team's own
+`[tools]` is kept as it is.
+
 ### Changed: a schedule is said by its next runs, never its cron
 
 What the model is told it scheduled, what `list_schedules` and `update_schedule` return, and

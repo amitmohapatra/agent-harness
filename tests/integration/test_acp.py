@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -746,13 +747,22 @@ async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
     assert homes == [kimi_home_of("ada"), kimi_home_of("bob")]
     for home in homes:
         assert (home / "credentials").resolve() == team / "credentials"
-        asked = (home / "config.toml").read_text().removeprefix(rules)
+        # the team's config, Kimi's own [tools] taking its schedule tools off the list, then asks
+        asked = (home / "config.toml").read_text().removeprefix(acp.cron_hidden(rules))
         assert asked == "".join(
             f'\n[[permission.rules]]\ndecision = "ask"\npattern = "{pattern}"\n'
             for pattern in ("Bash(rm *)", *KIMI_ASKED)
         )
         assert len(list(home.glob("sessions/*/session_*"))) == 1
     assert (team / "config.toml").read_text() == rules and not (team / "sessions").exists()
+
+
+def test_kimis_schedule_tools_are_taken_off_where_the_teams_config_says_nothing_of_tools() -> None:
+    hidden = acp.cron_hidden('model = "kimi-k2"\n')
+    assert tomllib.loads(hidden)["tools"]["disabled"] == list(acp.KIMI_OUTLIVES_THE_TURN)
+    own = '[tools]\ndisabled = ["Bash"]\n'
+    assert acp.cron_hidden(own) == own  # the team's own list, as it wrote it
+    assert acp.cron_hidden("not = [toml") == "not = [toml"  # nothing changed in a broken config
 
 
 @pytest.mark.parametrize(
@@ -783,10 +793,10 @@ async def test_a_config_written_inline_is_asked_over_where_toml_lets_a_rule_foll
     if asked is None:
         assert done.status is RunStatus.ERROR and done.error is not None
         assert "Bash(rm *)" in done.error.message and "prompts" not in recorded(tmp_path)
-        assert own == given
+        assert own == acp.cron_hidden(given)
     else:
         assert done.status is RunStatus.SUCCESS, done.error
-        assert own == given + asked
+        assert own == acp.cron_hidden(given) + asked
 
 
 async def test_a_failed_sub_agent_ends_its_child_run_failed(

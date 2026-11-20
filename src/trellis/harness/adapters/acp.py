@@ -648,8 +648,22 @@ def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
             (home / name).symlink_to(team / name)
     config = team / "config.toml"
     given = config.read_text() if config.exists() else ""
-    asked_config(home, given, [*kimi_allows(env, cwd), *KIMI_ASKED])
+    asked_config(home, cron_hidden(given), [*kimi_allows(env, cwd), *KIMI_ASKED])
     return str(home)
+
+
+def cron_hidden(given: str) -> str:
+    """``given`` (a Kimi configuration) with Kimi's own ``[tools] disabled`` taking its schedule
+    tools (:data:`KIMI_OUTLIVES_THE_TURN`) off its model's list, where it says nothing of
+    ``[tools]``: the model is offered the harness's ``schedule_task`` alone. A team's own
+    ``[tools]``, or a config that does not parse, is left as it is (its schedule tools are then
+    listed and refused: ``KIMI_DISABLE_CRON``)."""
+    try:
+        if "tools" in tomllib.loads(given):
+            return given
+    except tomllib.TOMLDecodeError:
+        return given
+    return f"{given}\n[tools]\ndisabled = {json.dumps(list(KIMI_OUTLIVES_THE_TURN))}\n"
 
 
 def asked_config(home: Path, given: str, patterns: list[str]) -> None:
