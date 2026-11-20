@@ -40,6 +40,7 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -94,6 +95,26 @@ CHOICES: Final = 3
 UPDATE: Final = "update"
 BOTH: Final = "both"
 NEITHER: Final = "none"
+#: What an answer to a schedule question may be besides its suggestions, as a JSON Schema the
+#: app renders from the user's own settings (a time picker, the days to tick, a calendar, or
+#: words): how often, which days, the time, a date, when it ends. The model reads the answer
+#: and makes the schedule it says; nothing here turns it into one.
+WHEN_ANSWER: Final = {
+    "type": "object",
+    "title": "When",
+    "properties": {
+        "repeat": {"type": "string", "title": "How often",
+                   "enum": ["once", "daily", "weekdays", "weekly", "monthly"]},
+        "days": {"type": "array", "title": "Days", "uniqueItems": True,
+                 "items": {"type": "string",
+                           "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}},
+        "time": {"type": "string", "format": "time", "title": "Time"},
+        "date": {"type": "string", "format": "date", "title": "Date"},
+        "ends": {"type": "string", "format": "date", "title": "Ends"},
+    },
+}  # fmt: skip
+#: What the model reads of an answer that is none of the suggestions.
+OWN_ANSWER: Final = "Nothing scheduled yet: the user answered in their own words: {answer}"
 #: The values of the options a schedule whose task names writes is confirmed with: schedule it
 #: allowing them in its runs, or schedule it asking at each run (or :data:`NEITHER`).
 ALLOW: Final = "allow"
@@ -540,10 +561,15 @@ async def _chosen(runtime: Runtime, args: dict[str, Any], choices: list[Any]) ->
     if not options:
         return "Each choice needs a task and a when."
     picked = await runtime.ask(
-        "Which should I set up?", options=[*options, Option(value=NEITHER, label="None of these")]
+        "Which should I set up?",
+        options=[*options, Option(value=NEITHER, label="None of these")],
+        # a suggestion's value, the user's own words, or the app's fields for any time
+        expects={"anyOf": [{"type": "string"}, WHEN_ANSWER]},
     )
     if picked == NEITHER:
         return "Nothing scheduled: the user wants none of these."
+    if not isinstance(picked, str) or picked not in {o.value for o in options}:
+        return OWN_ANSWER.format(answer=json.dumps(picked, ensure_ascii=False))
     return await _schedule_task({**args, "choices": None, **choices[int(picked)]})
 
 

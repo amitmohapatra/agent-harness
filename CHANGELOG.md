@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a schedule question takes any time the user gives, not only its suggestions
+
+When `schedule_task` offered choices, an answer that was none of them ("Tuesdays at 7 pm")
+failed the call (`int(picked)`). The question now carries an answer schema the app renders from
+the user's own settings (`schedules.WHEN_ANSWER`: how often, the days, the time, a date, when
+it ends); an answer that is none of the suggestions, in words or those fields, goes back to the
+model as the user's own (`OWN_ANSWER`), and the model makes the schedule it says.
+
 ### Changed: Kimi's own schedule tools are not offered to its model
 
 Kimi's `CronCreate`, `CronList` and `CronDelete` were refused when called

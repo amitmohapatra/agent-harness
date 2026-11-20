@@ -569,6 +569,33 @@ async def test_cancel_all_is_confirmed_and_several_that_fit_are_picked_from() ->
         assert a in local(h)._schedules and b not in local(h)._schedules
 
 
+async def test_a_schedule_question_takes_any_time_the_user_gives_not_only_its_suggestions() -> None:
+    """The question says what an answer may be (how often, the days, the time, a date, an end)
+    as a JSON Schema the app renders from the user's own settings; the suggestions are
+    shortcuts. An answer that is none of them, in words or the app's fields, goes back to the
+    model as the user's own: nothing is made in its place, nothing fails."""
+    choices = [{"task": "revenue yesterday", "when": "0 9 * * *"}]
+    async with Harness(config=Settings()) as h:
+        agent = await planned(h, ("schedule_task", {"task": "watch sales", "choices": choices}))
+        interrupt = await asked(agent)
+        when = (interrupt.expects or {}).get("anyOf", [{}])[-1].get("properties", {})
+        assert {"repeat", "days", "time", "date", "ends"} <= set(when), interrupt.expects
+        assert when["time"].get("format") == "time" and when["date"].get("format") == "date"
+        said = await picked(agent, interrupt, "Tuesdays at 7 pm")
+        assert "Tuesdays at 7 pm" in said and not local(h)._schedules  # the model's to make
+        again = await planned(h, ("schedule_task", {"task": "x", "choices": choices}), name="b")
+        fields = {"repeat": "weekly", "days": ["tue"], "time": "19:00"}
+        told = await picked_value(again, await asked(again), fields)
+        assert '"days": ["tue"]' in told and '"time": "19:00"' in told
+        assert not local(h)._schedules
+
+
+async def picked_value(agent: Any, interrupt: Any, value: Any) -> str:
+    done = await agent.resume(interrupt.interrupt_id, "answer", answer=value, reviewer="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    return str(done.answer)
+
+
 async def test_a_vague_ask_is_choices_the_user_picks_one_of() -> None:
     choices = [
         {"task": "revenue yesterday", "when": "0 9 * * *"},
