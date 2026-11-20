@@ -153,9 +153,6 @@ WHEN_ANSWER: Final = {
 }  # fmt: skip
 #: What the model reads of an answer that is none of the suggestions.
 OWN_ANSWER: Final = "Nothing scheduled yet: the user answered in their own words: {answer}"
-#: The schedule metadata key of a follow-up of a long-running job (``follow_ups``): not one of
-#: the user's schedules, so no limit counts it.
-FOLLOW: Final = "trellis_follow_up"
 #: The confirmation's recommended answer: make the schedule with each open detail as offered.
 CONFIRM: Final = "confirm"
 #: The schedule metadata key of what its unattended runs do with a call nobody approved: skip it
@@ -226,8 +223,6 @@ class Fired:
     #: what a call nobody approved does in its runs (:data:`UNATTENDED`); a schedule made
     #: before it was asked waits, as it did
     unapproved: str = UNATTENDED[1]
-    #: the job a follow-up checks (:data:`FOLLOW`), when it is one
-    follow: dict[str, Any] | None = None
 
     @classmethod
     def of(cls, metadata: dict[str, Any]) -> Fired | None:
@@ -247,7 +242,6 @@ class Fired:
             zone=metadata.get(ZONE) if isinstance(metadata.get(ZONE), str) else None,
             report=str(metadata.get(REPORT) or REPORTS[0]),
             unapproved=str(metadata.get(UNAPPROVED) or UNATTENDED[1]),
-            follow=metadata.get(FOLLOW) if isinstance(metadata.get(FOLLOW), dict) else None,
         )
 
 
@@ -796,9 +790,7 @@ def _run_budget(own: Budget | None, max_tool_calls: int) -> Budget:
 
 
 def _full(mine: list[Schedule], max_per_user: int) -> str | None:
-    """What the user is told when they have as many schedules as they may, else ``None``: the
-    harness's follow-ups of a long job (:data:`FOLLOW`) are not theirs to count."""
-    mine = [m for m in mine if FOLLOW not in m.metadata]
+    """What the user is told when they have as many schedules as they may, else ``None``."""
     if len(mine) < max_per_user:
         return None
     return f"You have {len(mine)} of {max_per_user} schedules: cancel one before adding another."
@@ -1283,8 +1275,6 @@ def _history(schedule: Schedule) -> dict[str, Any]:
         said["failed_runs_in_a_row"] = failures
     if schedule.consecutive_failures and schedule.last_error is not None:
         said["fire_error"] = _limit_said(schedule.last_error) or schedule.last_error.message
-    if isinstance(follow := schedule.metadata.get(FOLLOW), dict):
-        said["waiting"] = f"for {follow.get('job')} to finish (checked with {follow.get('status')})"
     if not schedule.enabled and (why := schedule.metadata.get(PAUSED_BY)):
         said["paused_because"] = str(why)
     if schedule.metadata[TASK].get("condition"):

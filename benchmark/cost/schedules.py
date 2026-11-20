@@ -420,6 +420,21 @@ def or_asks(check: Check, *about: str) -> Check:
     return either
 
 
+def asked_time_then(check: Check) -> Check:
+    """No time said: the first turn asks, naming a time (the one it would use, or asking which),
+    and nothing is made before the answer; ``check`` holds after the user's answer."""
+
+    def both(chat: Chat) -> list[str]:
+        options = (chat.asked[0] if chat.asked else None) or []
+        text = (chat.answers[0] + " " + " ".join(options)).lower()
+        named = "time" in text or bool(re.search(r"\d(:\d\d|\s?(am|pm|a\.m\.|p\.m\.))", text))
+        if not (asked_in(chat, 0) and named):
+            return ["the first turn did not ask the time"]
+        return check(chat)
+
+    return both
+
+
 def covered(cron: str) -> Check:
     """The schedules made fire at ``cron``'s instants in the user's zone together (one
     schedule, or one a day of the week)."""
@@ -1210,8 +1225,8 @@ def cases() -> list[Case]:
              scheduled("30 7 * * *")),
         Case("weekdays-18", S, ("On weekdays at 6pm give me the day's revenue.",),
              scheduled("0 18 * * 1-5")),
-        Case("monday-any", S, ("Every Monday send me the sales summary.",),
-             scheduled(weekday=0)),
+        Case("monday-any", S, ("Every Monday send me the sales summary.", "@0|Yes, that's fine."),
+             asked_time_then(scheduled(weekday=0))),
         Case("weekly-fri", S, ("Weekly on Friday at 5pm, send me the top 5 SKUs by revenue.",),
              scheduled("0 17 * * 5")),
         Case("monthly-1st", S,
@@ -1226,8 +1241,8 @@ def cases() -> list[Case]:
         Case("once-next-monday", S,
              ("Next Monday at 10am, just once, send me last week's sales summary.",),
              scheduled(once=True, at=_next_weekday_at(0, 10))),
-        Case("default-time", S, (f"Send me the stock of {SKU} every day.",),
-             and_says(scheduled("0 9 * * *"), "9")),
+        Case("default-time", S, (f"Send me the stock of {SKU} every day.", "@0|Yes, that's fine."),
+             asked_time_then(scheduled("0 9 * * *"))),
         Case("relative-2h", S, ("In 2 hours, remind me to call supplier SUP-03.",),
              scheduled(once=True, within=hour)),
         Case("cond-hourly", S,

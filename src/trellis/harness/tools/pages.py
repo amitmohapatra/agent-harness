@@ -10,8 +10,9 @@ cursor argument could cost far more than the model asked for. The conventions re
 argument is the first of :data:`CURSOR_ARGS` its schema has; a page is a JSON object (or JSON
 text of one) whose next cursor is the first of :data:`NEXT_KEYS` it holds (none, empty or null:
 the last page), and whose rows are its first list (:data:`ROW_KEYS` first). At most
-:data:`MAX_PAGES` pages are fetched (the result says when there were more); a call the model
-gives a cursor itself is run as it is (it asked for that page). The pages are one call of the
+:data:`MAX_PAGES` pages are fetched (the result says when there were more, and keeps the next
+page's cursor as ``next_cursor``); a call the model gives a cursor itself is run as it is (it
+asked for that page). The pages are one call of the
 tool (``tools.base.execute``): within its timeout and the run's time, retried as one, and
 governed, journaled and recorded as one.
 """
@@ -49,8 +50,9 @@ async def every_page(
 ) -> Any:
     """``run`` (the tool, once) for ``args``, and — the tool paged (:func:`cursor_arg`), no
     cursor given — for each next page, the pages' rows merged into the first page's object (its
-    next cursor gone, ``pages`` how many; :data:`MORE` when the last page fetched still had
-    one). A page that is not one ends it, as it is; a page that fails fails the call."""
+    next cursor gone, ``pages`` how many; :data:`MORE` and ``next_cursor`` to continue at when
+    the last page fetched still had one). A page that is not one ends it, as it is; a page that
+    fails fails the call."""
     arg = cursor_arg(spec)
     output = await run(args)
     if arg is None or args.get(arg) not in (None, ""):
@@ -74,8 +76,9 @@ async def every_page(
         merged.pop(name, None)
     merged[key] = rows
     merged["pages"] = pages
-    if after is not None:
+    if after is not None:  # the rest is the model's to ask for, with the cursor it continues at
         merged[MORE] = True
+        merged[NEXT_KEYS[0]] = after
     return merged
 
 

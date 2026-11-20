@@ -310,8 +310,9 @@ has to. In order of preference:
    8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
    and 20,000 characters — the model reads the small answer, never the rows. A tool declared
    `paged=True` (a cursor argument; `next_cursor` in its result) is fetched to its last page in
-   one call (`tools/pages.py`, at most 200 pages),
-   so its rows are queried whole too;
+   one call (`tools/pages.py`, at most 200 pages; past them the result says `more_pages` and
+   keeps the `next_cursor` the model may call with for the rest), so its rows are queried
+   whole too;
 3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
    result in the sandbox, and `execute` runs code over it), or `agent.tools.use(sandbox().tools())`
    on any adapter (`sandbox_exec`): every result the run keeps is written into the run's sandbox
@@ -525,18 +526,3 @@ by name, or a tool itself (`tool(fn)`, `mcp(...)`, `a2a(url)`...: it joins the r
 `tools.hints(task)` asks the memory service which of them fit (and offers the tools it names).
 Inside a tool call, `trellis.current().idempotency_key` is that call's key and
 `trellis.current().remaining()` the seconds it may still take (`None`: no limit).
-
-
-## A tool that starts a long job
-
-A tool whose call starts a job that takes a while declares the tool that says where the job is:
-`@tool(side_effects="write", long_running="export_status")` (a LangChain tool's `metadata`:
-`{"long_running": "export_status"}`). The call ends as any call; the model reads that the
-harness checks the job and continues the task in the chat, and no run waits for it. The
-harness reads the job with the status tool (it must be a `read`; its arguments are the job
-tool's result fields it takes) in one-time follow-ups of the chat, 2, 5, 15, 30 and then 60
-minutes apart, with no model call. The status tool's result says where the job is in
-`status`: `done` or `failed` ends it, anything else is still under way. Done, failed, or still
-running after a day, one run continues the task from what the status said, and the chain ends.
-A status that cannot be read is checked again. `list_schedules` shows what a follow-up waits
-for, and `cancel_schedule` stops it ([runs.md](runs.md#long-running-work)).

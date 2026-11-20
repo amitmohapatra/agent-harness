@@ -632,9 +632,15 @@ async def _save(
     data, count, shown = found
     made = {"sql": sql, "from": _sources(runtime, path, sql, record)}
     stored = await runtime.save_file(name, data, source=QUERY_RESULT, made=made)
+    # only an app (AG-UI) shows the run's files: elsewhere no link is promised
+    where = (
+        "the chat shows its download link"
+        if runtime.frontend is not None
+        else "it is kept with this run"
+    )
     return (
-        f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; the chat shows "
-        f"its download link. Its first rows:\n{shown}"
+        f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; {where}. Its "
+        f"first rows:\n{shown}"
     )
 
 

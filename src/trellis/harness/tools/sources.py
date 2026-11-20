@@ -80,7 +80,6 @@ class FunctionTool:
         freshness: Literal["live", "static"] | None = None,
         max_age: float | None = None,
         paged: bool = False,
-        long_running: str | None = None,
     ) -> None:
         if response_format not in get_args(ResponseFormat):
             raise ConfigurationError(
@@ -99,15 +98,7 @@ class FunctionTool:
             source="local",
             side_effects=side_effects or UNDECLARED,
             idempotent=idempotent,
-            **data_of(
-                {
-                    "freshness": freshness,
-                    "max_age": max_age,
-                    "paged": paged,
-                    "long_running": long_running,
-                },
-                name=named,
-            ),
+            **data_of({"freshness": freshness, "max_age": max_age, "paged": paged}, name=named),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -148,7 +139,6 @@ def tool(
     freshness: Literal["live", "static"] | None = None,
     max_age: float | None = None,
     paged: bool = False,
-    long_running: str | None = None,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -162,7 +152,6 @@ def tool(
     freshness: Literal["live", "static"] | None = None,
     max_age: float | None = None,
     paged: bool = False,
-    long_running: str | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -177,7 +166,6 @@ def tool(
     freshness: Literal["live", "static"] | None = None,
     max_age: float | None = None,
     paged: bool = False,
-    long_running: str | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``@tool(side_effects="read")``, ``tool(fn, side_effects="read")``
     — or ``@tool`` and ``tool(fn)``, which say nothing of what it does.
@@ -209,9 +197,7 @@ def tool(
     ``freshness="static"`` (reference data that does not change) say otherwise;
     ``freshness="live"`` says it in the tool's description too. ``paged``: it returns its rows
     a page at a time (a cursor argument, the next cursor in its result): one call fetches every
-    page (``tools.pages``). ``long_running``: the call starts a job that takes a while, and
-    names the tool that reads where it is (a read): the harness checks it in follow-ups of the
-    chat and continues the task when it is done (``trellis.harness.follow_ups``).
+    page (``tools.pages``).
     """
     made = functools.partial(
         FunctionTool,
@@ -224,7 +210,6 @@ def tool(
         freshness=freshness,
         max_age=max_age,
         paged=paged,
-        long_running=long_running,
     )
     return made(fn) if fn is not None else made
 

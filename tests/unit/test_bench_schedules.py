@@ -465,3 +465,24 @@ def test_a_schedule_never_run_paused_next_and_where_its_reply_goes() -> None:
     assert most(b.Chat(now=NOW, answers=["Unlimited."], calls=[[]], max_per_user=20)) == [
         "answer lacks '20'"
     ]
+
+
+def test_a_time_not_said_is_asked_first_then_scheduled_as_confirmed() -> None:
+    """No time said: the first turn asks (the time it would use named), nothing made; the
+    confirmation then makes it."""
+    check = b.asked_time_then(b.scheduled("0 9 * * *"))
+    asked = ["Every day at 09:00 — confirm, or give another time?", "Done."]
+    made_after = [made("0 9 * * *")]
+    assert check(b.Chat(now=NOW, answers=asked, asked=[["Confirm", "Neither"], None],
+                        after=made_after)) == []  # fmt: skip
+    # a silent guess: scheduled in the first turn, no question
+    assert check(b.Chat(now=NOW, answers=["Done.", "Ok."], after=made_after)) == [
+        "the first turn did not ask the time"
+    ]
+    # asked, but about something else
+    assert check(b.Chat(now=NOW, answers=["Which report?", "Done."], asked=[["A"], None],
+                        after=made_after)) == ["the first turn did not ask the time"]  # fmt: skip
+    # asked, then never made
+    assert check(b.Chat(now=NOW, answers=asked, asked=[["Confirm"], None])) == [
+        "0 schedules made, not 1"
+    ]

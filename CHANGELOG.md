@@ -5,14 +5,6 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
-### Added: long-running work is followed up by the harness, not polled by the model
-
-`tool(long_running="export_status")` (or a LangChain tool's `metadata`) says a call starts a
-job and names the read that says where it is. The harness checks it in one-time follow-ups of
-the chat (durable, fired once, 2 to 60 minutes apart) with no model call, and one run continues
-the task when the job is done, failed, or still running after a day. The model is told not to
-check it itself. `list_schedules` shows what a follow-up waits for; no schedule limit counts it.
-
 ### Changed: a new schedule is confirmed in one question, and its runs never wait for nobody
 
 A schedule could pause twice before it was made: "you already have one like it" and then
@@ -126,6 +118,19 @@ wording and calendar edges on a clock set to the day (the year's end, a leap day
 and questions whose answers are facts of this harness. Cases waiting on a feature (`report` in
 `update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
 reported apart.
+
+### Fixed: a saved file promises a download link only where an app shows one
+
+`query_result(save_as=)` told the model "the chat shows its download link" on every surface,
+and the model repeated it on A2A, MCP, fired runs and the API, where no link is shown. It now
+says so only in a run with a front end (AG-UI, which shows the run's files); elsewhere it says
+the file is kept with this run.
+
+### Fixed: a paged tool past 200 pages keeps the cursor of the rest
+
+A `paged=True` tool fetched to its 200-page cap said `more_pages` but dropped the next cursor,
+so the model was told there was more and could not ask for it. The result now keeps it as
+`next_cursor`, and a call with it runs from there. The cap is unchanged.
 
 ### Fixed: a failed run says why in the chat
 
