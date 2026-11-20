@@ -32,8 +32,11 @@ MAX_OVER_15 = 63
 #: schedule settings, end dates, limits said with their numbers, pause reasons, the model's
 #: keep question and notifications, 2026-11-20; then a new schedule's one confirmation, its
 #: unattended runs' skipped steps and an unanswered question's deadline, each branch a case a
-#: user meets) must not drift upwards
-MAX_MEAN_COMPLEXITY = 4.12
+#: user meets; then the edge cases the schedule and asking tests found — a clock change, a delay
+#: or end that never runs, a deleted pick, an unanswered run counted, picks matched in any
+#: case, an empty question, a last run's own error — each a bug a user would meet, 2026-11-20)
+#: must not drift upwards
+MAX_MEAN_COMPLEXITY = 4.125
 
 _BRANCHING = (
     ast.If,

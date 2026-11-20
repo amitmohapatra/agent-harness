@@ -1081,6 +1081,9 @@ NAMED_CADENCES: Final = {
 #: The schedule metadata key naming the conversation its runs are turns of (agent-runs fires
 #: them with it as their ``thread_id``).
 THREAD: Final = "thread_id"
+#: The most of a failed run's error message said back of it: its record's turn in the chat (the
+#: steps list) and a schedule's last run (``list_schedules``).
+ERROR_SAID: Final = 300
 
 
 def _thread(schedule: Schedule) -> str | None:

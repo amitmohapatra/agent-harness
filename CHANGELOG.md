@@ -130,6 +130,13 @@ and questions whose answers are facts of this harness. Cases waiting on a featur
 `update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
 reported apart.
 
+### Fixed: why a schedule's last run failed is said from its own record
+
+`list_schedules` said a schedule failed in a row but not why unless the memory service had the
+run's turn. It now says `last_run_error`, the error the run store keeps for the last run (the
+record it already read to say what a run waits on), so "why did my report fail?" is answered
+with memory off too.
+
 ### Fixed: a saved file promises a download link only where an app shows one
 
 `query_result(save_as=)` told the model "the chat shows its download link" on every surface,

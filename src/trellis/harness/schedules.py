@@ -67,7 +67,7 @@ from trellis.contracts import (
 from trellis.harness import snapshots
 from trellis.harness.budget import Budget
 from trellis.harness.notifications import Kind, Notification
-from trellis.harness.runs import THREAD
+from trellis.harness.runs import ERROR_SAID, THREAD
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.settings import Settings
 from trellis.harness.tools.base import Tool
@@ -1038,22 +1038,24 @@ async def _list_schedules(args: dict[str, Any]) -> Any:
         return "You have no schedules."
     shown = []
     for schedule in mine:
-        said = _shown(schedule)
-        if (waits := await _waiting(runtime, schedule)) is not None:
-            said["waiting"] = waits
-        shown.append(said)
+        shown.append({**_shown(schedule), **await _last_run(runtime, schedule)})
     return shown
 
 
-async def _waiting(runtime: Runtime, schedule: Schedule) -> str | None:
-    """What the schedule's last run waits on, said, while it waits on a person (point 29):
-    its next tick starts no other run meanwhile."""
+async def _last_run(runtime: Runtime, schedule: Schedule) -> dict[str, str]:
+    """What the schedule's last run's own record says: what it waits on while it waits on a
+    person (point 29: its next tick starts no other run meanwhile), or why it failed (its
+    error, as the run store keeps it: "why did my report fail?" answered with memory off)."""
     if schedule.last_run_id is None:
-        return None
+        return {}
     record = await runtime.agent.harness.runs.get(schedule.last_run_id, tenant=runtime.tenant)
-    if record is None or record.status is not RunStatus.PAUSED or record.awaiting is None:
-        return None
-    return f"for your answer: {record.awaiting.question}"
+    if record is None:
+        return {}
+    if record.status is RunStatus.PAUSED and record.awaiting is not None:
+        return {"waiting": f"for your answer: {record.awaiting.question}"}
+    if record.status in (RunStatus.ERROR, RunStatus.TIMEOUT) and record.error is not None:
+        return {"last_run_error": record.error.message[:ERROR_SAID]}
+    return {}
 
 
 async def _update_schedule(args: dict[str, Any]) -> Any:

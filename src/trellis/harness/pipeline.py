@@ -112,6 +112,7 @@ from trellis.harness.journal import Journal, Pending, Replay, call_key, governan
 from trellis.harness.line import Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
+from trellis.harness.runs import ERROR_SAID
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.schedules import Fired
 from trellis.harness.telemetry import RunTrace, agent_span, concluded, decided, metrics, output
@@ -1648,9 +1649,6 @@ def _transcript(
     )
     return _with_facts(messages, runtime, status, error)
 
-
-#: The most of a failed run's error message its record keeps for the chat (the steps list).
-ERROR_SAID: Final = 300
 
 #: What a person's decision on a tool call is, in the run record's words.
 DECIDED: Final = {

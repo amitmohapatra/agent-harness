@@ -360,3 +360,20 @@ async def test_runs_nobody_answered_count_as_failures_in_a_row_and_pause_the_sch
         assert schedule.enabled is False and schedule.metadata[FAILURES] == 2
         listed = await agent.run("list", user="ada", thread=THREAD_)
         assert '"paused_because": "its runs failed 2 times in a row"' in str(listed.answer)
+
+
+async def test_why_the_last_run_failed_is_read_from_its_record_with_no_memory() -> None:
+    """Why did my report fail? The schedule's last run's own error, read from the run store
+    (the record list_schedules already reads), not only from memory's transcript — so the
+    cause is said with memory off, and a run that did not fail says none."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sales", "when": "0 8 * * 1"}))
+        chat.fired.append(RuntimeError("Gmail: sign-in expired"))
+        assert (await fire(h, agent, only(h).schedule_id)).status is RunStatus.ERROR
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"last_run_error": "' in listed and "Gmail: sign-in expired" in listed, listed
+        chat.fired.append("done")
+        await fire(h, agent, only(h).schedule_id)
+        assert "last_run_error" not in await said(agent, chat, "ada", ("list_schedules", {}))
