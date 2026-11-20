@@ -37,7 +37,7 @@ requests, its usage log) is what the adapter reads, and nothing else pins it.
 from trellis import Harness, kimi
 
 h = Harness()
-agent = h.wrap(kimi(model="moonshot/kimi-k2", cwd="/srv/repo"), id="maintainer")
+agent = h.wrap(kimi(model="anthropic/claude-sonnet-4-5", cwd="/srv/repo"), id="maintainer")
 
 result = await agent.run("The build is red: find out why and fix it.", user="ada")
 if result.interrupt:  # Kimi asked to run a command that writes: a person approves

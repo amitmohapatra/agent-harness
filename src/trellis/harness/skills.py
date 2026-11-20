@@ -5,7 +5,7 @@ and agent — fed to each framework's own skills slot:
     ReAct("You review SQL.", model, skills=src)                  # ReAct
     create_deep_agent(model, **src.deep_agent())                 # Deep Agents: skills= and backend=
     ClaudeAgentOptions(**src.claude())                           # Claude: a local plugin of skills
-    kimi(model="kimi-k2", **src.kimi())                           # Kimi Code: its skills folder
+    kimi(model="anthropic/claude-sonnet-4-5", **src.kimi())       # Kimi Code: its skills folder
     SandboxAgent(..., capabilities=[*Capabilities.default(), src.openai()])  # OpenAI: Skills
     await agent.tools.use(src.tools())                           # no skills slot: list/load tools
 
