@@ -289,16 +289,8 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
     if result.status is RunStatus.PAUSED:
         return
     store = agent.harness.runs.schedules
-    kept: dict[str, Any] = {}
-    if fired.condition is not None and fired.met not in (None, fired.reported):
-        kept[REPORTED] = fired.met
-    if fired.failures and result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL):
-        kept[FAILURES] = 0
     ran = result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL)
-    change: dict[str, Any] = {}
-    if fired.expiring and not (ran and fired.met):  # the user was not asked: never paused unsaid
-        change = {"enabled": True}
-        kept[PAUSED_BY] = None
+    kept, change = _after(fired, ran=ran)
     told = fired.report == REPORTS[2] and fired.condition is not None and bool(fired.met)
     try:
         if (fired.once and ran) or told:  # done: a failed one-time run stays, paused
@@ -311,6 +303,22 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
         pass
     except Exception:
         log.warning("schedule %s not updated after its run", fired.schedule_id, exc_info=True)
+
+
+def _after(fired: Fired, *, ran: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    """What a fired run's end changes on its schedule: the metadata kept (a condition's state
+    that changed, the failures a success clears) and its other fields (a schedule whose run
+    was told to ask to be kept, and asked nothing, back on: never paused unsaid)."""
+    kept: dict[str, Any] = {}
+    if fired.condition is not None and fired.met not in (None, fired.reported):
+        kept[REPORTED] = fired.met
+    if fired.failures and ran:
+        kept[FAILURES] = 0
+    change: dict[str, Any] = {}
+    if fired.expiring and not (ran and fired.met):
+        change = {"enabled": True}
+        kept[PAUSED_BY] = None
+    return kept, change
 
 
 async def _told(agent: Agent, runtime: Runtime, fired: Fired, result: Result) -> None:
@@ -587,17 +595,10 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     task, when = str(args["task"]).strip(), str(args.get("when") or "").strip()
     condition = (args.get("condition") or "").strip() or None
     zone = str(args.get("timezone") or "").strip() or snapshots.zone(runtime) or "UTC"
-    once = bool(args.get("once"))
-    counted = ""
+    once, counted = bool(args.get("once")), ""
     if minutes := args.get("in_minutes"):  # once, at that minute
-        start = datetime.now(ZoneInfo(zone_of(zone) or "UTC"))
-        at = start + timedelta(minutes=float(minutes))
-        if at.second or at.microsecond:  # a cron's minute: the next whole one, never one gone
-            at = (at + timedelta(minutes=1)).replace(second=0, microsecond=0)
-        when, once = f"{at.minute} {at.hour} {at.day} {at.month} *", True
-        # the minute counted from, said where the model reads the time it got: the tool's
-        # text says only the hour (cached), so 03:53 for "in 2 hours" at 01:53 is not an error
-        counted = f" That is {float(minutes):g} minutes from {start:%H:%M} ({zone}), as asked."
+        when, counted = _in_minutes(float(minutes), zone)
+        once = True
     held = await limits(runtime)
     min_interval, max_per_user = float(held.min_interval or 0), int(held.max_per_user or 0)
     ends = _ending(args.get("end_at"), zone)
@@ -608,18 +609,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     twin = await _twin_asked(runtime, mine, about, when, zone, alike=args.get("alike"))
     if (said := twin or _full(mine, max_per_user)) is not None:
         return said
-    agent = runtime.agent
-    budget = _run_budget(agent.budget, int(held.run_max_tool_calls or 0))
-    metadata = {
-        **agent._metadata(runtime.without, None, budget=budget),
-        TASK: about,
-        TOUCHED: _now(),
-        ZONE: zone,
-    }
-    if (report := str(args.get("report") or REPORTS[0])) in REPORTS[1:]:
-        metadata[REPORT] = report
-    if runtime.conversation != runtime.run_id:  # the chat it was set in
-        metadata[THREAD] = runtime.identity.thread
+    metadata = _made_metadata(runtime, held, about, zone, args.get("report"))
     writes = await _asking(runtime, args.get("tools") or [])
     if writes:
         picked = await _writes_asked(runtime, _said(about, when, zone), writes)
@@ -627,6 +617,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             return "Nothing scheduled: the user did not want it."
         if picked == ALLOW:
             metadata[ALLOWED] = writes
+    agent = runtime.agent
     try:
         spec = ScheduleSpec(
             tenant_id=runtime.tenant,
@@ -645,6 +636,38 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     except (ValueError, ValidationError, ConflictError) as exc:
         return _refusal(exc, "That schedule was refused")
     return f"Scheduled {made.schedule_id}: {_described(made)}{counted}"
+
+
+def _in_minutes(minutes: float, zone: str) -> tuple[str, str]:
+    """``in_minutes``' one run: its cron for the next whole minute that many minutes on (never
+    one gone), and the minute it was counted from, said where the model reads the time it got
+    (the tool's text says only the hour, cached: 03:53 for "in 2 hours" at 01:53 is right)."""
+    start = datetime.now(ZoneInfo(zone_of(zone) or "UTC"))
+    at = start + timedelta(minutes=minutes)
+    if at.second or at.microsecond:
+        at = (at + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    counted = f" That is {minutes:g} minutes from {start:%H:%M} ({zone}), as asked."
+    return f"{at.minute} {at.hour} {at.day} {at.month} *", counted
+
+
+def _made_metadata(
+    runtime: Runtime, held: ScheduleLimits, about: dict[str, Any], zone: str, report: Any
+) -> dict[str, Any]:
+    """What a schedule made in chat keeps: its runs' budget, its task, when the user made it,
+    its zone, how its condition reports (when not the default), and the chat it was set in."""
+    agent = runtime.agent
+    budget = _run_budget(agent.budget, int(held.run_max_tool_calls or 0))
+    metadata = {
+        **agent._metadata(runtime.without, None, budget=budget),
+        TASK: about,
+        TOUCHED: _now(),
+        ZONE: zone,
+    }
+    if (report := str(report or REPORTS[0])) in REPORTS[1:]:
+        metadata[REPORT] = report
+    if runtime.conversation != runtime.run_id:  # the chat it was set in
+        metadata[THREAD] = runtime.identity.thread
+    return metadata
 
 
 def _limit_said(error: Any) -> str | None:
@@ -863,10 +886,21 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
         if "condition" in args:
             about["condition"] = (args["condition"] or "").strip() or None
         changes.update(_about(about))
+    more = _more_changes(args, schedule)
+    if isinstance(more, str):
+        return more
+    metadata = {**changes.get("metadata", {}), **more.pop("metadata", {})}
+    return await _changed(runtime, schedule, {**changes, **more, "metadata": metadata})
+
+
+def _more_changes(args: dict[str, Any], schedule: Schedule) -> dict[str, Any] | str:
+    """``update_schedule``'s pause or resume (and why, the user's own), end and report, as a
+    schedule's changes; what cannot be one, said back."""
+    changes: dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
     if args.get("enabled") is not None:
         changes["enabled"] = bool(args["enabled"])
-        paused = None if changes["enabled"] else "the user paused it"
-        changes["metadata"] = {**changes.get("metadata", {}), PAUSED_BY: paused}
+        metadata[PAUSED_BY] = None if changes["enabled"] else "the user paused it"
     if args.get("end_at") is not None:
         ends = _ending(args["end_at"], schedule.timezone)
         if isinstance(ends, str):
@@ -875,8 +909,8 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
     if (report := args.get("report")) is not None:
         if report not in REPORTS:
             return f"report is one of {', '.join(REPORTS)}, not {report!r}."
-        changes["metadata"] = {**changes.get("metadata", {}), REPORT: report}
-    return await _changed(runtime, schedule, changes)
+        metadata[REPORT] = report
+    return {**changes, "metadata": metadata}
 
 
 async def _changed(runtime: Runtime, schedule: Schedule, changes: dict[str, Any]) -> Any:
