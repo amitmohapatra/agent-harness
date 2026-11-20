@@ -19,7 +19,12 @@ surface is `kimi acp`, ACP over stdio. The harness speaks it through the officia
 ```bash
 pip install 'trellis-harness[kimi]'            # the ACP SDK and the MCP SDK
 npm install -g @moonshot-ai/kimi-code@2.6.2    # the kimi program (Node 22.19 or later)
+sudo apt-get install -y ripgrep                 # rg, which Kimi's Glob runs
 ```
+
+Kimi's `Glob` runs `rg`. Without it on the `PATH`, Kimi downloads it from its own CDN on the
+first `Glob` (into `~/.kimi-code/bin`), and that `Glob` fails when the download does, saying
+"ripgrep (rg) is not available ... and the automatic bootstrap failed".
 
 The `kimi` program is checked when a run starts: a version outside the tested range
 (`>=2.6.2,<2.7`, [versioning.md](../versioning.md)) fails the run, saying which version answered

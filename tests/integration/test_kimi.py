@@ -712,10 +712,12 @@ async def test_kimis_own_tools_that_only_read_run_unasked_and_are_recorded(
     """Kimi asks about none of its tools that only read (``Glob``, ``Grep``, ``Read``,
     ``TaskList``): each runs with nobody asked, and is recorded with its result once it ran."""
     ran: list[tuple[str, Any]] = []
+    said: dict[str, Any] = {}  # what each tool returned: Kimi's own error, when one failed
     observed = bridge.observed
 
     async def recording(runtime: Any, spec: Any, args: Any, outcome: Any, **more: Any) -> None:
         ran.append((spec.name, outcome.status.value))
+        said[spec.name] = outcome.output
         await observed(runtime, spec, args, outcome, **more)
 
     monkeypatch.setattr(bridge, "observed", recording)
@@ -729,7 +731,8 @@ async def test_kimis_own_tools_that_only_read_run_unasked_and_are_recorded(
     ]
     done = await harness.wrap(target, id="kimi-reads-all").run("where is the tea?", user="u1")
     assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
-    assert ran == [("Glob", "ok"), ("Grep", "ok"), ("Read", "ok"), ("TaskList", "ok")]
+    failed = "\n".join(f"{name}: {said.get(name)}" for name, status in ran if status != "ok")
+    assert ran == [("Glob", "ok"), ("Grep", "ok"), ("Read", "ok"), ("TaskList", "ok")], failed
 
 
 async def test_kimis_todo_list_is_the_runs_plan_event(

@@ -76,7 +76,10 @@ jobs:
           path: ~/.kimi-code-npm
           key: kimi-code-2.6.2-node22-${{ runner.os }}
       - name: Install Kimi Code
+        # and ripgrep, which Kimi's Glob runs: the image has none, and Kimi downloads it from
+        # its CDN on the first Glob, which fails when the download does
         run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ripgrep && rg --version
           [ -x ~/.kimi-code-npm/bin/kimi ] || npm install -g --prefix ~/.kimi-code-npm @moonshot-ai/kimi-code@2.6.2
           echo "$HOME/.kimi-code-npm/bin" >> "$GITHUB_PATH"
           ~/.kimi-code-npm/bin/kimi --version
