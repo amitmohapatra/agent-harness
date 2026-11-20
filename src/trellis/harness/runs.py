@@ -1091,8 +1091,20 @@ def _thread(schedule: Schedule) -> str | None:
 def _next_fire(spec: ScheduleSpec, after: datetime) -> datetime | None:
     if spec.cadence == "manual":
         return None
-    local = after.astimezone(ZoneInfo(spec.timezone))
+    zone = ZoneInfo(spec.timezone)
     cron = NAMED_CADENCES.get(spec.cadence, spec.cadence)
-    due = croniter(cron, local).get_next(datetime).astimezone(UTC)
+    cursor = croniter(cron, after.astimezone(zone))
+    due = cursor.get_next(datetime)
+    while _repeated(due, zone) and not cron.split()[1].startswith("*"):
+        due = cursor.get_next(datetime)  # as agent-runs: a repeated time fires on its first pass
+    due = due.astimezone(UTC)
     ends = getattr(spec, "end_at", None)  # as agent-runs: nothing at or after its end
     return None if ends is not None and due >= ends else due
+
+
+def _repeated(due: datetime, zone: ZoneInfo) -> bool:
+    """Whether ``due`` is the second time its wall-clock time comes (the hour an autumn change
+    repeats): a fixed hour fires on the first only, as cron and agent-runs do; a wildcard hour
+    (``hourly``) is a rate and fires on both."""
+    first = due.replace(tzinfo=None).replace(tzinfo=zone, fold=0)
+    return first.astimezone(UTC) < due.astimezone(UTC)

@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: schedules at their edges
+
+"In 2 hours" is two real hours across a clock change, and a delay before now or past a year
+is said back (it fired next year, or early). An end before a schedule's first run is said
+back instead of a schedule that never runs. A time of day the autumn change repeats fires
+once in `LocalRuns`, as in agent-runs. A pick among schedules the user's words fit (`ids`)
+whose schedule went before the run resumed is never applied to another: with several left
+the user is asked again, with one the pick is said to be gone. A fired run nobody answered, ended
+`TIMEOUT` by the store, counts as a failed run in a row (`TRELLIS_SCHEDULE_PAUSE_AFTER_
+FAILURES`): the next run counts it, and the one that pauses the schedule says so in the chat.
+
 ### Changed: a new schedule is confirmed in one question, and its runs never wait for nobody
 
 A schedule could pause twice before it was made: "you already have one like it" and then

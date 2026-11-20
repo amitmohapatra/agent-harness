@@ -103,6 +103,9 @@ REPORTS: Final = ("until_clears", "every_time", "once")
 #: The schedule metadata key of why it is paused, when it was paused for a reason the user is
 #: told (its runs failed, its one run failed, the user paused it, it waits to be kept).
 PAUSED_BY: Final = "trellis_paused_by"
+#: The schedule metadata key of its fired run that waits on a person, while it waits: the store
+#: ends one nobody answers (its deadline), never the harness, so the next run counts it.
+WAITS: Final = "trellis_waits"
 #: How long a schedule runs untouched before its next run asks whether it is still needed, by
 #: default (``TRELLIS_SCHEDULE_EXPIRE_DAYS``).
 STALE: Final = timedelta(days=Settings.model_fields["schedule_expire_days"].default)
@@ -225,6 +228,8 @@ class Fired:
     #: what a call nobody approved does in its runs (:data:`UNATTENDED`); a schedule made
     #: before it was asked waits, as it did
     unapproved: str = UNATTENDED[1]
+    #: its run before this one, when that one waited on a person (:data:`WAITS`)
+    waits: str | None = None
 
     @classmethod
     def of(cls, metadata: dict[str, Any]) -> Fired | None:
@@ -244,6 +249,7 @@ class Fired:
             zone=metadata.get(ZONE) if isinstance(metadata.get(ZONE), str) else None,
             report=str(metadata.get(REPORT) or REPORTS[0]),
             unapproved=str(metadata.get(UNAPPROVED) or UNATTENDED[1]),
+            waits=metadata.get(WAITS) if isinstance(metadata.get(WAITS), str) else None,
         )
 
 
@@ -283,7 +289,7 @@ def quiet(runtime: Runtime, answer: Any) -> bool:
 
 def _quiet(fired: Fired, answer: Any) -> bool:
     fired.met = not (isinstance(answer, str) and re.sub(r"\W", "", answer) == NO_REPORT)
-    if fired.expiring:  # its question reaches the user, met or not; a bare NO_REPORT asked none
+    if fired.expiring or fired.paused:  # its question (its pause) reaches the user, met or not
         return not fired.met
     held_before = fired.condition is not None and fired.reported
     return not fired.met or (held_before and fired.report == REPORTS[0])
@@ -297,11 +303,11 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
     if fired is None:
         return
     await _told(agent, runtime, fired, result)
-    if result.status is RunStatus.PAUSED:
-        return
     store = agent.harness.runs.schedules
-    ran = result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL)
-    kept, change = _after(fired, ran=ran)
+    # a run that paused its schedule did nothing else: it clears no failure, ends no schedule
+    ran = result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL) and not fired.paused
+    waits = result.status is RunStatus.PAUSED  # on a person: the next run sees how it ended
+    kept, change = ({WAITS: runtime.run_id}, {}) if waits else _after(fired, ran=ran)
     told = fired.report == REPORTS[2] and fired.condition is not None and bool(fired.met)
     try:
         if (fired.once and ran) or told:  # done: a failed one-time run stays, paused
@@ -325,6 +331,8 @@ def _after(fired: Fired, *, ran: bool) -> tuple[dict[str, Any], dict[str, Any]]:
         kept[REPORTED] = fired.met
     if fired.failures and ran:
         kept[FAILURES] = 0
+    if fired.waits is not None:  # the run before that waited ended, and was counted
+        kept[WAITS] = None
     change: dict[str, Any] = {}
     if fired.expiring and not (ran and fired.met):
         change = {"enabled": True}
@@ -363,13 +371,20 @@ async def _told(agent: Agent, runtime: Runtime, fired: Fired, result: Result) ->
 
 
 async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentError:
-    """A fired run's failure, counted on its schedule before the run ends: the
-    :data:`MAX_FAILURES`-th in a row pauses the schedule, and the error then says so (the
-    Kubernetes CronJob and Temporal leave a failing schedule running; an unattended one that
-    fails every time only costs)."""
+    """A fired run's failure, counted on its schedule before the run ends (:func:`_counted`):
+    the one that pauses the schedule says so in the run's error (the Kubernetes CronJob and
+    Temporal leave a failing schedule running; an unattended one that fails every time only
+    costs)."""
     fired = runtime.scheduled
-    if fired is None:
+    if fired is None or (why := await _counted(runtime, fired)) is None:
         return error
+    return error.model_copy(update={"message": f"{error.message} {_paused_said(why, fired)}"})
+
+
+async def _counted(runtime: Runtime, fired: Fired) -> str | None:
+    """One more failed run in a row, kept on the schedule: the :data:`MAX_FAILURES`-th (a
+    one-time schedule's first) pauses it, and why is returned; ``None`` when it does not, or
+    when the count is not kept (the schedule gone meanwhile, or the store failing: logged)."""
     fired.failures += 1
     stop = fired.once or fired.failures >= int((await limits(runtime)).pause_after_failures or 1)
     counted: dict[str, Any] = {FAILURES: fired.failures}
@@ -383,38 +398,65 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
         else ScheduleUpdate(metadata=counted)
     )
     try:
-        await agent.harness.runs.schedules.update(fired.schedule_id, change, tenant=runtime.tenant)
+        await runtime.agent.harness.runs.schedules.update(
+            fired.schedule_id, change, tenant=runtime.tenant
+        )
     except NotFoundError:
-        return error
+        return None
     except Exception:
         log.warning("schedule %s: failure not counted", fired.schedule_id, exc_info=True)
-        return error
-    if not stop:
-        return error
-    said = (
-        f"{error.message} This schedule is paused because {why}: {fired.task}. Ask me to resume "
-        "it once the cause is fixed."
+        return None
+    return why if stop else None
+
+
+def _paused_said(why: str, fired: Fired) -> str:
+    """What the run that paused its schedule says of it."""
+    return (
+        f"This schedule is paused because {why}: {fired.task}. Ask me to resume it once the "
+        "cause is fixed."
     )
-    return error.model_copy(update={"message": said})
 
 
-async def stale(runtime: Runtime) -> None:
+async def _unanswered(runtime: Runtime, fired: Fired) -> str | None:
+    """Its run before this one waited on a person and the store ended it (nobody answered by
+    its deadline, or its holder stopped): a failed run in a row the harness never saw end,
+    counted now (:func:`_counted`). The one that pauses the schedule is said as this run's
+    answer, and the run does nothing else."""
+    if fired.waits is None:
+        return None
+    before = await runtime.agent.harness.runs.get(fired.waits, tenant=runtime.tenant)
+    if (
+        before is None
+        or before.status not in (RunStatus.ERROR, RunStatus.TIMEOUT)
+        or before.error is None
+        or before.error.source != "agent-runs"
+    ):
+        return None
+    why = await _counted(runtime, fired)
+    return None if why is None else f"{before.error.message}. {_paused_said(why, fired)}"
+
+
+async def stale(runtime: Runtime) -> str | None:
     """Before a fired run works: a schedule the user has not changed for its days
     (``TRELLIS_SCHEDULE_EXPIRE_DAYS``) is paused until they keep it, and this run asks them, in
     its model's words and their language (handoff 2.6), after doing its task
     (:func:`expiring`): the user keeps it in chat (``update_schedule``, which renews it) or
-    cancels it."""
+    cancels it. What a run that does nothing else answers (:func:`_unanswered`), else
+    ``None``."""
     fired = runtime.scheduled
-    if fired is None or fired.touched is None:
-        return
+    if fired is None:
+        return None
+    if (said := await _unanswered(runtime, fired)) is not None or fired.touched is None:
+        return said
     days = int((await limits(runtime)).expire_days or 0)
     if datetime.now(UTC) - fired.touched < timedelta(days=days):
-        return
+        return None
     waits = ScheduleUpdate(enabled=False, metadata={PAUSED_BY: KEEP_IT})
     await runtime.agent.harness.runs.schedules.update(
         fired.schedule_id, waits, tenant=runtime.tenant
     )
     fired.expiring = True
+    return None
 
 
 def expiring(runtime: Runtime, input: Any) -> Any:
@@ -1220,18 +1262,29 @@ def _theirs(runtime: Runtime, schedule: Schedule) -> bool:
 
 async def _which(runtime: Runtime, args: dict[str, Any], verb: str) -> Schedule | str:
     """The schedule a call names (``id``), or — the user's words fitting several (``ids``) —
-    the one the user picks; a sentence when there is none."""
-    ids = [str(i) for i in args.get("ids") or [] if i] or [str(args.get("id") or "")]
-    found = [s for i in dict.fromkeys(ids) if (s := await _own(runtime, i)) is not None]
+    the one the user picks; a sentence when there is none. A run resuming with a pick whose
+    schedule went meanwhile never takes another for it: with several left it asks again (the
+    question changed), with one it says the pick is gone."""
+    ids = list(dict.fromkeys(str(i) for i in args.get("ids") or [] if i))
+    ids = ids or [str(args.get("id") or "")]
+    found = [s for i in ids if (s := await _own(runtime, i)) is not None]
     if not found:
         return f"No schedule {', '.join(ids)} of yours."
     if len(found) == 1:
-        return found[0]
+        gone = _picked(runtime, ids) or found[0].schedule_id
+        return found[0] if gone == found[0].schedule_id else f"No schedule {gone} of yours now."
     picked = await runtime.ask(
         f"Which one should I {verb}?",
         options=[Option(value=s.schedule_id, label=_label(s)) for s in found],
     )
     return next(s for s in found if s.schedule_id == picked)  # the answer is one of them
+
+
+def _picked(runtime: Runtime, ids: list[str]) -> str | None:
+    """The one of ``ids`` this run's journal holds as a person's answer: the pick a resumed
+    run's question was answered with (a first call has none)."""
+    answers = runtime.replay.journal.answers.values()
+    return next((a["answer"] for given in answers for a in given if a.get("answer") in ids), None)
 
 
 def _same(schedule: Schedule, about: dict[str, Any], when: str, zone: str) -> bool:
