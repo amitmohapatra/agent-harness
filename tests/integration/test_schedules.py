@@ -19,7 +19,7 @@ from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import AgentError, ErrorCategory, RunRecord, RunStatus, ScheduleSpec
-from trellis.harness import snapshots
+from trellis.harness import schedules, snapshots
 from trellis.harness.budget import BUDGET, Budget
 from trellis.harness.notifications import CHAT, ChatChannel, Kind, Notification
 from trellis.harness.runs import LocalRuns
@@ -1184,3 +1184,68 @@ async def test_agent_runs_own_floor_is_the_least_when_it_is_the_longer_one(
         assert "more often than every 2 hours" in answer, answer
         answer = await said(agent, chat, "ada", ("schedule_task", {**hourly, "task": "b"}))
         assert "more often than every 2 hours" in answer and len(read) == 1  # read once a minute
+
+
+def test_in_minutes_on_a_whole_minute_keeps_it() -> None:
+    at = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
+    assert schedules._in_minutes(20, "UTC", at)[0] == "20 9 20 11 *"
+    assert schedules._in_minutes(1.5, "UTC", at)[0] == "2 9 20 11 *"  # 09:01:30: on to 09:02
+
+
+def test_an_end_is_a_day_or_an_exact_time_and_anything_else_is_said_back() -> None:
+    zone = "Asia/Kolkata"
+    exact = schedules._ending("2030-12-31T17:00", zone)
+    assert exact == datetime(2030, 12, 31, 11, 30, tzinfo=UTC)
+    assert schedules._ends_said(exact, zone) == "at Tue 31 Dec 2030, 17:00 (Asia/Kolkata)"
+    assert "is not a day" in str(schedules._ending("next spring", zone))
+    assert schedules._ending("", zone) is None
+
+
+def test_a_limit_without_its_numbers_is_said_as_the_service_said_it() -> None:
+    bare = ScheduleLimitError("CONFLICT: at the limit", code="SCHEDULE_LIMIT", status=409)
+    assert schedules._limit_said(bare) is None
+    assert schedules._refusal(bare, "Refused") == "Refused: CONFLICT: at the limit"
+
+
+async def test_a_bad_end_in_a_change_is_said_back_and_changes_nothing() -> None:
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+        answer = await said(agent, chat, "ada", ("update_schedule", {"id": sid, "end_at": "soon"}))
+        assert "is not a day" in answer and only(h).end_at is None
+
+
+async def test_a_policy_agent_runs_cannot_say_now_leaves_the_harness_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """agent-runs' policy unread (down, a key without the right): the harness's own floor holds,
+    and the service's own refusal still applies."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+
+        async def down(*, tenant: str | None = None) -> Any:
+            raise RuntimeError("agent-runs unreachable")
+
+        monkeypatch.setattr(local(h).schedules, "policy", down, raising=False)
+        made = await said(agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 8 * * *"}))
+        assert "Scheduled" in made and h.schedule_floors == {}
+
+
+async def test_a_channel_that_fails_never_fails_the_fired_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 8 * * *"}))
+
+        async def broken(notification: Notification) -> list[str]:
+            raise RuntimeError("the notification service is down")
+
+        monkeypatch.setattr(h, "notify", broken)
+        chat.fired.append("done")
+        record = await fire(h, agent, only(h).schedule_id)
+        assert record.status is RunStatus.SUCCESS and record.output == "done"

@@ -638,11 +638,11 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     return f"Scheduled {made.schedule_id}: {_described(made)}{counted}"
 
 
-def _in_minutes(minutes: float, zone: str) -> tuple[str, str]:
+def _in_minutes(minutes: float, zone: str, start: datetime | None = None) -> tuple[str, str]:
     """``in_minutes``' one run: its cron for the next whole minute that many minutes on (never
     one gone), and the minute it was counted from, said where the model reads the time it got
     (the tool's text says only the hour, cached: 03:53 for "in 2 hours" at 01:53 is right)."""
-    start = datetime.now(ZoneInfo(zone_of(zone) or "UTC"))
+    start = (start or datetime.now(UTC)).astimezone(ZoneInfo(zone_of(zone) or "UTC"))
     at = start + timedelta(minutes=minutes)
     if at.second or at.microsecond:
         at = (at + timedelta(minutes=1)).replace(second=0, microsecond=0)
