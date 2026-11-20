@@ -127,6 +127,12 @@ and questions whose answers are facts of this harness. Cases waiting on a featur
 `update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
 reported apart.
 
+### Fixed: a paged tool past 200 pages keeps the cursor of the rest
+
+A `paged=True` tool fetched to its 200-page cap said `more_pages` but dropped the next cursor,
+so the model was told there was more and could not ask for it. The result now keeps it as
+`next_cursor`, and a call with it runs from there. The cap is unchanged.
+
 ### Fixed: a failed run says why in the chat
 
 A run that failed wrote its turn with status `ERROR` and no reason, so "why did my report

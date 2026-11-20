@@ -310,8 +310,9 @@ has to. In order of preference:
    8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
    and 20,000 characters — the model reads the small answer, never the rows. A tool declared
    `paged=True` (a cursor argument; `next_cursor` in its result) is fetched to its last page in
-   one call (`tools/pages.py`, at most 200 pages),
-   so its rows are queried whole too;
+   one call (`tools/pages.py`, at most 200 pages; past them the result says `more_pages` and
+   keeps the `next_cursor` the model may call with for the rest), so its rows are queried
+   whole too;
 3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
    result in the sandbox, and `execute` runs code over it), or `agent.tools.use(sandbox().tools())`
    on any adapter (`sandbox_exec`): every result the run keeps is written into the run's sandbox
