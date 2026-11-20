@@ -615,6 +615,23 @@ async def hook(request: Request) -> Response:
     return Response(status_code=204)
 ```
 
+### Long-running work
+
+A job that takes a while (a tool declared `long_running`, [tools.md](tools.md#a-tool-that-starts-a-long-job))
+is followed up by the harness, not polled by the model (`trellis/harness/follow_ups.py`):
+
+- **Durable and once.** Each check is a one-time schedule of the run's user in its chat
+  (`trellis_follow_up` in its metadata), agent-runs' like any: it survives a restart, fires
+  once, and holds no worker while it waits. It is not one of the user's schedules: no limit
+  counts it.
+- **No model while waiting.** A follow-up's run reads the status tool before any model call:
+  still under way, the next follow-up is made (2, 5, 15, 30, then every 60 minutes) and the
+  run says nothing (`NO_REPORT`).
+- **One continuation.** Done, failed, or under way after `follow_ups.GIVE_UP` (a day), one run
+  continues the task from what the status said: it reports, or does the task's next step (its
+  unattended rule applies), and the chain ends. A user's every-Monday schedule that starts a
+  job gets a chain per run; agent-runs starts no new run of it while one waits.
+
 ### Telling users: channels
 
 One interface tells a user what happened while they were away, whatever carries it

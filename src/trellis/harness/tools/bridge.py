@@ -516,6 +516,9 @@ async def _called(
         if is_pause_signal(cut) and not again:  # not over: made again on the resume
             budget.count_tool_call(runtime, times=-1)
         raise
+    from trellis.harness import follow_ups  # noqa: PLC0415 - a cycle
+
+    outcome = await follow_ups.started(runtime, tool, outcome)  # a long job: followed up
     await _ended_or_owed(
         runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
     )

@@ -58,6 +58,7 @@ from trellis.harness import (
     budget,
     children,
     conversation,
+    follow_ups,
     sandbox,
     schedules,
     skills,
@@ -839,6 +840,9 @@ async def _worked(
     await agent.hooks.started(runtime)
     await schedules.stale(runtime)
     input = schedules.expiring(runtime, input)
+    if (followed := await follow_ups.checked(runtime)) == schedules.NO_REPORT:
+        return Extracted(answer=followed), pushed  # the job still under way: checked again
+    input = followed or input
     if await background.stale(runtime):  # told already: nothing to deliver
         return Extracted(answer=schedules.NO_REPORT), pushed
     extracted = await _invoked(
