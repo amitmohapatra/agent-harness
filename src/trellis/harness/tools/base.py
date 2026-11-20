@@ -70,10 +70,6 @@ FRESHNESS: Final = "freshness"
 #: LangChain tool's ``metadata``, an MCP tool's ``_meta``): the harness follows its cursor to
 #: the last page (``tools.pages``).
 PAGED: Final = "paged"
-#: A tool whose call starts a job that takes a while, naming the tool (a read) that says where
-#: the job is (``tool(long_running="export_status")``, a LangChain tool's ``metadata``): the
-#: harness follows it up (``trellis.harness.follow_ups``).
-LONG_RUNNING: Final = "long_running"
 LIVE: Final = "live"
 #: A tool's data that does not change (reference data): its earlier values stay current.
 STATIC: Final = "static"
@@ -244,9 +240,7 @@ def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> di
         if strict:
             raise ConfigurationError(problem)
         return {}
-    paging: dict[str, Any] = {PAGED: True} if found.get(PAGED) is True else {}
-    if isinstance(status := found.get(LONG_RUNNING), str) and status:
-        paging[LONG_RUNNING] = status
+    paging = {PAGED: True} if found.get(PAGED) is True else {}
     if freshness == STATIC:
         return {FRESHNESS: STATIC, **paging}
     if freshness == LIVE:
