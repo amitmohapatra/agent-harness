@@ -487,7 +487,7 @@ with its tools bound takes them when it is built, with the harness's other tools
 | Tool | What it does |
 |---|---|
 | `schedule_task(task, when=None, condition=None, once=False, in_minutes=None, choices=None, timezone=None)` | `when` is a 5-field cron the model writes in the user's zone (`0 9 * * *` daily at 9, `0 9,17 * * *` at 9 and 17, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st, `0 9 4 11 *` with `once` for one day), checked with `croniter`; `in_minutes` instead is once, that many minutes from now ("in 2 hours"); `once=True` ends the schedule after its run; `timezone` only when the user names one; `choices` (a vague ask): 2-3 concrete schedules, the best first, the user picks one with a button |
-| `list_schedules()` | the user's schedules set in chat with this agent: id, task, time, condition, active or paused, next run |
+| `list_schedules()` | the user's schedules set in chat with this agent: id, task, when it runs (its next two runs as dates in its zone, `next Mon 24 Nov, 09:00, then Mon 1 Dec, 09:00 (Europe/Berlin)`: never its cron, which stays inside), condition, active or paused |
 | `update_schedule(id, ids=None, when=None, task=None, condition=None, enabled=None)` | `enabled=False` pauses, `True` resumes; `ids`: the schedules the user's words fit, when several do: the user picks one |
 | `cancel_schedule(id, ids=None)` | deletes it; `id="all"` deletes them all once the user confirms; `ids` as `update_schedule`'s |
 

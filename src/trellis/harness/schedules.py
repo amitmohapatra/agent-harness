@@ -771,8 +771,29 @@ def _about(about: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def runs_said(when: str, zone: str, *, once: bool = False, after: datetime | None = None) -> str:
+    """When a schedule runs, as the model and the user read it: its next run (and the one after,
+    for a repeating one) as a day, a date and an hour in its zone — never its cron, which stays
+    inside (handoff 2.4). A cron that does not parse is said as it is."""
+    try:
+        start = (after or datetime.now(UTC)).astimezone(ZoneInfo(zone))
+        cursor = croniter(when, start)
+        first = cursor.get_next(datetime)
+    except (ValueError, KeyError, ZoneInfoNotFoundError):
+        return f"'{when}' ({zone})"
+    year = start.year  # a date in another year says its year
+
+    def day(at: datetime) -> str:
+        dated = f"{at:%a} {at.day} {at:%b}" + (f" {at.year}" if at.year != year else "")
+        return f"{dated}, {at:%H:%M}"
+
+    if once:
+        return f"next {day(first)} ({zone})"
+    return f"next {day(first)}, then {day(cursor.get_next(datetime))} ({zone})"
+
+
 def _said(about: dict[str, Any], when: str, zone: str) -> str:
-    said = f"{about.get('task')}, '{when}' ({zone})"
+    said = f"{about.get('task')}, {runs_said(when, zone, once=bool(about.get('once')))}"
     return f"{said}, only when {about['condition']}" if about.get("condition") else said
 
 
@@ -783,21 +804,21 @@ def _label(schedule: Schedule) -> str:
 def _shown(schedule: Schedule) -> dict[str, Any]:
     about = schedule.metadata[TASK]
     due = schedule.next_fire_at if schedule.enabled else None
+    once = bool(about.get("once", False))
     return {
         "id": schedule.schedule_id,
         "task": about["task"],
-        "when": schedule.cadence,
+        "runs": runs_said(schedule.cadence, schedule.timezone, once=once) if due else None,
         "timezone": schedule.timezone,
         "condition": about.get("condition"),
-        "once": about.get("once", False),
+        "once": once,
         "status": "active" if schedule.enabled else "paused",
-        "next": due.isoformat() if due is not None else None,
     }
 
 
 def _described(schedule: Schedule) -> str:
     shown = _shown(schedule)
-    said = f"{shown['task']}, '{shown['when']}' ({shown['timezone']})"
+    said = f"{shown['task']}, {shown['runs'] or 'paused'}"
     if shown["condition"]:
         said += f", reported only when {shown['condition']}"
-    return f"{said}; next run {shown['next']}."
+    return f"{said}."
