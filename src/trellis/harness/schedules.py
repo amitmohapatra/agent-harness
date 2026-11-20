@@ -21,39 +21,52 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
   "in 2 hours" is ``in_minutes``. A fired run is offered none of these tools: it does its
   task.
 * Asked with buttons (``Runtime.ask(options=)``) where the answer changes the outcome: a
-  schedule like one the user has (:func:`_twin`: update it, recommended, keep both, or
-  neither; the very same again is "already set"), ``cancel_schedule(id="all")``, several that
+  schedule the model judged like one the user has (``alike``, read from ``list_schedules``:
+  update it, recommended, keep both, or neither; the very same again, :func:`_same`, is
+  "already set" whatever was passed), ``cancel_schedule(id="all")``, several that
   fit the user's words (``ids``) and a vague ask (``choices``).
-* Unattended safety, with no setting: after :data:`MAX_FAILURES` failed runs in a row
+* Unattended safety: after ``TRELLIS_SCHEDULE_PAUSE_AFTER_FAILURES`` failed runs in a row
   (``ERROR``, ``TIMEOUT``) the schedule is paused and the last run's error says so (the reply in
   the thread, the run's record and its ``run.finished`` webhook); a schedule the user has not
-  touched for :data:`STALE` asks at its next run "Still need this?" (Keep, recommended, or
-  Cancel), paused until answered. The count and the touch are in the schedule's metadata
-  (:data:`FAILURES`, :data:`TOUCHED`). agent-runs runs one fire of a schedule at a time and
-  spreads the fires over the minute.
-* Limits: ``TRELLIS_SCHEDULE_MIN_INTERVAL`` and ``TRELLIS_SCHEDULE_MAX_PER_USER`` (``Settings``),
-  per user ``Harness(schedule_limits=)``; agent-runs' own floor, rate limits and
+  touched for ``TRELLIS_SCHEDULE_EXPIRE_DAYS`` asks at its next run "Still need this?" (Keep,
+  recommended, or Cancel), paused until answered. The count and the touch are in the
+  schedule's metadata (:data:`FAILURES`, :data:`TOUCHED`). agent-runs runs one fire of a
+  schedule at a time and spreads the fires over the minute.
+* Limits: ``TRELLIS_SCHEDULE_*`` (``Settings``: the least time between runs, schedules per
+  user, each fired run's time and tool calls, failures before a pause, days before asking),
+  per user ``Harness(schedule_limits=)``, the same names; agent-runs' own floor, rate limits and
   ``max_running_per_tenant`` still apply. A limit reached is a sentence the model tells the
   user, not an error.
 """
 
 from __future__ import annotations
 
-import difflib
+import dataclasses
 import json
 import logging
 import re
+import time as time_module
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
-from trellis.contracts import AgentError, Option, RunStatus, Schedule, ScheduleSpec, ToolSpec
+from trellis.contracts import (
+    AgentError,
+    Option,
+    RunStatus,
+    Schedule,
+    ScheduleSpec,
+    ToolSpec,
+    stable_id,
+)
 from trellis.harness import snapshots
+from trellis.harness.budget import Budget
+from trellis.harness.notifications import Kind, Notification
 from trellis.harness.runs import THREAD
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.settings import Settings
@@ -75,8 +88,9 @@ TASK: Final = "trellis_task"
 REPORTED: Final = "trellis_reported"
 #: The schedule metadata key of its runs' failures in a row.
 FAILURES: Final = "trellis_failures"
-#: Failed runs in a row that pause a schedule (as agent-runs pauses one whose fires fail).
-MAX_FAILURES: Final = 3
+#: Failed runs in a row that pause a schedule, by default (``TRELLIS_SCHEDULE_PAUSE_AFTER_
+#: FAILURES``; agent-runs pauses one whose fires fail as it does).
+MAX_FAILURES: Final[int] = Settings.model_fields["schedule_pause_after_failures"].default
 #: The schedule metadata key of when the user last made or changed it (ISO 8601).
 TOUCHED: Final = "trellis_touched"
 #: The schedule metadata key of its zone, for its runs: a fired run has no app to say it.
@@ -89,8 +103,21 @@ REPORTS: Final = ("until_clears", "every_time", "once")
 #: The schedule metadata key of why it is paused, when it was paused for a reason the user is
 #: told (its runs failed, its one run failed, the user paused it, it waits to be kept).
 PAUSED_BY: Final = "trellis_paused_by"
-#: How long a schedule runs untouched before its next run asks whether it is still needed.
-STALE: Final = timedelta(days=90)
+#: How long a schedule runs untouched before its next run asks whether it is still needed, by
+#: default (``TRELLIS_SCHEDULE_EXPIRE_DAYS``).
+STALE: Final = timedelta(days=Settings.model_fields["schedule_expire_days"].default)
+#: How long agent-runs' schedule policy read is kept before it is read again, in seconds.
+FLOOR_KEPT: Final = 60.0
+#: Why a schedule unchanged for its days is paused (``paused_because``).
+KEEP_IT: Final = "it waits for the user to keep it"
+#: What a fired run of such a schedule is told, after its task: its model asks the user, in
+#: their words and language, never a fixed text of code (handoff 2.6).
+EXPIRING: Final = (
+    "This schedule has run unchanged for a long time and is now paused. Do the task, then end "
+    "your reply by asking the user, in their own language, whether they still need this "
+    "schedule: saying so keeps it (it resumes), or they can cancel it. Ask even if there is "
+    "nothing to report."
+)
 #: The tools' names.
 SCHEDULE_TOOLS: Final = ("schedule_task", "list_schedules", "update_schedule", "cancel_schedule")
 #: Occurrences measured to find a cron's shortest interval (as agent-runs measures its floor).
@@ -133,20 +160,25 @@ EACH_TIME: Final = "ask"
 #: The schedule metadata key of the writes the user allowed its runs when they confirmed it:
 #: a fired run calls them without asking (``tools.bridge``); any other write still asks.
 ALLOWED: Final = "trellis_allowed"
-#: How alike two tasks' words are (``difflib``'s ratio, digits left out) for one to be the
-#: other with a different time or value, where they name no identifier in common.
-ALIKE: Final = 0.8
 
 
 @dataclass(frozen=True)
 class ScheduleLimits:
     """One user's limits (``Harness(schedule_limits=)``); a field left ``None`` is the
-    environment's."""
+    environment's, ``Settings.schedule_<field>``: the same names, one source each."""
 
     #: the least seconds between two runs of a schedule
     min_interval: float | None = None
     #: how many schedules the user may have, per agent
     max_per_user: int | None = None
+    #: the most seconds one fired run may take
+    run_timeout: float | None = None
+    #: the most harness tool calls one fired run may make
+    run_max_tool_calls: int | None = None
+    #: fired runs failed in a row that pause the schedule
+    pause_after_failures: int | None = None
+    #: days a schedule runs unchanged before its next run asks to keep it
+    expire_days: int | None = None
 
 
 #: ``Harness(schedule_limits=)``: ``async (user, tenant) -> ScheduleLimits | None``.
@@ -177,6 +209,12 @@ class Fired:
     zone: str | None = None
     #: how its condition reports (:data:`REPORTS`)
     report: str = REPORTS[0]
+    #: whether this run asks the user to keep it (unchanged for its days: :func:`stale`)
+    expiring: bool = False
+    #: whether its answer is delivered (:func:`quiet`), once it answered
+    delivered: bool | None = None
+    #: why this run paused its schedule (:func:`failed`), when it did
+    paused: str | None = None
 
     @classmethod
     def of(cls, metadata: dict[str, Any]) -> Fired | None:
@@ -228,7 +266,14 @@ def quiet(runtime: Runtime, answer: Any) -> bool:
     fired = runtime.scheduled
     if fired is None:
         return False
+    fired.delivered = not _quiet(fired, answer)
+    return not fired.delivered
+
+
+def _quiet(fired: Fired, answer: Any) -> bool:
     fired.met = not (isinstance(answer, str) and re.sub(r"\W", "", answer) == NO_REPORT)
+    if fired.expiring:  # its question reaches the user, met or not; a bare NO_REPORT asked none
+        return not fired.met
     held_before = fired.condition is not None and fired.reported
     return not fired.met or (held_before and fired.report == REPORTS[0])
 
@@ -238,7 +283,10 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
     when it changed; a success clears the failures in a row. A failure is logged: the run's
     own result stands."""
     fired = runtime.scheduled
-    if fired is None or result.status is RunStatus.PAUSED:
+    if fired is None:
+        return
+    await _told(agent, runtime, fired, result)
+    if result.status is RunStatus.PAUSED:
         return
     store = agent.harness.runs.schedules
     kept: dict[str, Any] = {}
@@ -247,18 +295,52 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
     if fired.failures and result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL):
         kept[FAILURES] = 0
     ran = result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL)
+    change: dict[str, Any] = {}
+    if fired.expiring and not (ran and fired.met):  # the user was not asked: never paused unsaid
+        change = {"enabled": True}
+        kept[PAUSED_BY] = None
     told = fired.report == REPORTS[2] and fired.condition is not None and bool(fired.met)
     try:
         if (fired.once and ran) or told:  # done: a failed one-time run stays, paused
             await store.delete(fired.schedule_id, tenant=runtime.tenant)
-        elif kept:
+        elif kept or change:
             await store.update(
-                fired.schedule_id, ScheduleUpdate(metadata=kept), tenant=runtime.tenant
+                fired.schedule_id, ScheduleUpdate(metadata=kept, **change), tenant=runtime.tenant
             )
     except NotFoundError:  # cancelled meanwhile
         pass
     except Exception:
         log.warning("schedule %s not updated after its run", fired.schedule_id, exc_info=True)
+
+
+async def _told(agent: Agent, runtime: Runtime, fired: Fired, result: Result) -> None:
+    """What a fired run comes to, on the user's channels (``notifications``), once each: its
+    result when delivered, its failure (the pause it caused, when it did), its wait for an
+    approval. A channel failing never fails the run."""
+    if result.status is RunStatus.PAUSED and result.interrupt is not None:
+        kind, text = Kind.APPROVAL, f"{fired.task}: {result.interrupt.question}"
+    elif result.status in (RunStatus.ERROR, RunStatus.TIMEOUT):
+        error = result.error.message if result.error is not None else result.status.value
+        kind = Kind.PAUSED if fired.paused else Kind.FAILURE
+        text = error
+    elif fired.delivered and isinstance(result.answer, str):
+        kind, text = Kind.RESULT, result.answer
+    else:
+        return
+    notification = Notification(
+        kind=kind,
+        tenant=runtime.tenant,
+        user=runtime.user,
+        text=text,
+        key=stable_id(runtime.run_id, kind.value),
+        thread=runtime.identity.thread,
+        run_id=runtime.run_id,
+        schedule_id=fired.schedule_id,
+    )
+    try:
+        await agent.harness.notify(notification)
+    except Exception:
+        log.warning("schedule %s: its run not told", fired.schedule_id, exc_info=True)
 
 
 async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentError:
@@ -270,11 +352,12 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
     if fired is None:
         return error
     fired.failures += 1
-    stop = fired.once or fired.failures >= MAX_FAILURES
+    stop = fired.once or fired.failures >= int((await limits(runtime)).pause_after_failures or 1)
     counted: dict[str, Any] = {FAILURES: fired.failures}
     why = "its one run failed" if fired.once else f"its runs failed {fired.failures} times in a row"
     if stop:
         counted[PAUSED_BY] = why
+        fired.paused = why
     change = (
         ScheduleUpdate(metadata=counted, enabled=False)
         if stop
@@ -296,30 +379,32 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
     return error.model_copy(update={"message": said})
 
 
-async def stale(runtime: Runtime) -> str | None:
-    """Before a fired run works: a schedule the user has not touched for :data:`STALE` asks
-    once whether it is still needed, paused until they answer. Keep (recommended) resumes it
-    and the run does its task (``None``); Cancel deletes it and is the run's answer."""
+async def stale(runtime: Runtime) -> None:
+    """Before a fired run works: a schedule the user has not changed for its days
+    (``TRELLIS_SCHEDULE_EXPIRE_DAYS``) is paused until they keep it, and this run asks them, in
+    its model's words and their language (handoff 2.6), after doing its task
+    (:func:`expiring`): the user keeps it in chat (``update_schedule``, which renews it) or
+    cancels it."""
     fired = runtime.scheduled
-    if fired is None or fired.touched is None or datetime.now(UTC) - fired.touched < STALE:
-        return None
-    store, tenant = runtime.agent.harness.runs.schedules, runtime.tenant
-    waits = ScheduleUpdate(enabled=False, metadata={PAUSED_BY: "it waits for the user to keep it"})
-    await store.update(fired.schedule_id, waits, tenant=tenant)
-    keep = await runtime.ask(
-        f"Still need this? {fired.task}",
-        options=[
-            Option(value=UPDATE, label="Keep", recommended=True),
-            Option(value=NEITHER, label="Cancel"),
-        ],
+    if fired is None or fired.touched is None:
+        return
+    days = int((await limits(runtime)).expire_days or 0)
+    if datetime.now(UTC) - fired.touched < timedelta(days=days):
+        return
+    waits = ScheduleUpdate(enabled=False, metadata={PAUSED_BY: KEEP_IT})
+    await runtime.agent.harness.runs.schedules.update(
+        fired.schedule_id, waits, tenant=runtime.tenant
     )
-    if keep == UPDATE:
-        change = ScheduleUpdate(enabled=True, metadata={TOUCHED: _now(), PAUSED_BY: None})
-        await store.update(fired.schedule_id, change, tenant=tenant)
-        return None
-    await store.delete(fired.schedule_id, tenant=tenant)
-    runtime.scheduled = None  # gone: nothing of it to keep after the run
-    return f"Cancelled: {fired.task}."
+    fired.expiring = True
+
+
+def expiring(runtime: Runtime, input: Any) -> Any:
+    """A fired run's input, with the question :func:`stale` leaves to its model: after the
+    task, ask whether the user still needs the schedule, in their language."""
+    fired = runtime.scheduled
+    if fired is None or not fired.expiring or not isinstance(input, str):
+        return input
+    return f"{input}\n\n{EXPIRING}"
 
 
 def _now() -> str:
@@ -338,6 +423,13 @@ _WHEN: Final = {
 }
 _CONDITION: Final = {"type": "string", "description": "Report only when this holds."}
 _ID: Final = {"type": "string", "description": "An id from list_schedules."}
+#: When a schedule ends: the user's last day, or an exact time, in their zone.
+_END_AT: Final = {
+    "type": "string",
+    "description": "When it ends, in the user's zone: the last day it runs ('2026-12-31' for "
+    "'until 31 December'; count 'for 3 weeks' from today), or 'YYYY-MM-DDTHH:MM' for an exact "
+    "time. In update_schedule, '' removes the end.",
+}
 #: How a condition reports: the model picks it from the user's words.
 _REPORT: Final = {
     "type": "string",
@@ -383,15 +475,22 @@ SPECS: Final = (
         "tools can run, the best first; the user picks one. With no time said it runs at "
         "{default_time}; say the time you used. One schedule can run at several times or days "
         "('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every {every}. A condition reports as "
-        "report says. A schedule like one the "
-        "user has is asked about here. Tell the user when it runs as days and times in their "
-        "zone, never the cron.",
+        "report says. When the user may already have one like it, read list_schedules first; "
+        "one doing the same thing, perhaps at another time or value: pass its id as alike, "
+        "and the user is asked to update it or keep both. The very same again is not made "
+        "twice. Tell the user when it runs as days and times in their zone, never the cron.",
         {
             "task": _TASK,
             "when": _WHEN,
             "condition": _CONDITION,
             "once": {"type": "boolean", "description": "Run once, then end."},
             "report": _REPORT,
+            "end_at": _END_AT,
+            "alike": {
+                "type": "string",
+                "description": "The id (list_schedules) of the user's schedule that does the "
+                "same thing as this one: the user picks, update it or keep both.",
+            },
             "in_minutes": {
                 "type": "number",
                 "description": "Instead of when: run once this many minutes from now "
@@ -439,6 +538,7 @@ SPECS: Final = (
             "task": _TASK,
             "condition": _CONDITION,
             "report": _REPORT,
+            "end_at": _END_AT,
             "enabled": _ENABLED,
         },
         ["id"],
@@ -498,16 +598,24 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
         # the minute counted from, said where the model reads the time it got: the tool's
         # text says only the hour (cached), so 03:53 for "in 2 hours" at 01:53 is not an error
         counted = f" That is {float(minutes):g} minutes from {start:%H:%M} ({zone}), as asked."
-    min_interval, max_per_user = await _limits(runtime)
-    if (refused := _refused(when, min_interval)) is not None:
+    held = await limits(runtime)
+    min_interval, max_per_user = float(held.min_interval or 0), int(held.max_per_user or 0)
+    ends = _ending(args.get("end_at"), zone)
+    if refused := _refused(when, min_interval) or (ends if isinstance(ends, str) else None):
         return refused
     mine = await _mine(runtime)
     about = {"task": task, "condition": condition, "once": once}
-    twin = await _twin_asked(runtime, mine, about, when, zone)
+    twin = await _twin_asked(runtime, mine, about, when, zone, alike=args.get("alike"))
     if (said := twin or _full(mine, max_per_user)) is not None:
         return said
     agent = runtime.agent
-    metadata = {**agent._metadata(runtime.without, None), TASK: about, TOUCHED: _now(), ZONE: zone}
+    budget = _run_budget(agent.budget, int(held.run_max_tool_calls or 0))
+    metadata = {
+        **agent._metadata(runtime.without, None, budget=budget),
+        TASK: about,
+        TOUCHED: _now(),
+        ZONE: zone,
+    }
     if (report := str(args.get("report") or REPORTS[0])) in REPORTS[1:]:
         metadata[REPORT] = report
     if runtime.conversation != runtime.run_id:  # the chat it was set in
@@ -528,14 +636,87 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             timezone=zone,
             on_behalf_of=runtime.user,
             input=_input(task, condition),
-            timeout_seconds=agent.timeout,
+            timeout_seconds=min(t for t in (agent.timeout, held.run_timeout) if t is not None),
             agent_version=agent.version,
             metadata=metadata,
+            end_at=ends if isinstance(ends, datetime) else None,
         )
         made = await agent.harness.runs.schedules.create(spec)
     except (ValueError, ValidationError, ConflictError) as exc:
-        return f"That schedule was refused: {exc}"
+        return _refusal(exc, "That schedule was refused")
     return f"Scheduled {made.schedule_id}: {_described(made)}{counted}"
+
+
+def _limit_said(error: Any) -> str | None:
+    """agent-runs' limit (``RUNS__SCHEDULES__*``, its code and numbers) as the user is told it:
+    which limit, its number, what to do. ``None`` for anything else."""
+    code, details = getattr(error, "code", None), getattr(error, "details", None) or {}
+    try:
+        if code == "SCHEDULE_LIMIT":
+            most, count = int(details["max_per_tenant"]), int(details["schedule_count"])
+            return (
+                f"Your organisation has {count} of {most} schedules, the most it allows: cancel "
+                "one of yours, or ask your admin to raise the limit."
+            )
+        if code == "CADENCE_TOO_FREQUENT":
+            gap, least = details["interval_seconds"], details["min_interval_seconds"]
+            return (
+                f"That runs every {_every(float(gap))}, more often than every "
+                f"{_every(float(least))}, the most often a schedule may run here: pick a longer "
+                "gap."
+            )
+        if code == "FIRES_PER_DAY":
+            return (
+                f"Your organisation's {int(details['max_fires_per_day'])} scheduled runs for the "
+                "day were used up, so this one did not run; it runs again at its next time."
+            )
+    except (KeyError, TypeError, ValueError):  # a limit without its numbers: as it was said
+        return None
+    return None
+
+
+def _refusal(exc: Exception, lead: str) -> str:
+    """Why the store refused a schedule or a change, as the model tells the user."""
+    return _limit_said(exc) or f"{lead}: {exc}"
+
+
+def _ending(given: Any, zone: str) -> datetime | str | None:
+    """``end_at`` as the instant the schedule ends: a day is its last day, so the instant that
+    day ends in ``zone``; a date and time, that time there; ``''`` none (``update_schedule``
+    removes the end). What cannot be one, or is already past, is said back."""
+    text = str(given or "").strip()
+    if not text:
+        return None
+    place = ZoneInfo(zone_of(zone) or "UTC")
+    try:
+        if len(text) == len("2026-12-31"):
+            last = date.fromisoformat(text)
+            ends = datetime.combine(last + timedelta(days=1), time(), tzinfo=place)
+        else:
+            ends = datetime.fromisoformat(text).replace(tzinfo=place)
+    except ValueError:
+        return f"{text!r} is not a day ('2026-12-31') or a time ('2026-12-31T17:00')."
+    if ends <= datetime.now(UTC):
+        return f"{text} is already past in {zone}: say a later end."
+    return ends.astimezone(UTC)
+
+
+def _ends_said(ends: datetime, zone: str) -> str:
+    """When a schedule ends, in words in its zone: after its last day, or at a time."""
+    local = ends.astimezone(ZoneInfo(zone_of(zone) or "UTC"))
+    if local.time() == time():
+        last = local - timedelta(days=1)
+        return f"after {last:%a} {last.day} {last:%b} {last.year} ({zone})"
+    return f"at {local:%a} {local.day} {local:%b} {local.year}, {local:%H:%M} ({zone})"
+
+
+def _run_budget(own: Budget | None, max_tool_calls: int) -> Budget:
+    """A fired run's budget: the agent's, its tool calls at most ``max_tool_calls`` (the
+    agent's own lower limit stays)."""
+    own = own or Budget()
+    held = own.max_tool_calls
+    calls = max_tool_calls if held is None else min(held, max_tool_calls)
+    return dataclasses.replace(own, max_tool_calls=calls)
 
 
 def _full(mine: list[Schedule], max_per_user: int) -> str | None:
@@ -580,15 +761,23 @@ async def _writes_asked(runtime: Runtime, said: str, writes: list[str]) -> Any:
 
 
 async def _twin_asked(
-    runtime: Runtime, mine: list[Schedule], about: dict[str, Any], when: str, zone: str
+    runtime: Runtime,
+    mine: list[Schedule],
+    about: dict[str, Any],
+    when: str,
+    zone: str,
+    *,
+    alike: Any = None,
 ) -> Any:
-    """What a schedule like one the user has comes to: nothing new (the same again), or the one
-    they have updated, or none, as the user picks; ``None``: make it (no twin, or both kept)."""
-    twin = _twin(mine, about)
+    """What a schedule like one the user has comes to: nothing new (the very same again), or
+    the one the model judged ``alike`` updated, or none, as the user picks; ``None``: make it
+    (none alike, or both kept)."""
+    same = next((m for m in mine if _same(m, about, when, zone)), None)
+    if same is not None:
+        return f"Already set, nothing changed: {_described(same)}"
+    twin = next((m for m in mine if m.schedule_id == str(alike or "").strip()), None)
     if twin is None:
         return None
-    if _same(twin, about, when, zone):
-        return f"Already set, nothing changed: {_described(twin)}"
     said = _said(about, when, zone)
     choice = await runtime.ask(
         f"You already have a schedule like this: {_described(twin)} Update it to {said}, "
@@ -633,8 +822,28 @@ async def _chosen(runtime: Runtime, args: dict[str, Any], choices: list[Any]) ->
 
 
 async def _list_schedules(args: dict[str, Any]) -> Any:
-    mine = await _mine(_runtime())
-    return [_shown(s) for s in mine] if mine else "You have no schedules."
+    runtime = _runtime()
+    mine = await _mine(runtime)
+    if not mine:
+        return "You have no schedules."
+    shown = []
+    for schedule in mine:
+        said = _shown(schedule)
+        if (waits := await _waiting(runtime, schedule)) is not None:
+            said["waiting"] = waits
+        shown.append(said)
+    return shown
+
+
+async def _waiting(runtime: Runtime, schedule: Schedule) -> str | None:
+    """What the schedule's last run waits on, said, while it waits on a person (point 29):
+    its next tick starts no other run meanwhile."""
+    if schedule.last_run_id is None:
+        return None
+    record = await runtime.agent.harness.runs.get(schedule.last_run_id, tenant=runtime.tenant)
+    if record is None or record.status is not RunStatus.PAUSED or record.awaiting is None:
+        return None
+    return f"for your answer: {record.awaiting.question}"
 
 
 async def _update_schedule(args: dict[str, Any]) -> Any:
@@ -644,7 +853,7 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
         return schedule
     changes: dict[str, Any] = {}
     if args.get("when"):
-        min_interval, _ = await _limits(runtime)
+        min_interval = float((await limits(runtime)).min_interval or 0)
         if (refused := _refused(str(args["when"]).strip(), min_interval)) is not None:
             return refused
         changes["cadence"] = str(args["when"]).strip()
@@ -658,6 +867,11 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
         changes["enabled"] = bool(args["enabled"])
         paused = None if changes["enabled"] else "the user paused it"
         changes["metadata"] = {**changes.get("metadata", {}), PAUSED_BY: paused}
+    if args.get("end_at") is not None:
+        ends = _ending(args["end_at"], schedule.timezone)
+        if isinstance(ends, str):
+            return ends
+        changes["end_at"] = ends
     if (report := args.get("report")) is not None:
         if report not in REPORTS:
             return f"report is one of {', '.join(REPORTS)}, not {report!r}."
@@ -677,7 +891,7 @@ async def _changed(runtime: Runtime, schedule: Schedule, changes: dict[str, Any]
             schedule.schedule_id, ScheduleUpdate(**changes), tenant=runtime.tenant
         )
     except (ValidationError, ConflictError) as exc:
-        return f"That change was refused: {exc}"
+        return _refusal(exc, "That change was refused")
     return _shown(updated)
 
 
@@ -735,14 +949,45 @@ def _input(task: str, condition: str | None) -> str:
     )
 
 
-async def _limits(runtime: Runtime) -> tuple[float, int]:
+async def limits(runtime: Runtime) -> ScheduleLimits:
+    """The limits in force for the run's user: each field the hook's
+    (``Harness(schedule_limits=)``), else the settings' ``schedule_<field>``: none left
+    ``None``."""
     settings, hook = runtime.agent.harness.settings, runtime.agent.harness.schedule_limits
-    own = await hook(runtime.user, runtime.tenant) if hook is not None else None
-    own = own or ScheduleLimits()
-    return (
-        settings.schedule_min_interval if own.min_interval is None else own.min_interval,
-        settings.schedule_max_per_user if own.max_per_user is None else own.max_per_user,
+    own = (
+        await hook(runtime.user, runtime.tenant) if hook is not None else None
+    ) or ScheduleLimits()
+    held = ScheduleLimits(
+        **{
+            f.name: getattr(settings, f"schedule_{f.name}")
+            if getattr(own, f.name) is None
+            else getattr(own, f.name)
+            for f in dataclasses.fields(ScheduleLimits)
+        }
     )
+    least = max(float(held.min_interval or 0), await _service_floor(runtime))
+    return dataclasses.replace(held, min_interval=least)
+
+
+async def _service_floor(runtime: Runtime) -> float:
+    """agent-runs' own least time between a schedule's runs (``schedules.policy``), read at
+    most once a :data:`FLOOR_KEPT` per tenant: 0 where the store says none (``LocalRuns``) or
+    it cannot be read now (its own refusal, said in words, still applies)."""
+    harness = runtime.agent.harness
+    kept = harness.schedule_floors.get(runtime.tenant)
+    now = time_module.monotonic()
+    if kept is not None and now - kept[1] < FLOOR_KEPT:
+        return kept[0]
+    policy = getattr(harness.runs.schedules, "policy", None)
+    floor = 0.0
+    if policy is not None:
+        try:
+            floor = float((await policy(tenant=runtime.tenant)).min_interval_seconds)
+        except Exception:
+            log.warning("agent-runs' schedule policy not read", exc_info=True)
+            return kept[0] if kept is not None else 0.0
+    harness.schedule_floors[runtime.tenant] = (floor, now)
+    return floor
 
 
 def _refused(when: str, min_interval: float) -> str | None:
@@ -807,36 +1052,6 @@ async def _which(runtime: Runtime, args: dict[str, Any], verb: str) -> Schedule 
     return next(s for s in found if s.schedule_id == picked)  # the answer is one of them
 
 
-def _words(about: dict[str, Any]) -> str:
-    return f"{about.get('task') or ''} {about.get('condition') or ''}".lower()
-
-
-def _names(text: str) -> set[str]:
-    """The identifiers a task names (a SKU, an order number): words of letters and digits
-    that are not a time of day."""
-    return {
-        w
-        for w in re.findall(r"[a-z0-9][\w-]*", text)
-        if re.search(r"\d", w) and re.search(r"[a-z]", w) and not re.fullmatch(r"\d+(am|pm|h)", w)
-    }
-
-
-def _twin(mine: list[Schedule], about: dict[str, Any]) -> Schedule | None:
-    """The user's schedule that watches what ``about`` does, perhaps with another time or
-    value: one naming an identifier in common, else one whose words are alike."""
-    words = _words(about)
-    for schedule in mine:
-        theirs = _words(schedule.metadata[TASK])
-        if _names(words) & _names(theirs):
-            return schedule
-    plain = re.sub(r"\d", "", words)
-    for schedule in mine:
-        theirs = re.sub(r"\d", "", _words(schedule.metadata[TASK]))
-        if difflib.SequenceMatcher(None, plain, theirs).ratio() >= ALIKE:
-            return schedule
-    return None
-
-
 def _same(schedule: Schedule, about: dict[str, Any], when: str, zone: str) -> bool:
     """Whether ``about`` at ``when`` is ``schedule`` again: its time, zone and the figures and
     presence of its condition."""
@@ -847,7 +1062,9 @@ def _same(schedule: Schedule, about: dict[str, Any], when: str, zone: str) -> bo
         return condition is not None, found
 
     return (
-        schedule.cadence == when
+        " ".join(str(theirs.get("task", "")).lower().split())
+        == " ".join(str(about["task"]).lower().split())
+        and schedule.cadence == when
         and schedule.timezone == zone
         and bool(theirs.get("once")) == about["once"]
         and figures(theirs.get("condition")) == figures(about["condition"])
@@ -914,13 +1131,15 @@ def _history(schedule: Schedule) -> dict[str, Any]:
     zone), its failed runs in a row, why its last fire failed, and for a condition how it
     reports and whether it was reported (why a watch went quiet)."""
     said: dict[str, Any] = {}
+    if (ends := getattr(schedule, "end_at", None)) is not None:
+        said["ends"] = _ends_said(ends, schedule.timezone)
     if (at := schedule.last_fired_at) is not None:
         local = at.astimezone(ZoneInfo(zone_of(schedule.timezone) or "UTC"))
         said["last_run"] = f"{local:%a} {local.day} {local:%b}, {local:%H:%M} ({schedule.timezone})"
     if failures := int(schedule.metadata.get(FAILURES) or 0):
         said["failed_runs_in_a_row"] = failures
     if schedule.consecutive_failures and schedule.last_error is not None:
-        said["fire_error"] = schedule.last_error.message
+        said["fire_error"] = _limit_said(schedule.last_error) or schedule.last_error.message
     if not schedule.enabled and (why := schedule.metadata.get(PAUSED_BY)):
         said["paused_because"] = str(why)
     if schedule.metadata[TASK].get("condition"):

@@ -133,10 +133,14 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 5 minutes. A condition reports as report says. A schedule like one the user has is asked about here. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 1 hour. A condition reports as report says. When the user may already have one like it, read list_schedules first; one doing the same thing, perhaps at another time or value: pass its id as alike, and the user is asked to update it or keep both. The very same again is not made twice. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
+              "alike": {
+                "description": "The id (list_schedules) of the user's schedule that does the same thing as this one: the user picks, update it or keep both.",
+                "type": "string"
+              },
               "choices": {
                 "description": "Only for a vague ask: 2-3 concrete schedules, the best first; the user picks one, which is made.",
                 "items": {
@@ -164,6 +168,10 @@
               },
               "condition": {
                 "description": "Report only when this holds.",
+                "type": "string"
+              },
+              "end_at": {
+                "description": "When it ends, in the user's zone: the last day it runs ('2026-12-31' for 'until 31 December'; count 'for 3 weeks' from today), or 'YYYY-MM-DDTHH:MM' for an exact time. In update_schedule, '' removes the end.",
                 "type": "string"
               },
               "in_minutes": {
@@ -244,6 +252,10 @@
               "enabled": {
                 "description": "false pauses it, true resumes it.",
                 "type": "boolean"
+              },
+              "end_at": {
+                "description": "When it ends, in the user's zone: the last day it runs ('2026-12-31' for 'until 31 December'; count 'for 3 weeks' from today), or 'YYYY-MM-DDTHH:MM' for an exact time. In update_schedule, '' removes the end.",
+                "type": "string"
               },
               "id": {
                 "description": "An id from list_schedules.",
@@ -438,10 +450,14 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 5 minutes. A condition reports as report says. A schedule like one the user has is asked about here. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 1 hour. A condition reports as report says. When the user may already have one like it, read list_schedules first; one doing the same thing, perhaps at another time or value: pass its id as alike, and the user is asked to update it or keep both. The very same again is not made twice. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
+              "alike": {
+                "description": "The id (list_schedules) of the user's schedule that does the same thing as this one: the user picks, update it or keep both.",
+                "type": "string"
+              },
               "choices": {
                 "description": "Only for a vague ask: 2-3 concrete schedules, the best first; the user picks one, which is made.",
                 "items": {
@@ -469,6 +485,10 @@
               },
               "condition": {
                 "description": "Report only when this holds.",
+                "type": "string"
+              },
+              "end_at": {
+                "description": "When it ends, in the user's zone: the last day it runs ('2026-12-31' for 'until 31 December'; count 'for 3 weeks' from today), or 'YYYY-MM-DDTHH:MM' for an exact time. In update_schedule, '' removes the end.",
                 "type": "string"
               },
               "in_minutes": {
@@ -549,6 +569,10 @@
               "enabled": {
                 "description": "false pauses it, true resumes it.",
                 "type": "boolean"
+              },
+              "end_at": {
+                "description": "When it ends, in the user's zone: the last day it runs ('2026-12-31' for 'until 31 December'; count 'for 3 weeks' from today), or 'YYYY-MM-DDTHH:MM' for an exact time. In update_schedule, '' removes the end.",
+                "type": "string"
               },
               "id": {
                 "description": "An id from list_schedules.",

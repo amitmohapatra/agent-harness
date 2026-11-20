@@ -10,6 +10,7 @@ tools keep their own way (``test_govern_framework_tools``, ``test_claude``, ``te
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -454,6 +455,8 @@ class Chat:
     async def __call__(self, input: str, agent: Runtime) -> Any:
         if input.startswith("Scheduled task:"):
             return [text_of(await agent.tools.call(n, amount=a)) for n, a in self.calls]
+        if input == "list":
+            return text_of(await agent.tools.call("list_schedules"))
         args = {"task": "pay the rent", "when": "0 8 1 * *", "tools": ["pay", "wire", "nope"]}
         return text_of(await agent.tools.call("schedule_task", **args))
 
@@ -495,3 +498,27 @@ async def test_cancelling_the_confirmation_makes_no_schedule() -> None:
         assert asked.interrupt is not None
         await agent.resume(asked.interrupt.interrupt_id, "answer", answer=NEITHER, reviewer="ada")
         assert not h.runs._schedules  # type: ignore[attr-defined]
+
+
+async def test_a_fired_run_waiting_for_approval_is_listed_and_its_next_tick_starts_none() -> None:
+    """Point 29: a fired run that waits on a person is said as waiting in list_schedules (what
+    for), and while it waits its schedule's next tick starts no second run (agent-runs' rule,
+    Kubernetes' Forbid; LocalRuns as agent-runs)."""
+    async with Harness(config=Settings()) as h:
+        agent = arm(h.wrap(Chat(("refund", 2)), id="desk"), [pay, refund, wire])
+        asked = await agent.run("pay my rent monthly", user="ada", thread=THREAD)
+        assert asked.interrupt is not None
+        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=ALLOW, reviewer="ada")
+        run = await fired(h, agent)
+        assert run.status is RunStatus.PAUSED, run
+        listed = await agent.run("list", user="ada", thread=THREAD)
+        assert '"waiting": "for your answer: ' in str(listed.answer), listed.answer
+        assert "refund" in str(listed.answer)
+        runs = h.runs
+        [schedule] = runs._schedules.values()  # type: ignore[union-attr]
+        before = len(runs._runs)  # type: ignore[union-attr]
+        later = (schedule.next_fire_at or datetime.now(UTC)) + timedelta(days=40)
+        runs._fire_due(later)  # type: ignore[union-attr]
+        assert len(runs._runs) == before  # type: ignore[union-attr]
+        after = runs._schedules[schedule.schedule_id]  # type: ignore[union-attr]
+        assert after.last_run_id == run.run_id and after.next_fire_at > later

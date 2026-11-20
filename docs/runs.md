@@ -486,8 +486,8 @@ with its tools bound takes them when it is built, with the harness's other tools
 
 | Tool | What it does |
 |---|---|
-| `schedule_task(task, when=None, condition=None, once=False, report=None, in_minutes=None, choices=None, timezone=None)` | `when` is a 5-field cron the model writes in the user's zone (`0 9 * * *` daily at 9, `0 9,17 * * *` at 9 and 17, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st, `0 9 4 11 *` with `once` for one day), checked with `croniter`; `in_minutes` instead is once, that many minutes from now ("in 2 hours"), rounded up to the next whole minute; `once=True` ends the schedule after its run (a run that fails pauses it instead, said in the error, so the user can run it again); `report` for a condition: `until_clears` (default: when it holds, then not again until it has stopped holding), `every_time` (each run it holds) or `once` (the first time it holds, then the schedule ends); `timezone` only when the user names one; `choices` (a vague ask): 2-3 concrete schedules, the best first, the user picks one with a button, or gives any time of their own: the question carries an answer schema the app renders from the user's settings (`WHEN_ANSWER`: how often, the days, the time, a date, when it ends), and an answer that is none of the suggestions, in words or those fields, goes back to the model as the user's own (nothing is made in its place) |
-| `list_schedules()` | the user's schedules set in chat with this agent: id, task, when it runs (its next two runs as dates in its zone, `next Mon 24 Nov, 09:00, then Mon 1 Dec, 09:00 (Europe/Berlin)`: never its cron, which stays inside), condition, active or paused; where there is one: its last run (in its zone), `failed_runs_in_a_row`, `fire_error` (why agent-runs could not fire it), and for a condition how it `reports` and whether it was `reported` (why a watch went quiet) |
+| `schedule_task(task, when=None, condition=None, once=False, report=None, end_at=None, in_minutes=None, choices=None, timezone=None)` | `when` is a 5-field cron the model writes in the user's zone (`0 9 * * *` daily at 9, `0 9,17 * * *` at 9 and 17, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st, `0 9 4 11 *` with `once` for one day), checked with `croniter`; `in_minutes` instead is once, that many minutes from now ("in 2 hours"), rounded up to the next whole minute; `once=True` ends the schedule after its run (a run that fails pauses it instead, said in the error, so the user can run it again); `end_at` when it ends, in the user's zone: their last day (`2026-12-31` for "until 31 December": its runs that day still happen, none after; agent-runs keeps it as the instant that day ends) or an exact `YYYY-MM-DDTHH:MM`, a past one said back; `report` for a condition: `until_clears` (default: when it holds, then not again until it has stopped holding), `every_time` (each run it holds) or `once` (the first time it holds, then the schedule ends); `timezone` only when the user names one; `choices` (a vague ask): 2-3 concrete schedules, the best first, the user picks one with a button, or gives any time of their own: the question carries an answer schema the app renders from the user's settings (`WHEN_ANSWER`: how often, the days, the time, a date, when it ends), and an answer that is none of the suggestions, in words or those fields, goes back to the model as the user's own (nothing is made in its place) |
+| `list_schedules()` | the user's schedules set in chat with this agent: id, task, when it runs (its next two runs as dates in its zone, `next Mon 24 Nov, 09:00, then Mon 1 Dec, 09:00 (Europe/Berlin)`: never its cron, which stays inside), condition, active or paused; where there is one: when it `ends` (in words in its zone), its last run (in its zone), `failed_runs_in_a_row`, why a paused one is `paused_because`, what its last run is `waiting` for (a person's answer: its next tick starts no other run meanwhile), `fire_error` (why agent-runs could not fire it), and for a condition how it `reports` and whether it was `reported` (why a watch went quiet) |
 | `update_schedule(id, ids=None, when=None, task=None, condition=None, enabled=None)` | `enabled=False` pauses, `True` resumes; `ids`: the schedules the user's words fit, when several do: the user picks one |
 | `cancel_schedule(id, ids=None)` | deletes it; `id="all"` deletes them all once the user confirms; `ids` as `update_schedule`'s |
 
@@ -507,9 +507,11 @@ with its tools bound takes them when it is built, with the harness's other tools
   price") is not scheduled: it says so and offers what its tools can watch. A fired run is
   offered none of the four tools: it does its task (it made schedules of its own when it was).
 - **Asked with buttons.** Where two or more answers change the outcome, the tools ask the user
-  through the run's own question (`Runtime.ask(options=)`, buttons on AG-UI): a schedule like one
-  the user has (the same identifier, or alike words) — "Update it to ... (Recommended)", "Keep
-  both", "Cancel"; the very same again is "Already set" and nothing is asked —, cancel all, a
+  through the run's own question (`Runtime.ask(options=)`, buttons on AG-UI): a schedule the
+  model judged like one the user has (`schedule_task(alike=)`, the id it read in
+  `list_schedules`; no word-overlap rule of code decides, handoff 2.5) — "Update it to ...
+  (Recommended)", "Keep both", "Cancel"; the very same again (task, time, zone, once and the
+  condition's figures) is "Already set" and nothing is asked —, cancel all, a
   reference that fits several (`ids`), a vague ask (`choices`).
 - **Whose.** A schedule acts for the run's user, in the key's tenant (`on_behalf_of`); each user
   sees and changes only their own, and only those set in chat (a schedule your code makes with
@@ -525,26 +527,40 @@ with its tools bound takes them when it is built, with the harness's other tools
   written to the conversation, not grounded or judged, and the thread stream leaves it out. A
   condition that still holds is reported once: the runs after stay quiet (`NO_REPORT`) until
   it stops holding (`trellis_reported` in the schedule's metadata).
-- **Limits.** `TRELLIS_SCHEDULE_MIN_INTERVAL` (default 300 s) and
-  `TRELLIS_SCHEDULE_MAX_PER_USER` (default 20, per agent) ([configuration.md](configuration.md));
-  `TRELLIS_SCHEDULE_DEFAULT_TIME` (default 09:00) is the time a schedule runs at when the user
-  names none. `schedule_task`'s description says the default time and the shortest repeat in
-  force, as facts the model decides by;
-  per user or plan, `Harness(schedule_limits=async (user, tenant) -> ScheduleLimits | None)`
-  (a `ScheduleLimits(min_interval=, max_per_user=)` field left `None` is the environment's).
-  agent-runs' own floor (one run an hour), its tenant rate limit and `max_running_per_tenant`
-  still apply. A limit reached is a sentence the model tells the user ("You have 20 of 20
-  schedules: cancel one before adding another."), not an error.
+- **Limits.** `TRELLIS_SCHEDULE_*` ([configuration.md](configuration.md)), the handoff's
+  defaults: at most one run an hour (`MIN_INTERVAL`, 3600 s), 5 schedules a user per agent
+  (`MAX_PER_USER`), each fired run 10 minutes (`RUN_TIMEOUT`) and 30 tool calls
+  (`RUN_MAX_TOOL_CALLS`: the run's `Budget(max_tool_calls=)`; an agent's own lower limits
+  stay), paused after 3 failed runs in a row (`PAUSE_AFTER_FAILURES`), asked to be kept after
+  90 days unchanged (`EXPIRE_DAYS`), and 09:00 when no time is said (`DEFAULT_TIME`).
+  `schedule_task`'s description says the default time and the shortest repeat in force, as
+  facts the model decides by. Per user or plan, `Harness(schedule_limits=async (user, tenant)
+  -> ScheduleLimits | None)`: a `ScheduleLimits` field (the same names without `schedule_`:
+  `min_interval=`, `max_per_user=`, `run_timeout=`, `run_max_tool_calls=`,
+  `pause_after_failures=`, `expire_days=`) left `None` is the environment's
+  (`schedules.limits(runtime)` resolves them; the shortest repeat is the longer of this and
+  agent-runs' own floor, read from its `GET /v1/schedules/policy` at most once a minute per
+  tenant). agent-runs' own floor, its per-tenant and
+  per-day limits (`RUNS__SCHEDULES__*`), its rate limit and `max_running_per_tenant` still
+  apply. A limit reached is a sentence the model tells the user ("You have 5 of 5 schedules:
+  cancel one before adding another."; "That runs every 2 minutes, more often than every 1
+  hour..."), never a cron or an error code; agent-runs' limits are said with their numbers too
+  ("Your organisation has 50 of 50 schedules, the most it allows...", from its
+  `SCHEDULE_LIMIT`, `CADENCE_TOO_FREQUENT` and `FIRES_PER_DAY` codes).
 
 - **Unattended, safely.** Nothing to configure. agent-runs fires a schedule once after an
   outage (not once per missed tick), skips a tick while its last run is still queued, running
   or paused (Kubernetes `concurrencyPolicy: Forbid`), and fires each schedule a stable 0 to 59
   seconds after its tick (a hash of its id: "daily at 9" is still 9:00, and a thousand of them
-  spread over the minute). After 3 failed runs in a row (`ERROR`, `TIMEOUT`) the schedule is
+  spread over the minute). After 3 failed runs in a row (`ERROR`, `TIMEOUT`; the setting above) the schedule is
   paused, and that run's error says so: in the thread, the run's record and its `run.finished`
   webhook (`trellis_failures` in the schedule's metadata; a success clears it). A schedule the
-  user has not made or changed for 90 days asks at its next run "Still need this?" (Keep,
-  recommended, or Cancel) and is paused until they answer (`trellis_touched`). A run that
+  user has not made or changed for 90 days (the setting above) is paused at its next run
+  (`paused_because`: it waits for the user to keep it), and that run does its task and ends
+  by asking, in its model's words and the user's language (handoff 2.6), whether they still
+  need it; it is delivered even when its condition has nothing to report. The user keeps it
+  in chat (`update_schedule`, which resumes and renews it: `trellis_touched`) or cancels it.
+  A run that asked nothing (a bare `NO_REPORT`) leaves it on, and its next run asks again. A run that
   times out while no worker holds it (agent-runs ends it) is not counted. A fired run is told
   the day and hour in its schedule's zone (`trellis_zone`), never silently UTC.
 - **A user who left.** Check them in an `on_run_start` hook: a fired run acts as its

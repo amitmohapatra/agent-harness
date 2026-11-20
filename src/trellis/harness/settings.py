@@ -80,6 +80,10 @@ VARIABLES: Final = {
     "schedule_min_interval": "TRELLIS_SCHEDULE_MIN_INTERVAL",
     "schedule_max_per_user": "TRELLIS_SCHEDULE_MAX_PER_USER",
     "schedule_default_time": "TRELLIS_SCHEDULE_DEFAULT_TIME",
+    "schedule_run_timeout": "TRELLIS_SCHEDULE_RUN_TIMEOUT",
+    "schedule_run_max_tool_calls": "TRELLIS_SCHEDULE_RUN_MAX_TOOL_CALLS",
+    "schedule_pause_after_failures": "TRELLIS_SCHEDULE_PAUSE_AFTER_FAILURES",
+    "schedule_expire_days": "TRELLIS_SCHEDULE_EXPIRE_DAYS",
     "host_execution": "TRELLIS_HOST_EXECUTION",
 }
 #: The settings a release took out, refused by name with what replaces them.
@@ -129,14 +133,25 @@ class Settings(BaseModel):
     files_url: str | None = None
     #: The least time between two runs of a schedule set in chat, in seconds (the schedule
     #: tools refuse a ``when`` that fires more often); ``Harness(schedule_limits=)`` overrides
-    #: it per user.
-    schedule_min_interval: float = Field(default=300.0, gt=0)
+    #: it per user (an admin's 15 minutes). agent-runs' own floor still applies.
+    schedule_min_interval: float = Field(default=3600.0, gt=0)
     #: How many schedules set in chat one user may have, per agent; ``Harness(
     #: schedule_limits=)`` overrides it per user.
-    schedule_max_per_user: int = Field(default=20, ge=0)
+    schedule_max_per_user: int = Field(default=5, ge=0)
     #: The time a schedule runs at when the user names none (``HH:MM``, their zone); the model is
     #: told it, and says the time it used in its reply.
     schedule_default_time: str = Field(default="09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    #: The most seconds one fired run may take (a schedule made keeps it as its runs' timeout;
+    #: an agent's own shorter ``run_timeout`` stays). ``Harness(schedule_limits=)`` per user.
+    schedule_run_timeout: float = Field(default=600.0, gt=0)
+    #: The most harness tool calls one fired run may make (its ``Budget(max_tool_calls=)``; an
+    #: agent's own lower one stays). ``Harness(schedule_limits=)`` per user.
+    schedule_run_max_tool_calls: int = Field(default=30, gt=0)
+    #: Fired runs failed in a row that pause their schedule, said in the last one's error.
+    schedule_pause_after_failures: int = Field(default=3, gt=0)
+    #: Days a schedule runs unchanged before its next run asks the user to keep it (Keep
+    #: renews it for as long again).
+    schedule_expire_days: int = Field(default=90, gt=0)
     #: Whether agents may run shell commands on this machine outside a sandbox
     #: (``trellis.harness.host``): ``allow`` (the default) — the harness's own through its
     #: isolation layer, Claude Code's and Kimi Code's own shells as they run; ``deny`` — the

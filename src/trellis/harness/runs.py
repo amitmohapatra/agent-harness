@@ -826,6 +826,14 @@ class LocalRuns:
         for schedule in list(self._schedules.values()):
             if not schedule.enabled or schedule.next_fire_at is None or schedule.next_fire_at > now:
                 continue
+            last = self._runs.get(schedule.last_run_id or "")
+            if last is not None and last.status in UNFINISHED:
+                # as agent-runs: a tick while the last run is queued, running or waits on a
+                # person starts no other (Kubernetes' concurrencyPolicy: Forbid); it moves on
+                self._schedules[schedule.schedule_id] = schedule.model_copy(
+                    update={"next_fire_at": _next_fire(schedule, now)}
+                )
+                continue
             self._fire(schedule, now, now)
 
     def _fire(self, schedule: Schedule, tick: datetime, now: datetime) -> FireResult:
@@ -982,7 +990,7 @@ class LocalSchedules:
         if "metadata" in changed:
             changed["metadata"] = {**schedule.metadata, **(changed["metadata"] or {})}
         updated = Schedule.model_validate({**schedule.model_dump(), **changed})
-        if {"cadence", "timezone"} & changed.keys():
+        if {"cadence", "timezone", "end_at"} & changed.keys():
             updated = updated.model_copy(
                 update={"next_fire_at": _next_fire(updated, datetime.now(UTC))}
             )
@@ -1006,9 +1014,16 @@ class LocalSchedules:
         for now — a ``manual`` schedule's only way to run."""
         schedule = self._owned(schedule_id, tenant)
         current = datetime.now(UTC)
+        ends = getattr(schedule, "end_at", None)
+        if ends is not None and (at or current) >= ends:
+            raise _conflict("CONFLICT: the schedule has ended and will not fire.")
         due = schedule.next_fire_at
         tick = at or (due if due is not None and due <= current else current)
         return self._runs._fire(schedule, tick, current)
+
+
+#: The statuses of a run not yet ended: its schedule's next tick starts no other meanwhile.
+UNFINISHED: Final = frozenset({RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.PAUSED})
 
 
 def _conflict(message: str) -> ConflictError:
@@ -1052,4 +1067,6 @@ def _next_fire(spec: ScheduleSpec, after: datetime) -> datetime | None:
         return None
     local = after.astimezone(ZoneInfo(spec.timezone))
     cron = NAMED_CADENCES.get(spec.cadence, spec.cadence)
-    return croniter(cron, local).get_next(datetime).astimezone(UTC)
+    due = croniter(cron, local).get_next(datetime).astimezone(UTC)
+    ends = getattr(spec, "end_at", None)  # as agent-runs: nothing at or after its end
+    return None if ends is not None and due >= ends else due

@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,8 +18,10 @@ from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import RunRecord, RunStatus, ScheduleSpec
+from trellis.contracts import AgentError, ErrorCategory, RunRecord, RunStatus, ScheduleSpec
 from trellis.harness import snapshots
+from trellis.harness.budget import BUDGET, Budget
+from trellis.harness.notifications import CHAT, ChatChannel, Kind, Notification
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import (
     BOTH,
@@ -26,6 +29,7 @@ from trellis.harness.schedules import (
     MAX_FAILURES,
     NEITHER,
     NO_REPORT,
+    PAUSED_BY,
     REPORT,
     REPORTED,
     SCHEDULE_TOOLS,
@@ -38,7 +42,12 @@ from trellis.harness.schedules import (
     schedule_tools,
 )
 from trellis.harness.tools.convert import text_of
-from trellis.runs import ScheduleUpdate
+from trellis.runs import (
+    CadenceTooFrequentError,
+    ConflictError,
+    ScheduleLimitError,
+    ScheduleUpdate,
+)
 
 THREAD = "chat-1"
 
@@ -198,7 +207,7 @@ def test_a_one_time_run_says_its_one_date_and_its_year_when_not_this_one() -> No
     [
         ("every monday", "is not a cron expression"),
         ("0 8 * * 1 2026", "is not a cron expression"),
-        ("*/2 * * * *", "more often than every 5 minutes"),
+        ("*/2 * * * *", "more often than every 1 hour"),
     ],
 )
 async def test_a_bad_or_too_frequent_time_is_said_back(when: str, said_: str) -> None:
@@ -233,7 +242,8 @@ async def test_the_env_limit_and_the_per_user_hook() -> None:
         seen.append((user, tenant))
         return ScheduleLimits(max_per_user=1) if user == "free" else None
 
-    async with Harness(config=Settings(), schedule_limits=plans) as h:
+    # every 5 minutes is the env's here, for the users the hook leaves to it
+    async with Harness(config=Settings(schedule_min_interval=300), schedule_limits=plans) as h:
         agent = h.wrap(chat, id="desk")
         await said(agent, chat, "free", ("schedule_task", {"task": "a", "when": "0 9 * * *"}))
         answer = await said(
@@ -517,15 +527,16 @@ async def picked(agent: Any, interrupt: Any, value: str) -> str:
     (BOTH, ["SKU-1 is 3 or less", "SKU-1 under 5"]),
     (NEITHER, ["SKU-1 under 5"]),
 ])  # fmt: skip
-async def test_a_schedule_like_one_the_user_has_is_asked_about_update_first(
+async def test_a_schedule_the_model_judges_alike_is_asked_about_update_first(
     value: str, conditions: list[str]
 ) -> None:
-    """The same thing watched with another value: the user picks — update it (recommended,
-    first), keep both, or neither; the very same again is said to be set already."""
+    """The same thing watched with another value, judged so by the model (``alike``, from
+    list_schedules, handoff 2.5): the user picks — update it (recommended, first), keep both,
+    or neither; the very same again is said to be set already."""
     async with Harness(config=Settings()) as h:
-        lower = {**WATCH, "condition": "SKU-1 is 3 or less"}
+        [had] = await seeded(h, "desk", WATCH)
+        lower = {**WATCH, "condition": "SKU-1 is 3 or less", "alike": had}
         agent = await planned(h, ("schedule_task", lower))
-        await seeded(h, "desk", WATCH)
         interrupt = await asked(agent)
         labels = [o.label for o in interrupt.options]
         assert labels[0].startswith("Update it to") and labels[1:] == ["Keep both", "Cancel"]
@@ -535,20 +546,34 @@ async def test_a_schedule_like_one_the_user_has_is_asked_about_update_first(
         await picked(agent, interrupt, value)
         found = [s.metadata[TASK]["condition"] for s in local(h)._schedules.values()]
         assert sorted(found) == sorted(conditions)
-        same = {**WATCH, "condition": "SKU-1 below 5"}
+        same = {**WATCH, "condition": "SKU-1 below 5"}  # no alike: the very same is caught
         again = await planned(h, ("schedule_task", same), name="again")
         await seeded(h, "again", WATCH)
         result = await again.run("schedule it", user="ada")
         assert "Already set, nothing changed" in str(result.answer)
 
 
-async def test_a_task_in_alike_words_at_another_time_is_asked_about() -> None:
+async def test_a_task_the_model_judges_alike_at_another_time_is_asked_about() -> None:
     async with Harness(config=Settings()) as h:
-        later = {"task": "send me the sales summary", "when": "0 9 * * 1"}
+        [had] = await seeded(h, "desk", {"task": "Send the sales summary", "when": "0 8 * * 1"})
+        later = {"task": "send me the sales summary", "when": "0 9 * * 1", "alike": had}
         agent = await planned(h, ("schedule_task", later))
-        await seeded(h, "desk", {"task": "Send the sales summary", "when": "0 8 * * 1"})
         await picked(agent, await asked(agent), UPDATE)
         assert [s.cadence for s in local(h)._schedules.values()] == ["0 9 * * 1"]
+
+
+async def test_alike_words_the_model_did_not_judge_alike_are_made_with_no_rule_of_code() -> None:
+    """No word-overlap rule decides (handoff 2.5: the model judges): without alike, a task in
+    words like one the user has is made, and an alike that names no schedule of theirs asks
+    nothing."""
+    async with Harness(config=Settings()) as h:
+        await seeded(h, "desk", {"task": "Send the sales summary", "when": "0 8 * * 1"})
+        later = {"task": "send me the sales summary", "when": "0 9 * * 1"}
+        agent = await planned(h, ("schedule_task", later))
+        assert "Scheduled" in str((await agent.run("schedule it", user="ada")).answer)
+        other = {"task": "check returns", "when": "0 7 * * 1", "alike": "sch_none"}
+        made = await planned(h, ("schedule_task", other), name="other")
+        assert "Scheduled" in str((await made.run("schedule it", user="ada")).answer)
 
 
 async def test_cancel_all_is_confirmed_and_several_that_fit_are_picked_from() -> None:
@@ -681,7 +706,7 @@ def test_the_schedule_tool_says_its_rules_as_facts_from_the_settings() -> None:
     assert "A condition reports as report says" in said
     assert "never the cron" in said
     default = next(t for t in schedule_tools() if t.name == "schedule_task").spec.description
-    assert "09:00" in default and "every 5 minutes" in default  # the defaults, said
+    assert "09:00" in default and "every 1 hour" in default  # the defaults, said
     odd = Settings(schedule_min_interval=90)
     assert "every 90 seconds" in next(iter(schedule_tools(settings=odd))).spec.description
 
@@ -777,37 +802,40 @@ async def test_three_failed_runs_in_a_row_pause_the_schedule_and_say_so_in_the_t
         assert "sync" in records[-1].error.message
 
 
-async def test_a_schedule_untouched_for_90_days_asks_once_and_pauses_until_answered() -> None:
+async def test_a_schedule_untouched_for_90_days_is_paused_and_its_run_asks_in_the_models_words() -> (
+    None
+):
+    """Handoff 2.6: the question asked of a schedule left unchanged for its days
+    (``TRELLIS_SCHEDULE_EXPIRE_DAYS``) is the run's model's, in the user's language: the run
+    still does its task (its report not lost), is told to end by asking whether the user still
+    needs it, and is delivered even when its condition has nothing to report; the schedule is
+    paused (``paused_because``) until the user keeps it in chat, which renews it, or cancels it.
+    """
     chat = Chat()
     async with Harness(config=Settings()) as h:
         agent = h.wrap(chat, id="desk")
-        await said(agent, chat, "ada", ("schedule_task", {"task": "sales", "when": "0 8 * * *"}))
+        args = {"task": "sales", "when": "0 8 * * *", "condition": "sales under 5"}
+        await said(agent, chat, "ada", ("schedule_task", args))
         sid = only(h).schedule_id
         assert TOUCHED in local(h)._schedules[sid].metadata  # set when made
         old = (datetime.now(UTC) - STALE - timedelta(days=1)).isoformat()
-        for answer, kept in ((UPDATE, True), (NEITHER, False)):
-            await local(h).schedules.update(sid, ScheduleUpdate(metadata={TOUCHED: old}))
-            chat.fired.append("sales: 12")
-            paused = await fire(h, agent, sid)
-            assert paused.status is RunStatus.PAUSED and paused.awaiting is not None
-            assert paused.awaiting.question == "Still need this? sales"
-            assert [bool(getattr(o, "recommended", False)) for o in paused.awaiting.options] == [
-                True,
-                False,
-            ]
-            assert local(h)._schedules[sid].enabled is False  # no answer: stays paused
-            await agent.resume(
-                paused.awaiting.interrupt_id, "answer", answer=answer, reviewer="ada"
-            )
-            assert await h.worker([agent]).run_once() is True
-            done = await h.runs.get(paused.run_id)
-            assert done is not None and done.status is RunStatus.SUCCESS, done
-            if kept:
-                assert done.output == "sales: 12"
-                schedule = local(h)._schedules[sid]
-                assert schedule.enabled is True and schedule.metadata[TOUCHED] > old
-            else:
-                assert "Cancelled" in str(done.output) and sid not in local(h)._schedules
+        await local(h).schedules.update(sid, ScheduleUpdate(metadata={TOUCHED: old}))
+        chat.fired.append("Sales: 12, nothing under 5. Do you still need this schedule?")
+        done = await fire(h, agent, sid)
+        assert done.status is RunStatus.SUCCESS and done.awaiting is None
+        assert "still need" in chat.inputs[-1] and "language" in chat.inputs[-1]
+        assert "Do you still need" in str(done.output)  # delivered, though not met
+        schedule = local(h)._schedules[sid]
+        assert schedule.enabled is False and schedule.metadata[PAUSED_BY]
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"paused_because": "it waits for the user to keep it"' in listed
+        await said(agent, chat, "ada", ("update_schedule", {"id": sid, "enabled": True}))
+        kept = local(h)._schedules[sid]
+        assert kept.enabled is True and kept.metadata[TOUCHED] > old
+        assert not kept.metadata.get(PAUSED_BY)
+        chat.fired.append(NO_REPORT)  # renewed: an ordinary run again, quiet when not met
+        again = await fire(h, agent, sid)
+        assert "still need" not in chat.inputs[-1] and again.output == NO_REPORT
 
 
 async def test_a_failure_not_counted_leaves_the_runs_error_as_it_was(
@@ -875,7 +903,7 @@ async def test_list_schedules_says_why_a_schedule_is_paused() -> None:
 
 
 async def test_how_a_condition_reports_can_be_changed_later() -> None:
-    """"Tell me every time instead": update_schedule takes report, as schedule_task does."""
+    """ "Tell me every time instead": update_schedule takes report, as schedule_task does."""
     chat = Chat()
     async with Harness(config=Settings()) as h:
         agent = h.wrap(chat, id="desk")
@@ -889,3 +917,270 @@ async def test_how_a_condition_reports_can_be_changed_later() -> None:
         assert '"reports": "every_time"' in listed, listed
         bad = await said(agent, chat, "ada", ("update_schedule", {"id": sid, "report": "never"}))
         assert "until_clears" in bad and local(h)._schedules[sid].metadata[REPORT] == "every_time"
+
+
+async def test_a_schedules_runs_are_held_to_the_run_limits_of_the_settings_and_the_hook() -> None:
+    """Each fired run at most 10 minutes and 30 tool calls (handoff phase 3), as its schedule
+    keeps them; an agent's own tighter limit stays; the per-user hook sets a user's own."""
+    chat = Chat()
+
+    async def limits(user: str, tenant: str) -> ScheduleLimits | None:
+        return ScheduleLimits(run_max_tool_calls=10) if user == "bo" else None
+
+    async with Harness(config=Settings(), schedule_limits=limits) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 8 * * *"}))
+        await said(agent, chat, "bo", ("schedule_task", {"task": "b", "when": "0 8 * * *"}))
+        made = {s.on_behalf_of: s for s in local(h)._schedules.values()}
+        assert made["ada"].timeout_seconds == 600
+        assert made["ada"].metadata[BUDGET]["max_tool_calls"] == 30
+        assert made["bo"].metadata[BUDGET]["max_tool_calls"] == 10
+        tight = h.wrap(chat, id="tight", run_timeout=60, budget=Budget(max_tool_calls=4))
+        await said(tight, chat, "ada", ("schedule_task", {"task": "c", "when": "0 9 * * *"}))
+        [own] = [s for s in local(h)._schedules.values() if s.agent_id == "tight"]
+        assert own.timeout_seconds == 60 and own.metadata[BUDGET]["max_tool_calls"] == 4
+
+
+async def test_failures_before_a_pause_and_days_before_asking_are_settings() -> None:
+    chat = Failing()
+    async with Harness(
+        config=Settings(schedule_pause_after_failures=2, schedule_expire_days=30)
+    ) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sync", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+        for _ in range(2):
+            chat.fired.appendleft("x")
+            last = await fire(h, agent, sid)
+        assert local(h)._schedules[sid].enabled is False
+        assert last.error is not None and "failed 2 times in a row" in last.error.message
+        await said(agent, chat, "ada", ("update_schedule", {"id": sid, "enabled": True}))
+        old = (datetime.now(UTC) - timedelta(days=31)).isoformat()
+        await local(h).schedules.update(sid, ScheduleUpdate(metadata={TOUCHED: old}))
+        chat.fired.append("sales: 12. Still need it?")
+        await fire(h, agent, sid)
+        assert "still need" in chat.inputs[-1] and local(h)._schedules[sid].enabled is False
+
+
+async def test_a_schedule_ends_on_the_day_the_user_said_in_their_zone() -> None:
+    """ "Every day at 9 until 31 December": end_at is the user's last day, in their zone, kept
+    as the instant that day ends; its runs that day still happen, none after. "Extend it to
+    March" moves it, "remove the end date" clears it; a past day is said back."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {
+            "task": "stock of A-1",
+            "when": "0 9 * * *",
+            "timezone": "Asia/Kolkata",
+            "end_at": "2026-12-31",
+        }
+        made = await said(agent, chat, "ada", ("schedule_task", args))
+        schedule = only(h)
+        assert schedule.end_at == datetime(2026, 12, 31, 18, 30, tzinfo=UTC), (
+            made
+        )  # 1 Jan 00:00 IST
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"ends": "after Thu 31 Dec 2026 (Asia/Kolkata)"' in listed, listed
+        sid = schedule.schedule_id
+        await said(agent, chat, "ada", ("update_schedule", {"id": sid, "end_at": "2027-03-31"}))
+        assert local(h)._schedules[sid].end_at == datetime(2027, 3, 31, 18, 30, tzinfo=UTC)
+        await said(agent, chat, "ada", ("update_schedule", {"id": sid, "end_at": ""}))
+        assert local(h)._schedules[sid].end_at is None
+        assert "ends" not in await said(agent, chat, "ada", ("list_schedules", {}))
+        past = {**args, "task": "old", "end_at": "2020-01-01"}
+        answer = await said(agent, chat, "ada", ("schedule_task", past))
+        assert "already past" in answer and len(local(h)._schedules) == 1
+
+
+async def test_a_schedule_past_its_end_fires_no_more() -> None:
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "a", "when": "0 9 * * *", "end_at": "2030-01-01"}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        sid = only(h).schedule_id
+        gone = datetime.now(UTC) - timedelta(minutes=1)
+        await local(h).schedules.update(sid, ScheduleUpdate(end_at=gone))
+        schedule = local(h)._schedules[sid]
+        assert schedule.next_fire_at is None
+        with pytest.raises(ConflictError, match="ended"):
+            await local(h).schedules.fire(sid)
+
+
+@pytest.mark.parametrize(
+    ("raised", "plain"),
+    [
+        (
+            ScheduleLimitError(
+                "CONFLICT: the tenant has 50 schedules",
+                code="SCHEDULE_LIMIT",
+                status=409,
+                details={"max_per_tenant": 50, "schedule_count": 50},
+            ),
+            "Your organisation has 50 of 50 schedules, the most it allows",
+        ),
+        (
+            CadenceTooFrequentError(
+                "VALIDATION: cadence too frequent",
+                code="CADENCE_TOO_FREQUENT",
+                status=422,
+                details={"min_interval_seconds": 3600, "interval_seconds": 1800},
+            ),
+            "That runs every 30 minutes, more often than every 1 hour",
+        ),
+    ],
+)
+async def test_a_limit_agent_runs_holds_is_said_in_plain_words_with_its_numbers(
+    raised: Exception, plain: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The service's own limits (``RUNS__SCHEDULES__*``) reach the user as the harness's do:
+    which limit, its number, what to do; never an error code."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+
+        async def refused(spec: ScheduleSpec) -> None:
+            raise raised
+
+        monkeypatch.setattr(local(h).schedules, "create", refused)
+        answer = await said(
+            agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 8 * * *"})
+        )
+        assert plain in answer and "SCHEDULE_LIMIT" not in answer, answer
+        assert "CADENCE_TOO_FREQUENT" not in answer and "VALIDATION" not in answer
+
+
+async def test_a_fire_refused_for_the_days_limit_is_listed_in_plain_words() -> None:
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+        spent = AgentError(
+            code="FIRES_PER_DAY",
+            category=ErrorCategory.RATE_LIMIT,
+            message="FIRES_PER_DAY: 500 of 500",
+            details={"max_fires_per_day": 500, "fires_today": 500, "day": "2026-11-20"},
+        )
+        local(h)._schedules[sid] = (
+            local(h)
+            ._schedules[sid]
+            .model_copy(update={"consecutive_failures": 1, "last_error": spent})
+        )
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert "500 scheduled runs" in listed and "FIRES_PER_DAY" not in listed, listed
+
+
+async def test_a_keep_question_the_model_did_not_ask_leaves_the_schedule_on_to_ask_again() -> None:
+    """A run told to ask that answered only NO_REPORT asked nothing: not delivered, and the
+    schedule is not left paused unsaid; its next run asks again."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "sales", "when": "0 8 * * *", "condition": "sales under 5"}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        sid = only(h).schedule_id
+        old = (datetime.now(UTC) - STALE - timedelta(days=1)).isoformat()
+        await local(h).schedules.update(sid, ScheduleUpdate(metadata={TOUCHED: old}))
+        chat.fired.append(NO_REPORT)
+        await fire(h, agent, sid)
+        schedule = local(h)._schedules[sid]
+        assert schedule.enabled is True and not schedule.metadata.get(PAUSED_BY)
+        chat.fired.append("Nothing under 5. Still need it?")
+        await fire(h, agent, sid)
+        assert "still need" in chat.inputs[-1] and local(h)._schedules[sid].enabled is False
+
+
+class Recorded:
+    """A channel that keeps what it was given."""
+
+    name = "recorded"
+
+    def __init__(self) -> None:
+        self.got: list[Notification] = []
+
+    async def deliver(self, notification: Notification, harness: Harness) -> None:
+        self.got.append(notification)
+
+
+async def test_a_fired_runs_outcome_is_told_on_the_users_channels_once() -> None:
+    """Point 31: a fired run's result, its failure and the pause it caused go to the user's
+    channels (``Harness(channels=, user_channels=)``) once each; a quiet run tells nothing."""
+    chat, recorded = Failing(), Recorded()
+
+    async def routed(user: str, tenant: str, notification: Notification) -> list[str]:
+        return [CHAT, "recorded"]
+
+    async with Harness(
+        config=Settings(schedule_pause_after_failures=2),
+        channels=[ChatChannel(), recorded],
+        user_channels=routed,
+    ) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sync", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+        chat.fired.extend(["synced 4", NO_REPORT, "x", "x"])
+        for _ in range(4):
+            await fire(h, agent, sid)
+        assert [n.kind for n in recorded.got] == [Kind.RESULT, Kind.FAILURE, Kind.PAUSED]
+        result, failure, paused = recorded.got
+        assert "synced 4" in result.text and result.schedule_id == sid
+        assert "upstream down" in failure.text and "paused" in paused.text
+        assert all(n.user == "ada" and n.thread for n in recorded.got)
+        assert len({n.key for n in recorded.got}) == 3
+
+
+async def test_with_no_zone_known_a_schedule_says_utc_never_silently() -> None:
+    """Point 14 (handoff 2.2): no app zone and none named, the reply says the zone it used, and
+    the model is told it is not the user's, so it says so or asks."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        made = await said(agent, chat, "ada", ("schedule_task", {"task": "a", "when": "0 9 * * *"}))
+        assert "(UTC)" in made and only(h).timezone == "UTC"
+        assert "(UTC; the user's zone is not known)" in chat.described[-1]
+
+
+async def test_wait_then_continue_fires_once_in_the_chat_and_ends_itself() -> None:
+    """Point 27: "wait 20 minutes, then continue" is one run in the same conversation, the
+    schedule gone after it; a repeat of its fire answers the same run, never a second."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "continue the report", "in_minutes": 20}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        schedule = only(h)
+        assert schedule.metadata[TASK]["once"] is True
+        due = schedule.next_fire_at
+        assert due is not None
+        first = await local(h).schedules.fire(schedule.schedule_id, at=due)
+        again = await local(h).schedules.fire(schedule.schedule_id, at=due)
+        assert again.run_id == first.run_id  # the same tick: one run
+        chat.fired.append("continued")
+        assert await h.worker([agent]).run_once() is True
+        record = await h.runs.get(first.run_id)
+        assert record is not None and record.status is RunStatus.SUCCESS
+        assert record.thread_id == THREAD and not local(h)._schedules
+
+
+async def test_agent_runs_own_floor_is_the_least_when_it_is_the_longer_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shortest repeat in force is the longer of the harness's and agent-runs' own
+    (``GET /v1/schedules/policy``), read once a minute: never a schedule the harness takes and
+    the service refuses."""
+    chat, read = Chat(), []
+    async with Harness(config=Settings(schedule_min_interval=900)) as h:
+        agent = h.wrap(chat, id="desk")
+
+        async def policy(*, tenant: str | None = None) -> Any:
+            read.append(tenant)
+            return SimpleNamespace(min_interval_seconds=7200)
+
+        monkeypatch.setattr(local(h).schedules, "policy", policy, raising=False)
+        hourly = {"task": "a", "when": "0 * * * *"}
+        answer = await said(agent, chat, "ada", ("schedule_task", hourly))
+        assert "more often than every 2 hours" in answer, answer
+        answer = await said(agent, chat, "ada", ("schedule_task", {**hourly, "task": "b"}))
+        assert "more often than every 2 hours" in answer and len(read) == 1  # read once a minute

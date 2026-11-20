@@ -5,6 +5,54 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a run waiting on a person is listed, and agent-runs' floor is the harness's too
+
+`list_schedules` says what a schedule's last run is `waiting` for, while it waits on a
+person's answer; `LocalRuns`, as agent-runs, starts no run for a tick while the last one is
+queued, running or waiting (it started one per tick). The shortest repeat the tools hold to
+is the longer of `TRELLIS_SCHEDULE_MIN_INTERVAL` and agent-runs' own floor, read from its
+`GET /v1/schedules/policy` at most once a minute per tenant, so the harness never takes a
+schedule the service refuses.
+
+### Changed: the 90-day question is the model's, and a fired run's outcome is told
+
+A schedule unchanged for its days paused its run on a fixed question ("Still need this?",
+Keep or Cancel) and did no task until answered. Now the schedule is paused and that run does
+its task and ends by asking, in its model's words and the user's language, whether they still
+need it; the user keeps it in chat (it resumes, renewed) or cancels it. A run that asked
+nothing leaves it on, to ask again. A fired run's outcome — its result when delivered, its
+failure, the pause it caused, its wait for an approval — goes to the user's channels
+(`Harness.notify`), once each.
+
+### Changed: the model judges a schedule like one the user has
+
+A word-overlap rule of code (`ALIKE`, 0.8, and an identifier in common) decided which of the
+user's schedules a new one was like, and asked. The model now judges it, from
+`list_schedules`, and passes that schedule's id as `schedule_task(alike=)`: the user is asked
+with the same buttons (update it, recommended; keep both; cancel). Code keeps only the exact
+duplicate: the very same task, time, zone, once and condition figures are "Already set".
+
+### Added: a schedule's end date, and every limit said with its number
+
+`schedule_task(end_at=)` and `update_schedule(end_at=)`: the user's last day in their zone
+("until 31 December", "for 3 weeks"), or an exact time; `''` removes it, a past one is said
+back, and `list_schedules` says when it `ends`. agent-runs keeps it (`ScheduleSpec.end_at`),
+and so does `LocalRuns`: nothing fires at or after it. agent-runs' own limits reach the user
+as the harness's do, which limit and its number ("Your organisation has 50 of 50
+schedules..."; "That runs every 30 minutes, more often than every 1 hour..."; the day's runs
+used up), never an error code.
+
+### Changed: schedule limits are the handoff's, and every one is a setting
+
+The defaults change for deployments that set none: at most one run an hour (was every 5
+minutes) and 5 schedules a user per agent (was 20). Set `TRELLIS_SCHEDULE_MIN_INTERVAL=300`
+and `TRELLIS_SCHEDULE_MAX_PER_USER=20` to keep the old ones. New settings, each also a
+`ScheduleLimits` field of `Harness(schedule_limits=)` per user: `TRELLIS_SCHEDULE_RUN_TIMEOUT`
+(600 s) and `TRELLIS_SCHEDULE_RUN_MAX_TOOL_CALLS` (30) bound each fired run (an agent's own
+lower limits stay), `TRELLIS_SCHEDULE_PAUSE_AFTER_FAILURES` (3, was fixed) and
+`TRELLIS_SCHEDULE_EXPIRE_DAYS` (90, was fixed). Schedules made before keep the run limits they
+were made with.
+
 ### Added: one notification interface, the chat its first channel
 
 `Harness(channels=)` and `await h.notify(Notification(...))` (`trellis.harness.notifications`):

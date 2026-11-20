@@ -31,6 +31,10 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "TRELLIS_SCHEDULE_MIN_INTERVAL": "600",
         "TRELLIS_SCHEDULE_MAX_PER_USER": "5",
         "TRELLIS_SCHEDULE_DEFAULT_TIME": "08:30",
+        "TRELLIS_SCHEDULE_RUN_TIMEOUT": "300",
+        "TRELLIS_SCHEDULE_RUN_MAX_TOOL_CALLS": "20",
+        "TRELLIS_SCHEDULE_PAUSE_AFTER_FAILURES": "5",
+        "TRELLIS_SCHEDULE_EXPIRE_DAYS": "30",
         "TRELLIS_HOST_EXECUTION": "allow",
     }
     settings = Settings.from_env(env)
@@ -48,6 +52,10 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "schedule_min_interval": 600.0,
         "schedule_max_per_user": 5,
         "schedule_default_time": "08:30",
+        "schedule_run_timeout": 300.0,
+        "schedule_run_max_tool_calls": 20,
+        "schedule_pause_after_failures": 5,
+        "schedule_expire_days": 30,
         "host_execution": "allow",
     }
     assert set(env) == set(settings_module.VARIABLES.values())  # every one, and only them
@@ -74,9 +82,13 @@ def test_a_retired_variable_is_not_read(retired: str) -> None:
     assert Settings.from_env({retired: "x", "K_SERVICE": "svc"}) == Settings()
 
 
-def test_the_schedule_limits_default_to_5_minutes_and_20_and_are_checked() -> None:
+def test_the_schedule_settings_default_to_the_handoffs_and_are_checked() -> None:
+    """The handoff's phase 3 defaults: at most hourly, 5 a user, each fired run 10 minutes and
+    30 tool calls, paused after 3 failed runs in a row, asked to be kept after 90 days."""
     settings = Settings()
-    assert (settings.schedule_min_interval, settings.schedule_max_per_user) == (300.0, 20)
+    assert (settings.schedule_min_interval, settings.schedule_max_per_user) == (3600.0, 5)
+    assert (settings.schedule_run_timeout, settings.schedule_run_max_tool_calls) == (600.0, 30)
+    assert (settings.schedule_pause_after_failures, settings.schedule_expire_days) == (3, 90)
     assert Settings(schedule_max_per_user=0).schedule_max_per_user == 0  # none may be set
     assert Settings().schedule_default_time == "09:00"
     for wrong in (
@@ -84,6 +96,10 @@ def test_the_schedule_limits_default_to_5_minutes_and_20_and_are_checked() -> No
         {"schedule_max_per_user": -1},
         {"schedule_default_time": "9am"},
         {"schedule_default_time": "24:00"},
+        {"schedule_run_timeout": 0},
+        {"schedule_run_max_tool_calls": 0},
+        {"schedule_pause_after_failures": 0},
+        {"schedule_expire_days": 0},
     ):
         with pytest.raises(ValidationError):
             Settings(**wrong)  # type: ignore[arg-type]

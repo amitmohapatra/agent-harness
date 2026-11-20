@@ -837,8 +837,8 @@ async def _worked(
     if unresumable is not None:
         raise unresumable
     await agent.hooks.started(runtime)
-    if (cancelled := await schedules.stale(runtime)) is not None:
-        return Extracted(answer=cancelled), pushed
+    await schedules.stale(runtime)
+    input = schedules.expiring(runtime, input)
     if await background.stale(runtime):  # told already: nothing to deliver
         return Extracted(answer=schedules.NO_REPORT), pushed
     extracted = await _invoked(

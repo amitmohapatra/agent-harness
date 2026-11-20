@@ -158,6 +158,9 @@ class Harness:
             raise ConfigurationError(f"two channels have one name: {names}")
         self.notified: LRUSet[tuple[str, str, str]] = LRUSet(maxsize=KEPT)
         self.schedule_limits = schedule_limits
+        #: agent-runs' own least time between a schedule's runs, per tenant, and when it was
+        #: read (``schedules.limits``: read again a minute on)
+        self.schedule_floors: dict[str, tuple[float, float]] = {}
         self.credentials = credentials
         s = self.settings
         builds_runs = runs is None and s.runs_url is not None
