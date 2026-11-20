@@ -86,6 +86,9 @@ REPORT: Final = "trellis_report"
 #: How a condition reports: until it clears (once while it holds, again after it stopped: the
 #: default), every run it holds, or once and then the schedule ends.
 REPORTS: Final = ("until_clears", "every_time", "once")
+#: The schedule metadata key of why it is paused, when it was paused for a reason the user is
+#: told (its runs failed, its one run failed, the user paused it, it waits to be kept).
+PAUSED_BY: Final = "trellis_paused_by"
 #: How long a schedule runs untouched before its next run asks whether it is still needed.
 STALE: Final = timedelta(days=90)
 #: The tools' names.
@@ -268,7 +271,10 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
         return error
     fired.failures += 1
     stop = fired.once or fired.failures >= MAX_FAILURES
-    counted = {FAILURES: fired.failures}
+    counted: dict[str, Any] = {FAILURES: fired.failures}
+    why = "its one run failed" if fired.once else f"its runs failed {fired.failures} times in a row"
+    if stop:
+        counted[PAUSED_BY] = why
     change = (
         ScheduleUpdate(metadata=counted, enabled=False)
         if stop
@@ -283,10 +289,9 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
         return error
     if not stop:
         return error
-    why = "Its one run failed" if fired.once else f"It failed {fired.failures} times in a row"
     said = (
-        f"{error.message} {why} and is paused: {fired.task}. Ask me to resume it once the "
-        "cause is fixed."
+        f"{error.message} This schedule is paused because {why}: {fired.task}. Ask me to resume "
+        "it once the cause is fixed."
     )
     return error.model_copy(update={"message": said})
 
@@ -299,7 +304,8 @@ async def stale(runtime: Runtime) -> str | None:
     if fired is None or fired.touched is None or datetime.now(UTC) - fired.touched < STALE:
         return None
     store, tenant = runtime.agent.harness.runs.schedules, runtime.tenant
-    await store.update(fired.schedule_id, ScheduleUpdate(enabled=False), tenant=tenant)
+    waits = ScheduleUpdate(enabled=False, metadata={PAUSED_BY: "it waits for the user to keep it"})
+    await store.update(fired.schedule_id, waits, tenant=tenant)
     keep = await runtime.ask(
         f"Still need this? {fired.task}",
         options=[
@@ -308,7 +314,7 @@ async def stale(runtime: Runtime) -> str | None:
         ],
     )
     if keep == UPDATE:
-        change = ScheduleUpdate(enabled=True, metadata={TOUCHED: _now()})
+        change = ScheduleUpdate(enabled=True, metadata={TOUCHED: _now(), PAUSED_BY: None})
         await store.update(fired.schedule_id, change, tenant=tenant)
         return None
     await store.delete(fired.schedule_id, tenant=tenant)
@@ -332,6 +338,14 @@ _WHEN: Final = {
 }
 _CONDITION: Final = {"type": "string", "description": "Report only when this holds."}
 _ID: Final = {"type": "string", "description": "An id from list_schedules."}
+#: How a condition reports: the model picks it from the user's words.
+_REPORT: Final = {
+    "type": "string",
+    "enum": list(REPORTS),
+    "description": "For a condition: until_clears (default) reports when it holds, then not "
+    "again until it stopped holding; every_time each run it holds; once the first time it "
+    "holds, then the schedule ends.",
+}
 #: The schedules the user's words fit, when several do: the user picks one.
 _IDS: Final = {
     "type": "array",
@@ -377,13 +391,7 @@ SPECS: Final = (
             "when": _WHEN,
             "condition": _CONDITION,
             "once": {"type": "boolean", "description": "Run once, then end."},
-            "report": {
-                "type": "string",
-                "enum": list(REPORTS),
-                "description": "For a condition: until_clears (default) reports when it holds, "
-                "then not again until it stopped holding; every_time each run it holds; once "
-                "the first time it holds, then the schedule ends.",
-            },
+            "report": _REPORT,
             "in_minutes": {
                 "type": "number",
                 "description": "Instead of when: run once this many minutes from now "
@@ -430,6 +438,7 @@ SPECS: Final = (
             "when": _NEW_WHEN,
             "task": _TASK,
             "condition": _CONDITION,
+            "report": _REPORT,
             "enabled": _ENABLED,
         },
         ["id"],
@@ -647,6 +656,12 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
         changes.update(_about(about))
     if args.get("enabled") is not None:
         changes["enabled"] = bool(args["enabled"])
+        paused = None if changes["enabled"] else "the user paused it"
+        changes["metadata"] = {**changes.get("metadata", {}), PAUSED_BY: paused}
+    if (report := args.get("report")) is not None:
+        if report not in REPORTS:
+            return f"report is one of {', '.join(REPORTS)}, not {report!r}."
+        changes["metadata"] = {**changes.get("metadata", {}), REPORT: report}
     return await _changed(runtime, schedule, changes)
 
 
@@ -741,12 +756,10 @@ def _refused(when: str, min_interval: float) -> str | None:
     times = [cursor.get_next(datetime) for _ in range(PROBES)]
     shortest = min((b - a).total_seconds() for a, b in pairwise(times))
     if shortest < min_interval:
-        least = (
-            f"{min_interval / MINUTE:g} minutes"
-            if min_interval >= MINUTE
-            else f"{min_interval:g} seconds"
+        return (
+            f"That runs every {_every(shortest)}, more often than every {_every(min_interval)}, "
+            "the most often a schedule may run here: pick a longer gap."
         )
-        return f"'{when}' runs more often than every {least}, the least allowed: pick a longer one."
     return None
 
 
@@ -908,6 +921,8 @@ def _history(schedule: Schedule) -> dict[str, Any]:
         said["failed_runs_in_a_row"] = failures
     if schedule.consecutive_failures and schedule.last_error is not None:
         said["fire_error"] = schedule.last_error.message
+    if not schedule.enabled and (why := schedule.metadata.get(PAUSED_BY)):
+        said["paused_because"] = str(why)
     if schedule.metadata[TASK].get("condition"):
         said["reports"] = str(schedule.metadata.get(REPORT) or REPORTS[0])
         said["reported"] = bool(schedule.metadata.get(REPORTED))

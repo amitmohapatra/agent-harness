@@ -256,6 +256,15 @@
                 },
                 "type": "array"
               },
+              "report": {
+                "description": "For a condition: until_clears (default) reports when it holds, then not again until it stopped holding; every_time each run it holds; once the first time it holds, then the schedule ends.",
+                "enum": [
+                  "until_clears",
+                  "every_time",
+                  "once"
+                ],
+                "type": "string"
+              },
               "task": {
                 "description": "What to do, as the user said it.",
                 "type": "string"
@@ -551,6 +560,15 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "report": {
+                "description": "For a condition: until_clears (default) reports when it holds, then not again until it stopped holding; every_time each run it holds; once the first time it holds, then the schedule ends.",
+                "enum": [
+                  "until_clears",
+                  "every_time",
+                  "once"
+                ],
+                "type": "string"
               },
               "task": {
                 "description": "What to do, as the user said it.",

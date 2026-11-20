@@ -269,6 +269,7 @@ async def test_the_harness_own_tools_pass_the_check() -> None:
             "id": ("string", None),
             "ids": ("array", "string"),
             **task,
+            "report": ("string", None),
             "enabled": ("boolean", None),
         },
         "cancel_schedule": {"id": ("string", None), "ids": ("array", "string")},

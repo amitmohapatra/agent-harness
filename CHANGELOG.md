@@ -29,7 +29,11 @@ answered: a fired run's failure among them.
 `schedule_task` takes `report` for a condition: `until_clears` (the default, as before),
 `every_time` (each run it holds) or `once` (the first time it holds, then the schedule ends).
 `list_schedules` says, where there is one, a schedule's last run in its zone, its failed runs
-in a row, why agent-runs could not fire it, and for a condition whether it was reported.
+in a row, why agent-runs could not fire it, and for a condition whether it was reported. It says
+why a paused one is paused (`paused_because`: its runs failed in a row, its one run failed,
+the user paused it, or it waits to be kept). `update_schedule` takes `report` too ("tell me
+every time instead"). A time too frequent is refused in words ("That runs every 2 minutes,
+more often than every 5 minutes..."), never by its cron.
 
 ### Fixed: a fired run's zone, a failed one-time run, and `in_minutes` seconds
 

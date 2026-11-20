@@ -26,6 +26,7 @@ from trellis.harness.schedules import (
     MAX_FAILURES,
     NEITHER,
     NO_REPORT,
+    REPORT,
     REPORTED,
     SCHEDULE_TOOLS,
     STALE,
@@ -222,7 +223,7 @@ async def test_the_env_limit_and_the_per_user_hook() -> None:
         answer = await said(
             agent, chat, "ada", ("schedule_task", {"task": "t", "when": "*/30 * * * *"})
         )
-        assert "more often than every 60 minutes" in answer
+        assert "more often than every 1 hour" in answer
         # another user has their own count
         await said(agent, chat, "bob", ("schedule_task", {"task": "t", "when": "0 9 * * *"}))
 
@@ -833,3 +834,58 @@ async def test_a_failure_not_counted_leaves_the_runs_error_as_it_was(
             assert record.status is RunStatus.ERROR and record.error is not None
             assert "upstream down" in record.error.message
         assert "failure not counted" in caplog.text
+
+
+async def test_a_too_frequent_time_is_said_in_words_never_its_cron() -> None:
+    """The model tells the user what the tool says: the gap and the limit in words."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "x", "when": "*/2 * * * *"}
+        answer = await said(agent, chat, "ada", ("schedule_task", args))
+        assert "every 2 minutes" in answer and "*/2" not in answer, answer
+
+
+async def test_list_schedules_says_why_a_schedule_is_paused() -> None:
+    """Asked "why is it paused?", the model reads the reason: its runs failed in a row, its
+    one run failed, or the user paused it; resumed, there is none."""
+    chat = Failing()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sync", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+        for _ in range(MAX_FAILURES):
+            chat.fired.appendleft("x")
+            await fire(h, agent, sid)
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert f'"paused_because": "its runs failed {MAX_FAILURES} times in a row"' in listed
+        await said(agent, chat, "ada", ("update_schedule", {"id": sid, "enabled": True}))
+        assert "paused_because" not in await said(agent, chat, "ada", ("list_schedules", {}))
+        await said(agent, chat, "ada", ("update_schedule", {"id": sid, "enabled": False}))
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"paused_because": "the user paused it"' in listed, listed
+
+        once = {"task": "remind me", "when": "0 9 4 11 *", "once": True}
+        await said(agent, chat, "ada", ("schedule_task", once))
+        [one] = [s for s in local(h)._schedules.values() if s.schedule_id != sid]
+        chat.fired.appendleft("x")
+        await fire(h, agent, one.schedule_id)
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"paused_because": "its one run failed"' in listed, listed
+
+
+async def test_how_a_condition_reports_can_be_changed_later() -> None:
+    """"Tell me every time instead": update_schedule takes report, as schedule_task does."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "stock of A-1", "when": "0 8 * * *", "condition": "under 5"}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        sid = only(h).schedule_id
+        change = {"id": sid, "report": "every_time"}
+        await said(agent, chat, "ada", ("update_schedule", change))
+        assert local(h)._schedules[sid].metadata[REPORT] == "every_time"
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"reports": "every_time"' in listed, listed
+        bad = await said(agent, chat, "ada", ("update_schedule", {"id": sid, "report": "never"}))
+        assert "until_clears" in bad and local(h)._schedules[sid].metadata[REPORT] == "every_time"
