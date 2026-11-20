@@ -144,8 +144,10 @@ agent (the harness's MCP/A2A endpoint) over raw tools.
   run (platform ownership is not enforced at the catalog).
 * Examples share tool names in one tenant's catalog and one user (`ada`); `examples-env.sh
   fresh` gives each full run a clean tenant.
-* The overhead baseline (`benchmark-results.json`) was recorded on another machine: re-record
-  it in Phase 0.
+* The overhead baseline (`benchmark-results.json`) holds a reference workload's time beside
+  the cases': each run scales its numbers by that workload timed on its own machine, so the
+  baseline holds on any machine (re-record it only when the harness's overhead changes on
+  purpose).
 
 ## How to run things
 

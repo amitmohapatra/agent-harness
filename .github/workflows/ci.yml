@@ -121,7 +121,8 @@ jobs:
             agent-harness/build/matrix-*.xml
           if-no-files-found: ignore
       - name: Overhead benchmark
-        # fails when the harness's own overhead doubles against benchmark-results.json
+        # fails when the harness's own overhead (CPU time, scaled by a reference workload timed
+        # in the same job) reaches 1.75 times benchmark-results.json's: a slower runner is not one
         run: make bench
       - uses: actions/upload-artifact@v4
         if: always()
