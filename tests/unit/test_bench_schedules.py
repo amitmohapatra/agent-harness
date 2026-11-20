@@ -78,6 +78,16 @@ def test_a_time_the_words_leave_open_is_settled_and_said_or_asked() -> None:
     assert nine(chat(made("0 21 * * *"), answer="Set for 21:00; AM instead?")) != []
 
 
+def test_a_question_is_matched_however_its_words_are_hyphenated() -> None:
+    """A question naming what the words left open counts whatever joins them: "every-other-week"
+    is "every other week" (the answers the every-other-week case was scored down on)."""
+    other = b.or_asks(b.alternate_weeks, "every week", "weekly", "every other", "two weeks")
+    asked = "I can't set an every-other-week pattern. Which should I use: every Monday, or?"
+    assert other(chat(answer=asked)) == []
+    assert other(chat(answer="A true every-other-Monday schedule isn't possible. Which?")) == []
+    assert other(chat(answer="What should the sales summary cover?")) != []  # asks other
+
+
 def test_schedules_together_and_a_time_of_day_in_words() -> None:
     both = b.covered("0 9 * * 1,4")
     assert both(chat(made("0 9 * * 1,4"))) == []
