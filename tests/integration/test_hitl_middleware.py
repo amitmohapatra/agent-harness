@@ -29,6 +29,11 @@ def email(to: str, body: str) -> str:
     return f"sent to {to}"
 
 
+#: What the middleware says of a call to email ada when its gate gives no description.
+DESCRIBED = "Tool execution requires approval\n\nTool: email\nArgs: {'to': 'ada', 'body': 'hi'}"
+EVERY_DECISION = "Decisions: approve, edit, reject, respond."
+
+
 @pytest.fixture(autouse=True)
 def _reset() -> None:
     sent.clear()
@@ -61,7 +66,8 @@ async def test_the_middleware_pause_is_an_approval_of_the_tool_call(harness: Har
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     interrupt = paused.interrupt
     assert interrupt.reason is InterruptReason.APPROVAL and interrupt.ui == "approve"
-    assert interrupt.question == "Approve email?"
+    # in the library's own words: its description of the call, the decisions it takes
+    assert interrupt.question == f"Approve email? {DESCRIBED}\n{EVERY_DECISION}"
     assert interrupt.tool_call is not None
     assert (interrupt.tool_call.tool, interrupt.tool_call.args) == (
         "email",
@@ -75,6 +81,42 @@ async def test_the_middleware_pause_is_an_approval_of_the_tool_call(harness: Har
         "respond",
     ]
     assert sent == []
+
+
+async def test_the_approval_says_the_librarys_description_the_plan_and_the_decisions(
+    harness: Harness,
+) -> None:
+    """The person is asked in the library's own words: the middleware's description of each
+    call, the plan the agent keeps (LangChain's ``TodoListMiddleware``, Deep Agents'
+    ``write_todos``) and the decisions the call takes."""
+    from langchain.agents.middleware import TodoListMiddleware
+
+    todos = [{"content": "Find Ada's address", "status": "completed"},
+             {"content": "Email Ada", "status": "in_progress"}]  # fmt: skip
+    model = ScriptedChatModel(
+        turns=[("write_todos", {"todos": todos}), ("email", {"to": "ada", "body": "hi"}), "sent"]
+    )
+    review = InterruptOnConfig(
+        allowed_decisions=["approve", "reject"], description="Mail leaves us."
+    )
+    gate = HumanInTheLoopMiddleware(interrupt_on={"email": review})
+    graph = create_agent(
+        model,
+        tools=await native_tools(harness, email, framework="langgraph"),
+        middleware=[TodoListMiddleware(), gate],  # type: ignore[list-item]
+        checkpointer=InMemorySaver(),
+    )
+    agent = harness.wrap(graph, id="planner")
+    paused = await agent.run("email ada", user="u1", thread="t1")
+    assert paused.interrupt is not None, paused.error
+    assert paused.interrupt.question == (
+        "Approve email? Mail leaves us.\n"
+        "Plan:\n- Find Ada's address (completed)\n- Email Ada (in_progress)\n"
+        "Decisions: approve, reject."
+    )
+    assert (paused.interrupt.payload or {})["todos"] == todos
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="l")
+    assert done.status is RunStatus.SUCCESS and sent == []
 
 
 async def test_approve_runs_the_call(harness: Harness) -> None:
@@ -179,7 +221,10 @@ async def test_a_batch_of_calls_is_one_approval_and_one_decision_for_each(
     agent = await mailer(harness, model)
     paused = await agent.run("email both", user="u1", thread="t1")
     assert paused.interrupt is not None
-    assert paused.interrupt.question == "Approve email? (and 1 more call)"
+    bob = DESCRIBED.replace("ada", "bob")
+    assert paused.interrupt.question == (
+        f"Approve email? (and 1 more call) {DESCRIBED}\n{bob}\n{EVERY_DECISION}"
+    )
     assert paused.interrupt.payload is not None
     assert len(paused.interrupt.payload["action_requests"]) == 2
     with pytest.raises(ConfigurationError, match="one decision for each call"):
@@ -199,7 +244,10 @@ async def test_a_rejected_batch_rejects_every_call(harness: Harness) -> None:
     agent = await mailer(harness, model)
     paused = await agent.run("email", user="u1", thread="t1")
     assert paused.interrupt is not None
-    assert paused.interrupt.question == "Approve email? (and 2 more calls)"
+    each = "\n".join([DESCRIBED] * 3)
+    assert (
+        paused.interrupt.question == f"Approve email? (and 2 more calls) {each}\n{EVERY_DECISION}"
+    )
     await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="l")
     assert sent == []
     assert all("not executed" in str(m.content) for m in tool_messages(model))
@@ -237,7 +285,8 @@ async def test_a_per_call_pause_is_an_approval_of_its_one_call(harness: Harness)
     paused = await agent.run("email ada", user="u1", thread="t1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     interrupt = paused.interrupt
-    assert interrupt.reason is InterruptReason.APPROVAL and interrupt.question == "Approve email?"
+    assert interrupt.reason is InterruptReason.APPROVAL
+    assert interrupt.question == f"Approve email? {DESCRIBED}\n{EVERY_DECISION}"
     assert interrupt.tool_call is not None and interrupt.tool_call.tool == "email"
     assert interrupt.payload is not None and interrupt.payload["type"] == "tool_approval"
     assert "response_schema" in interrupt.payload

@@ -12,10 +12,11 @@ run; Way 2 builds the same ``Question`` and pauses its own run with it::
 
 Everything goes on the contracts' ``Interrupt`` as it is: ``options`` (strings or
 ``Option``\\ s), ``multiple``, ``expects`` (or ``form=``, a pydantic model whose JSON Schema is
-``expects`` and which the answer is read back into), ``ui_schema``, and the asker's own screen
-(``component``, with its ``props``). What the person sees follows from what is asked
-(:attr:`Question.ui`). Whether an answer fits is ``trellis.runs.answers.answer_problem``, the
-check agent-runs makes: there is no second copy here.
+``expects`` and which the answer is read back into), ``ui_schema``, the asker's own screen
+(``component``, with its ``props``), and who asked (``source``: the payload's :data:`SOURCE`).
+What the person sees follows from what is asked (:attr:`Question.ui`). Whether an answer fits
+is ``trellis.runs.answers.answer_problem``, the check agent-runs makes: there is no second copy
+here.
 """
 
 from __future__ import annotations
@@ -54,7 +55,8 @@ class Question:
     ``table`` a table, ``diff=(before, after)`` a diff, otherwise a form (``expects`` its JSON
     Schema, or ``form`` a pydantic model); a table or diff with ``expects`` is a review.
     ``ui_schema`` gives the form's widget hints (react-jsonschema-form's ``uiSchema``);
-    ``component`` names your own screen, rendered with ``props`` where a surface has it."""
+    ``component`` names your own screen, rendered with ``props`` where a surface has it;
+    ``source`` who asked (the run's agent, the tool it asked with), in the payload."""
 
     question: str
     expects: dict[str, Any] | None = None
@@ -69,6 +71,7 @@ class Question:
     assignee: str | None = None
     deadline: datetime | None = None
     escalate_to: str | None = None
+    source: Mapping[str, str] | None = None
     #: what the asker's ``expects`` is, ``form`` given or not
     schema: dict[str, Any] | None = field(init=False, default=None)
 
@@ -131,12 +134,14 @@ class Question:
 
     @property
     def payload(self) -> dict[str, Any] | None:
-        """What a table or a diff shows (the run stores a large one as a run artifact)."""
+        """What a table or a diff shows (the run stores a large one as a run artifact), and
+        who asked (:data:`SOURCE`)."""
+        shown: dict[str, Any] = {SOURCE: dict(self.source)} if self.source is not None else {}
         if self.table is not None:
-            return {"table": list(self.table)}
-        if self.diff is not None:
-            return {"diff": {"before": self.diff[0], "after": self.diff[1]}}
-        return None
+            shown["table"] = list(self.table)
+        elif self.diff is not None:
+            shown["diff"] = {"before": self.diff[0], "after": self.diff[1]}
+        return shown or None
 
     @property
     def key(self) -> str:
@@ -201,6 +206,9 @@ class Question:
             ) from exc
 
 
+#: The key of a question's payload that says who asked: ``{"agent": <the run's agent>,
+#: "tool": <the tool it asked with>}`` (``ask_user``, Claude's and Kimi's ``AskUserQuestion``).
+SOURCE: Final = "source"
 #: What of a graph's ``interrupt(value)`` dict goes on the interrupt, as ``ask`` takes it.
 DESCRIBED: Final = ("options", "multiple", "expects", "ui_schema", "component", "props", "assignee")
 
@@ -224,4 +232,4 @@ def _jsonable(option: Option | str) -> Any:
     return option if isinstance(option, str) else option.model_dump(mode="json", exclude_none=True)
 
 
-__all__ = ["Question", "RunCancelled", "answer_of"]
+__all__ = ["SOURCE", "Question", "RunCancelled", "answer_of"]

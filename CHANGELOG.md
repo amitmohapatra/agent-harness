@@ -5,6 +5,29 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: one question format for every adapter, and an unattended run never waits on a question
+
+`ask_user` and Claude's and Kimi's own `AskUserQuestion` ask the person the same way
+(`tools.ask.ask_fields`): one question a choice of its options, each with its description,
+the recommended one first and marked with why; several questions one form; the `ask_user`
+component, the control `ui` names and a plain-text fallback for plain chat; an answer in words
+always taken. Each question names who asked in its payload (`source`: the run's agent and the
+tool). Claude's several questions in one call were asked one pause after another; now they are
+one pause, answered in Claude's own shape. Kimi's form of one question kept no option
+descriptions; now it does, and a form of several is `ask_user`'s form (its fields named by
+question).
+
+A run nobody is known to read (not a chat front end's, or fired by a schedule) offers Claude no
+`AskUserQuestion` (the SDK's own `disallowed_tools`; a conversation's kept process is started
+anew), Kimi's question is declined in Kimi's own words, and neither gets the note on when to
+ask (`agent.ASKING`); a run a person reads asks as before.
+
+LangChain's `HumanInTheLoopMiddleware` and Deep Agents' `interrupt_on` approvals are asked in
+the library's own words: each call's `description`, the plan (`todos`, also in the payload) and
+the decisions the request takes; they said only "Approve email?". Claude Code's permission prompts carry the CLI's own `title` and
+`description` instead of "Claude Code asks before it runs this call.", which stays for a CLI
+that sends neither.
+
 ### Changed: Kimi needs ripgrep where it runs, checked before it starts
 
 Kimi's `Glob` runs ripgrep (`rg`); without it, Kimi Code downloaded it from its own CDN at the

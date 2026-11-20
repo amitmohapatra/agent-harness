@@ -16,7 +16,7 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Hashable, Sequence
+from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -920,6 +920,7 @@ class Runtime:
         assignee: str | None = None,
         deadline: datetime | None = None,
         escalate_to: str | None = None,
+        source: Mapping[str, str] | None = None,
     ) -> Any:
         """Ask a person and wait for the answer: the run pauses here, and on resume this call
         returns what they answered (the edited value for a review; a list of values with
@@ -932,10 +933,11 @@ class Runtime:
         schema, ``ui_schema`` its widget hints). ``component`` names your own screen and
         ``props`` its data: a surface that has it renders it, any other the control above. A
         table or diff with ``expects`` is a review. It is the run's user's to answer unless
-        ``assignee`` names someone else (``user:…``, ``role:…``). A question that cannot be
-        asked as given (an ``expects`` that is not a JSON Schema, ``props`` without a
-        ``component``...) is refused here (``ConfigurationError``, saying why); an answer
-        must fit it (``Agent.resume``)."""
+        ``assignee`` names someone else (``user:…``, ``role:…``); ``source`` says who asked
+        (the payload's ``asking.SOURCE``: ``ask_user``'s, a framework's own question tool's).
+        A question that cannot be asked as given (an ``expects`` that is not a JSON Schema,
+        ``props`` without a ``component``...) is refused here (``ConfigurationError``, saying
+        why); an answer must fit it (``Agent.resume``)."""
         asked = Question(
             question,
             expects=expects,
@@ -950,6 +952,7 @@ class Runtime:
             assignee=assignee or principal(self.user),
             deadline=deadline,
             escalate_to=escalate_to,
+            source=source,
         )
         resolution = await self.interrupt(asked.key, payload=asked.payload, **asked.fields())
         return asked.answer(resolution)

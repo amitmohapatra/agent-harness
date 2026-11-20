@@ -285,6 +285,7 @@ async def asked(
     call_id: str | None = None,
     kept: bool = False,
     always: bool = False,
+    said: str | None = None,
 ) -> ToolCall | ToolOutcome:
     """A call ``framework`` asks its user about before it runs it (its own permission check:
     Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
@@ -292,14 +293,16 @@ async def asked(
     journal when the run resumes, not asked again when the tool was approved for the rest of the
     run — and the call to let through (perhaps edited), or the outcome of one rejected. The
     tool catalog's word on the tool decides first, as for any call (:func:`_catalog_decides`),
-    unless the question is ``always`` a person's (a plan to approve). A pause propagates."""
+    unless the question is ``always`` a person's (a plan to approve). The person reads why in
+    the framework's own words when it gives them (``said``: Claude Code's prompt), else
+    :data:`FRAMEWORK_ASKS`. A pause propagates."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     if not always and await _catalog_decides(runtime, spec, args):
         return call
-    why = FRAMEWORK_ASKS.format(framework=framework)
+    why = said or FRAMEWORK_ASKS.format(framework=framework)
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
         decision, call, rejected = await _decided(runtime, spec, call, Ask(why), kept=kept)
     if rejected is not None:

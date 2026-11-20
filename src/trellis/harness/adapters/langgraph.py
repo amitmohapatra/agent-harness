@@ -357,6 +357,7 @@ class LangGraphAdapter(Keeps):
                 native_id=first.id,
                 ids=ids,
                 schema=schema if isinstance(schema, dict) else None,
+                plan=state.get(PLAN) if isinstance(state, Mapping) else None,
             )
         return Extracted(answer, transcript, pause, asked=asked(messages))  # type: ignore[arg-type]
 
@@ -923,6 +924,18 @@ TOOL_APPROVAL: Final = "tool_approval"
 DECISION_SCHEMA: Final = "response_schema"
 
 
+#: The state key the agent's plan is kept under (LangChain's ``TodoListMiddleware``, Deep Agents'
+#: ``write_todos``), and the key of an approval's payload that holds it.
+PLAN: Final = "todos"
+#: The decisions a ``HumanInTheLoopMiddleware`` request may allow, in the order they are said.
+DECISIONS: Final = ("approve", "edit", "reject", "respond")
+#: What a person reads of a ``HumanInTheLoopMiddleware`` request (:func:`hitl_said`): its plan,
+#: each step with its status, and the decisions it takes.
+PLAN_SAID: Final = "Plan:\n{steps}"
+STEP_SAID: Final = "- {content} ({status})"
+DECISIONS_SAID: Final = "Decisions: {decisions}."
+
+
 def is_hitl(value: Any) -> bool:
     """Whether an interrupt's value is a ``HumanInTheLoopMiddleware`` request: a batch's (its
     ``action_requests`` and their ``review_configs``) or one call's (``interrupt_mode=
@@ -943,6 +956,42 @@ def hitl_calls(request: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     in order: a batch's, or the one call of a per-call request."""
     actions = [request] if request.get("type") == TOOL_APPROVAL else request["action_requests"]
     return [(str(a.get("name")), dict(a.get("args") or {})) for a in actions]
+
+
+def hitl_allowed(request: Mapping[str, Any]) -> list[str]:
+    """The decisions a ``HumanInTheLoopMiddleware`` request takes, as :data:`DECISIONS` orders
+    them: those every call of a batch allows (its ``allowed_decisions``), or those a per-call
+    request's schema of them names (:data:`DECISION_SCHEMA`; none known without it)."""
+    if request.get("type") == TOOL_APPROVAL:
+        schema = request.get(DECISION_SCHEMA, {})
+        branches = [schema, *schema.get("$defs", {}).values()]
+        named = {b.get("properties", {}).get("type", {}).get("const") for b in branches}
+    else:
+        named = set.intersection(*(set(c["allowed_decisions"]) for c in request["review_configs"]))
+    return [d for d in DECISIONS if d in named]
+
+
+def hitl_said(request: Mapping[str, Any]) -> str:
+    """What a person is asked of a ``HumanInTheLoopMiddleware`` request, in the library's own
+    words: an approval of its first call (and how many more it holds), each call's
+    ``description``, the agent's plan when it keeps one (:data:`PLAN`), and the decisions the
+    request takes (:func:`hitl_allowed`)."""
+    calls = hitl_calls(request)
+    more = len(calls) - 1
+    said = f"Approve {calls[0][0]}?"
+    if more:
+        said += f" (and {more} more call{'s' if more > 1 else ''})"
+    actions = [request] if request.get("type") == TOOL_APPROVAL else request["action_requests"]
+    described = "\n".join(str(a["description"]) for a in actions if a.get("description"))
+    plan = request.get(PLAN, ())
+    steps = [STEP_SAID.format(content=t.get("content"), status=t.get("status")) for t in plan]
+    allowed = ", ".join(hitl_allowed(request))
+    parts = (
+        f"{said} {described}" if described else said,
+        PLAN_SAID.format(steps="\n".join(steps)) if steps else "",
+        DECISIONS_SAID.format(decisions=allowed) if allowed else "",
+    )
+    return "\n".join(p for p in parts if p)
 
 
 def hitl_response(request: dict[str, Any], resolution: InterruptResolution) -> dict[str, Any]:

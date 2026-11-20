@@ -90,6 +90,7 @@ answer the call's result. Who has it:
 |---|---|
 | a chat front end's ([`serve_chat`](surfaces.md): a person reads it and answers its pauses) | offered by itself; off with `without=["ask"]` |
 | the same, on Claude Code or Kimi Code | theirs instead (`AskUserQuestion`, asked as the run's question): no second tool |
+| any other run on Claude Code or Kimi Code | none: Claude Code is started with `AskUserQuestion` in its `disallowed_tools` (a conversation's kept process an attended turn started is started anew), and Kimi's question is declined, Kimi telling its model so in its own words ("User dismissed the question without answering."); the run never waits on nobody |
 | started from code (`agent.run`, `stream`), queued (`start`), fired by a schedule, called over A2A or by another run | not offered by itself: nobody is known to answer, and a pause there may never be resumed. An agent whose caller answers pauses declares it: `ReAct(tools=[trellis.ask_user()])` (or any agent's tools) |
 | a graph built with its tools bound | bound when it is built, with the harness's other tools: `await h.harness_tools()` ([frameworks/langgraph.md](frameworks/langgraph.md#the-harnesss-tools-on-a-graph-you-build)); every run of it may ask; off with `without=["ask"]` |
 
@@ -97,8 +98,8 @@ A tool of the agent's own named `ask_user` wins, and one declared is offered onc
 `text`, `date`, `date_range` or `number`; `options` makes it a choice, `multiple` lets several be
 picked, `recommended` (with `why`) marks one option `Option.recommended`. The model decides each
 question's shape; when to ask at all is the note sent with every memory context and, memory
-on or off, to every run whose model has a question tool (`ask_user`, or Claude's and Kimi's
-`AskUserQuestion`), said once (`agent.ASKING`): when several things fit the user's words, ask which one; else ask only when it
+on or off, to every run whose model has a question tool (`ask_user`, or — in a run a person
+reads — Claude's and Kimi's `AskUserQuestion`), said once (`agent.ASKING`): when several things fit the user's words, ask which one; else ask only when it
 cannot find out itself, the choice is the user's and a wrong guess costs; otherwise act and say
 the assumption. A context with a profile also gets `agent.REMEMBERED`: a remembered rule,
 preference or value used is said with its date, a costly or old fill asked about first. A context
@@ -140,15 +141,31 @@ number or a date shows it filled in (`props.default`, the schema's `default`).
 Where the app declared tools of its own, `ask_user` says first that a value one of them asks
 for is asked with it (the app's date picker, not `kind="date"`).
 
-**What a UI gets from each framework's own question tool.** Claude Code and Kimi Code ask their
-own way; the harness changes neither:
+**One format for every question of a model's.** `ask_user` and each framework's own question
+tool ask the same way (`tools.ask.ask_fields`): one question a choice of its options — each
+with its description, the recommended one first, marked with why — several questions one form;
+the `ask_user` component and `props`, the control `ui` names, the plain-chat text above, an
+answer in words always taken; and the payload's `source` says who asked: the run's agent and
+the tool (`{"agent": "shop", "tool": "ask_user"}`, `{"agent": "ops", "tool": "AskUserQuestion"}`).
 
-| | Claude Code `AskUserQuestion` | Kimi Code `AskUserQuestion` |
+| | Claude Code `AskUserQuestion` | Kimi Code `AskUserQuestion` (its form, ACP's `elicitation/create`) |
 |---|---|---|
-| a choice | the `ask_user` component, the options, several picks (`multiSelect`), the option labelled "(Recommended)" recommended with its description as why | `ui: "choice"` with its options; no component, no recommended option, one pick |
-| another answer in words | taken: Claude reads it as the answer | taken: the question is dismissed and Kimi told `The user answered your question "…" with: …` in the resumed turn (`adapters.acp.ANSWERED`) |
+| one question | a choice: its options with their descriptions, several picks (`multiSelect`), the option labelled "(Recommended)" recommended with its description as why | the same (`multi_select`) |
+| several questions in one call | all in one pause: one form, a field a question (its options a titled `oneOf` with their descriptions), answered in one go; Claude reads the answers by question | the same; Kimi gets the answers by its form's fields |
+| another answer in words | taken: Claude reads it as each question's answer | taken: the question is dismissed and Kimi told `The user answered your question "…" with: …` in the resumed turn (`adapters.acp.ANSWERED`) |
 | a date, a number, open text | no kinds: asked in its reply, as text | the same |
-| several values | several questions in one call, asked one after another | one question a call |
+| a run nobody is known to read | not offered (`disallowed_tools`) | declined: Kimi says so to its model |
+
+For example, Claude asking "Which regions?" (`north (Recommended)`: your last choice; `south`:
+slower; several picks) and "Which format?" (`CSV`, `PDF`) in one call is one pause whose
+plain-chat text is:
+
+```text
+2 questions:
+1. Which regions? (north (Recommended): your last choice or south: slower): north (Recommended) (your last choice)
+2. Which format? (CSV or PDF)
+(Answer each, or say what to keep and what to change.)
+```
 
 A risky action is not a question of the model's: governance pauses the call for the person's
 approval whatever the model does ([governance.md](governance.md)). The same benchmark's
@@ -568,9 +585,22 @@ and the same five decisions answer it.
 **`create_agent(middleware=[HumanInTheLoopMiddleware(interrupt_on=...)])`, and Deep Agents'
 `create_deep_agent(interrupt_on=...)`** (a checkpointer is needed, as for any graph pause). The
 middleware batches the calls of one model message that need review into one request; the
-interrupt shows the first (`"Approve email?"`, `"Approve email? (and 1 more call)"`) and carries
-the whole request as its `payload` — `action_requests` (each call's `name`, `args`,
-`description`) and `review_configs` (each call's `allowed_decisions`). The resume is the
+interrupt is asked in the library's own words: the first call (`"Approve email?"`, `"Approve
+email? (and 1 more call)"`), each call's `description`, the agent's plan when it keeps one
+(`TodoListMiddleware`, Deep Agents' `write_todos`: the state's `todos`), and the decisions the
+request takes (said, not offered as `options`: an answer and the middleware's own decisions
+stay open):
+
+```text
+Approve email? Mail leaves us.
+Plan:
+- Find Ada's address (completed)
+- Email Ada (in_progress)
+Decisions: approve, reject.
+```
+
+It carries the whole request as its `payload` — `action_requests` (each call's `name`, `args`,
+`description`), `review_configs` (each call's `allowed_decisions`) and the plan (`todos`). The resume is the
 middleware's `{"decisions": [...]}`, one per call, in order:
 
 | `resume(...)` | Decisions sent |

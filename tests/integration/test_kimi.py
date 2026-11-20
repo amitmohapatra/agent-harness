@@ -564,6 +564,7 @@ def _asks_two(body: dict[str, Any]) -> Any:
     return "answered: " + results[-1]
 
 
+@pytest.mark.usefixtures("attended")
 async def test_every_question_kimi_asks_in_one_call_reaches_the_person(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -575,13 +576,13 @@ async def test_every_question_kimi_asks_in_one_call_reaches_the_person(
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-asks-two")
         asked = await agent.run("set it up", user="u1")
         assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
-        assert asked.interrupt.question == "Which db?\nWhich cloud?"
+        assert asked.interrupt.question.startswith("2 questions:\n1. Which db? (pg: Postgres")
         assert asked.interrupt.expects is not None
         fields = asked.interrupt.expects["properties"]
-        assert [o["const"] for o in fields["q0"]["oneOf"]] == ["pg", "mysql"]
-        assert fields["q0"]["oneOf"][0]["description"] == "Postgres"
-        assert [o["const"] for o in fields["q1"]["items"]["anyOf"]] == ["aws", "gcp"]
-        picked = {"q0": "mysql", "q1": ["aws", "gcp"]}
+        assert [o["const"] for o in fields["Which db?"]["oneOf"]] == ["pg", "mysql"]
+        assert fields["Which db?"]["oneOf"][0]["description"] == "Postgres"
+        assert fields["Which cloud?"]["items"]["enum"] == ["aws", "gcp"]
+        picked = {"Which db?": "mysql", "Which cloud?": ["aws", "gcp"]}
         done = await agent.resume(
             asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1"
         )
@@ -589,6 +590,25 @@ async def test_every_question_kimi_asks_in_one_call_reaches_the_person(
         assert done.answer is not None
         assert '"Which db?":"mysql"' in done.answer
         assert '"Which cloud?":"aws, gcp"' in done.answer
+
+
+async def test_an_unattended_run_declines_kimis_question_in_kimis_own_words(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A run nobody is known to read never waits on a question: Kimi's form is declined, and
+    Kimi tells its model so itself (its "dismissed" note); the run goes on to its answer."""
+
+    def asks_once(body: dict[str, Any]) -> Any:
+        results = [result_text(m["content"]) for m in body["messages"] if m.get("role") == "tool"]
+        return "told: " + results[-1] if results else _asks_two(body)
+
+    async with PlannedEndpoint(turns=asks_once).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-unattended")
+        done = await agent.run("set it up", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
+    assert (
+        done.answer is not None and "User dismissed the question without answering." in done.answer
+    )
 
 
 #: The plan file Kimi names in its plan mode's reminder.

@@ -27,7 +27,6 @@ from trellis import Harness, ReAct, current, middleware, tool
 from trellis.contracts import RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness import snapshots
-from trellis.harness.agent import ASKING
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.sandbox import DELIVERS_HERE
 
@@ -172,8 +171,9 @@ async def test_claude_code_says_the_date_itself_so_the_harness_adds_none(
     await agent.run("what day is it?", user="u1")
     started = started_with(tmp_path)
     assert started["system_prompt"] == f"You help.\n\n{DELIVERS_HERE}"
-    # the harness's context carries when to ask (Claude has a question tool), no date line
-    assert started["prompt"] == "what day is it?" and started["context"] == ASKING
+    # the harness's context carries no date line (and, nobody known to read the run, no
+    # question tool and no note on when to ask)
+    assert started["prompt"] == "what day is it?" and started["context"] == ""
 
 
 @pytest.mark.host_execution

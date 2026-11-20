@@ -476,12 +476,15 @@ async def test_a_question_a_tool_asked_resumes_the_session_naming_its_call(
     assert started_with(tmp_path)["prompt"] == told
 
 
+@pytest.mark.usefixtures("attended")
 async def test_claudes_question_to_its_user_is_the_runs_question(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Claude's ``AskUserQuestion`` is asked as the run's (as Kimi's): each question a choice,
-    several picks with ``multiSelect``, the option labelled "(Recommended)" recommended with
-    its description as why; Claude reads the answers by question, as its own UI gives them."""
+    """Claude's ``AskUserQuestion`` is asked as the run's (as Kimi's), in ``ask_user``'s
+    format: its questions all in one pause — one form, a field a question, several picks with
+    ``multiSelect``, the option labelled "(Recommended)" filled in with its description as why,
+    each option's description said — and Claude reads the answers by question, as its own UI
+    gives them; the resumed call asks nothing again."""
     questions = [
         {
             "question": "Which regions?",
@@ -502,24 +505,145 @@ async def test_claudes_question_to_its_user_is_the_runs_question(
     script = [{"builtin": "AskUserQuestion", "args": {"questions": questions}}, {"text": "ok"}]
     agent = harness.wrap(options(tmp_path, script), id="asker")
     first = await agent.run("set it up", user="u1")
-    assert first.interrupt is not None and first.interrupt.tool_call is None
-    assert first.interrupt.multiple and first.interrupt.options[0] == Option(
-        value="north (Recommended)", description="your last choice", recommended=True
+    asked = first.interrupt
+    assert asked is not None and asked.tool_call is None and asked.ui == "form"
+    assert asked.question == (
+        "2 questions:\n"
+        "1. Which regions? (north (Recommended): your last choice or south: slower): "
+        "north (Recommended) (your last choice)\n"
+        "2. Which format? (CSV or PDF)\n"
+        "(Answer each, or say what to keep and what to change.)"
     )
-    picked = ["north (Recommended)", "south"]
-    second = await agent.resume(
-        first.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1"
-    )
-    assert second.interrupt is not None and second.interrupt.options == ["CSV", "PDF"]
-    done = await agent.resume(second.interrupt.interrupt_id, "answer", answer="CSV", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS
-    [asked] = built_ins(tmp_path)
-    assert asked["args"]["answers"] == {
-        "Which regions?": "north (Recommended), south",
+    assert asked.component == "ask_user" and (asked.props or {})["kind"] == "form"
+    assert asked.expects is not None
+    regions, formats = asked.expects["properties"].values()
+    assert regions["items"]["oneOf"][1] == {"const": "south", "title": "south",
+                                            "description": "slower"}  # fmt: skip
+    assert formats["enum"] == ["CSV", "PDF"]
+    assert asked.payload == {"source": {"agent": "asker", "tool": "AskUserQuestion"}}
+    # the recommended regions stand, filled in; the format is picked
+    picked = {"Which format?": "CSV"}
+    done = await agent.resume(asked.interrupt_id, "answer", answer=picked, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None
+    [ran] = built_ins(tmp_path)
+    assert ran["args"]["answers"] == {
+        "Which regions?": "north (Recommended)",
         "Which format?": "CSV",
     }
 
 
+@pytest.mark.usefixtures("attended")
+async def test_claudes_questions_answered_in_words_are_each_questions_answer(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Words that pick none of the options are never refused: Claude reads them as the answer
+    to each of its questions."""
+    questions = [
+        {"question": "Which db?", "options": [{"label": "pg"}, {"label": "mysql"}]},
+        {"question": "Which cloud?", "options": [{"label": "aws"}, {"label": "gcp"}]},
+    ]
+    script = [{"builtin": "AskUserQuestion", "args": {"questions": questions}}, {"text": "ok"}]
+    agent = harness.wrap(options(tmp_path, script), id="in-words")
+    paused = await agent.run("set it up", user="u1")
+    assert paused.interrupt is not None
+    words = "whatever is cheapest"
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer=words, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    [ran] = built_ins(tmp_path)
+    assert ran["args"]["answers"] == {"Which db?": words, "Which cloud?": words}
+
+
+@pytest.mark.usefixtures("attended")
+async def test_claudes_one_question_keeps_each_options_description(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """One question is a choice in the same format: each option with its description, the
+    recommended one first and marked, the run's agent and Claude's tool as who asked."""
+    asked = {
+        "question": "Which format?",
+        "header": "Format",
+        "options": [
+            {"label": "PDF", "description": "to print"},
+            {"label": "CSV (Recommended)", "description": "you use it most"},
+        ],
+    }
+    script = [{"builtin": "AskUserQuestion", "args": {"questions": [asked]}}, {"text": "ok"}]
+    agent = harness.wrap(options(tmp_path, script), id="one-asker")
+    paused = await agent.run("export it", user="u1")
+    assert paused.interrupt is not None
+    assert paused.interrupt.question == (
+        "Which format?\n1. CSV (Recommended) (Recommended: you use it most)\n2. PDF: to print\n"
+        "(Pick one, or say another.)"
+    )
+    assert paused.interrupt.options == [
+        Option(value="CSV (Recommended)", description="you use it most", recommended=True),
+        Option(value="PDF", description="to print"),
+    ]
+    assert paused.interrupt.payload == {"source": {"agent": "one-asker", "tool": "AskUserQuestion"}}
+
+
+async def test_an_unattended_claude_run_is_offered_no_question_tool(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run nobody is known to read never waits on a question: Claude Code is started with
+    its ``AskUserQuestion`` disallowed (the SDK's own ``disallowed_tools``), so a call of it is
+    the CLI's own error and the run goes on — and a conversation's process an attended turn
+    started is not reused for an unattended one."""
+    from trellis.harness.runtime import Runtime
+
+    asks = {"builtin": "AskUserQuestion", "args": {"questions": [{"question": "Which?",
+            "options": [{"label": "a"}, {"label": "b"}]}]}}  # fmt: skip
+    target = options(tmp_path, [asks, {"text": "went on: {last}"}])
+    agent = harness.wrap(target, id="unattended")
+    done = await agent.run("export it", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None
+    assert (
+        done.answer
+        == "went on: <tool_use_error>No such tool available: AskUserQuestion</tool_use_error>"
+    )
+    assert "AskUserQuestion" in started_with(tmp_path)["disallowed_tools"].split(",")
+    assert built_ins(tmp_path) == []
+
+    chat = harness.wrap(options(tmp_path, [{"text": "hello"}]), id="chat")
+    with monkeypatch.context() as attended:
+        attended.setattr(Runtime, "attended", property(lambda runtime: True))
+        await chat.run("hi", user="u1", thread="t1")
+    assert "AskUserQuestion" not in started_with(tmp_path)["disallowed_tools"].split(",")
+    await chat.run("hi again", user="u1", thread="t1")
+    assert "AskUserQuestion" in started_with(tmp_path)["disallowed_tools"].split(",")
+
+
+async def test_an_unattended_claude_run_is_told_nothing_of_asking(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """With no question tool, no note on when to ask: the context is what Claude is told of
+    its folder's ``outputs/`` alone."""
+    script = [{"text": "told: {context}"}]
+    result = await harness.wrap(options(tmp_path, script), id="quiet").run("hi", user="u1")
+    assert result.answer == f"told: {DELIVERS_HERE}"
+
+
+async def test_claudes_permission_prompt_is_the_clis_own_title_and_description(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """What Claude Code asks its user about a call, the person is asked in the CLI's own words:
+    its prompt's title and description, then the choices."""
+    edit = {
+        "builtin": "Edit",
+        "args": {"file_path": "build.txt"},
+        "title": "Claude wants to edit build.txt",
+        "description": "Bumps the build number",
+    }
+    agent = harness.wrap(options(tmp_path, [edit, {"text": "done"}]), id="titled")
+    asked = await agent.run("bump it", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.question == (
+        "Approve Edit? Claude wants to edit build.txt. Bumps the build number. "
+        "Allow once, allow for this conversation, or deny."
+    )
+
+
+@pytest.mark.usefixtures("attended")
 async def test_claudes_question_is_asked_once_though_it_words_it_anew(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -693,11 +817,10 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     assert not (work / "outputs" / "report.csv").exists()  # moved to the file store
     assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
     assert (work / "outputs" / "sub" / "x.txt").exists()
-    # no system prompt of its own stays none (the SDK's default): told with the context
-    # (when to ask, then its outputs/)
+    # no system prompt of its own stays none (the SDK's default): told with the context (its
+    # outputs/; a run nobody is known to read gets no note on when to ask)
     started = started_with(tmp_path)
-    told = f"{ASKING}\n\n{boxes.DELIVERS_HERE}"
-    assert started["system_prompt"] == "" and started["context"] == told
+    assert started["system_prompt"] == "" and started["context"] == boxes.DELIVERS_HERE
     await harness.aclose()
 
 
@@ -858,6 +981,7 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     assert available == sorted(available) and {"Read", "Bash", "Skill"} <= set(available)
 
 
+@pytest.mark.usefixtures("attended")
 async def test_without_memory_the_context_is_when_to_ask_alone(
     harness: Harness, tmp_path: Path
 ) -> None:

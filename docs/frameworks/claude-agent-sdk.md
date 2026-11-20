@@ -120,9 +120,18 @@ the user Claude Code would ask:
   it through. The CLI asks about every harness tool in plan mode; those the hook allowed run
   unasked (a read), the others as the bridge governs them.
 * **Claude's questions** (`AskUserQuestion`) are the run's questions, asked as `ask_user` asks
-  them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
-  recommended with its description as why, another answer in words); Claude reads the answers
-  by question.
+  them, all the questions of a call in one pause: one question a choice, several one form (its
+  options with their descriptions, several picks with `multiSelect`, the option labelled
+  "(Recommended)" recommended with its description as why, another answer in words); Claude
+  reads the answers by question, and the resumed call asks nothing again. The payload's
+  `source` names the run's agent and `AskUserQuestion`. A run nobody is known to read (not a
+  chat front end's, or fired by a schedule) is started with `AskUserQuestion` in the SDK's
+  own `disallowed_tools`, and gets no note on when to ask: it never waits on nobody. A
+  conversation's kept process an attended turn started is started anew for an unattended one.
+* **Claude Code's permission prompt** is what the person reads when Claude Code asks about a
+  call: its own `title` and `description` (`"Approve Edit? Claude wants to edit build.txt.
+  Bumps the build number. Allow once, …"`); a CLI that sends neither is said as "Claude Code
+  asks before it runs this call."
 * **Risk.** Every tool the bundled CLI has is declared by what it does. Reads run: `Read`,
   `Glob`, `Grep`, `LSP`, the listing and look-up tools, loading a deferred MCP tool
   (`ToolSearch`), waiting for MCP servers (`WaitForMcpServers`), the tools Claude keeps its

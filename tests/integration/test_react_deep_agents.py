@@ -248,7 +248,10 @@ async def test_a_sub_agents_interrupt_on_is_its_own_gate_asked_once(harness: Har
     agent = harness.wrap(target, id="pays")
     paused = await agent.run("pay 5", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
-    assert paused.interrupt.question == "Approve wire?"
+    assert paused.interrupt.question == (
+        "Approve wire? Tool execution requires approval\n\nTool: wire\nArgs: {'amount': 5}\n"
+        "Decisions: approve, edit, reject, respond."
+    )
     assert (paused.interrupt.payload or {})["action_requests"][0]["name"] == "wire"
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.status is RunStatus.SUCCESS and done.answer == "paid", done.error

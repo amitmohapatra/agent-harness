@@ -78,10 +78,12 @@ from trellis.harness.adapters.langgraph import (
     DECISION_SCHEMA,
     FOREIGN,
     HITL,
+    PLAN,
     carries,
     hitl_approved,
     hitl_calls,
     hitl_rejected,
+    hitl_said,
     holds,
     is_hitl,
 )
@@ -1412,22 +1414,23 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
 def _middleware_approval(runtime: Runtime, ident: str, native: NativePause) -> Pending:
     """LangChain's ``HumanInTheLoopMiddleware`` (Deep Agents' ``interrupt_on``) paused on the
     calls it holds — a batch, or one call (``interrupt_mode="per_call"``): an approval of the
-    first, the whole request (every call, each one's ``allowed_decisions``, or the schema of
-    the decision a per-call request takes) in the payload; the resume answers all of them."""
+    first, asked in the library's own words (``hitl_said``: each call's description, the plan,
+    the decisions it takes — said, not offered as options, which would leave an answer or the
+    middleware's own decisions no room), the whole request (every call, each one's
+    ``allowed_decisions``, or the schema of the decision a per-call request takes, and the
+    agent's plan: ``PLAN``) in the payload; the resume answers all of them."""
     request = json.loads(json.dumps(native.value, default=str))
     if native.schema is not None:
         request[DECISION_SCHEMA] = native.schema
-    calls = hitl_calls(request)
-    (name, args), more = calls[0], len(calls) - 1
-    question = f"Approve {name}?"
-    if more:
-        question += f" (and {more} more call{'s' if more > 1 else ''})"
+    if native.plan:
+        request[PLAN] = json.loads(json.dumps(native.plan, default=str))
+    name, args = hitl_calls(request)[0]
     interrupt = Interrupt(
         interrupt_id=ident,
         tenant_id=runtime.tenant,
         run_id=runtime.run_id,
         reason=InterruptReason.APPROVAL,
-        question=question,
+        question=hitl_said(request),
         tool_call=ToolCall(tool=name, args=args, idempotency_key=native.native_id),
         payload=request,
     )

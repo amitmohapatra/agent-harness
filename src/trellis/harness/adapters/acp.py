@@ -127,6 +127,7 @@ from trellis.harness.bridges.acp_live import (
     Background,
     accounted,
     chosen,
+    declined,
     dismissed,
     selected,
     shape,
@@ -142,6 +143,7 @@ from trellis.harness.journal import Pending, call_key
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
+from trellis.harness.tools.ask import Field, ask_fields, ask_own
 from trellis.harness.tools.base import UNDECLARED, SideEffects
 from trellis.harness.tools.convert import SERVER
 from trellis.harness.tools.elicit import Elicited, elicited
@@ -1897,6 +1899,8 @@ class Attempt:
         paused on it, the agent stops here. Answered with words that are none of its options,
         the question is dismissed and the agent told their words (:meth:`_in_words`)."""
         args = self.calls[tool_call.tool_call_id].args  # its call's update came before it
+        if self._unasked(name):  # Kimi's fallback offers a skip: it tells its model so
+            return chosen(options, "reject_once")
         try:
             question, answer, picked = await _asked(self.runtime, options, name, args, tool_call)
         except Paused:
@@ -1916,16 +1920,22 @@ class Attempt:
         await self._stop()
 
     async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
-        """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``: every question
-        of the call, a field each), asked as the run's question (:func:`_filled`) on behalf of
-        the call it is for; the run paused on it, the agent stops here. Answered with words
+        """A form the agent asks its user to fill, asked as the run's question on behalf of
+        the call it is for: its own question tool's (Kimi's ``AskUserQuestion``: every question
+        of the call, a field each) as ``ask_user`` asks (:func:`_own_form`) — declined in a run
+        nobody is known to read (:meth:`_unasked`) — any other as an MCP server's
+        (:func:`_filled`). The run paused on it, the agent stops here. Answered with words
         that fill none of it, the form is cancelled and the agent told their words
         (:meth:`_in_words`)."""
         self._handles()
         known = self.calls[mode.tool_call_id]  # its call's update came before it
+        if self._unasked(known.name):
+            return declined()
+        own = self._questions(known.name)
         try:
             async with self.runtime.asking_within(known.name, known.args):
-                filled, answer = await _filled(self.runtime, message, mode)
+                asking = _own_form(known, mode) if own else _filled(self.runtime, message, mode)
+                filled, answer = await asking
         except Paused:
             await self._stop()
             return unfilled()
@@ -1982,6 +1992,16 @@ class Attempt:
         if self.boxed is None:  # the capability was not given: the agent asks out of turn
             raise RequestError.method_not_found("fs/terminal (this run has no sandbox)")
         return self.boxed
+
+    def _questions(self, name: str) -> bool:
+        """Whether a call of ``name`` is the agent's question to its user (its profile's
+        question tool: Kimi's ``AskUserQuestion``)."""
+        return self.profile is not None and name in self.profile.questions
+
+    def _unasked(self, name: str) -> bool:
+        """Whether a call of ``name`` is the agent's question in a run nobody is known to
+        read (``Runtime.attended``): declined, it never waits on nobody."""
+        return self._questions(name) and not self.runtime.attended
 
     def _refused(self, call: _Call | None) -> None:
         if call is not None:
@@ -2364,17 +2384,34 @@ async def _asked(
 ) -> tuple[str, Any, str | None]:
     """The agent's question to its user (:func:`_offers_a_choice`), asked as the run's: one
     question, what the agent shows with it (a question's words, a plan) and every option it
-    offers, each by its name, or words (:data:`IN_WORDS`). Asked on behalf of the agent's call
-    (``name``, ``args``: ``Runtime.asking_within``), which a session resumed after the pause is
-    told to make again. The question, the answer, and the id of the option it names (an
-    option handed back: ``answers.meant``), ``None`` for words. A pause propagates."""
+    offers, each by its name, or words — in ``ask_user``'s format (``tools.ask.ask_fields``).
+    Asked on behalf of the agent's call (``name``, ``args``: ``Runtime.asking_within``), which a
+    session resumed after the pause is told to make again. The question, the answer, and the id
+    of the option it names (an option handed back: ``answers.meant``), ``None`` for words. A
+    pause propagates."""
     question = _text(tool_call.content) or CHOOSE
     async with runtime.asking_within(name, args):
-        answer = await runtime.ask(
-            question, options=[option.name for option in options], expects=IN_WORDS[False]
-        )
+        offered = Field(name="", options=[option.name for option in options])
+        answer = await ask_fields(question, [offered], tool=name)
     picked = {option.name: option.option_id for option in options}.get(answer)
     return question, answer, picked
+
+
+async def _own_form(call: _Call, mode: Any) -> tuple[Any, Any]:
+    """A form of the agent's own question tool (Kimi's ``AskUserQuestion``: a field each
+    question of its ``call``, in order), asked as ``ask_user`` asks a framework's questions
+    (``tools.ask.ask_own``: each option with its description, all in one pause). The person's
+    answer as the agent takes it (its fields' values, by its form's own keys), and the answer;
+    ``None`` and their words when they pick none of the options. A pause propagates."""
+    from acp.schema import CreateElicitationResponse
+    from pydantic import TypeAdapter
+
+    answered = await ask_own(call.name, list(call.args.get("questions") or ()))
+    if isinstance(answered, str):
+        return None, answered
+    content = dict(zip(mode.requested_schema.properties or {}, answered.values(), strict=False))
+    given = {"action": "accept", "content": content}
+    return TypeAdapter(CreateElicitationResponse).validate_python(given), answered
 
 
 async def _filled(runtime: Runtime, message: str, mode: Any) -> tuple[Any, Any]:

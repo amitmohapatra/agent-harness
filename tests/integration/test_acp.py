@@ -42,7 +42,7 @@ from trellis.harness.adapters.acp import (
     kimi,
     native_spec,
 )
-from trellis.harness.agent import ASKING, NARROW_FROM
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.bridges import acp_live, live
 from trellis.harness.bridges.resumed import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.budget import Budget
@@ -118,10 +118,9 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert server["headers"][0]["name"] == "Authorization"
     # the harness tool needs no person: Kimi asks, the harness lets it through
     assert record["permissions"] == [{"title": "mcp__trellis__lookup", "answer": "approve_once"}]
-    # what Kimi is told of its folder's outputs/ (the user's), when to ask with its question
-    # tool (memory off: the note alone), then the user's message
-    told = ASKED_WITH.format(context=ASKING)
-    assert record["prompts"] == [f"{DELIVERS_HERE}\n{told}\ntell me about tea"]
+    # what Kimi is told of its folder's outputs/ (the user's), then the user's message: a run
+    # nobody is known to read has no question tool, so no note on when to ask
+    assert record["prompts"] == [f"{DELIVERS_HERE}\ntell me about tea"]
     assert record["initialize"][0]["terminal"] is False  # no sandbox: no terminal of ours
 
 
@@ -474,14 +473,75 @@ async def test_an_edited_call_is_made_again_with_its_arguments_and_runs(
     assert [p["answer"] for p in record["permissions"]] == ["reject", "approve_once"]
 
 
+@pytest.mark.usefixtures("attended")
 async def test_its_question_is_the_runs_question(harness: Harness, tmp_path: Path) -> None:
     """One question, sent as Kimi sends it to a client that takes forms (a form of one field
-    that picks): a choice of its options."""
+    that picks): a choice of its options, in ``ask_user``'s format."""
     script = [
         {"question": "Which colour?", "options": ["red", "blue"]},
         {"text": "picked {last}"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="asker")
+    asked = await agent.run("paint", user="u1")
+    assert asked.interrupt is not None
+    assert asked.interrupt.question == "Which colour?\n1. red\n2. blue\n(Pick one, or say another.)"
+    assert asked.interrupt.options == ["red", "blue"] and asked.interrupt.component == "ask_user"
+    assert asked.interrupt.payload == {"source": {"agent": "asker", "tool": "AskUserQuestion"}}
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="blue", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "picked blue"
+
+
+@pytest.mark.usefixtures("attended")
+async def test_a_single_question_form_keeps_its_options_descriptions(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A form of one question keeps what Kimi's form says of each option: its description,
+    and the one labelled "(Recommended)" recommended, first, with its description as why."""
+    asked = {"question": "Which db?", "header": "DB", "options": [
+        {"label": "mysql", "description": "what you run now"},
+        {"label": "pg (Recommended)", "description": "Postgres, for the JSON columns"}]}  # fmt: skip
+    script = [{"questions": [asked]}, {"text": "got {last}"}]
+    agent = harness.wrap(fake(tmp_path, script), id="described")
+    paused = await agent.run("set it up", user="u1")
+    assert paused.interrupt is not None
+    assert paused.interrupt.options == [
+        Option(value="pg (Recommended)", description="Postgres, for the JSON columns",
+               recommended=True),
+        Option(value="mysql", description="what you run now"),
+    ]  # fmt: skip
+    assert "2. mysql: what you run now" in paused.interrupt.question
+    answer = "pg (Recommended)"
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer=answer, reviewer="u1")
+    assert done.answer == 'got {"answers": {"Which db?": "pg (Recommended)"}}'
+
+
+@pytest.mark.parametrize("forms", ["1", "0"], ids=["form", "permission-request"])
+async def test_an_unattended_run_declines_its_question_in_its_own_words(
+    harness: Harness, tmp_path: Path, forms: str
+) -> None:
+    """A run nobody is known to read never waits on a question: Kimi's form is declined (its
+    question as a permission request skipped), and Kimi tells its model so in its own words;
+    the run goes on."""
+    script = [{"questions": QUESTIONS}, {"text": "got {last}"}]
+    agent = harness.wrap(fake(tmp_path, script, env={"FAKE_ACP_FORMS": forms}), id=f"un-{forms}")
+    done = await agent.run("set it up", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None
+    record = recorded(tmp_path)
+    if forms == "1":
+        assert [form["answer"] for form in record["forms"]] == [{"action": "decline"}]
+    else:
+        assert [p["answer"] for p in record["permissions"]] == ["q0_skip"]
+    assert done.answer == "got dismissed"
+
+
+async def test_a_form_of_an_agent_with_no_profile_is_asked_as_a_servers_form(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An agent the harness has no profile of names no question tool: its form is asked as an
+    MCP server's is (``tools.elicit``), a form of one field that picks a choice of its
+    values, whether a person is known to read the run or not."""
+    script = [{"question": "Which colour?", "options": ["red", "blue"]}, {"text": "picked {last}"}]
+    agent = harness.wrap(fake(tmp_path, script, profile=None), id="no-profile-form")
     asked = await agent.run("paint", user="u1")
     assert asked.interrupt is not None and asked.interrupt.question == "Which colour?"
     assert asked.interrupt.options == [
@@ -508,6 +568,7 @@ SUPPLIERS = ["SUP-04 (Lyon Mills)", "SUP-07 (Prato Knit)"]
     ],
     ids=["label-case-spacing", "exact", "part", "not", "ordinal", "neither"],
 )
+@pytest.mark.usefixtures("attended")
 async def test_an_answer_to_its_question_is_an_option_handed_back_or_the_users_words(
     harness: Harness, tmp_path: Path, forms: str, answer: str, read: str
 ) -> None:
@@ -524,6 +585,7 @@ async def test_an_answer_to_its_question_is_an_option_handed_back_or_the_users_w
     assert done.answer == read
 
 
+@pytest.mark.usefixtures("attended")
 async def test_several_picks_or_a_form_answered_in_words_reach_the_agent(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -571,25 +633,32 @@ QUESTIONS = [
 ]
 
 
+@pytest.mark.usefixtures("attended")
 async def test_every_question_of_a_call_is_asked_in_one_form(
     harness: Harness, tmp_path: Path
 ) -> None:
     """L47. Kimi asks every question of an ``AskUserQuestion`` call in one form of a client
     that takes forms (ACP's ``elicitation/create``), and only the first of a client that does
-    not. The harness takes forms: one question to the person, a field a question — its
-    options with their descriptions, several picks where the question takes several — and
-    every answer goes back."""
+    not. The harness takes forms: one question to the person in ``ask_user``'s format, a field
+    a question — its options with their descriptions, several picks where the question takes
+    several — and every answer goes back."""
     script = [{"questions": QUESTIONS}, {"text": "got {last}"}]
     agent = harness.wrap(fake(tmp_path, script), id="asks-two")
     asked = await agent.run("set it up", user="u1")
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
-    assert asked.interrupt.question == "Which db?\nWhich cloud?"
-    assert asked.interrupt.expects is not None
+    assert asked.interrupt.question == (
+        "2 questions:\n1. Which db? (pg: Postgres or mysql)\n2. Which cloud? (aws or gcp)\n"
+        "(Answer each, or say what to keep and what to change.)"
+    )
+    assert asked.interrupt.component == "ask_user" and asked.interrupt.expects is not None
     fields = asked.interrupt.expects["properties"]
-    assert fields["q0"]["title"] == "DB" and fields["q1"]["title"] == "Cloud"
-    assert fields["q0"]["oneOf"][0] == {"const": "pg", "title": "pg", "description": "Postgres"}
-    assert fields["q1"]["type"] == "array"
-    picked = {"q0": "pg", "q1": ["aws", "gcp"]}
+    assert fields["Which db?"]["oneOf"][0] == {
+        "const": "pg",
+        "title": "pg",
+        "description": "Postgres",
+    }
+    assert fields["Which cloud?"]["type"] == "array"
+    picked = {"Which db?": "pg", "Which cloud?": ["aws", "gcp"]}
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     assert done.answer == 'got {"answers": {"Which db?": "pg", "Which cloud?": "aws, gcp"}}'
@@ -598,6 +667,7 @@ async def test_every_question_of_a_call_is_asked_in_one_form(
     assert "your call to AskUserQuestion" in record["prompts"][-1]
 
 
+@pytest.mark.usefixtures("attended")
 async def test_a_question_asked_as_a_permission_request_offers_every_option_of_the_agents(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -607,7 +677,10 @@ async def test_a_question_asked_as_a_permission_request_offers_every_option_of_t
     script = [{"question": "Which colour?", "options": ["red", "blue"]}, {"text": "picked {last}"}]
     agent = harness.wrap(fake(tmp_path, script, env={"FAKE_ACP_FORMS": "0"}), id="asker-plain")
     asked = await agent.run("paint", user="u1")
-    assert asked.interrupt is not None and asked.interrupt.question == "Which colour?"
+    assert asked.interrupt is not None
+    assert asked.interrupt.question == (
+        "Which colour?\n1. red\n2. blue\n3. Skip\n(Pick one, or say another.)"
+    )
     assert asked.interrupt.options == ["red", "blue", "Skip"]
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="Skip", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "picked dismissed"
@@ -648,6 +721,7 @@ async def test_a_plan_is_reviewed_by_a_person_who_picks_among_every_option_the_a
     assert record["modes"] == ["plan"]  # still planning, and asking, when the resume continued it
 
 
+@pytest.mark.usefixtures("attended")
 async def test_a_question_answered_with_no_option_it_offers_is_skipped(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -989,8 +1063,8 @@ async def test_a_session_the_agent_no_longer_holds_is_run_again_from_its_prompt(
     [warning] = [e for e in events if e.data.get("code") == "acp_session"]
     assert "was not resumed" in warning.data["message"]
     # from the prompt, the journal's
-    told = ASKED_WITH.format(context=ASKING)  # when to ask: Kimi has its question tool
-    assert recorded(tmp_path)["prompts"][-1] == f"{DELIVERS_HERE}\n{told}\nrefund o4"
+    # nobody known to read the run: no question tool, no note on when to ask
+    assert recorded(tmp_path)["prompts"][-1] == f"{DELIVERS_HERE}\nrefund o4"
 
 
 async def test_an_agent_without_session_resume_loads_the_session(

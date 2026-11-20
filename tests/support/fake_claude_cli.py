@@ -25,7 +25,9 @@ permission rules go on (``--allowedTools``, then ``can_use_tool``). After a call
 error (``{"builtin": ..., "fails": "why"}`` scripts a built-in that fails). ``{"stall":
 seconds}`` is a step on which the "model" sends nothing for that long (then goes on). A call's
 ``"again": {...}`` is the arguments the "model" makes it with when a resumed session has it
-make that call again (a real model rarely repeats a call word for word).
+make that call again (a real model rarely repeats a call word for word). A call of a built-in in
+``--disallowedTools`` is the real CLI's error (:data:`NO_SUCH_TOOL`); a built-in's ``"title"`` and
+``"description"`` are what its permission request shows of it.
 
 Spending: every result carries usage (:data:`STEP_TOKENS` a step) and a cost
 (``FAKE_CLAUDE_COST`` a step); past ``--max-budget-usd`` the query stops with the real CLI's
@@ -130,6 +132,8 @@ INITIALIZED: dict[str, Any] = {
 }
 #: What a call whose hook failed in a matcher set to block is refused with.
 BLOCKED = {"permissionDecision": "deny", "permissionDecisionReason": "PreToolUse hook failed"}
+#: What the real CLI answers a call of a tool it does not offer (``--disallowedTools``).
+NO_SUCH_TOOL = "<tool_use_error>No such tool available: {tool}</tool_use_error>"
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
@@ -804,12 +808,19 @@ class Cli:
             self.mcp_ready.add(server)
 
     def permission(
-        self, name: str, args: dict[str, Any], tool_id: str, *, ask: bool = False
+        self,
+        name: str,
+        args: dict[str, Any],
+        tool_id: str,
+        *,
+        ask: bool = False,
+        shown: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """What the SDK's ``can_use_tool`` says about a call — not asked, as the real CLI does
         not ask it, for a tool in ``--allowedTools``, any tool under ``bypassPermissions``, an
         edit under ``acceptEdits`` and a plan presented under ``plan`` (allowed then), unless a
-        hook said ``ask``."""
+        hook said ``ask``. The request carries what the CLI shows its user of the call
+        (``shown``: the prompt's ``title`` and ``description``)."""
         allowed = (argument("--allowedTools") or "").split(",")
         mode = argument("--permission-mode")
         if argument("--permission-prompt-tool") != "stdio" or (
@@ -848,6 +859,7 @@ class Cli:
                 "permission_suggestions": suggested,
                 "tool_use_id": named(tool_id),
                 **{k: v for k, v in self.working.items() if k == "agent_id"},
+                **(shown or {}),
             }
         )
         record = os.environ.get("FAKE_CLAUDE_RECORD")
@@ -1203,9 +1215,16 @@ class Cli:
         self.result(session, tool_id, content)
 
     def allowed(
-        self, session: str, name: str, args: dict[str, Any], tool_id: str
+        self,
+        session: str,
+        name: str,
+        args: dict[str, Any],
+        tool_id: str,
+        *,
+        shown: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """What the ``PreToolUse`` hooks, then the permission rules, decide about a call."""
+        """What the ``PreToolUse`` hooks, then the permission rules, decide about a call
+        (``shown``: what its permission request shows of it)."""
         hooked = self.pre_tool_use(session, name, args, tool_id)
         decided = hooked.get("hookSpecificOutput") or {}
         if decided.get("permissionDecision") == "deny" or hooked.get("continue") is False:
@@ -1221,7 +1240,11 @@ class Cli:
             return {"behavior": "allow", "updatedInput": decided.get("updatedInput", args)}
         given = decided.get("updatedInput", args)
         asked = self.permission(
-            name, given, tool_id, ask=planned or decided.get("permissionDecision") == "ask"
+            name,
+            given,
+            tool_id,
+            ask=planned or decided.get("permissionDecision") == "ask",
+            shown=shown,
         )
         return {"updatedInput": given, **asked}
 
@@ -1266,7 +1289,16 @@ class Cli:
         call = [{"type": "tool_use", "id": tool_id, "name": name, "input": args}]
         if not quiet:
             send(assistant(session, call, parent=parent))
-        permission = self.allowed(session, name, args, tool_id)
+        if builtin in (argument("--disallowedTools") or "").split(","):
+            # the real CLI offers its model no disallowed tool: a call of one is an error
+            content = [{"type": "text", "text": NO_SUCH_TOOL.format(tool=builtin)}]
+            if not quiet:
+                self.result(session, tool_id, content, parent)
+            self.denied = True
+            return content[0]["text"], False, False
+        # what the CLI shows its own user of the call when it asks (``title``, ``description``)
+        shown = {k: item[k] for k in ("title", "description") if k in item}
+        permission = self.allowed(session, name, args, tool_id, shown=shown)
         allowed = permission.get("behavior", "allow") == "allow"
         error = not allowed
         ran = permission.get("updatedInput", args)

@@ -489,6 +489,9 @@ async def test_one_field_is_the_single_question_it_always_was(harness: Harness) 
     for n, args in enumerate((flat, field)):
         async with served(asking(harness, args, f"ask-one-{n}")) as http:
             [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        # who asked is each agent's own
+        assert entry["metadata"].pop("payload") == {"source": {"agent": f"ask-one-{n}",
+                                                               "tool": "ask_user"}}  # fmt: skip
         seen.append({k: entry[k] for k in ("reason", "message", "responseSchema", "metadata")})
     assert seen[0] == seen[1] and seen[0]["reason"] == "choice"
     # the recommended one first, as for any choice
@@ -528,6 +531,31 @@ async def test_ask_user_names_the_apps_own_controls_as_the_ones_to_call(
              (with_tools["ask_user"], plain)]  # fmt: skip
     assert kinds[0] == f"{kinds[1]} {said}"  # and where the kind of answer is chosen
     assert "controls" not in json.dumps(plain)
+
+
+async def test_every_question_names_who_asked_it(harness: Harness) -> None:
+    """The one question format says who asked: the run's agent and the tool it asked with
+    (the payload's ``source``), on every surface."""
+    agent = asking(harness, {"question": "Which size?", "options": ["S", "L"]}, "ask-source")
+    paused = await agent.run("order", user="u1")
+    assert paused.interrupt is not None
+    assert paused.interrupt.payload == {"source": {"agent": "ask-source", "tool": "ask_user"}}
+
+
+def test_an_options_description_is_said_on_every_surface() -> None:
+    """An option a framework's own question describes keeps its description: in a form's
+    schema (a titled value), in what an app's control gets, and in what plain chat reads."""
+    from trellis.harness.tools.ask import Field
+
+    region = Field(name="region", options=["north", "west"], descriptions={"north": "the closest"})
+    assert region.in_form()["oneOf"] == [
+        {"const": "north", "title": "north", "description": "the closest"},
+        {"const": "west", "title": "west"},
+    ]
+    assert region.shown()["descriptions"] == {"north": "the closest"}
+    assert region.line("Region") == "Region (north: the closest or west)"
+    # the model's own ask_user takes no descriptions: they are a framework's question's
+    assert "descriptions" not in json.dumps(ask_user().tool.spec.input_schema)
 
 
 def test_a_forms_option_field_lists_its_recommended_option_first() -> None:
