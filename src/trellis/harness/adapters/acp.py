@@ -362,6 +362,9 @@ class Profile:
     questions: frozenset[str] = frozenset()
     routed: Callable[[dict[str, str], Runtime, str | None], None] | None = None
     usage: Callable[[Mapping[str, str], str], UsageLog] | None = None
+    #: the programs it runs that must be on its ``PATH``, each with how to install it: checked
+    #: before it starts (:func:`missing`), so it neither fails at its first use nor downloads one
+    needs: Mapping[str, str] = dataclasses.field(default_factory=dict)
     #: the variable that names where the agent keeps its state (sessions, config, skills), set
     #: to a home of the run's own when the run gives it one (a sandboxed run)
     home: str | None = None
@@ -707,7 +710,23 @@ KIMI: Final = Profile(
     homed=kimi_home,
     label=KIMI_CODE,
     connects=True,
+    # its Glob: without it, Kimi Code downloads it from its own CDN at the first Glob, or fails
+    needs={"rg": "ripgrep (apt-get install -y ripgrep, or brew install ripgrep)"},
 )
+
+
+def missing(profile: Profile | None, env: Mapping[str, str]) -> str | None:
+    """What ``profile``'s agent needs on its ``PATH`` (in ``env``) and lacks, said with how to
+    install it; ``None`` when nothing is missing."""
+    lacking = [
+        f"{program}: {how}"
+        for program, how in (profile.needs if profile is not None else {}).items()
+        if shutil.which(program, path=env.get("PATH", os.defpath)) is None
+    ]
+    if not lacking:
+        return None
+    name = profile.label if profile is not None and profile.label else "the agent"
+    return f"{name} needs on its PATH, and it is not there: {'; '.join(lacking)}"
 
 
 # --------------------------------------------------------------------------- the target
@@ -1180,6 +1199,8 @@ class ACPAdapter(Keeps):
 
             return _harness_server(mcp.relayed(tools, relay.call), relay)
 
+        if (lacking := missing(profile, env)) is not None:
+            raise ConfigurationError(lacking)
         await session.start(spawned, served if tools is not None else None)
         try:
             init = await session.answered(

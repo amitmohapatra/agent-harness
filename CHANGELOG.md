@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: Kimi needs ripgrep where it runs, checked before it starts
+
+Kimi's `Glob` runs ripgrep (`rg`); without it, Kimi Code downloaded it from its own CDN at the
+first `Glob`, or that call failed. A run whose Kimi has no `rg` on its `PATH` now ends at once,
+saying what to install (`apt-get install -y ripgrep`, `brew install ripgrep`; a Docker image's
+line in [docs/frameworks/kimi.md](docs/frameworks/kimi.md)), and Kimi is not started.
+
 ### Added: a run waiting on a person is listed, and agent-runs' floor is the harness's too
 
 `list_schedules` says what a schedule's last run is `waiting` for, while it waits on a

@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -143,6 +144,25 @@ async def test_kimi_calls_a_harness_tool_and_answers(
     own = set(KIMI_BUILTINS) | set(KIMI_OUTLIVES_THE_TURN)  # listed by Kimi, turned off
     assert set(offered) - {t for t in offered if t.startswith("mcp__")} <= own
     assert "what about tea?" in endpoint.said()
+
+
+async def test_kimi_without_ripgrep_on_its_path_is_refused_before_it_starts(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """No ripgrep where Kimi runs: the run ends at once saying what to install, and Kimi is not
+    started (it would download ripgrep from its own CDN at its first Glob, or fail there)."""
+    bare = tmp_path / "bin"
+    bare.mkdir()
+    node = Path(shutil.which("node") or "/usr/bin/node").parent  # Kimi Code runs on node
+    target = kimi_target(endpoint, tmp_path, env={"PATH": f"{bare}:{node}"})
+    if shutil.which("rg", path=str(node)) is not None:
+        pytest.skip(f"{node} holds ripgrep: no PATH here lacks it")
+    result = await harness.wrap(target, id="kimi-no-rg").run("find the configs", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert (
+        "ripgrep" in result.error.message and "apt-get install -y ripgrep" in result.error.message
+    )
+    assert endpoint.requests == []  # Kimi never asked its model anything
 
 
 async def test_a_schedule_kimi_could_not_keep_is_refused_by_kimi_itself(

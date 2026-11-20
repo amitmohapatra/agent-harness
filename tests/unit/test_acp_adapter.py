@@ -266,3 +266,18 @@ async def test_a_request_still_being_answered_as_the_attempt_ends_is_given_up() 
     attempt.handling |= {answering, answered}
     await attempt.stopped()
     assert answering.cancelled() and not answered.cancelled()
+
+
+def test_kimi_is_refused_without_ripgrep_on_its_path_never_left_to_download_it(
+    tmp_path: Path,
+) -> None:
+    """Kimi's Glob runs ripgrep (``rg``); without it on the PATH Kimi Code downloads it from its
+    own CDN at the first Glob, or fails there. The harness says what to install, before the run."""
+    found = tmp_path / "with"
+    found.mkdir()
+    (found / "rg").write_text("#!/bin/sh\n")
+    (found / "rg").chmod(0o755)
+    assert acp.missing(acp.KIMI, {"PATH": str(found)}) is None
+    said = acp.missing(acp.KIMI, {"PATH": str(tmp_path / "without")})
+    assert said is not None and "ripgrep" in said and "apt-get install -y ripgrep" in said
+    assert acp.missing(acp.Profile(name="other", builtins={}), {"PATH": ""}) is None
