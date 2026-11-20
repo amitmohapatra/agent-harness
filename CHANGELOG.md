@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a failed run says why in the chat
+
+A run that failed wrote its turn with status `ERROR` and no reason, so "why did my report
+fail?" had no answer in the chat. Its record now keeps the error's message (its first 300
+characters, `ERROR_SAID`), which the memory service's steps list says, as any "why" is
+answered: a fired run's failure among them.
+
 ### Added: how a condition reports, and what a schedule keeps of its runs
 
 `schedule_task` takes `report` for a condition: `until_clears` (the default, as before),

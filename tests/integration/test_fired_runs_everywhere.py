@@ -126,3 +126,36 @@ async def test_a_fired_run_is_audited_remembered_and_reads_its_chat(
     # conversation: the fired run read the chat it was set in
     if seen:  # a function target has no model: what it reads is its input, checked elsewhere
         assert ASKED in _read(seen[0]), "the fired run did not read the chat it was set in"
+
+
+async def test_a_failed_fired_run_leaves_its_error_in_the_chat_for_explain(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A question like "why did my stock alert fail?" is answered as any "why" is, from the
+    run's own record in the chat (``explain``): a fired run that fails writes its turn to the
+    chat's conversation, and that turn says it failed and why, in the error's own words."""
+    h, chats = memory_harness, []
+
+    async def desk(input: Any, agent: Any) -> str:
+        chats.append(input)
+        if len(chats) == 1:
+            await agent.tools.call("schedule_task", **WATCH)
+            return "I will check it every day at 9:00."
+        raise RuntimeError("Gmail: sign-in expired")
+
+    agent = h.wrap(desk, id="desk")
+    said = await agent.run(ASKED, user="ada", thread=THREAD)
+    assert said.status is RunStatus.SUCCESS, said.error
+    runs = h.runs
+    assert isinstance(runs, LocalRuns)
+    [schedule] = runs._schedules.values()
+    await h.writes.drain()
+    memory_service.calls.clear()
+
+    fired = await runs.schedules.fire(schedule.schedule_id)
+    await h.worker([agent]).run_once()
+    record = await runs.get(fired.run_id)
+    assert record is not None and record.status is RunStatus.ERROR
+    await h.writes.drain()
+    written = json.dumps([c.body for c in memory_service.named("messages")], default=str)
+    assert "Gmail: sign-in expired" in written, written[:3000]

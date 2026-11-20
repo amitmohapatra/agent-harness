@@ -1492,7 +1492,7 @@ async def _failed(
 
     await events.settle(last, lambda: _ended(agent, runtime, status, error=error))
     metrics.run_finished(runtime.agent_id, outcome.value)
-    await agent.recorded_run(runtime, _transcript(runtime, extracted, status))
+    await agent.recorded_run(runtime, _transcript(runtime, extracted, status, error=error))
     await agent.recorded_outcome(runtime, status, error.message)
     return Result(run_id=runtime.run_id, status=status, error=error)
 
@@ -1609,10 +1609,17 @@ async def _recorded(
         log.info("run %s was already recorded as %s", run_id, record.status.value)
 
 
-def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus) -> list[Said]:
+def _transcript(
+    runtime: Runtime,
+    extracted: Extracted | None,
+    status: RunStatus,
+    *,
+    error: AgentError | None = None,
+) -> list[Said]:
     """The attempt's messages: the question, then what the agent said - its tool calls and
     their results too, where the framework reports them (its answer, when the framework
-    reports no transcript of its own) - with the run's record of them (:func:`_with_facts`)."""
+    reports no transcript of its own) - with the run's record of them (:func:`_with_facts`),
+    a failed run's ``error`` among it."""
     said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
@@ -1636,8 +1643,11 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
     messages = identified(
         [*asked, *steered, *said], runtime, answered=status is not RunStatus.PAUSED
     )
-    return _with_facts(messages, runtime, status)
+    return _with_facts(messages, runtime, status, error)
 
+
+#: The most of a failed run's error message its record keeps for the chat (the steps list).
+ERROR_SAID: Final = 300
 
 #: What a person's decision on a tool call is, in the run record's words.
 DECIDED: Final = {
@@ -1648,14 +1658,17 @@ DECIDED: Final = {
 }
 
 
-def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[Said]:
+def _with_facts(
+    said: list[Said], runtime: Runtime, status: RunStatus, error: AgentError | None = None
+) -> list[Said]:
     """``said`` with what the run's journal records of it (``Said.facts``, plain values: the
     service's custom metadata nests two levels at most): each tool result its call's status,
     seconds and sources (the trajectory's outcome of the same call, matched by content in
     order, as the journal matches calls), when it was fetched (``Runtime.fetched``: the one
     place a fetch time is kept, ``snapshots``) and how long its tool says its value stays
-    current, and the last message the run's status, its seconds
-    so far and the approvals given — what the memory service's steps list of the
+    current, and the last message the run's status, its seconds so far, the approvals given
+    and, a run that failed, why (:data:`ERROR_SAID` of its error's message: "why did my report
+    fail?" is answered from it, as any "why" is) — what the memory service's steps list of the
     turn shows (not when it is a tool result: a run stopped at a call keeps that call's own).
     A result no recorded call matches carries nothing."""
     journal = runtime.replay.journal
@@ -1691,6 +1704,8 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
         return out
     began = runtime.started_at
     run: dict[str, Any] = {"status": status.value}
+    if error is not None and error.message:
+        run["error"] = error.message[:ERROR_SAID]
     if began is not None:
         run["seconds"] = round((snapshots.now() - began).total_seconds(), 3)
     approvals = [
