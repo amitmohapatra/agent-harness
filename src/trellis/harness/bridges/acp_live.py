@@ -184,6 +184,14 @@ def unfilled() -> Any:
     return CancelElicitationResponse(action="cancel")
 
 
+def declined() -> Any:
+    """The answer to a form the agent asked its user to fill that nobody is there to answer
+    (ACP's ``decline``): the agent tells its model so, in its own words, and goes on."""
+    from acp.schema import DeclineElicitationResponse
+
+    return DeclineElicitationResponse(action="decline")
+
+
 async def _logged_in_time(said: Callable[[], Awaitable[bool]], seconds: float) -> bool:
     """Whether Kimi's log ``said`` so within ``seconds``, asked again as it is written: Kimi
     logs an event after it answers for it — a moment after, long after on a busy machine. A

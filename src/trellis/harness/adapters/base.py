@@ -139,6 +139,9 @@ class NativePause:
     #: the JSON Schema of the answer the framework takes (LangGraph's
     #: ``interrupt(response_schema=...)``), which it checks the answer against
     schema: dict[str, Any] | None = None
+    #: the agent's plan when it paused, as its graph's state keeps it (``todos``: LangChain's
+    #: ``TodoListMiddleware``, Deep Agents' ``write_todos``)
+    plan: list[Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

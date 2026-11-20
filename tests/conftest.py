@@ -163,6 +163,16 @@ def narrowing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def attended(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every run not fired by a schedule is one a person reads and answers
+    (``Runtime.attended``), as a chat front end's is: the tests of what a framework's own
+    question asks, which an unattended run never asks."""
+    from trellis.harness.runtime import Runtime
+
+    monkeypatch.setattr(Runtime, "attended", property(lambda runtime: runtime.scheduled is None))
+
+
+@pytest.fixture
 def writes_unasked(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``write`` runs announced, unasked: the tests of what a write does once it runs (its
     retries, a crash around it, its progress saves, its stream), whose subject is not whether

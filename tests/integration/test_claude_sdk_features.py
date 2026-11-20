@@ -44,6 +44,7 @@ from trellis.contracts import RunEventType, RunStatus, ToolCall
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
+    QUESTION_TOOL,
     UNHELD_AGENTS,
     ClaudeAdapter,
 )
@@ -193,9 +194,10 @@ async def test_the_options_reach_the_cli_as_the_sdk_sends_them(
     switches = ("--debug-to-stderr", "--include-partial-messages", "--include-hook-events")
     assert all(name in argv for name in (*switches, "--strict-mcp-config"))
     assert "--system-prompt" not in argv  # the preset stays Claude Code's own prompt
-    # the team's, then the tools whose work outlives a query
+    # the team's, then the tools whose work outlives a query, and the question tool of a run
+    # nobody is known to read
     assert flag(argv, "--disallowedTools") == ",".join(
-        ["WebFetch", *OUTLIVES_THE_QUERY, *UNHELD_AGENTS]
+        ["WebFetch", *OUTLIVES_THE_QUERY, *UNHELD_AGENTS, QUESTION_TOOL]
     )
     servers = json.loads(cli["mcp_config"])["mcpServers"]
     assert servers["erp"] == {"type": "http", "url": "http://127.0.0.1:9/mcp"}

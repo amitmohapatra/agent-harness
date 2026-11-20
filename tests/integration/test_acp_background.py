@@ -490,6 +490,7 @@ async def test_a_session_kept_for_the_next_turn_leaves_its_files_when_the_harnes
     assert (kimi_home_of(USER) / "config.toml").exists()
 
 
+@pytest.mark.usefixtures("attended")
 async def test_a_paused_turns_session_keeps_its_files_when_the_harness_closes(
     tmp_path: Path,
 ) -> None:

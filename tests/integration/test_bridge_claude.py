@@ -19,7 +19,6 @@ from tests.support.journals import journal_of
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus
-from trellis.harness.agent import ASKING
 from trellis.harness.bridges.claude import JournalSessions, _said_local
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
@@ -204,9 +203,9 @@ async def test_a_memory_service_that_is_down_leaves_the_prompt_without_context(
     memory_service.fail.add("context")
     agent = memory_harness.wrap(machine(tmp_path, "one", [{"text": "[{context}]"}]), id="down")
     events = [e async for e in agent.stream("hi", user="ada")]
-    # no context of memory's: when to ask (Claude has its question tool), and what Claude is
-    # told of outputs/ (no system prompt to say it)
-    assert events[-1].data["result"] == f"[{ASKING}\n\n{DELIVERS_HERE}]"
+    # no context of memory's, no note on when to ask (a run nobody is known to read has no
+    # question tool): what Claude is told of outputs/ alone (no system prompt to say it)
+    assert events[-1].data["result"] == f"[{DELIVERS_HERE}]"
     assert [e.data["code"] for e in events if e.data.get("name") == "warning"] == [
         "memory_unavailable"
     ]

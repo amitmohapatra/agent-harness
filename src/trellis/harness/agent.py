@@ -1263,8 +1263,10 @@ class Agent:
 
     def offers_a_question(self, runtime: Runtime) -> bool:
         """Whether the run's model has a question tool: ``ask_user`` among the run's tools, or
-        its framework's own (``Adapter.asks``: Claude's and Kimi's ``AskUserQuestion``)."""
-        return ASK_USER in runtime.toolbox or self.adapter.asks(self.target)
+        — in a run a person is known to read (``Runtime.attended``) — its framework's own
+        (``Adapter.asks``: Claude's and Kimi's ``AskUserQuestion``, which an unattended run
+        does not offer or declines)."""
+        return ASK_USER in runtime.toolbox or (runtime.attended and self.adapter.asks(self.target))
 
     async def recalled(self, runtime: Runtime) -> None:
         """With memory off (or unreachable where it replays the conversation), the

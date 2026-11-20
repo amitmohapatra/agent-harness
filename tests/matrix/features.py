@@ -367,6 +367,10 @@ async def answered_in_words(w: World) -> None:
     # each answer is a run of its own: Kimi's (a process each) takes two of them within the
     # cell's time, an option handed back and words that name one (every answer: test_acp.py)
     answers = [IN_WORDS[0], IN_WORDS[2]] if w.adapter == "kimi" else IN_WORDS
+    if w.adapter in ("claude", "kimi"):  # their own question is asked in a run a person reads
+        from trellis.harness.runtime import Runtime
+
+        w.monkeypatch.setattr(Runtime, "attended", property(lambda run: run.scheduled is None))
     for n, (given, read) in enumerate(answers):
 
         def answer(interrupt: Any, given: str = given) -> tuple[str, Any]:
@@ -769,11 +773,11 @@ async def abstains(w: World) -> None:
 async def asking_note(w: World) -> None:
     """When and how to ask: the note reaches the model with the memory context, and — memory
     on or off — wherever the model has a question tool (``ask_user``, offered by itself to a
-    chat front end's run; Claude's and Kimi's own ``AskUserQuestion``), said once; with
-    neither, never."""
+    chat front end's run; Claude's and Kimi's own ``AskUserQuestion``, in a run a person reads:
+    a chat front end's), said once; with neither, never."""
     d = Desk()
     o = (await w.go([d.lookup()], [("lookup", {"topic": "contact"})])).succeeded()
-    offered = w.adapter in ("claude", "kimi") or any(
+    offered = (w.adapter in ("claude", "kimi") and w.mode == "agui") or any(
         "ask_user" in names for names in w.models.offered()
     )
     if w.on or offered:
@@ -1425,6 +1429,13 @@ FEATURES: Final[list[Feature]] = [
         "tools=[ask_user()]; Claude's and Kimi's own question tool",
         answered_in_words,
         way2=NA("an agent's question asks through a harness run's pause"),
+        cells={
+            (adapter, None, "schedule"): NA(
+                "a fired run never waits on a question: Claude's is not offered, Kimi's is "
+                "declined (test_claude.py, test_acp.py)"
+            )
+            for adapter in ("claude", "kimi")
+        },
     ),
     Feature(
         "F36a",

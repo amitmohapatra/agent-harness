@@ -153,7 +153,7 @@ from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.telemetry import gateway_headers, lasting_headers
 from trellis.harness.tools import bridge
-from trellis.harness.tools.ask import ask_question
+from trellis.harness.tools.ask import ask_own
 from trellis.harness.tools.base import UNDECLARED, SideEffects
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
@@ -284,10 +284,10 @@ PLAN_WAITS: Final = (
 #: risk or an ``approve_when``), never a question to the run's user; published with no risk of
 #: the harness's, so the catalog's is an administrator's.
 CLAUDE_NETWORK: Final = frozenset({"WebFetch", "WebSearch"})
-#: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
-#: ends a recommended option's label with.
+#: Claude Code's question to its user, asked as the run's (:func:`_answered`); disallowed in a
+#: run nobody is known to read (``Runtime.attended``: :func:`_disallowed`), which never waits on
+#: a question.
 QUESTION_TOOL: Final = "AskUserQuestion"
-RECOMMENDED: Final = "(Recommended)"
 #: What Claude Code is called when a person is asked about a call it asks about.
 CLAUDE_CODE: Final = "Claude Code"
 #: Claude Code's built-in tools whose work needs the CLI to go on running after the query: a
@@ -1524,16 +1524,20 @@ def routed_env(
 def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
     those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), those that start agents
-    no run holds (:data:`UNHELD_AGENTS`), and those the tool hints narrow away (Claude's
-    built-ins and MCP tools too, for the whole query; never its skills slot,
-    :data:`SKILLS_SLOT`)."""
+    no run holds (:data:`UNHELD_AGENTS`), its question to its user in a run nobody is known to
+    read (:data:`QUESTION_TOOL`: a process kept for the conversation is started anew, its
+    options differing), and those the tool hints narrow away (Claude's built-ins and MCP tools
+    too, for the whole query; never its skills slot, :data:`SKILLS_SLOT`)."""
     given = list(denied or ())
     narrowed = (
         [n for n in runtime.native if n != SKILLS_SLOT and not runtime.offers(n)]
         if runtime.offered is not None
         else []
     )
-    hidden = [n for n in (*OUTLIVES_THE_QUERY, *UNHELD_AGENTS, *narrowed) if n not in given]
+    unasked = () if runtime.attended else (QUESTION_TOOL,)
+    hidden = [
+        n for n in (*OUTLIVES_THE_QUERY, *UNHELD_AGENTS, *unasked, *narrowed) if n not in given
+    ]
     return [*given, *dict.fromkeys(hidden)]
 
 
@@ -1778,7 +1782,7 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
     the deployment's decision, announced in the hook) and the network the catalog let through
     (:data:`CLAUDE_NETWORK`), and a harness tool (its hook decided it, and the bridge governs
     its call: Claude Code asks about one in plan mode all the same), and any other asks a
-    person (``bridge.asked``); Claude's
+    person (``bridge.asked``, in the CLI's own words: :func:`_prompt`); Claude's
     question to its user is the run's (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
@@ -1823,7 +1827,9 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
             try:
                 # the same helper's work as the call's PreToolUse said (``Steps.helped``)
                 with helpers.working(steps.helped.get(this)):
-                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this, kept=True)
+                    decided = await bridge.asked(
+                        spec, args, CLAUDE_CODE, call_id=this, kept=True, said=_prompt(context)
+                    )
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 decided = None
             if decided is None:
@@ -1841,28 +1847,25 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
 
 async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     """``AskUserQuestion``'s input with the person's ``answers`` (by question, the label picked,
-    several joined with ", "), each question asked as ``ask_user`` asks it: its options, several
-    picks with ``multiSelect``, the one labelled :data:`RECOMMENDED` recommended (its
-    description why), another answer in words. The call the resumed session makes again in
-    other words is the one the person answered (``Replay.made``): Claude reads its questions
-    with their answers."""
-    answers: dict[str, str] = {}
+    several joined with ", "; words that pick none of the options, every question's), its
+    questions asked as ``ask_user`` asks, all in one pause (``tools.ask.ask_own``). The call the
+    resumed session makes again in other words is the one the person answered
+    (``Replay.made``): Claude reads its questions with their answers."""
     # the answers it reads are this call's: read again when it is made again after a pause
     async with runtime.asking_within(QUESTION_TOOL, args) as made:
-        for asked in made.args.get("questions") or ():
-            options = [o for o in asked.get("options") or () if o.get("label")]
-            best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
-            picked = await ask_question(
-                asked["question"],
-                [str(o["label"]) for o in options],
-                multiple=bool(asked.get("multiSelect")),
-                recommended=best.get("label"),
-                why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
-            )
-            answers[asked["question"]] = (
-                ", ".join(picked) if isinstance(picked, list) else str(picked)
-            )
-    return {**made.args, "answers": answers}
+        questions = list(made.args.get("questions") or ())
+        answered = await ask_own(QUESTION_TOOL, questions)
+    if isinstance(answered, str):
+        answered = {str(q["question"]): answered for q in questions}
+    joined = {q: ", ".join(a) if isinstance(a, list) else str(a) for q, a in answered.items()}
+    return {**made.args, "answers": joined}
+
+
+def _prompt(context: Any) -> str | None:
+    """What the CLI shows its own user of a call it asks about (its permission request's
+    ``title`` and ``description``), each a sentence; ``None`` when it says neither."""
+    said = (getattr(context, "title", None), getattr(context, "description", None))
+    return " ".join(f"{part.rstrip('. ')}." for part in said if part) or None
 
 
 def _spec(runtime: Runtime, name: str) -> ToolSpec:

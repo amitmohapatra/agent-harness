@@ -38,6 +38,7 @@ from trellis.harness.adapters.claude import (
     MCP_OUTPUT_ENV,
     MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
+    QUESTION_TOOL,
     UNHELD_AGENTS,
     ClaudeAdapter,
     ClaudeRunError,
@@ -218,6 +219,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         model_ended=lambda key: watched.append(("ended", key)),
         raise_stopped=lambda: None,  # no call stopped by the process's end
         offered=None,
+        attended=False,
         tenant="default",
         user="u1",
     )
@@ -246,7 +248,8 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
-    assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
+    # nothing narrowed; nobody reads the run, so its question tool is not offered
+    assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS, QUESTION_TOOL]
     # the harness keeps large results; the user's own Claude folder, no auto memory
     assert sent.env == {
         MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS),
