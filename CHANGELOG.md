@@ -10,9 +10,9 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 "In 2 hours" is two real hours across a clock change, and a delay before now or past a year
 is said back (it fired next year, or early). An end before a schedule's first run is said
 back instead of a schedule that never runs. A time of day the autumn change repeats fires
-once in `LocalRuns`, as in agent-runs. When the user's words fit several schedules (`ids`),
-the user is asked even if only one is theirs now, so a pick whose schedule went before the
-run resumed is asked again, never applied to another. A fired run nobody answered, ended
+once in `LocalRuns`, as in agent-runs. A pick among schedules the user's words fit (`ids`)
+whose schedule went before the run resumed is never applied to another: with several left
+the user is asked again, with one the pick is said to be gone. A fired run nobody answered, ended
 `TIMEOUT` by the store, counts as a failed run in a row (`TRELLIS_SCHEDULE_PAUSE_AFTER_
 FAILURES`): the next run counts it, and the one that pauses the schedule says so in the chat.
 

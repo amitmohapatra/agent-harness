@@ -20,6 +20,7 @@ from tests.integration.test_schedules import (
     fire,
     local,
     only,
+    picked,
     planned,
     said,
     seeded,
@@ -172,9 +173,8 @@ async def test_the_same_user_in_another_tenant_sees_and_changes_none_of_it() -> 
 
 
 async def test_ids_naming_another_users_schedule_offer_only_the_users_own() -> None:
-    """The model passing ids that fit the words, one of them someone else's: that one is
-    neither offered nor changed; the user's one left is asked about (the words fit several),
-    and changed once picked."""
+    """The model passing ids that fit the words, one of them someone else's: that one is not
+    offered nor changed; the user's one left is changed with no question."""
     chat = Chat()
     async with Harness(config=Settings()) as h:
         agent = h.wrap(chat, id="desk")
@@ -183,14 +183,8 @@ async def test_ids_naming_another_users_schedule_offer_only_the_users_own() -> N
         await said(agent, chat, "bob", ("schedule_task", {"task": "stock", "when": "0 7 * * *"}))
         [theirs] = [s for s in local(h)._schedules if s != mine]
         for name in ("update_schedule", "cancel_schedule"):
-            chat.calls.append((name, {"id": theirs, "ids": [theirs, mine], "enabled": False}))
-            result = await agent.run("change it", user="ada", thread="c-1")
-            assert result.interrupt is not None, result
-            assert result.interrupt.option_values == [mine]
-            done = await agent.resume(
-                result.interrupt.interrupt_id, "answer", answer=mine, reviewer="ada"
-            )
-            assert done.status is RunStatus.SUCCESS, done
+            args = {"id": theirs, "ids": [theirs, mine], "enabled": False}
+            await said(agent, chat, "ada", (name, args))
             assert local(h)._schedules[theirs].enabled is True
         assert mine not in local(h)._schedules
 
@@ -306,10 +300,11 @@ def test_a_time_the_autumn_change_repeats_fires_once_and_hourly_every_real_hour(
     assert fires == times
 
 
-async def test_a_pick_whose_schedule_went_meanwhile_asks_again_never_acts_on_another() -> None:
-    """The user's words fit two and they pick one; before the run resumes, that one is gone
-    (cancelled elsewhere, or a one-time run ended it). The one left is not what they picked:
-    they are asked again about it, and nothing is changed meanwhile."""
+async def test_a_pick_whose_schedule_went_meanwhile_is_never_taken_for_another() -> None:
+    """The user's words fit several and they pick one; before the run resumes, that one is
+    gone (cancelled elsewhere, or a one-time run ended it). The one left is not what they
+    picked: it is said to be gone and nothing changes; with several left they are asked
+    again."""
     async with Harness(config=Settings()) as h:
         for name in ("update_schedule", "cancel_schedule"):
             a, b = await seeded(
@@ -320,11 +315,20 @@ async def test_a_pick_whose_schedule_went_meanwhile_asks_again_never_acts_on_ano
             interrupt = await asked(agent)
             assert [o.value for o in interrupt.options] == [a, b]
             await local(h).schedules.delete(a)
-            again = await agent.resume(interrupt.interrupt_id, "answer", answer=a, reviewer="ada")
-            assert again.status is RunStatus.PAUSED and again.interrupt is not None, again
-            assert [o.value for o in again.interrupt.options] == [b]
-            kept = local(h)._schedules[b]
-            assert kept.enabled is True
+            said_ = await picked(agent, interrupt, a)
+            assert f"No schedule {a} of yours now" in said_, said_
+            assert local(h)._schedules[b].enabled is True
+        a, b, c = await seeded(
+            h, "three", WATCH, {"task": "SKU-2", "when": "0 6 * * *"},
+            {"task": "SKU-3", "when": "0 7 * * *"},
+        )  # fmt: skip
+        agent = await planned(h, ("cancel_schedule", {"id": a, "ids": [a, b, c]}), name="three")
+        interrupt = await asked(agent)
+        await local(h).schedules.delete(a)
+        again = await agent.resume(interrupt.interrupt_id, "answer", answer=a, reviewer="ada")
+        assert again.status is RunStatus.PAUSED and again.interrupt is not None, again
+        assert [o.value for o in again.interrupt.options] == [b, c]
+        assert {b, c} <= set(local(h)._schedules)
 
 
 async def test_runs_nobody_answered_count_as_failures_in_a_row_and_pause_the_schedule() -> None:

@@ -1262,21 +1262,29 @@ def _theirs(runtime: Runtime, schedule: Schedule) -> bool:
 
 async def _which(runtime: Runtime, args: dict[str, Any], verb: str) -> Schedule | str:
     """The schedule a call names (``id``), or — the user's words fitting several (``ids``) —
-    the one the user picks, even when only one of them is theirs now (one they picked may
-    have gone before the run resumed: the one left is asked about, never taken for it); a
-    sentence when there is none."""
+    the one the user picks; a sentence when there is none. A run resuming with a pick whose
+    schedule went meanwhile never takes another for it: with several left it asks again (the
+    question changed), with one it says the pick is gone."""
     ids = list(dict.fromkeys(str(i) for i in args.get("ids") or [] if i))
     ids = ids or [str(args.get("id") or "")]
     found = [s for i in ids if (s := await _own(runtime, i)) is not None]
     if not found:
         return f"No schedule {', '.join(ids)} of yours."
-    if len(ids) == 1:
-        return found[0]
+    if len(found) == 1:
+        gone = _picked(runtime, ids) or found[0].schedule_id
+        return found[0] if gone == found[0].schedule_id else f"No schedule {gone} of yours now."
     picked = await runtime.ask(
         f"Which one should I {verb}?",
         options=[Option(value=s.schedule_id, label=_label(s)) for s in found],
     )
     return next(s for s in found if s.schedule_id == picked)  # the answer is one of them
+
+
+def _picked(runtime: Runtime, ids: list[str]) -> str | None:
+    """The one of ``ids`` this run's journal holds as a person's answer: the pick a resumed
+    run's question was answered with (a first call has none)."""
+    answers = runtime.replay.journal.answers.values()
+    return next((a["answer"] for given in answers for a in given if a.get("answer") in ids), None)
 
 
 def _same(schedule: Schedule, about: dict[str, Any], when: str, zone: str) -> bool:
