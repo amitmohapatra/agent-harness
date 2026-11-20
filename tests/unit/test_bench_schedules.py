@@ -77,8 +77,8 @@ def test_a_time_the_words_leave_open_is_settled_and_said_or_asked() -> None:
 
 
 def test_a_question_is_matched_however_its_words_are_hyphenated() -> None:
-    """"every-other-week" is "every other week": a question naming what the words left open
-    counts whatever joins them (the answers the every-other-week case was scored down on)."""
+    """A question naming what the words left open counts whatever joins them: "every-other-week"
+    is "every other week" (the answers the every-other-week case was scored down on)."""
     other = b.or_asks(b.alternate_weeks, "every week", "weekly", "every other", "two weeks")
     asked = "I can't set an every-other-week pattern. Which should I use: every Monday, or?"
     assert other(chat(answer=asked)) == []
