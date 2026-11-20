@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
+import pytest
+
 from benchmark.cost import schedules as b
 from trellis.contracts import Schedule, ScheduleSpec
 from trellis.harness.schedules import NO_REPORT, TASK
@@ -415,10 +417,13 @@ def test_the_facts_of_this_harness_and_made_up_ones() -> None:
     assert zone(chat(answer="It is in New York time.")) != []
 
 
-def test_pending_cases_name_their_feature_and_are_reported_apart() -> None:
+def test_pending_cases_name_their_feature_and_are_reported_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ids = {c.id for c in b.cases()}
     assert set(b.PENDING) <= ids and all(b.PENDING.values())
-    pending = next(iter(b.PENDING))
+    pending = "until-dec31"  # a case whose feature is pending is reported apart
+    monkeypatch.setitem(b.PENDING, pending, "end_at")
     rows = [{"case": pending, "category": "ends", "passed": False, "problems": ["x"],
              "model_calls": 1, "input_tokens": 1, "seconds": 1, "usd": 0},
             {"case": "daily-9", "category": "schedule", "passed": True, "problems": [],

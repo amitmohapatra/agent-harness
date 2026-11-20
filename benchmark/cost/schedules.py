@@ -86,10 +86,11 @@ from trellis.harness.schedules import (
     SCHEDULE_TOOLS,
     TASK,
     ScheduleLimits,
+    _ending,
     _every,
     _input,
 )
-from trellis.runs import ConflictError
+from trellis.runs import ConflictError, ScheduleLimitError
 
 #: The categories, in the order they are reported.
 CATEGORIES: Final = (
@@ -123,7 +124,7 @@ class Seed:
     #: its zone (else the case's: the app's zone when it was set)
     timezone: str | None = None
     enabled: bool = True
-    #: its last day (ISO date), kept as the harness will keep an end (``end_at``: pending)
+    #: its last day (ISO date), kept as the harness keeps an end (``end_at``)
     until: str | None = None
 
 
@@ -1394,15 +1395,9 @@ def cases() -> list[Case]:
     ]  # fmt: skip
 
 
-#: Cases written to a feature the harness does not have yet: the feature each waits on.
-PENDING: Final = {
-    "every-time": "report in update_schedule",
-    "until-dec31": "end_at",
-    "three-weeks": "end_at",
-    "extend-march": "end_at",
-    "remove-end": "end_at",
-    "org-cap": "organisation schedule limit",
-}
+#: Cases written to a feature the harness does not have yet: the feature each waits on (none
+#: now: report in update_schedule, end_at and the organisation's limit are built).
+PENDING: Final[dict[str, str]] = {}
 #: Why the seeded failing runs fail.
 GMAIL: Final = "Gmail: sign-in expired"
 
@@ -1455,10 +1450,11 @@ def more_cases(stock: int) -> list[Case]:
     failed2, failed3 = (Past(GMAIL),) * 2, (Past(GMAIL),) * 3
     hour = (timedelta(minutes=88), timedelta(minutes=93))
     today_10 = datetime(2026, 11, 20, 10, tzinfo=ist)
-    quota = ConflictError(
-        "SCHEDULE_QUOTA_EXCEEDED: tenant has 50 of 50 schedules (organization limit)",
-        code="SCHEDULE_QUOTA_EXCEEDED",
+    quota = ScheduleLimitError(  # agent-runs' own refusal (RUNS__SCHEDULES__MAX_PER_TENANT)
+        "CONFLICT: the tenant has the most schedules the deployment allows.",
+        code="SCHEDULE_LIMIT",
         status=409,
+        details={"max_per_tenant": 50, "schedule_count": 50},
     )
     return [
         # --- why and explain: the runs before the chat, as the harness recorded them
@@ -1710,8 +1706,10 @@ async def _seed(h: Any, agent: Any, user: str, thread: str, seed: Seed, *, zone:
     if seed.until is not None:
         about["until"] = seed.until
     ends: dict[str, Any] = {}
-    if seed.until and "end_at" in ScheduleSpec.model_fields:
-        ends["end_at"] = seed.until
+    if seed.until:  # as schedule_task keeps the user's last day: the instant it ends there
+        ending = _ending(seed.until, seed.timezone or zone)
+        if isinstance(ending, datetime):
+            ends["end_at"] = ending
 
     spec = ScheduleSpec(
         tenant_id=await h._tenant(None),
