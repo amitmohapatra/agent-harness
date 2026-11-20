@@ -583,13 +583,17 @@ model only.
 
 ## Scheduling benchmark
 
-`python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.4` asks 61 chats
+`python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.4` asks 76 chats
 whether the agent schedules when asked and only then (`benchmark/cost/schedules.py`; `ReAct`
 with the retail tools, the in-process run store, memory off, the user's zone sent as AG-UI's
 `forwardedProps.timezone`). `schedule`: daily, weekdays, weekly, monthly, twice a day, once
 ("tomorrow at 9", "next Monday"), in 2 hours, with and without a condition, Hindi/English, a
 skill that asks for one, a zone named or the app's, a zone not known (scheduling in UTC or
-asking for it); scored on the one schedule made, its cron read in its zone against the
+asking for it); a time the words leave open (9 or 7 with no AM or PM: settled and said in
+words the user cannot misread, or asked), the user's own time in words, noon, midnight, a
+24-hour time, two weekdays in one request, the last day of a month, every other week, a time
+of day in words (tomorrow morning, the end of the day), again in 20 minutes, an end date, a
+team's own time, and a skill's schedule the user did not ask for (none made); scored on the one schedule made, its cron read in its zone against the
 expected instants, `once` and the condition. `no_schedule`: a question that mentions a time or
 a habit: nothing written, the figure answered. `manage`: list, move, pause, resume, cancel one,
 cancel all (confirmed first), a reference that fits two (asked which), a new condition.
