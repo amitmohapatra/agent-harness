@@ -65,6 +65,16 @@ chat only; a name the harness has no channel of is logged and skipped.
 The chat's channel (`ChatChannel`, the default) delivers through the run the notification is
 about, which the thread stream already delivers: nothing is said twice. Email, Slack and Teams
 plug in as channels; schedules and runs do not call `notify` yet.
+### Benchmark: the scheduling set asks what users ask about schedules
+
+`benchmark/cost/schedules.py` has 140 chats (76 before, each kept as it was): why a schedule
+fails, how often, when it last ran, why it is paused or quiet, from runs that went before the
+chat as the harness records them; change and delete; end dates; limits said plainly; hard
+wording and calendar edges on a clock set to the day (the year's end, a leap day, DST weeks);
+and questions whose answers are facts of this harness. Cases waiting on a feature (`report` in
+`update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
+reported apart.
+
 ### Fixed: a failed run says why in the chat
 
 A run that failed wrote its turn with status `ERROR` and no reason, so "why did my report

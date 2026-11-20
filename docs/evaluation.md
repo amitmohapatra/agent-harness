@@ -583,7 +583,7 @@ model only.
 
 ## Scheduling benchmark
 
-`python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.4` asks 76 chats
+`python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.4` asks 140 chats
 whether the agent schedules when asked and only then (`benchmark/cost/schedules.py`; `ReAct`
 with the retail tools, the in-process run store, memory off, the user's zone sent as AG-UI's
 `forwardedProps.timezone`). `schedule`: daily, weekdays, weekly, monthly, twice a day, once
@@ -607,6 +607,23 @@ watch offered; a vague ask: asked back (buttons or a question), scheduled once p
 also covers a schedule like one the user has (asked: update it first, recommended) and the same
 again ("already set"). A question with options the run pauses on is answered by the next turn
 (`@n|words`: option `n`, or the words where nothing waits).
+
+The set covers what a user asks about schedules, hard wording and edge cases among it, each
+scored on facts the chat can check (the store, the calls, the run records, the harness's own
+settings), with no rule written for one case:
+
+| Group | Cases | What is asked, and how it is scored |
+|---|---|---|
+| `explain` | 12 | a schedule whose runs went before the chat (`Past`: fired by the worker, a failure raised as the run starts, as an `on_run_start` hook ends one, so the harness records it as any: the run `ERROR` with `Gmail: sign-in expired`, its turn in the chat, `trellis_failures`, paused at the third; memory on for those, as a failed run's turn is read back only there; a run moved a day back): why it fails, how many times, when it last ran, whether it is still on and why it is paused (after 3 failures, or by the user), why it said nothing (its condition not holding, or reported already), what it found yesterday (from its record, not fetched again), never run yet, when it runs next while paused. A made-up reason, count or time fails |
+| `manage` | 23 (10 new) | "make it 10 instead" after a question, weekdays only, Tuesdays and Thursdays, a new condition, pause then resume, "tell me every time" (`report`), cancel by description, cancel all (confirmed, and declined), "the report one" when two fit (asked which, then one moved) |
+| `ends` | 4 | until 31 December, for the next 3 weeks, extended to March, the end removed: scored on the day the last run falls |
+| `limits` | 5 (3 new) | at the user's limit, the organisation's (the store's refusal as the tool returns it), every 5 minutes against an hour: the limit named, the number, what the user can do, no cron and no error code |
+| `hard` | 28 | Hinglish, Devanagari and Spanish with English, typos, the year's and the month's end and a 29 February (yearly, and next year's, which does not exist) on a clock set to that day, DST weeks in New York and London, the 1st Monday and the 2nd Tuesday, every hour from 9 to 5 on weekdays, twice a day, in 90 minutes, the day after tomorrow, 9 am New York time for a user in Kolkata, not on weekends, except Wednesday, weekend nights, 8 this morning when it is 10, a habit said, a watch no tool can do |
+| `facts` | 7 | the laptop off, public holidays, every minute, who sees them, the zone, where the reply shows, how many are allowed: the harness's facts (docs/runs.md, the tools' descriptions, the deployment's settings); a claim none of them makes fails |
+
+A case written to a feature the harness does not have yet is in `PENDING` with that feature
+(`report` in `update_schedule`; `end_at`; the organisation's schedule limit): it runs, and the
+report gives it apart (`pending`), out of the pass count; `--cases pending` runs those alone.
 Writes `<out>.jsonl` (each case's calls, answers, tokens) and `<out>.json` (per category).
 
 ## Skills benchmark

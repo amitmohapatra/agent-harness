@@ -17,7 +17,24 @@ memory off (``--adapter``: any framework the ``complex`` suite wraps). Categorie
 * ``fired`` — a seeded schedule fired by the worker: a condition met is reported with the
   figure, one not met answers ``NO_REPORT``, one met twice is reported once, and a fired run
   makes no schedule;
-* ``limits`` — over the per-user cap or too frequent: one clear sentence, no retry loop.
+* ``limits`` — over the per-user cap or too frequent: one clear sentence, no retry loop;
+  at the user's limit or the organisation's: which limit, the number and what the user can do,
+  in plain words (no cron, no error code);
+* ``check`` / ``cannot`` — a condition checked once before it is scheduled; one no tool can
+  check, or an ask too vague to schedule;
+* ``explain`` — a schedule whose runs went before the chat (:class:`Past`: failed the way the
+  harness records a failure, quiet, reported, a day ago): why it fails, how often, when it last
+  ran, whether it is on and why it is paused, why it said nothing, what it found — the record's
+  facts, nothing made up;
+* ``ends`` — an end date set, moved and removed;
+* ``hard`` — mixed languages, typos, month, year and leap-day edges, DST weeks, the n-th weekday,
+  hours in a window, a time in another zone, a time gone today, a habit only, a watch no tool
+  can do;
+* ``facts`` — questions about schedules whose answers are facts of this harness (the device
+  off, holidays, every minute, who sees them, the zone): true, or "not known", never made up.
+
+A case the harness has no feature for yet is written to the behaviour wanted and listed in
+:data:`PENDING` (with the feature), reported apart.
 
 Every check is exact (the store's schedules after the chat, the calls made, the figures in the
 answer). Run::
@@ -34,9 +51,11 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -56,13 +75,36 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import pipeline
+from trellis.harness import pipeline, snapshots
+from trellis.harness import schedules as harness_schedules
 from trellis.harness.frontend import Frontend
 from trellis.harness.runs import THREAD, LocalRuns
-from trellis.harness.schedules import NO_REPORT, SCHEDULE_TOOLS, TASK, ScheduleLimits, _input
+from trellis.harness.schedules import (
+    NO_REPORT,
+    REPORT,
+    REPORTS,
+    SCHEDULE_TOOLS,
+    TASK,
+    ScheduleLimits,
+    _every,
+    _input,
+)
+from trellis.runs import ConflictError
 
 #: The categories, in the order they are reported.
-CATEGORIES: Final = ("schedule", "no_schedule", "manage", "fired", "limits", "check", "cannot")
+CATEGORIES: Final = (
+    "schedule",
+    "no_schedule",
+    "manage",
+    "fired",
+    "limits",
+    "check",
+    "cannot",
+    "explain",
+    "ends",
+    "hard",
+    "facts",
+)
 #: How many fire instants of a recurring schedule are compared.
 INSTANTS: Final = 4
 #: The tools that change a schedule (every other schedule tool only reads).
@@ -81,6 +123,21 @@ class Seed:
     #: its zone (else the case's: the app's zone when it was set)
     timezone: str | None = None
     enabled: bool = True
+    #: its last day (ISO date), kept as the harness will keep an end (``end_at``: pending)
+    until: str | None = None
+
+
+@dataclass(frozen=True)
+class Past:
+    """A run of a seed that went before the chat: fired by the worker, failing with ``error``
+    (raised as the run starts, as an ``on_run_start`` hook ends a run: the harness records it
+    as it records any failure — the run ``ERROR`` with its error, its turn in the chat, the
+    schedule's ``trellis_failures``, paused at the third), else run by the model; ``days_ago``
+    moves the run and the schedule's last fire that many days back in the run store."""
+
+    error: str | None = None
+    days_ago: int = 0
+    seed: int = 0
 
 
 @dataclass
@@ -99,6 +156,10 @@ class Chat:
     after: list[Schedule] = field(default_factory=list)
     fired: list[str] = field(default_factory=list)
     fired_calls: list[str] = field(default_factory=list)
+    #: the shortest repeat the run's tools allow, in seconds (the deployment's, or the user's)
+    min_interval: float | None = None
+    #: how many schedules the user may have (the deployment's, or the user's)
+    max_per_user: int | None = None
 
     def made(self) -> list[Schedule]:
         before = {s.schedule_id for s in self.seeded}
@@ -139,6 +200,17 @@ class Case:
     limits: ScheduleLimits | None = None
     #: what the app tells the model besides (an AG-UI context entry)
     context: tuple[dict[str, str], ...] = ()
+    #: runs of the seeds before the chat, in order
+    past: tuple[Past, ...] = ()
+    #: the environment's memory service on: the chat is its transcript (a failed run's turn
+    #: and its record are there, as the harness writes them; with memory off a failed run's
+    #: turn is not read back)
+    memory: bool = False
+    #: the time it is in the chat (``snapshots.now`` and the schedule tools' clock); ``None``:
+    #: now
+    now: datetime | None = None
+    #: the run store refuses a new schedule with this (agent-runs' own limits)
+    refuse: ConflictError | None = None
 
 
 # --------------------------------------------------------------------------- checks
@@ -571,6 +643,512 @@ def limited(*words: str) -> Check:
     return check
 
 
+# --------------------------------------------------------------------------- explain, facts
+
+#: What the failed runs' record says of why: the sign-in expired.
+SIGN_IN: Final = (r"sign.?in|log.?in|signed out", r"expir")
+#: Causes no record of these chats holds: an answer that gives one made it up.
+MADE_UP_CAUSES: Final = (
+    r"rate.?limit",
+    r"time(d)?.?out",
+    r"network",
+    r"server (error|down|issue|problem)",
+    r"quota",
+    r"outage",
+    r"crash",
+    r"\bbug\b",
+    r"out of (credits|budget|money)",
+    r"password (changed|reset)",
+)
+#: A failure claimed (for a schedule none of whose runs failed).
+FAILED_CLAIMS: Final = (
+    *SIGN_IN,
+    r"\bfailed (\d+|once|twice|two|three)",
+    r"\b\d+ (failed|failures|errors)",
+    r"\b(after|because of|due to) (\w+ ){0,2}(failures|errors|failed)",
+)
+#: Said paused.
+PAUSED: Final = r"paus|turned off|switched off|\boff\b|not (running|active|on)|disabled|stopped"
+#: Said true of a schedule paused with no failure: the record says no more.
+NOT_RECORDED: Final = (
+    r"by hand|manually|you paused|someone paused|was paused by|turned (it )?off|"
+    r"no (failures|errors|failed runs)|(hasn't|has not|didn't|did not|never) fail|"
+    r"not (because of|due to) (a |any )?(failure|error)|(don't|do not) know|not (known|recorded)|"
+    r"no record|doesn't say|does not say"
+)
+#: Said of a condition reported already: quiet until it stops holding.
+REPORTED_ONCE: Final = (
+    r"already (told|reported|alerted|notified|sent|let you know)|reported (it )?(already|once|"
+    r"before|earlier)|once (while|until|per)|until (it|the (stock|condition|level)) (clears|"
+    r"stops|goes|rises|is no longer)|stops? (holding|being (true|under|below))|"
+    r"(goes|rises|is) back (up|above|over)"
+)
+#: A schedule runs without the user's device, and its reply waits in the chat.
+RUNS_WITHOUT_YOU: Final = (
+    r"still run|will run|runs (anyway|regardless|as (usual|normal|scheduled))|"
+    r"(doesn't|does not|don't|do not) (need|depend|require)|not (on|from) your "
+    r"(laptop|computer|device)|server|cloud|independent"
+)
+IN_CHAT: Final = r"chat|conversation|thread|when you (open|come back|return|log)"
+NEEDS_DEVICE: Final = (
+    r"(?<!n't )(?<!not )\bneeds? your (laptop|computer|device|phone)",
+    r"(keep|leave) your (laptop|computer|device|phone) (on|open|running|awake)",
+    r"(won't|will not|doesn't|does not|can't|cannot) run (if|when|while) your "
+    r"(laptop|computer|device)",
+    r"(will be|gets?|is) (skipped|missed)",
+)
+#: A cron has no holidays: it runs on every day it names.
+RUNS_ON_HOLIDAYS: Final = (
+    r"\byes\b|still run|(?<!n't )(?<!not )\bruns? (on|every|regardless|as usual)|"
+    r"(doesn't|does not|won't|will not|can't|cannot) (skip|know|tell)|"
+    r"no (notion|idea|knowledge|concept|calendar|list) of (public |bank )?holidays|"
+    r"not aware of (public |bank )?holidays|(isn't|is not|aren't|are not) (aware|skipped)"
+)
+SKIPS_HOLIDAYS: Final = (
+    r"(?<!n't )(?<!not )\bskips? (public |bank )?holidays",
+    r"(won't|will not|doesn't|does not) run on (public |bank )?holidays",
+    r"holidays are (skipped|excluded)",
+    r"automatically (skip|pause)",
+    r"holiday calendar (is|it) (used|follows)",
+)
+#: Each user sees only their own schedules (docs/runs.md, "Whose"); nothing says more.
+ONLY_YOU: Final = (
+    r"only you|just you|no one else|nobody else|only (be )?(visible|available) to you|"
+    r"other (users|people) (can't|cannot|can not|don't|do not|won't)|yours alone|only yours|"
+    r"private to you"
+)
+OTHERS_SEE: Final = (
+    r"(?<!whether )(?<!whether your )(?<!if )(?<!if your )\b(your )?(team|teammates|colleagues|"
+    r"coworkers|admins?|administrators?|managers?|everyone|anyone in your (organi[sz]ation|"
+    r"company))( members)? (can|could|will|also) (also )?(see|view|access)",
+    r"(shared|visible) (with|to) (your )?(team|organi[sz]ation|company|everyone|admins?)",
+)
+KOLKATA: Final = r"kolkata|\bist\b|india"
+IN_NEW_YORK: Final = (
+    r"(?<!not )(?<!n't )\b(is|runs|set|scheduled) (in|on|for|to) (the )?(new york|eastern|"
+    r"america/new_york|est\b|edt\b|utc\b(?! ?\+))",
+)
+#: Said of a schedule with no run yet, and a run claimed for one.
+NOT_RUN_YET: Final = (
+    r"(hasn't|has not|not yet|never|didn't|did not) (run|ran|been run|fired)|no (runs?|record)"
+    r"( of it)? yet|no (past )?runs|first run"
+)
+RAN_CLAIMS: Final = (r"(?<!not )(?<!never )\blast ran (on|at|today|yesterday)",)
+#: Said: it runs again once resumed.
+RESUME: Final = r"resume|turn (it )?(back )?on|switch (it )?(back )?on|re-?enable|unpause"
+#: Results said to go anywhere but the chat (no such channel in this harness).
+ELSEWHERE: Final = (
+    r"(?<!not )(?<!n't )\b(by|via|in an?|to your) (e-?mail|sms|text message|push notification|"
+    r"whatsapp|slack)",
+)
+#: Said no.
+NO: Final = (
+    r"\bno\b|can't|cannot|can not|not (possible|allowed|able)|isn't (possible|allowed)|"
+    r"too (often|frequent)|won't"
+)
+#: A cron as a person would see it, and an error code.
+CRON_SHOWN: Final = r"(?<![\w:.])(?:[\d*][\d*/,#L-]*\s+){4}[\d*][\d*/,#L-]*(?![\w:])"
+CODE_SHOWN: Final = r"(?<![/\w])[A-Za-z]+(?:_[A-Za-z]+)+\b|\b(400|401|403|404|409|422|429|503)\b"
+
+
+def _flat(text: str) -> str:
+    """``text`` lowercased, digits without thousands separators (as :func:`said_all`)."""
+    return re.sub(r"(?<=\d)[,\s](?=\d{3}\b)", "", text).lower()
+
+
+def explains(*facts: str, wrong: Sequence[str] = MADE_UP_CAUSES) -> Check:
+    """Nothing written; the last answer says each of ``facts`` (patterns) and none of
+    ``wrong`` (a claim no record or doc holds: made up)."""
+
+    def check(chat: Chat) -> list[str]:
+        text = _flat(chat.answers[-1])
+        problems = [f"wrote {n}" for n in chat.written()]
+        problems += [f"answer lacks /{f}/" for f in facts if not re.search(f, text)]
+        for w in wrong:
+            if found := re.search(w, text):
+                problems.append(f"a made-up claim: {found.group(0)!r}")
+        return problems
+
+    return check
+
+
+_WORDS: Final = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                 "ten")  # fmt: skip
+_NUMBERS: Final = {w: n for n, w in enumerate(_WORDS)}
+_NUM: Final = r"(\d+|" + "|".join(_NUMBERS) + ")"
+#: A count of failures said: not the rule's ("paused after 3 failures") nor one to come ("one
+#: more failure").
+_COUNTS: Final = (
+    rf"(?<!after )(?<!at )\b{_NUM}\s+(?!(?:\w+\s+){{0,1}}(?:more|another|further)\b)"
+    r"(?:\w+\s+){0,2}?(?:times?|failures?|failed runs?|attempts?|errors?)\b",
+    rf"\bfailed\s+{_NUM}\b",
+    r"\bfailed\s+(once|twice|thrice)\b",
+)
+
+
+def counted(n: int) -> Check:
+    """Nothing written; every count of failures the last answer says is ``n``, and it says
+    one."""
+    once = {"once": 1, "twice": 2, "thrice": 3}
+
+    def check(chat: Chat) -> list[str]:
+        text = _flat(chat.answers[-1])
+        problems = [f"wrote {w}" for w in chat.written()]
+        said = [
+            int(m) if m.isdigit() else _NUMBERS.get(m, once.get(m, -1))
+            for pattern in _COUNTS
+            for m in re.findall(pattern, text)
+        ]
+        if not said:
+            return [*problems, "says no count"]
+        return problems + [f"counts {c}, not {n}" for c in dict.fromkeys(said) if c != n][:1]
+
+    return check
+
+
+def time_said(text: str, at: datetime) -> bool:
+    """Whether ``text`` says the clock time ``at``: 24-hour or 12-hour, the minutes said unless
+    on the hour (then ``9 am`` will do)."""
+    h12 = at.hour % 12 or 12
+    half = "am" if at.hour < 12 else "pm"
+    forms = {f"{at:%H:%M}", f"{at.hour}:{at:%M}", f"{h12}:{at:%M}", f"{h12}.{at:%M}"}
+    if at.minute == 0:
+        forms |= {f"{h12} {half}", f"{h12}{half}", f"{h12} {half[0]}.m."}
+    return any(re.search(rf"(?<![\d:.]){re.escape(f)}(?![\d])", text) for f in forms)
+
+
+def last_ran(n: int) -> Check:
+    """Nothing written; the last answer says when seed ``n`` last ran (its clock time in its
+    zone, as the run store has it)."""
+
+    def check(chat: Chat) -> list[str]:
+        seed = chat.seeded[n]
+        if seed.last_fired_at is None:
+            return [f"seed {n} has no last run"]
+        at = seed.last_fired_at.astimezone(ZoneInfo(seed.timezone))
+        problems = [f"wrote {w}" for w in chat.written()]
+        if not time_said(chat.answers[-1].lower(), at):
+            problems.append(f"answer lacks the last run's time ({at:%H:%M})")
+        return problems
+
+    return check
+
+
+def from_record(*says: str, tools: Sequence[str] = ("stock_level",)) -> Check:
+    """Nothing written; the last answer says each of ``says`` — what a past run found, read from
+    its record in the chat: none of ``tools`` called again for it."""
+
+    def check(chat: Chat) -> list[str]:
+        problems = [f"wrote {w}" for w in chat.written()]
+        called = {name for turn in chat.calls for name, _, _ in turn}
+        problems += [f"fetched {t} again instead of reading the run" for t in tools if t in called]
+        return problems + said_all(chat.answers[-1], says)
+
+    return check
+
+
+def shortest_said() -> Check:
+    """Nothing written; the last answer says no, and the shortest repeat allowed in words (the
+    deployment's ``schedule_min_interval``, as the tool's description says it)."""
+
+    def check(chat: Chat) -> list[str]:
+        assert chat.min_interval is not None
+        problems = [f"wrote {w}" for w in chat.written()]
+        problems += said_all(chat.answers[-1], (_every(chat.min_interval),))
+        if not re.search(NO, _flat(chat.answers[-1])):
+            problems.append("answer does not say no")
+        return problems
+
+    return check
+
+
+def most_said() -> Check:
+    """Nothing written; the last answer says how many schedules the user may have (the
+    deployment's ``schedule_max_per_user``, or theirs)."""
+
+    def check(chat: Chat) -> list[str]:
+        assert chat.max_per_user is not None
+        problems = [f"wrote {w}" for w in chat.written()]
+        return problems + said_all(chat.answers[-1], (str(chat.max_per_user),))
+
+    return check
+
+
+def every(*checks: Check) -> Check:
+    """Each of ``checks``: their problems together."""
+    return lambda chat: [p for c in checks for p in c(chat)]
+
+
+def one_of(*checks: Check) -> Check:
+    """Any of ``checks`` (where the words allow more than one reading): the first's problems
+    when none passes."""
+
+    def check(chat: Chat) -> list[str]:
+        found = [c(chat) for c in checks]
+        return [] if any(not f for f in found) else found[0]
+
+    return check
+
+
+# --------------------------------------------------------------------------- change, ends
+
+
+def _targets(args: dict[str, Any], sid: str) -> bool:
+    return args.get("id") == sid or sid in (args.get("ids") or [])
+
+
+def paused_then_resumed(n: int, untouched: Sequence[int] = ()) -> Check:
+    """The first turn paused seed ``n`` (``enabled`` false), the second resumed it; it is on at
+    the end, nothing made, the ``untouched`` seeds as they were."""
+
+    def check(chat: Chat) -> list[str]:
+        sid = chat.seeded[n].schedule_id
+        problems = ["made a schedule"] if chat.made() else []
+        for turn, want, said in ((0, False, "pause"), (1, True, "resume")):
+            done = [
+                a
+                for name, a, _ in chat.calls[turn]
+                if name == "update_schedule" and _targets(a, sid) and a.get("enabled") is want
+            ]
+            if not done:
+                problems.append(f"turn {turn + 1} did not {said} it")
+        problems += changed(n, enabled=True, untouched=untouched)(chat)
+        return list(dict.fromkeys(problems))
+
+    return check
+
+
+def reports_as(n: int, report: str, untouched: Sequence[int] = ()) -> Check:
+    """Seed ``n`` kept (its time and condition) and now reporting as ``report``
+    (:data:`REPORTS`), nothing made, the ``untouched`` seeds as they were."""
+
+    def check(chat: Chat) -> list[str]:
+        s = seeded_by(chat, n)
+        if s is None:
+            return [f"seed {n} is gone"]
+        cond = chat.seeded[n].metadata[TASK].get("condition") or ""
+        problems = changed(n, cron=chat.seeded[n].cadence, untouched=untouched)(chat)
+        if (s.metadata[TASK].get("condition") or "") != cond:
+            problems.append(f"condition {s.metadata[TASK].get('condition')!r}, not {cond!r}")
+        got = str(s.metadata.get(REPORT) or REPORTS[0])
+        return problems + ([] if got == report else [f"reports {got}, not {report}"])
+
+    return check
+
+
+def asked_which_moved(targets: dict[int, str]) -> Check:
+    """Two seeds fit the user's words: asked which (nothing written before), then exactly one of
+    them fires at its ``targets`` cron, the other as it was; nothing made."""
+
+    def check(chat: Chat) -> list[str]:
+        problems = [] if asked_in(chat, 0) else ["did not ask which"]
+        if not chat.asked[0] and [n for n, a, _ in chat.calls[0] if writes(n, a)]:
+            problems.append("wrote before asking")
+        problems += ["made a schedule"] if chat.made() else []
+        moved = [n for n, cron in targets.items() if not changed(n, cron=cron)(chat)]
+        if len(moved) != 1:
+            return [*problems, f"{len(moved)} moved, not one"]
+        problems += changed(moved[0], untouched=[n for n in targets if n != moved[0]])(chat)
+        return problems
+
+    return check
+
+
+def end_of(schedule: Schedule) -> datetime | None:
+    """When a schedule ends: its ``end_at`` (pending in the harness), else its task's
+    ``until``; a day alone ends at the end of that day in its zone."""
+    zone = ZoneInfo(schedule.timezone)
+    end = getattr(schedule, "end_at", None) or schedule.metadata[TASK].get("until")
+    if isinstance(end, datetime):
+        return end if end.tzinfo else end.replace(tzinfo=zone)
+    if not isinstance(end, str) or not end:
+        return None
+    try:
+        if len(end) == len("2026-12-31"):
+            day = date.fromisoformat(end) + timedelta(days=1)
+            return datetime(day.year, day.month, day.day, tzinfo=zone)
+        at = datetime.fromisoformat(end)
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=zone)
+
+
+def last_fire(schedule: Schedule, now: datetime, end: datetime) -> datetime | None:
+    """The schedule's last run before ``end``, in its zone."""
+    cursor, last = croniter(schedule.cadence, now.astimezone(ZoneInfo(schedule.timezone))), None
+    for _ in range(5000):
+        at = cursor.get_next(datetime)
+        if at >= end:
+            return last
+        last = at
+    return last
+
+
+def ended_by(
+    days: Callable[[datetime], tuple[date, date]],
+    check: Check | None = None,
+    *,
+    seed: int | None = None,
+) -> Check:
+    """``check``; and the schedule made (or seed ``seed``, its time as it was) ends so that its
+    last run falls on a day between ``days(now)`` (both in)."""
+
+    def ends_check(chat: Chat) -> list[str]:
+        problems = check(chat) if check is not None else []
+        if seed is None:
+            s, missing = one_made(chat)
+            problems += [] if check is not None else missing
+        else:
+            s = seeded_by(chat, seed)
+            problems += changed(seed, cron=chat.seeded[seed].cadence)(chat)
+        if s is None:
+            return problems
+        end = end_of(s)
+        if end is None:
+            return [*problems, "no end date kept"]
+        last = last_fire(s, chat.now, end)
+        first, final = days(chat.now)
+        if last is None:
+            return [*problems, f"no run before its end {end:%Y-%m-%d}"]
+        if not first <= last.date() <= final:
+            problems.append(f"last run on {last:%Y-%m-%d}, not {first} to {final}")
+        return problems
+
+    return ends_check
+
+
+def no_end(n: int) -> Check:
+    """Seed ``n`` kept at its time, with no end."""
+
+    def check(chat: Chat) -> list[str]:
+        problems = changed(n, cron=chat.seeded[n].cadence)(chat)
+        s = seeded_by(chat, n)
+        if s is not None and end_of(s) is not None:
+            problems.append("an end is still kept")
+        return problems
+
+    return check
+
+
+# --------------------------------------------------------------------------- limits, hard
+
+
+def plain_limit(*says: str, which: str, action: str, codes: Sequence[str] = ()) -> Check:
+    """Nothing made, ``schedule_task`` tried at most twice; the last answer says each of
+    ``says`` (the number), names the limit (``which``) and what the user can do (``action``),
+    in plain words: no cron, no error code (any, or one of ``codes``)."""
+
+    def check(chat: Chat) -> list[str]:
+        problems = ["made a schedule"] if chat.made() else []
+        tries = len(chat.named("schedule_task"))
+        if tries > 2:
+            problems.append(f"schedule_task tried {tries} times")
+        answer = chat.answers[-1]
+        text = _flat(answer)
+        problems += said_all(answer, says)
+        if not re.search(which, text):
+            problems.append(f"answer does not name the limit (/{which}/)")
+        if not re.search(action, text):
+            problems.append(f"answer says no way on (/{action}/)")
+        if re.search(CRON_SHOWN, answer):
+            problems.append("answer shows a cron")
+        if re.search(CODE_SHOWN, answer) or any(c.lower() in text for c in codes):
+            problems.append("answer shows an error code")
+        return problems
+
+    return check
+
+
+def nth_weekday(nth: int, weekday: int, hour: int, n: int = 3) -> Check:
+    """One schedule that runs on the ``nth`` ``weekday`` (Monday 0) of each month at ``hour``
+    in the user's zone: exactly those runs, or every such weekday at that hour with a condition
+    that keeps only the ``nth`` (the run checks the date)."""
+
+    def check(chat: Chat) -> list[str]:
+        s, problems = one_made(chat)
+        if s is None:
+            return problems
+        zone = ZoneInfo(chat.zone or "UTC")
+        want, day = [], chat.now.astimezone(zone).date()
+        while len(want) < n:
+            if day.weekday() == weekday and (day.day - 1) // 7 == nth - 1:
+                at = datetime(day.year, day.month, day.day, hour, tzinfo=zone)
+                if at > chat.now:
+                    want.append(at.astimezone(UTC))
+            day += timedelta(days=1)
+        condition = (s.metadata[TASK].get("condition") or "").lower()
+        if not condition:
+            got = instants(s.cadence, s.timezone, chat.now, n)
+            return [] if got == want else [f"runs at {got}, not the {nth}th weekday {weekday}"]
+        got = [t for t in instants(s.cadence, s.timezone, chat.now, 30) if t <= want[-1]]
+        local = [t.astimezone(zone) for t in got]
+        if not set(want) <= set(got) or any(
+            (t.weekday(), t.hour, t.minute) != (weekday, hour, 0) for t in local
+        ):
+            problems.append(f"runs at '{s.cadence}' {s.timezone}, not every weekday {weekday}")
+        if not re.search(r"second|2nd|third|3rd|first|1st|fourth|4th|\d+.{1,4}\d+", condition):
+            problems.append(f"condition {condition!r} does not keep the {nth}th")
+        return problems
+
+    return check
+
+
+def times_a_day(n: int, gap: timedelta = timedelta(hours=3)) -> Check:
+    """One schedule running ``n`` times each day, ``gap`` or more apart, each time said in the
+    last answer."""
+
+    def check(chat: Chat) -> list[str]:
+        s, problems = one_made(chat)
+        if s is None:
+            return problems
+        zone = ZoneInfo(chat.zone or "UTC")
+        local = [t.astimezone(zone) for t in instants(s.cadence, s.timezone, chat.now, 3 * n)]
+        days = {t.date() for t in local}
+        each = [sorted(t for t in local if t.date() == d) for d in sorted(days)][1:-1] or [local]
+        count = len(each[0])
+        if count != n or any(len(d) != n for d in each):
+            return [*problems, f"runs {count} times a day, not {n}"]
+        if any(b - a < gap for a, b in pairwise(each[0])):
+            problems.append(f"runs closer than {gap} apart")
+        text = chat.answers[-1].lower()
+        problems += [f"answer does not say {t:%H:%M}" for t in each[0] if not time_said(text, t)]
+        return problems
+
+    return check
+
+
+#: Said: the day asked for does not exist.
+NO_SUCH_DAY: Final = (
+    r"leap|no 29|(isn't|is not|doesn't|does not|won't|will not) (have|exist|be)|only (has )?28|"
+    r"28 days"
+)
+
+
+def impossible_date(near: Sequence[date]) -> Check:
+    """A day that does not exist: nothing made and the answer says so — or one schedule, once,
+    first on one of the days ``near`` it, named in the answer."""
+
+    def check(chat: Chat) -> list[str]:
+        text = _flat(chat.answers[-1])
+        if not chat.made():
+            ok = re.search(NO_SUCH_DAY, text)
+            return [] if ok else ["neither scheduled near it nor said the date is not"]
+        s, problems = one_made(chat)
+        if s is None:
+            return problems
+        first = instants(s.cadence, s.timezone, chat.now, 1)[0].astimezone(ZoneInfo(s.timezone))
+        if first.date() not in near:
+            said = ", ".join(str(d) for d in near)
+            return [*problems, f"first run {first:%Y-%m-%d}, not one of {said}"]
+        if not s.metadata[TASK].get("once"):
+            problems.append("not once")
+        if str(first.day) not in text or f"{first:%b}".lower() not in text:
+            problems.append(f"answer does not name {first:%d %b}")
+        return problems
+
+    return check
+
+
 # --------------------------------------------------------------------------- the cases
 
 
@@ -587,6 +1165,14 @@ def _next_weekday_at(weekday: int, hour: int) -> Callable[[datetime, str], datet
         local = now.astimezone(ZoneInfo(zone))
         days = (weekday - local.weekday()) % 7 or 7
         return (local + timedelta(days)).replace(hour=hour, minute=0, second=0, microsecond=0)
+
+    return at
+
+
+def _in_days_at(days: int, hour: int) -> Callable[[datetime, str], datetime]:
+    def at(now: datetime, zone: str) -> datetime:
+        local = now.astimezone(ZoneInfo(zone)) + timedelta(days=days)
+        return local.replace(hour=hour, minute=0, second=0, microsecond=0)
 
     return at
 
@@ -612,7 +1198,7 @@ def cases() -> list[Case]:
         "description": "team instructions",
         "value": "Our reports go out at 8:00 in the morning, the user's time.",
     }
-    S, N, M, F, L, K, C = CATEGORIES
+    S, N, M, F, L, K, C, *_ = CATEGORIES
     hour = (timedelta(minutes=118), timedelta(minutes=123))
     return [
         # --- should schedule
@@ -804,6 +1390,242 @@ def cases() -> list[Case]:
         Case("too-often", L, (f"Check the stock of {SKU} every 5 minutes.",),
              limited("hour", "60 minutes", "often", "frequent", "least", "minimum"),
              limits=ScheduleLimits(min_interval=3600)),
+        *more_cases(stock),
+    ]  # fmt: skip
+
+
+#: Cases written to a feature the harness does not have yet: the feature each waits on.
+PENDING: Final = {
+    "every-time": "report in update_schedule",
+    "until-dec31": "end_at",
+    "three-weeks": "end_at",
+    "extend-march": "end_at",
+    "remove-end": "end_at",
+    "org-cap": "organisation schedule limit",
+}
+#: Why the seeded failing runs fail.
+GMAIL: Final = "Gmail: sign-in expired"
+
+
+def _end_of_month(now: datetime) -> date:
+    first = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return (first - timedelta(days=1)).date()
+
+
+def _on(month: int, day: int) -> Callable[[datetime], tuple[date, date]]:
+    """That day of the month, next (this year's, or next year's once it is gone)."""
+
+    def days(now: datetime) -> tuple[date, date]:
+        at = date(now.year, month, day)
+        at = at if at >= now.date() else date(now.year + 1, month, day)
+        return at, at
+
+    return days
+
+
+def _next_march(now: datetime) -> tuple[date, date]:
+    year = now.year + (now.month > 3)
+    return date(year, 3, 1), date(year, 3, 31)
+
+
+def _weeks(n: int, zone: str) -> Callable[[datetime], tuple[date, date]]:
+    def days(now: datetime) -> tuple[date, date]:
+        today = now.astimezone(ZoneInfo(zone)).date()
+        return today + timedelta(days=7 * n - 1), today + timedelta(days=7 * n)
+
+    return days
+
+
+def more_cases(stock: int) -> list[Case]:
+    """The groups added to the first 76: explain, change and delete, ends, limits, hard
+    wording, facts."""
+    kolkata, new_york, london = "Asia/Kolkata", "America/New_York", "Europe/London"
+    ist, ny, uk = ZoneInfo(kolkata), ZoneInfo(new_york), ZoneInfo(london)
+    _, _, M, _, L, _, _, X, E, H, Q = CATEGORIES
+    alert = Seed(f"check the stock of {SKU} and email me if it is under 5", "0 9 * * *",
+                 f"total stock of {SKU} under 5")  # fmt: skip
+    paused = Seed(alert.task, alert.when, alert.condition, enabled=False)
+    stock_seed = Seed(f"check stock of {SKU}", "0 9 * * *", f"total stock of {SKU} under 5")
+    summary_seed = Seed("send me the sales summary", "0 8 * * 1")
+    other_seed = Seed(f"check stock of {OTHER_SKU}", "0 18 * * *", "total stock under 5")
+    revenue_seed = Seed("send me the revenue report", "0 18 * * *")
+    month_end = _end_of_month(datetime.now(ist)).isoformat()
+    ending = Seed(f"send me the stock of {SKU}", "0 9 * * *", until=month_end)
+    low = max(stock // 4, 1)
+    failed2, failed3 = (Past(GMAIL),) * 2, (Past(GMAIL),) * 3
+    hour = (timedelta(minutes=88), timedelta(minutes=93))
+    today_10 = datetime(2026, 11, 20, 10, tzinfo=ist)
+    quota = ConflictError(
+        "SCHEDULE_QUOTA_EXCEEDED: tenant has 50 of 50 schedules (organization limit)",
+        code="SCHEDULE_QUOTA_EXCEEDED",
+        status=409,
+    )
+    return [
+        # --- why and explain: the runs before the chat, as the harness recorded them
+        Case("why-failing", X, ("Why is my stock alert failing?",),
+             explains(*SIGN_IN), seeds=(alert,), past=failed2, memory=True),
+        Case("fail-count", X, ("How many times has my stock alert failed?",),
+             counted(2), seeds=(alert,), past=failed2, memory=True),
+        Case("last-run", X, ("When did my stock alert last run?",),
+             last_ran(0), seeds=(alert,), past=failed2, memory=True),
+        Case("still-on-failed", X, ("Is my stock alert still on?",),
+             explains(PAUSED), seeds=(alert,), past=failed3, memory=True),
+        Case("why-paused-failed", X, ("Why is my stock alert paused?",),
+             every(explains(PAUSED, *SIGN_IN), counted(3)), seeds=(alert,), past=failed3,
+             memory=True),
+        Case("still-on-user", X, ("Is my stock alert still on?",),
+             explains(PAUSED, wrong=FAILED_CLAIMS), seeds=(paused,)),
+        Case("why-paused-user", X, ("Why is my stock alert paused?",),
+             explains(PAUSED, NOT_RECORDED, wrong=(*FAILED_CLAIMS, *MADE_UP_CAUSES)),
+             seeds=(paused,)),
+        Case("why-quiet", X, ("Why hasn't my stock alert told me anything?",),
+             explains(str(stock), str(low), wrong=FAILED_CLAIMS),
+             seeds=(Seed(alert.task, "0 9 * * *", f"total stock of {SKU} is under {low}"),),
+             past=(Past(),)),
+        Case("why-quiet-reported", X,
+             ("My stock alert told me once and then went quiet. Why didn't it tell me again?",),
+             explains(REPORTED_ONCE, wrong=FAILED_CLAIMS),
+             seeds=(Seed(alert.task, "0 9 * * *", f"total stock of {SKU} is under {stock + 50}"),),
+             past=(Past(), Past())),
+        Case("checked-yesterday", X, ("What did my stock check find yesterday?",),
+             from_record(str(stock), SKU),
+             seeds=(Seed(f"tell me the total stock of {SKU}", "0 9 * * *"),),
+             past=(Past(days_ago=1),)),
+        Case("never-ran", X, ("When did my sales summary last run?",),
+             explains(NOT_RUN_YET, wrong=RAN_CLAIMS), seeds=(summary_seed,)),
+        Case("next-run-paused", X, ("When will my stock alert run next?",),
+             explains(PAUSED, RESUME), seeds=(alert,), past=failed3, memory=True),
+        # --- change and delete
+        Case("move-follow-up", M, ("When does my stock check run?", "Make it 10 instead."),
+             changed(0, cron="0 10 * * *", untouched=(1,)), seeds=(stock_seed, summary_seed)),
+        Case("weekdays-only", M, ("Only run the stock check on weekdays.",),
+             changed(0, cron="0 9 * * 1-5", untouched=(1,)), seeds=(stock_seed, summary_seed)),
+        Case("tue-thu", M, ("Change the sales summary to Tuesdays and Thursdays.",),
+             changed(1, cron="0 8 * * 2,4", untouched=(0,)), seeds=(stock_seed, summary_seed)),
+        Case("condition-10", M,
+             ("Change my stock alert to tell me when it's under 10 instead of 5.",),
+             changed(0, condition="10", untouched=(1,)), seeds=(stock_seed, summary_seed)),
+        Case("pause-resume", M, ("Pause the stock check for now.", "OK, turn it back on."),
+             paused_then_resumed(0, untouched=(1,)), seeds=(stock_seed, summary_seed)),
+        Case("every-time", M, ("Tell me every time the stock is under 5, not just once.",),
+             reports_as(0, "every_time", untouched=(1,)), seeds=(stock_seed, summary_seed)),
+        Case("cancel-described", M, ("Stop sending me the sales summary.",),
+             cancelled(1, kept=(0,)), seeds=(stock_seed, summary_seed)),
+        Case("cancel-all-three", M,
+             ("Delete everything I've scheduled.", "@0|Yes, all of them."),
+             cancelled(0, 1, 2, ask_first=True), seeds=(stock_seed, summary_seed, other_seed)),
+        Case("cancel-all-no", M, ("Cancel all my schedules.", "@1|No, keep them."),
+             cancelled(kept=(0, 1), ask_first=True), seeds=(stock_seed, summary_seed)),
+        Case("ambiguous-report", M, ("Move the report one to 7am.", "@1|The second one."),
+             asked_which_moved({0: "0 7 * * 1", 1: "0 7 * * *"}),
+             seeds=(summary_seed, revenue_seed)),
+        # --- end dates
+        Case("until-dec31", E,
+             (f"Every day at 9am send me the stock of {SKU} until 31 December.",),
+             ended_by(_on(12, 31), scheduled("0 9 * * *"))),
+        Case("three-weeks", E,
+             (f"For the next 3 weeks, send me the stock of {SKU} every morning at 8.",),
+             ended_by(_weeks(3, kolkata), scheduled("0 8 * * *"))),
+        Case("extend-march", E, ("Extend my stock report to March.",),
+             ended_by(_next_march, seed=0), seeds=(ending,)),
+        Case("remove-end", E, ("Remove the end date from my stock report.",),
+             no_end(0), seeds=(ending,)),
+        # --- limits: which, the number, what the user can do, plainly
+        Case("at-cap", L, ("Every Friday at 5pm send me the top 5 SKUs by revenue.",),
+             plain_limit("2", which=r"(limit|maximum|most|max|allowed|up to)[^.]{0,60}schedule"
+                         r"|schedules?[^.]{0,60}(limit|maximum|most|max|allowed)",
+                         action=r"cancel|delete|remove"),
+             seeds=(stock_seed, summary_seed), limits=ScheduleLimits(max_per_user=2)),
+        Case("org-cap", L, (f"Every day at 9am send me the stock of {SKU}.",),
+             plain_limit("50", which=r"organi[sz]ation|company|workspace|account|team",
+                         action=r"admin|administrator|owner|cancel|delete|remove",
+                         codes=(quota.code, "409")),
+             refuse=quota),
+        Case("too-often-plain", L,
+             (f"Check the stock of {SKU} every 5 minutes and tell me if it drops under 5.",),
+             plain_limit(which=r"hour|60 minutes",
+                         action=r"hourly|every hour|once an hour|every 60 minutes"),
+             limits=ScheduleLimits(min_interval=3600)),
+        # --- hard wording and edge cases
+        Case("hinglish-once", H, (f"Kal subah 8 baje mujhe {SKU} ka stock batana, bas ek baar.",),
+             scheduled(once=True, at=_tomorrow_at(8))),
+        Case("hinglish-weekdays", H, ("Weekdays pe shaam 6 baje din ka revenue bhej dena.",),
+             scheduled("0 18 * * 1-5")),
+        Case("devanagari", H, ("हर सोमवार सुबह 10 बजे मुझे sales summary भेजना।",),
+             scheduled("0 10 * * 1")),
+        Case("spanglish", H, ("Cada viernes a las 5pm send me the top 5 SKUs por revenue.",),
+             scheduled("0 17 * * 5")),
+        Case("typo-weekly", H, ("evry mondy at 9am snd me the sals sumary",),
+             scheduled("0 9 * * 1")),
+        Case("typo-once", H, ("remnd me tmrw at 10am to cal suplier SUP-03",),
+             scheduled(once=True, at=_tomorrow_at(10))),
+        Case("year-end", H, ("Next Monday at 9am, just once, send me last week's sales summary.",),
+             scheduled(once=True, at=_next_weekday_at(0, 9)),
+             now=datetime(2026, 12, 31, 10, tzinfo=ist)),
+        Case("month-end", H, (f"Tomorrow at 9am remind me to check {SKU}'s stock, just once.",),
+             scheduled(once=True, at=_tomorrow_at(9)), now=datetime(2027, 1, 31, 15, tzinfo=ist)),
+        Case("leap-yearly", H, ("Every 29 February at 10am remind me to do the leap-year count.",),
+             scheduled("0 10 29 2 *")),
+        Case("leap-next-year", H, ("On 29 February next year at 9am remind me to count stock.",),
+             impossible_date((date(2027, 2, 28), date(2027, 3, 1))), now=today_10),
+        Case("dst-new-york", H, (f"Every day at 9am send me the stock of {SKU}.",),
+             scheduled("0 9 * * *"), zone=new_york, now=datetime(2027, 3, 12, 10, tzinfo=ny)),
+        Case("dst-london", H, (f"On Monday at 9am remind me to check {SKU}'s stock, just once.",),
+             scheduled(once=True, at=_next_weekday_at(0, 9)), zone=london,
+             now=datetime(2027, 3, 26, 11, tzinfo=uk)),
+        Case("second-tuesday", H,
+             ("Every 2nd Tuesday of the month at 10am send me the revenue by region.",),
+             nth_weekday(2, 1, 10)),
+        Case("hourly-9-to-5", H,
+             (f"Every hour from 9 to 5 on weekdays, send me the stock of {SKU}.",),
+             one_of(scheduled("0 9-17 * * 1-5"),
+                    says_any(scheduled("0 9-16 * * 1-5"), "4 pm", "4pm", "16:00", "4:00"))),
+        Case("twice-a-day", H, (f"Send me the stock of {SKU} twice a day.",), times_a_day(2)),
+        Case("in-90", H, ("Remind me in 90 minutes to call supplier SUP-03.",),
+             scheduled(once=True, within=hour)),
+        Case("new-york-time", H, ("Every day at 9am New York time, send me the sales summary.",),
+             scheduled("0 9 * * *", new_york)),
+        Case("not-weekends", H,
+             ("Send me the day's revenue every day at 7pm, but not on weekends.",),
+             scheduled("0 19 * * 1-5")),
+        Case("past-today", H, ("Remind me at 8 this morning to call SUP-03.",),
+             or_asks(says_any(scheduled(once=True, at=_tomorrow_at(8)), "tomorrow"),
+                     "passed", "past", "already", "tomorrow"), now=today_10),
+        Case("habit-said", H, ("I always check the stock first thing on Monday mornings.",),
+             unscheduled()),
+        Case("habit-hinglish", H, ("Main har shaam revenue dekhta hoon, bas bata raha tha.",),
+             unscheduled()),
+        Case("cannot-website", H, ("Tell me if our website goes down.",), cannot),
+        Case("cannot-fx", H, ("Alert me when the dollar goes above 95 rupees.",), cannot),
+        Case("first-monday", H,
+             ("On the first Monday of every month at 9am send me last month's revenue.",),
+             nth_weekday(1, 0, 9)),
+        Case("except-wednesday", H,
+             (f"Every weekday except Wednesday at 9am, send me the stock of {SKU}.",),
+             scheduled("0 9 * * 1,2,4,5")),
+        Case("weekend-night", H, ("At 9:45pm on weekends send me the week's sales.",),
+             covered("45 21 * * 0,6")),
+        Case("day-after-tomorrow", H,
+             ("The day after tomorrow at 11am, remind me to call SUP-03.",),
+             scheduled(once=True, at=_in_days_at(2, 11))),
+        Case("hinglish-typo", H, ("har somvar 9 baje sals summry bhejo",),
+             scheduled("0 9 * * 1")),
+        # --- questions whose answers are facts of this harness
+        Case("laptop-off", Q, ("What happens to my stock check if my laptop is off at 9?",),
+             explains(RUNS_WITHOUT_YOU, IN_CHAT, wrong=NEEDS_DEVICE), seeds=(stock_seed,)),
+        Case("holidays", Q, ("Will my Monday sales summary still go out on a public holiday?",),
+             explains(RUNS_ON_HOLIDAYS, wrong=SKIPS_HOLIDAYS), seeds=(summary_seed,)),
+        Case("every-minute", Q, ("Can you run my stock check every minute instead?",),
+             shortest_said(), seeds=(stock_seed,)),
+        Case("who-sees", Q, ("Who else can see my schedules?",),
+             explains(ONLY_YOU, wrong=OTHERS_SEE), seeds=(stock_seed, summary_seed)),
+        Case("what-zone", Q, ("What time zone is my stock check in?",),
+             explains(KOLKATA, wrong=IN_NEW_YORK), zone=new_york,
+             seeds=(Seed(stock_seed.task, "0 9 * * *", stock_seed.condition, timezone=kolkata),)),
+        Case("where-reply", Q, ("Where will my stock check's results show up?",),
+             explains(IN_CHAT, wrong=ELSEWHERE), seeds=(stock_seed,)),
+        Case("how-many", Q, ("How many schedules can I have?",), most_said(),
+             seeds=(stock_seed,)),
     ]  # fmt: skip
 
 
@@ -823,9 +1645,73 @@ class Calls(Hooks):
         return outcome
 
 
+class Outage(Hooks):
+    """A fired run fails as it starts with :attr:`error`, while it is set (a :class:`Past`
+    run's): what an ``on_run_start`` hook that raises does (docs/runs.md, "A user who left")."""
+
+    def __init__(self) -> None:
+        self.error: str | None = None
+
+    async def on_run_start(self, run: Any) -> None:
+        if self.error is not None and run.scheduled is not None:
+            raise RuntimeError(self.error)
+
+
+@contextmanager
+def clock(at: datetime | None) -> Iterator[None]:
+    """The time it is, for the run and the schedule tools: ``at`` (``None``: now). The run
+    store keeps its own clock (when a schedule is due), which no case here reads."""
+    if at is None:
+        yield
+        return
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:
+            return at.astimezone(tz) if tz is not None else at.replace(tzinfo=None)
+
+    kept = snapshots.now, harness_schedules.datetime
+    setattr(snapshots, "now", lambda: at.astimezone(UTC))  # noqa: B010 - the test seam
+    setattr(harness_schedules, "datetime", Frozen)  # noqa: B010 - its runs_said, in_minutes
+    try:
+        yield
+    finally:
+        setattr(snapshots, "now", kept[0])  # noqa: B010
+        setattr(harness_schedules, "datetime", kept[1])  # noqa: B010
+
+
+async def _past(h: Any, agent: Any, outage: Outage, chat: Chat, past: Past) -> None:
+    """``past``'s run of its seed, fired and worked before the chat; moved back its days."""
+    outage.error = past.error
+    try:
+        fired = await h.runs.schedules.fire(chat.seeded[past.seed].schedule_id)
+        await h.worker([agent]).run_once()
+    finally:
+        outage.error = None
+    if not past.days_ago:
+        return
+    back, runs = timedelta(days=past.days_ago), h.runs
+    record = runs._runs[fired.run_id]
+    moved = {k: getattr(record, k) - back for k in ("created_at", "updated_at", "placed_at")
+             if getattr(record, k, None) is not None}  # fmt: skip
+    runs._runs[fired.run_id] = record.model_copy(update=moved)
+    schedule = runs._schedules[fired.schedule_id]
+    if schedule.last_fired_at is not None:
+        runs._schedules[fired.schedule_id] = schedule.model_copy(
+            update={"last_fired_at": schedule.last_fired_at - back}
+        )
+
+
 async def _seed(h: Any, agent: Any, user: str, thread: str, seed: Seed, *, zone: str) -> Schedule:
-    """``seed`` made as ``schedule_task`` makes it, in its zone or ``zone``."""
-    about = {"task": seed.task, "condition": seed.condition, "once": False}
+    """``seed`` made as ``schedule_task`` makes it, in its zone or ``zone``; its end, where it
+    has one, where the harness will keep it (``end_at``, when the contracts have it) and in its
+    task (``until``)."""
+    about: dict[str, Any] = {"task": seed.task, "condition": seed.condition, "once": False}
+    if seed.until is not None:
+        about["until"] = seed.until
+    ends: dict[str, Any] = {}
+    if seed.until and "end_at" in ScheduleSpec.model_fields:
+        ends["end_at"] = seed.until
 
     spec = ScheduleSpec(
         tenant_id=await h._tenant(None),
@@ -837,15 +1723,55 @@ async def _seed(h: Any, agent: Any, user: str, thread: str, seed: Seed, *, zone:
         input=_input(seed.task, seed.condition),
         enabled=seed.enabled,
         metadata={**agent._metadata(frozenset(), None), TASK: about, THREAD: thread},
+        **ends,
     )
     return await h.runs.schedules.create(spec)
+
+
+async def _chat(h: Any, agent: Any, case: Case, *, user: str, thread: str) -> Chat:
+    """The case's chat before its first turn: its time, the limits its tools say, its seeds
+    made (and, where the case says, the run store refusing any more)."""
+    chat = Chat(now=(case.now or datetime.now(UTC)).astimezone(UTC), zone=case.zone)
+    own = case.limits or ScheduleLimits()
+    given = h.settings
+    chat.min_interval = (
+        given.schedule_min_interval if own.min_interval is None else own.min_interval
+    )
+    chat.max_per_user = (
+        given.schedule_max_per_user if own.max_per_user is None else own.max_per_user
+    )
+    zone = case.zone or "UTC"
+    chat.seeded = [await _seed(h, agent, user, thread, s, zone=zone) for s in case.seeds]
+    if case.refuse is not None:
+        _refusing(h, case.refuse)
+    return chat
+
+
+async def _before(h: Any, agent: Any, outage: Outage, chat: Chat, *, case: Case, user: str) -> None:
+    """``case``'s past runs, in order; then the seeds as the chat finds them (their last run,
+    their failures, paused), the failed runs' turns written to memory first."""
+    for past in case.past:
+        await _past(h, agent, outage, chat, past)
+    now = {s.schedule_id: s for s in (await h.runs.schedules.list(on_behalf_of=user)).items}
+    chat.seeded = [now.get(s.schedule_id, s) for s in chat.seeded]
+    if case.memory:
+        await h.writes.drain()
+
+
+def _refusing(h: Any, error: ConflictError) -> None:
+    """The run store refuses every new schedule with ``error`` (agent-runs' own limits)."""
+
+    async def create(spec: ScheduleSpec, *args: Any, **kwargs: Any) -> Schedule:
+        raise error
+
+    setattr(h.runs.schedules, "create", create)  # noqa: B010 - this case's store
 
 
 async def run_case(
     case: Case, model: str, tag: str, max_steps: int = 12, *, adapter: str = "react"
 ) -> dict[str, Any]:
 
-    h = runner.harness()
+    h = runner.harness(memory=case.memory)
     if case.limits is not None:
         limits = case.limits
 
@@ -857,15 +1783,17 @@ async def run_case(
         assert isinstance(h.runs, LocalRuns)
         bound = await bound_of(h, adapter)
         target, options = target_of(model, "thread", None, max_steps, adapter=adapter, bound=bound)
-        trace = Calls()
-        agent = h.wrap(target, id=f"sched-{case.id}", hooks=[trace], run_timeout=300, **options)
+        trace, outage = Calls(), Outage()
+        agent = h.wrap(target, id=f"sched-{case.id}", hooks=[trace, outage], run_timeout=300,
+                       **options)  # fmt: skip
         user, thread = f"sched-{tag}-{case.id}", f"sched-{tag}-{case.id}"
-        chat = Chat(now=datetime.now(UTC), zone=case.zone)
-        zone = case.zone or "UTC"
-        chat.seeded = [await _seed(h, agent, user, thread, s, zone=zone) for s in case.seeds]
+        chat = await _chat(h, agent, case, user=user, thread=thread)
         app = Frontend(context=case.context, timezone=case.zone)
         started = time.monotonic()
-        with runner.metered(adapter=adapter) as meter:
+        with runner.metered(adapter=adapter) as meter, clock(case.now):
+            if case.past:
+                await _before(h, agent, outage, chat, case=case, user=user)
+                trace.calls = []
             waits: Interrupt | None = None
             for text in case.turns:
                 trace.calls = []
@@ -924,23 +1852,37 @@ async def run_case(
 
 
 def summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    by = {c: [x for x in rows if x["category"] == c] for c in CATEGORIES}
+    """The report: the cases that score (pending ones apart: :data:`PENDING`), per category,
+    and the costs of all."""
+    pending = [x for x in rows if x["case"] in PENDING]
+    scored = [x for x in rows if x["case"] not in PENDING]
+    by = {c: [x for x in scored if x["category"] == c] for c in CATEGORIES}
     calls = sum(x["model_calls"] for x in rows) or 1
     return {
-        "passed": sum(x["passed"] for x in rows),
-        "cases": len(rows),
+        "passed": sum(x["passed"] for x in scored),
+        "cases": len(scored),
         "by_category": {c: f"{sum(x['passed'] for x in v)}/{len(v)}" for c, v in by.items() if v},
+        "pending": {
+            x["case"]: {"feature": PENDING[x["case"]], "passed": x["passed"]} for x in pending
+        },
         "input_tokens_per_request": round(sum(x["input_tokens"] for x in rows) / calls),
         "model_calls_per_case": round(calls / max(len(rows), 1), 2),
         "seconds_per_case": round(sum(x["seconds"] for x in rows) / max(len(rows), 1), 2),
         "usd": round(sum(x["usd"] for x in rows), 4),
-        "failed": {x["case"]: x["problems"] for x in rows if not x["passed"]},
+        "failed": {x["case"]: x["problems"] for x in scored if not x["passed"]},
     }
 
 
 async def bench(args: argparse.Namespace) -> dict[str, Any]:
     wanted = {c for c in args.cases.split(",") if c}
-    chosen = [c for c in cases() if not wanted or c.id in wanted or c.category in wanted]
+    chosen = [
+        c
+        for c in cases()
+        if not wanted
+        or c.id in wanted
+        or c.category in wanted
+        or ("pending" in wanted and c.id in PENDING)
+    ]
     rows: list[dict[str, Any]] = []
     spent = 0.0
     tag = args.tag or datetime.now(UTC).strftime("%H%M%S")
@@ -953,7 +1895,7 @@ async def bench(args: argparse.Namespace) -> dict[str, Any]:
             spent += row["usd"]
             rows.append(row)
             _kept(f"{args.out}.jsonl", row, append=True)
-            mark = "ok  " if row["passed"] else "FAIL"
+            mark = ("ok  " if row["passed"] else "FAIL") + (" (pending)" * (case.id in PENDING))
             sys.stderr.write(f"{mark} {case.id}: {'; '.join(row['problems'])}\n")
     report = summary(rows)
     _kept(f"{args.out}.json", report)
@@ -972,7 +1914,8 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)  # fmt: skip
     p.add_argument("--model", default=env("TRELLIS_BENCH_MODEL") or env("TRELLIS_LIVE_MODEL"))
     p.add_argument("--adapter", choices=ADAPTERS, default="react", help="the framework wrapped")
-    p.add_argument("--cases", default="", help="case ids or categories, comma-separated")
+    p.add_argument("--cases", default="",
+                   help="case ids or categories (or 'pending'), comma-separated")  # fmt: skip
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--max-usd", type=float, default=None)
     p.add_argument("--tag", default="")
