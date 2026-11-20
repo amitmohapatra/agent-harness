@@ -32,7 +32,7 @@ from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
 from trellis.harness.background import Tasks
-from trellis.harness.bounded import LRU
+from trellis.harness.bounded import LRU, LRUSet
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import FORGET, TOOL_SEARCH, USERS_OWN, Memory, RunMemory
@@ -51,6 +51,14 @@ from trellis.harness.holding import Holds
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity, conversation_key
 from trellis.harness.line import Followers
+from trellis.harness.notifications import (
+    KEPT,
+    Channel,
+    ChannelsHook,
+    ChatChannel,
+    Notification,
+    notify,
+)
 from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
 from trellis.harness.runlog import event_log
@@ -135,8 +143,20 @@ class Harness:
         gateway: Gateway | Literal[False] | None = None,
         schedule_limits: LimitsHook | None = None,
         credentials: CredentialsHook | None = None,
+        channels: Sequence[Channel] | None = None,
+        user_channels: ChannelsHook | None = None,
     ) -> None:
         self.settings = config or Settings.from_env()
+        #: where :meth:`notify` tells users what happened (the chat's by default), and the
+        #: (channel, tenant, key) each was given already
+        self.channels: tuple[Channel, ...] = (
+            (ChatChannel(),) if channels is None else tuple(channels)
+        )
+        self.user_channels = user_channels
+        names = [c.name for c in self.channels]
+        if len(set(names)) < len(names):
+            raise ConfigurationError(f"two channels have one name: {names}")
+        self.notified: LRUSet[tuple[str, str, str]] = LRUSet(maxsize=KEPT)
         self.schedule_limits = schedule_limits
         self.credentials = credentials
         s = self.settings
@@ -450,6 +470,13 @@ class Harness:
             if name in REMOVED_METHODS:
                 raise AttributeError(f"h.{name}() was removed: {REMOVED_METHODS[name]}")
             raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+    async def notify(self, notification: Notification) -> list[str]:
+        """Tell ``notification`` on each of its user's channels (``channels=``,
+        ``user_channels=``) that was not given it yet — at most once per channel for its
+        tenant and ``key``, however often this is called: the names of the channels that took
+        it now (``notifications``)."""
+        return await notify(self, notification)
 
     async def aclose(self) -> None:
         """End what the agents' frameworks keep running between runs (``Agent.aclose``), finish

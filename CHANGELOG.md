@@ -5,6 +5,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: one notification interface, the chat its first channel
+
+`Harness(channels=)` and `await h.notify(Notification(...))` (`trellis.harness.notifications`):
+a fired run's result, a failure, a schedule paused or a run waiting for approval goes to the
+user's channels, at most once per channel for its tenant and stable `key` (a retry or a resumed
+run sends nothing again; a channel that failed is tried again by the next call). Which channels
+a user gets is the company's code, `Harness(user_channels=async (user, tenant, notification) ->
+names | None)`, per user and per kind; with none, or `None`, or a hook that fails (logged), the
+chat only; a name the harness has no channel of is logged and skipped.
+The chat's channel (`ChatChannel`, the default) delivers through the run the notification is
+about, which the thread stream already delivers: nothing is said twice. Email, Slack and Teams
+plug in as channels; schedules and runs do not call `notify` yet.
 ### Fixed: a failed run says why in the chat
 
 A run that failed wrote its turn with status `ERROR` and no reason, so "why did my report

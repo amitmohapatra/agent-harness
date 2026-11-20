@@ -582,6 +582,67 @@ async def hook(request: Request) -> Response:
     return Response(status_code=204)
 ```
 
+### Telling users: channels
+
+One interface tells a user what happened while they were away, whatever carries it
+(`trellis/harness/notifications.py`): a `Notification` — its `kind` (`Kind.RESULT` a fired
+run's result, `FAILURE`, `PAUSED` a schedule paused, `APPROVAL` a run waiting for the user's
+approval), its `tenant` and `user`, the `thread`, `run_id` or `schedule_id` it is about, a
+short `text` of the facts, and a stable `key` — goes to the user's channels with
+`await h.notify(notification)`, which returns the names of the channels that took it now.
+
+- **Channels.** `Harness(channels=[...])`: the channels the company connected, set once in
+  code; none given is the chat's own (`ChatChannel`), `[]` is nowhere. A channel is any object with a `name` (one per harness) and
+  `async deliver(notification, harness)` that returns once it delivered (or cannot tell) and
+  raises when it did not (`Undelivered`): email, Slack or Teams plug in here, with nothing of
+  schedules or runs to change.
+- **Whose channels.** `Harness(user_channels=async (user, tenant, notification) -> names |
+  None)`: the names of the channels this user gets for this notification (by its `kind`, too),
+  from the company's code, as `schedule_limits=` is — never the environment. No hook, or one
+  that says `None`: the chat only (`CHAT`), never every channel. A name the harness has no
+  channel of is logged and skipped; a hook that raises is logged and the chat alone is told.
+- **At most once per channel.** `notify` gives a channel a tenant's `key` only once in the process: a
+  second call (a retry, a resumed run, two at once) sends nothing again. A channel that raised
+  is logged and tried again by the next call. The last 10,000 keys are kept (`KEPT`); a channel
+  that reaches an outside system passes `key` on as its idempotency key, so another process
+  does not send it twice either.
+- **The chat.** A notification is about a run of the user's thread (a fired run is the same
+  agent, user and thread): that run is the chat's delivery — the thread stream delivers its
+  reply, pause or error to an open chat ([surfaces.md](surfaces.md)) and the conversation keeps
+  its reply — so `ChatChannel` sends nothing of its own, which would say it twice. It checks the
+  run is the user's, in that thread (`Undelivered` otherwise, or with no run).
+
+```python
+from trellis import Harness
+from trellis.harness.notifications import ChatChannel, Kind, Notification
+
+
+class Email:
+    name = "email"
+
+    async def deliver(self, notification: Notification, harness: Harness) -> None:
+        await mailer.send(notification.user, notification.text, idempotency_key=notification.key)
+
+
+async def routes(user: str, tenant: str, notification: Notification) -> list[str] | None:
+    if notification.kind is Kind.APPROVAL:
+        return ["chat", "email"]  # an approval waits: email it too
+    return None  # the rest: the chat only
+
+
+h = Harness(channels=[ChatChannel(), Email()], user_channels=routes)
+said = Notification(
+    kind=Kind.RESULT,
+    tenant=tenant,
+    user="ada",
+    text=report,
+    key=key,
+    thread="chat-1",
+    run_id=run_id,
+)
+await h.notify(said)
+```
+
 ## The inbox
 
 `await h.inbox("role:procurement")` — the paused runs waiting on that assignee (or, with no
