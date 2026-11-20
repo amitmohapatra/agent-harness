@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -24,7 +25,9 @@ from trellis.harness.budget import BUDGET, Budget
 from trellis.harness.notifications import CHAT, ChatChannel, Kind, Notification
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import (
+    ALLOWED,
     BOTH,
+    CONFIRM,
     FAILURES,
     MAX_FAILURES,
     NEITHER,
@@ -36,6 +39,7 @@ from trellis.harness.schedules import (
     STALE,
     TASK,
     TOUCHED,
+    UNAPPROVED,
     UPDATE,
     ScheduleLimits,
     runs_said,
@@ -477,6 +481,16 @@ async def test_a_graph_built_with_its_tools_takes_them_from_the_harness() -> Non
 # --------------------------------------------------------------------------- asked with options
 
 
+@tool(side_effects="write")
+def send_report(to: str = "me") -> str:
+    """Email the report.
+
+    Args:
+        to: Who it goes to.
+    """
+    return f"sent to {to}"
+
+
 @tool(side_effects="read")
 def stock(sku: str) -> int:
     """Units of a SKU in stock now.
@@ -490,10 +504,16 @@ def stock(sku: str) -> int:
 WATCH = {"task": "check stock of SKU-1", "when": "0 9 * * *", "condition": "SKU-1 under 5"}
 
 
-async def planned(h: Harness, *calls: tuple[str, dict[str, Any]], name: str = "desk") -> Any:
-    """``ReAct`` on a planned model making ``calls`` (the stock check first), with ``stock``."""
+async def planned(
+    h: Harness,
+    *calls: tuple[str, dict[str, Any]],
+    name: str = "desk",
+    tools: Sequence[Any] = (),
+) -> Any:
+    """``ReAct`` on a planned model making ``calls`` (the stock check first), with ``stock``
+    and ``tools``."""
     model = PlannedChat([("stock", {"sku": "SKU-1"}), *calls])
-    return arm(h.wrap(ReAct(system_prompt="Help.", model=model), id=name), [stock])
+    return arm(h.wrap(ReAct(system_prompt="Help.", model=model), id=name), [stock, *tools])
 
 
 async def seeded(h: Harness, agent: str, *abouts: dict[str, Any]) -> list[str]:
@@ -523,27 +543,28 @@ async def picked(agent: Any, interrupt: Any, value: str) -> str:
 
 
 @pytest.mark.parametrize(("value", "conditions"), [
-    (UPDATE, ["SKU-1 is 3 or less"]),
-    (BOTH, ["SKU-1 is 3 or less", "SKU-1 under 5"]),
+    (CONFIRM, ["SKU-1 is 3 or less"]),  # the recommended answer: update it
+    ({"alike": UPDATE}, ["SKU-1 is 3 or less"]),
+    ({"alike": BOTH}, ["SKU-1 is 3 or less", "SKU-1 under 5"]),
     (NEITHER, ["SKU-1 under 5"]),
 ])  # fmt: skip
 async def test_a_schedule_the_model_judges_alike_is_asked_about_update_first(
-    value: str, conditions: list[str]
+    value: Any, conditions: list[str]
 ) -> None:
     """The same thing watched with another value, judged so by the model (``alike``, from
-    list_schedules, handoff 2.5): the user picks — update it (recommended, first), keep both,
-    or neither; the very same again is said to be set already."""
+    list_schedules, handoff 2.5): in the schedule's one question the user picks — update it
+    (recommended: the default), keep both, or cancel; the very same again is said to be set
+    already."""
     async with Harness(config=Settings()) as h:
         [had] = await seeded(h, "desk", WATCH)
         lower = {**WATCH, "condition": "SKU-1 is 3 or less", "alike": had}
         agent = await planned(h, ("schedule_task", lower))
         interrupt = await asked(agent)
-        labels = [o.label for o in interrupt.options]
-        assert labels[0].startswith("Update it to") and labels[1:] == ["Keep both", "Cancel"]
-        # recommended by the flag, with why: the user's newest request
-        assert [o.recommended for o in interrupt.options] == [True, None, None]
-        assert interrupt.options[0].description == "what you asked for now"
-        await picked(agent, interrupt, value)
+        assert [o.value for o in interrupt.options] == [CONFIRM, NEITHER]
+        assert [o.recommended for o in interrupt.options] == [True, None]
+        form = (interrupt.expects or {}).get("anyOf", [{}])[-1].get("properties", {})
+        assert form["alike"]["enum"] == [UPDATE, BOTH] and form["alike"]["default"] == UPDATE
+        await picked_value(agent, interrupt, value)
         found = [s.metadata[TASK]["condition"] for s in local(h)._schedules.values()]
         assert sorted(found) == sorted(conditions)
         same = {**WATCH, "condition": "SKU-1 below 5"}  # no alike: the very same is caught
@@ -558,7 +579,7 @@ async def test_a_task_the_model_judges_alike_at_another_time_is_asked_about() ->
         [had] = await seeded(h, "desk", {"task": "Send the sales summary", "when": "0 8 * * 1"})
         later = {"task": "send me the sales summary", "when": "0 9 * * 1", "alike": had}
         agent = await planned(h, ("schedule_task", later))
-        await picked(agent, await asked(agent), UPDATE)
+        await picked_value(agent, await asked(agent), {"alike": UPDATE})
         assert [s.cadence for s in local(h)._schedules.values()] == ["0 9 * * 1"]
 
 
@@ -1249,3 +1270,64 @@ async def test_a_channel_that_fails_never_fails_the_fired_run(
         chat.fired.append("done")
         record = await fire(h, agent, only(h).schedule_id)
         assert record.status is RunStatus.SUCCESS and record.output == "done"
+
+
+async def test_a_time_the_model_assumed_is_confirmed_once_and_may_be_changed() -> None:
+    """Item 7: no time said, the model uses the default and says so (``inferred``); the user
+    confirms in one question offering that time (recommended), a time picker, or their words.
+    A time they pick is the schedule's."""
+    async with Harness(config=Settings()) as h:
+        args = {"task": "sales summary", "when": "0 9 * * 1", "inferred": ["time"]}
+        agent = await planned(h, ("schedule_task", args))
+        interrupt = await asked(agent)
+        assert interrupt.options[0].value == CONFIRM
+        assert interrupt.options[0].recommended is True
+        form = (interrupt.expects or {}).get("anyOf", [{}])[-1].get("properties", {})
+        assert form["time"]["default"] == "09:00" and form["time"]["format"] == "time"
+        await picked_value(agent, interrupt, {"time": "07:30"})
+        assert only(h).cadence == "30 7 * * 1"
+
+
+async def test_everything_open_is_asked_in_one_question_never_two() -> None:
+    """Item 8: an assumed zone, a schedule the model judged alike and a write its runs make are
+    one question, with every open detail in it; confirmed with the recommended answers, the
+    alike one is updated, the write allowed, and an unapproved step skipped and told."""
+    async with Harness(config=Settings()) as h:
+        [had] = await seeded(h, "desk", {"task": "Send the sales summary", "when": "0 8 * * 1"})
+        args = {
+            "task": "send the sales summary",
+            "when": "0 9 * * 1",
+            "alike": had,
+            "tools": ["send_report"],
+            "inferred": ["zone"],
+        }
+        agent = await planned(h, ("schedule_task", args), tools=[send_report])
+        interrupt = await asked(agent)
+        form = (interrupt.expects or {}).get("anyOf", [{}])[-1].get("properties", {})
+        assert {"alike", "allow", "unapproved"} <= set(form) and "time" not in form
+        assert "send_report" in interrupt.question and "already have" in interrupt.question
+        result = await picked(agent, interrupt, CONFIRM)
+        assert "Scheduled" in result or "Updated" in result or "sch_" in result, result
+        [schedule] = local(h)._schedules.values()  # the alike one, updated: not a second
+        assert schedule.schedule_id == had and schedule.cadence == "0 9 * * 1"
+        assert schedule.metadata[ALLOWED] == ["send_report"]
+        assert schedule.metadata[UNAPPROVED] == "skip"
+
+
+async def test_a_schedule_said_in_full_is_made_with_no_question() -> None:
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "sales summary", "when": "0 9 * * 1", "timezone": "Asia/Kolkata"}
+        made = await said(agent, chat, "ada", ("schedule_task", args))
+        assert made.startswith("Scheduled") and len(local(h)._schedules) == 1
+
+
+async def test_a_confirmation_cancelled_or_answered_in_words_makes_nothing() -> None:
+    async with Harness(config=Settings()) as h:
+        args = {"task": "sales summary", "when": "0 9 * * 1", "inferred": ["time"]}
+        agent = await planned(h, ("schedule_task", args))
+        assert "Nothing scheduled" in await picked(agent, await asked(agent), NEITHER)
+        other = await planned(h, ("schedule_task", args), name="other")
+        said_ = await picked_value(other, await asked(other), "make it Tuesdays at 7 pm")
+        assert "Tuesdays at 7 pm" in said_ and not local(h)._schedules

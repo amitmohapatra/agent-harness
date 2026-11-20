@@ -854,6 +854,12 @@ async def _decided(
         approved.remove(gated)  # one approval, one call
         decision = decision.approved(f"{spec.name} was approved in the framework's own gate.")
         events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
+    if decision.asks and (skipped := _unattended(runtime, spec.name)) is not None:
+        events.custom(DECISION, tool=spec.name, decision="REJECT", unattended=True)
+        outcome = ToolOutcome(
+            tool=spec.name, status=ToolStatus.REJECTED, output=skipped, error_class="NotApproved"
+        )
+        return decision, call, outcome
     if decision.asks:
         resolution = await _answered(runtime, call, decision, hooked=hooked, deciding=deciding)
         runtime.replay.journal.asked_again(repeat)
@@ -886,6 +892,27 @@ async def _decided(
     elif decision.announces:
         events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
+
+
+#: What the model of an unattended run reads of a call nobody approved, which its schedule
+#: skips (``schedules.UNAPPROVED``): it does the rest and tells its user.
+UNATTENDED: Final = (
+    "{tool} was not run: nobody is here to approve it, and this schedule skips a step nobody "
+    "approved. Do the rest of the task, and say in your reply what was not done and that the "
+    "user can approve it to have it done."
+)
+
+
+def _unattended(runtime: Runtime, tool: str) -> str | None:
+    """What a call that would ask a person says instead, in a run its schedule fired that
+    skips what nobody approved (its ``unapproved``); ``None``: it asks."""
+    root = runtime
+    while root.parent is not None:  # a child run works for its parent's schedule
+        root = root.parent
+    fired = root.scheduled
+    if fired is None or getattr(fired, "unapproved", None) != "skip":
+        return None
+    return UNATTENDED.format(tool=tool)
 
 
 def _rewound_past(

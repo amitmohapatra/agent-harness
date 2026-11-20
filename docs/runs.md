@@ -506,13 +506,30 @@ with its tools bound takes them when it is built, with the harness's other tools
   if the user wants to hear again. Nothing its tools can check ("when a competitor changes
   price") is not scheduled: it says so and offers what its tools can watch. A fired run is
   offered none of the four tools: it does its task (it made schedules of its own when it was).
-- **Asked with buttons.** Where two or more answers change the outcome, the tools ask the user
-  through the run's own question (`Runtime.ask(options=)`, buttons on AG-UI): a schedule the
-  model judged like one the user has (`schedule_task(alike=)`, the id it read in
-  `list_schedules`; no word-overlap rule of code decides, handoff 2.5) — "Update it to ...
-  (Recommended)", "Keep both", "Cancel"; the very same again (task, time, zone, once and the
-  condition's figures) is "Already set" and nothing is asked —, cancel all, a
-  reference that fits several (`ids`), a vague ask (`choices`).
+- **One question for a new schedule.** A schedule with anything open is confirmed in one
+  question (`Runtime.ask`: Confirm, recommended, or Cancel, and a form the app renders), every
+  open detail in it at once, never asked one after another:
+  - what the model assumed rather than the user said (`schedule_task(inferred=)`: time,
+    days, zone, condition, end): with no time said the model uses
+    `TRELLIS_SCHEDULE_DEFAULT_TIME` and lists `time`, and the form offers it as a time picker;
+  - a schedule the model judged like one the user has (`alike=`, the id it read in
+    `list_schedules`; no word-overlap rule of code decides, handoff 2.5): update it (the
+    default) or keep both;
+  - the writes its runs make (`tools=`): allowed in its runs unasked (the default), or asked;
+  - what its unattended runs do with a step nobody approved: skip it and say so (the default),
+    or wait for the user.
+
+  Confirm takes every default; answered in words, the model reads it and decides. A schedule
+  said in full, with nothing new to allow, is made with no question. The very same again
+  (task, time, zone, once and the condition's figures) is "Already set". Cancel all, a
+  reference that fits several (`ids`) and a vague ask (`choices`) ask with buttons too.
+- **Unattended runs never wait for nobody.** A run its schedule fired calls what the schedule
+  allowed; a call nobody approved is skipped (`trellis_unapproved: skip`): the run goes on and
+  its reply says what was not done and that the user can approve it. A schedule set to wait
+  pauses on it instead, and waits a day for the user's answer (`runtime.UNANSWERED`, the
+  interrupt's `deadline`): past it the run ends `TIMEOUT`, nobody answered (agent-runs'
+  ticker, and `LocalRuns` as it). A schedule made before it was asked waits, as it did. An
+  `irreversible` tool asks every call, so it is never run unattended.
 - **Whose.** A schedule acts for the run's user, in the key's tenant (`on_behalf_of`); each user
   sees and changes only their own, and only those set in chat (a schedule your code makes with
   `agent.schedule` is not listed).

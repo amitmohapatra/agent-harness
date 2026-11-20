@@ -153,10 +153,15 @@ WHEN_ANSWER: Final = {
 }  # fmt: skip
 #: What the model reads of an answer that is none of the suggestions.
 OWN_ANSWER: Final = "Nothing scheduled yet: the user answered in their own words: {answer}"
-#: The values of the options a schedule whose task names writes is confirmed with: schedule it
-#: allowing them in its runs, or schedule it asking at each run (or :data:`NEITHER`).
-ALLOW: Final = "allow"
-EACH_TIME: Final = "ask"
+#: The confirmation's recommended answer: make the schedule with each open detail as offered.
+CONFIRM: Final = "confirm"
+#: The schedule metadata key of what its unattended runs do with a call nobody approved: skip it
+#: and say so in the reply (:data:`UNATTENDED`'s first, the default), or wait for its user.
+UNAPPROVED: Final = "trellis_unapproved"
+UNATTENDED: Final = ("skip", "wait")
+#: What the model reads of what the user assumed nothing about (``inferred``): those details
+#: of a schedule, confirmed with the user in its one question.
+INFERRED: Final = ("time", "days", "zone", "condition", "end")
 #: The schedule metadata key of the writes the user allowed its runs when they confirmed it:
 #: a fired run calls them without asking (``tools.bridge``); any other write still asks.
 ALLOWED: Final = "trellis_allowed"
@@ -215,6 +220,9 @@ class Fired:
     delivered: bool | None = None
     #: why this run paused its schedule (:func:`failed`), when it did
     paused: str | None = None
+    #: what a call nobody approved does in its runs (:data:`UNATTENDED`); a schedule made
+    #: before it was asked waits, as it did
+    unapproved: str = UNATTENDED[1]
 
     @classmethod
     def of(cls, metadata: dict[str, Any]) -> Fired | None:
@@ -233,6 +241,7 @@ class Fired:
             allowed=tuple(str(name) for name in metadata.get(ALLOWED) or ()),
             zone=metadata.get(ZONE) if isinstance(metadata.get(ZONE), str) else None,
             report=str(metadata.get(REPORT) or REPORTS[0]),
+            unapproved=str(metadata.get(UNAPPROVED) or UNATTENDED[1]),
         )
 
 
@@ -480,8 +489,8 @@ SPECS: Final = (
         "schedule only if they want to hear again. If no tool of yours can check it, do not "
         "schedule: say so and offer two or three things your tools can watch, by name. A "
         "vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your "
-        "tools can run, the best first; the user picks one. With no time said it runs at "
-        "{default_time}; say the time you used. One schedule can run at several times or days "
+        "tools can run, the best first; the user picks one. With no time said, use "
+        "{default_time} and list time in inferred. One schedule can run at several times or days "
         "('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every {every}. A condition reports as "
         "report says. When the user may already have one like it, read list_schedules first; "
         "one doing the same thing, perhaps at another time or value: pass its id as alike, "
@@ -494,6 +503,12 @@ SPECS: Final = (
             "once": {"type": "boolean", "description": "Run once, then end."},
             "report": _REPORT,
             "end_at": _END_AT,
+            "inferred": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(INFERRED)},
+                "description": "What you assumed rather than the user said: the user confirms "
+                "it in one question, with everything else still open.",
+            },
             "alike": {
                 "type": "string",
                 "description": "The id (list_schedules) of the user's schedule that does the "
@@ -606,17 +621,12 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
         return refused
     mine = await _mine(runtime)
     about = {"task": task, "condition": condition, "once": once}
-    twin = await _twin_asked(runtime, mine, about, when, zone, alike=args.get("alike"))
-    if (said := twin or _full(mine, max_per_user)) is not None:
+    if (said := _already(mine, about, when, zone) or _full(mine, max_per_user)) is not None:
         return said
     metadata = _made_metadata(runtime, held, about, zone, args.get("report"))
-    writes = await _asking(runtime, args.get("tools") or [])
-    if writes:
-        picked = await _writes_asked(runtime, _said(about, when, zone), writes)
-        if picked == NEITHER:
-            return "Nothing scheduled: the user did not want it."
-        if picked == ALLOW:
-            metadata[ALLOWED] = writes
+    when, answer = await _settled(runtime, args, mine, about, (when, zone), metadata=metadata)
+    if answer is not None:
+        return answer
     agent = runtime.agent
     try:
         spec = ScheduleSpec(
@@ -636,6 +646,42 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     except (ValueError, ValidationError, ConflictError) as exc:
         return _refusal(exc, "That schedule was refused")
     return f"Scheduled {made.schedule_id}: {_described(made)}{counted}"
+
+
+async def _settled(
+    runtime: Runtime,
+    args: dict[str, Any],
+    mine: list[Schedule],
+    about: dict[str, Any],
+    at: tuple[str, str],
+    *,
+    metadata: dict[str, Any],
+) -> tuple[str, Any]:
+    """The schedule's ``when`` once every open detail is settled, in its one question when
+    anything is (:func:`_confirmed`): what the model assumed (``inferred``), the schedule it
+    judged alike, the writes its runs make. ``metadata`` takes what the user allowed. With an
+    answer beside it, that is the tool's: nothing made, or the alike schedule updated."""
+    when, zone = at
+    open_ = {
+        "time": _assumed_time(when, args.get("inferred")),
+        "twin": next((m for m in mine if m.schedule_id == str(args.get("alike") or "")), None),
+        "writes": await _asking(runtime, args.get("tools") or []),
+    }
+    if not any(open_.values()) and not set(args.get("inferred") or ()) & set(INFERRED):
+        return when, None  # said in full: made with no question
+    confirmed = await _confirmed(runtime, _said(about, when, zone), open_)
+    if isinstance(confirmed, str):
+        return when, confirmed
+    when = _at(when, confirmed.time)
+    metadata[UNAPPROVED] = confirmed.unapproved
+    if confirmed.allow:
+        metadata[ALLOWED] = open_["writes"]
+    if open_["twin"] is None or confirmed.alike != UPDATE:
+        return when, None
+    update = {"cadence": when, "timezone": zone, **_about(about)}
+    kept = {k: metadata[k] for k in (ALLOWED, UNAPPROVED) if k in metadata}
+    update["metadata"] = {**update["metadata"], **kept}
+    return when, await _changed(runtime, open_["twin"], update)
 
 
 def _in_minutes(minutes: float, zone: str, start: datetime | None = None) -> tuple[str, str]:
@@ -662,6 +708,7 @@ def _made_metadata(
         TASK: about,
         TOUCHED: _now(),
         ZONE: zone,
+        UNAPPROVED: UNATTENDED[0],  # never waiting for nobody, unless the user says so
     }
     if (report := str(report or REPORTS[0])) in REPORTS[1:]:
         metadata[REPORT] = report
@@ -769,56 +816,110 @@ async def _asking(runtime: Runtime, names: list[Any]) -> list[str]:
     return asking
 
 
-async def _writes_asked(runtime: Runtime, said: str, writes: list[str]) -> Any:
-    """The user's confirmation of a schedule whose runs will call ``writes``: schedule it
-    allowing them, schedule it asking at each run, or not at all."""
-    named = ", ".join(writes)
-    return await runtime.ask(
-        f"Schedule {said}? Its runs will call {named}, which change things.",
-        options=[
-            Option(value=ALLOW, label=f"Schedule it, allowing {named} in its runs"),
-            Option(value=EACH_TIME, label="Schedule it, asking me at each run"),
-            Option(value=NEITHER, label="Do not schedule it"),
-        ],
-    )
-
-
-async def _twin_asked(
-    runtime: Runtime,
-    mine: list[Schedule],
-    about: dict[str, Any],
-    when: str,
-    zone: str,
-    *,
-    alike: Any = None,
-) -> Any:
-    """What a schedule like one the user has comes to: nothing new (the very same again), or
-    the one the model judged ``alike`` updated, or none, as the user picks; ``None``: make it
-    (none alike, or both kept)."""
+def _already(mine: list[Schedule], about: dict[str, Any], when: str, zone: str) -> str | None:
+    """The very same schedule again (:func:`_same`): said to be set, nothing made."""
     same = next((m for m in mine if _same(m, about, when, zone)), None)
-    if same is not None:
-        return f"Already set, nothing changed: {_described(same)}"
-    twin = next((m for m in mine if m.schedule_id == str(alike or "").strip()), None)
-    if twin is None:
-        return None
-    said = _said(about, when, zone)
-    choice = await runtime.ask(
-        f"You already have a schedule like this: {_described(twin)} Update it to {said}, "
-        "or keep both?",
+    return None if same is None else f"Already set, nothing changed: {_described(same)}"
+
+
+@dataclass(frozen=True)
+class _Confirmed:
+    """What the user confirmed of a new schedule: its time (``HH:MM``, when it was open), the
+    schedule they keep when one is alike (:data:`UPDATE` it or :data:`BOTH`), whether its runs
+    may make its writes unasked, and what they do with a call nobody approved."""
+
+    time: str | None
+    alike: str
+    allow: bool
+    unapproved: str
+
+
+async def _confirmed(
+    runtime: Runtime,
+    said: str,
+    open_: dict[str, Any],
+) -> _Confirmed | str:
+    """The one question a new schedule asks, every open detail in it (``open_``: the time it
+    assumed, the schedule the model judged alike, the writes its runs make): Confirm with
+    each as offered (recommended), the details changed in the app's form, Cancel, or the
+    user's own words — what the model then reads (:data:`OWN_ANSWER`)."""
+    fields = _fields(open_)
+    question = " ".join(
+        [f"Set up this schedule? {said}."]
+        + ([f"You already have one like it: {_described(open_['twin'])}"] if open_["twin"] else [])
+        + ([f"Its runs will call {', '.join(open_['writes'])}, which change things."]
+           if open_["writes"] else [])
+    )  # fmt: skip
+    answer = await runtime.ask(
+        question,
         options=[
-            Option(
-                value=UPDATE,
-                label=f"Update it to {said}",
-                description="what you asked for now",
-                recommended=True,
-            ),
-            Option(value=BOTH, label="Keep both"),
+            Option(value=CONFIRM, label="Confirm", recommended=True),
             Option(value=NEITHER, label="Cancel"),
         ],
+        expects={"anyOf": [{"type": "string"}, {"type": "object", "properties": fields}]},
     )
-    if choice == UPDATE:
-        return await _changed(runtime, twin, {"cadence": when, "timezone": zone, **_about(about)})
-    return None if choice == BOTH else "Nothing scheduled: the user keeps the one they have."
+    if answer == NEITHER:
+        return "Nothing scheduled: the user did not want it."
+    if answer != CONFIRM and not isinstance(answer, dict):
+        return OWN_ANSWER.format(answer=json.dumps(answer))
+    picked = {name: field.get("default") for name, field in fields.items()}
+    picked |= answer if isinstance(answer, dict) else {}
+    unapproved = picked["unapproved"]
+    return _Confirmed(
+        time=picked.get("time"),
+        alike=str(picked.get("alike") or BOTH),
+        allow=picked.get("allow") is True,
+        unapproved=unapproved if unapproved in UNATTENDED else UNATTENDED[0],
+    )
+
+
+def _fields(open_: dict[str, Any]) -> dict[str, Any]:
+    """The confirmation's form: a field for each open detail, its recommended answer its
+    default (the app renders a time picker, a choice, a box to tick)."""
+    fields: dict[str, Any] = {}
+    if open_["time"] is not None:
+        fields["time"] = {
+            "type": "string",
+            "format": "time",
+            "title": "Time",
+            "default": open_["time"],
+        }
+    if open_["twin"] is not None:
+        fields["alike"] = {
+            "type": "string",
+            "title": "The one you have",
+            "enum": [UPDATE, BOTH],
+            "default": UPDATE,
+        }
+    if open_["writes"]:
+        fields["allow"] = {
+            "type": "boolean",
+            "default": True,
+            "title": f"Allow {', '.join(open_['writes'])} in its runs unasked",
+        }
+    fields["unapproved"] = {
+        "type": "string",
+        "title": "A step nobody approved",
+        "enum": list(UNATTENDED),
+        "default": UNATTENDED[0],
+    }
+    return fields  # fmt: skip
+
+
+def _at(when: str, time_: str | None) -> str:
+    """``when`` at ``time_`` (``HH:MM``) where the user changed the time it assumed."""
+    if not time_ or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_):
+        return when
+    hour, minute = time_.split(":")
+    return " ".join([str(int(minute)), str(int(hour)), *when.split()[2:]])
+
+
+def _assumed_time(when: str, inferred: Any) -> str | None:
+    """The time a schedule runs at, ``HH:MM``, when the model assumed it (``inferred``)."""
+    minute, hour, *_ = [*when.split(), "", ""]
+    if "time" not in (inferred or ()) or not (minute.isdigit() and hour.isdigit()):
+        return None
+    return f"{int(hour):02d}:{int(minute):02d}"
 
 
 async def _chosen(runtime: Runtime, args: dict[str, Any], choices: list[Any]) -> Any:

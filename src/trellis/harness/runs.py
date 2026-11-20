@@ -414,6 +414,7 @@ class LocalRuns:
             now = datetime.now(UTC)
             self._fire_due(now)
             self._expire_leases(now)
+            self._expire_interrupts(now)
             wanted = set(agent_ids)
             ready = [
                 record
@@ -788,6 +789,31 @@ class LocalRuns:
                 self._artifact_runs.pop(artifact_id, None)
                 if self._artifacts.pop(artifact_id, None) is None:  # a payload object's key
                     (self._payload_root / artifact_id).unlink(missing_ok=True)
+
+    def _expire_interrupts(self, now: datetime) -> None:
+        """As agent-runs' ticker does: a paused run past its interrupt's ``deadline`` goes to
+        its ``escalate_to`` (once: the new interrupt has none), or ends ``TIMEOUT``, nobody
+        answered."""
+        for record in list(self._runs.values()):
+            asked = record.awaiting
+            if record.status is not RunStatus.PAUSED or asked is None or asked.deadline is None:
+                continue
+            if asked.deadline >= now:
+                continue
+            if asked.escalate_to:
+                moved = asked.model_copy(
+                    update={"assignee": asked.escalate_to, "escalate_to": None, "deadline": None}
+                )
+                self._runs[record.run_id] = record.model_copy(update={"awaiting": moved})
+                continue
+            error = AgentError(
+                code="interrupt_deadline",
+                category=ErrorCategory.TIMEOUT,
+                message=f"nobody answered by {asked.deadline}",
+                retryable=False,
+                source="agent-runs",
+            )
+            self._move(record, RunStatus.TIMEOUT, error=error)
 
     def _expire_leases(self, now: datetime) -> None:
         for run_id, (_, until) in list(self._leases.items()):

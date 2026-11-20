@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a new schedule is confirmed in one question, and its runs never wait for nobody
+
+A schedule could pause twice before it was made: "you already have one like it" and then
+"its runs will call send_report". Now every open detail is one question: the time, days, zone,
+condition or end the model assumed (`schedule_task(inferred=)`; with no time said it uses the
+default and says so), the schedule it judged alike, the writes to allow, and what an
+unattended run does with a step nobody approved. Confirm takes the recommended answers; a
+schedule said in full is made with no question. The options `ALLOW` and `EACH_TIME` are gone
+(the form's `allow` field). A fired run now skips a call nobody approved and says so in its
+reply (`trellis_unapproved: skip`, the default for new schedules), or, set to wait, waits a day
+for the user (`runtime.UNANSWERED`, the interrupt's `deadline`) and then ends `TIMEOUT`.
+`LocalRuns` times out or escalates a paused run past its interrupt's deadline, as agent-runs'
+ticker does. Schedules made before keep waiting, as they did.
+
 ### Changed: Kimi needs ripgrep where it runs, checked before it starts
 
 Kimi's `Glob` runs ripgrep (`rg`); without it, Kimi Code downloaded it from its own CDN at the

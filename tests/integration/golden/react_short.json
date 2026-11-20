@@ -133,7 +133,7 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 1 hour. A condition reports as report says. When the user may already have one like it, read list_schedules first; one doing the same thing, perhaps at another time or value: pass its id as alike, and the user is asked to update it or keep both. The very same again is not made twice. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said, use 09:00 and list time in inferred. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 1 hour. A condition reports as report says. When the user may already have one like it, read list_schedules first; one doing the same thing, perhaps at another time or value: pass its id as alike, and the user is asked to update it or keep both. The very same again is not made twice. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
@@ -177,6 +177,20 @@
               "in_minutes": {
                 "description": "Instead of when: run once this many minutes from now ('in 2 hours': 120).",
                 "type": "number"
+              },
+              "inferred": {
+                "description": "What you assumed rather than the user said: the user confirms it in one question, with everything else still open.",
+                "items": {
+                  "enum": [
+                    "time",
+                    "days",
+                    "zone",
+                    "condition",
+                    "end"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
               },
               "once": {
                 "description": "Run once, then end.",
@@ -450,7 +464,7 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 1 hour. A condition reports as report says. When the user may already have one like it, read list_schedules first; one doing the same thing, perhaps at another time or value: pass its id as alike, and the user is asked to update it or keep both. The very same again is not made twice. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said, use 09:00 and list time in inferred. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 1 hour. A condition reports as report says. When the user may already have one like it, read list_schedules first; one doing the same thing, perhaps at another time or value: pass its id as alike, and the user is asked to update it or keep both. The very same again is not made twice. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
@@ -494,6 +508,20 @@
               "in_minutes": {
                 "description": "Instead of when: run once this many minutes from now ('in 2 hours': 120).",
                 "type": "number"
+              },
+              "inferred": {
+                "description": "What you assumed rather than the user said: the user confirms it in one question, with everything else still open.",
+                "items": {
+                  "enum": [
+                    "time",
+                    "days",
+                    "zone",
+                    "condition",
+                    "end"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
               },
               "once": {
                 "description": "Run once, then end.",

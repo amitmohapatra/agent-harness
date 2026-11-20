@@ -27,12 +27,13 @@ MAX_COMPLEXITY = 34
 MAX_FUNCTION_LINES = 198
 #: how many functions may exceed a complexity of 15
 MAX_OVER_15 = 63
-#: the mean (4.1063 today: the spend saves of a worker's run, the one answer rule, a graph's
+#: the mean (4.1114 today: the spend saves of a worker's run, the one answer rule, a graph's
 #: harness tools, and the hold, event-log and turn-order fixes for load, 2026-11-19; then the
 #: schedule settings, end dates, limits said with their numbers, pause reasons, the model's
-#: keep question and notifications, 2026-11-20, each branch a case a user meets) must not
-#: drift upwards
-MAX_MEAN_COMPLEXITY = 4.11
+#: keep question and notifications, 2026-11-20; then a new schedule's one confirmation, its
+#: unattended runs' skipped steps and an unanswered question's deadline, each branch a case a
+#: user meets) must not drift upwards
+MAX_MEAN_COMPLEXITY = 4.12
 
 _BRANCHING = (
     ast.If,

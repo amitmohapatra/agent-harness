@@ -260,6 +260,7 @@ async def test_the_harness_own_tools_pass_the_check() -> None:
             "once": ("boolean", None),
             "report": ("string", None),
             "end_at": ("string", None),
+            "inferred": ("array", "string"),
             "alike": ("string", None),
             "in_minutes": ("number", None),
             "choices": ("array", task),

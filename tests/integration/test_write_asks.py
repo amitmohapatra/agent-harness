@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -25,7 +25,8 @@ from trellis.contracts import ConfigurationError, InterruptReason, RunStatus, To
 from trellis.harness import conversation
 from trellis.harness.governance.decision import ALWAYS, CONVERSATION, DENY, ONCE
 from trellis.harness.runs import LocalRuns
-from trellis.harness.schedules import ALLOW, ALLOWED, EACH_TIME, NEITHER
+from trellis.harness.runtime import UNANSWERED
+from trellis.harness.schedules import ALLOWED, CONFIRM, NEITHER, UNAPPROVED
 from trellis.harness.settings import deployment_spool
 from trellis.harness.tools import bridge
 from trellis.harness.tools.convert import text_of
@@ -343,7 +344,7 @@ async def test_a_hooks_ask_beats_what_a_schedule_allowed() -> None:
         agent = arm(h.wrap(chat, id="desk", hooks=[OverHundred()]), [pay])
         asked = await agent.run("pay my rent monthly", user="ada", thread=THREAD)
         assert asked.interrupt is not None, asked
-        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=ALLOW, reviewer="ada")
+        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=WAIT, reviewer="ada")
         run = await fired(h, agent)
         assert run.status is RunStatus.PAUSED and done == ["pay 1"], run  # allowed, then hooked
         assert "Over 100" in run.awaiting.question
@@ -468,9 +469,15 @@ async def fired(h: Harness, agent: Any) -> Any:
     return await h.runs.get(run_id)
 
 
-@pytest.mark.parametrize("picked", [ALLOW, EACH_TIME])
+#: The schedule's confirmation, its writes allowed and an unapproved step waiting for its user.
+WAIT: Final = {"allow": True, "unapproved": "wait"}
+#: The same, its writes asked at each run.
+EACH_RUN: Final = {"allow": False, "unapproved": "wait"}
+
+
+@pytest.mark.parametrize("picked", [WAIT, EACH_RUN])
 async def test_a_schedule_allows_the_writes_its_task_names_when_it_is_confirmed(
-    picked: str,
+    picked: dict[str, Any],
 ) -> None:
     async with Harness(config=Settings()) as h:
         agent = arm(h.wrap(Chat(("pay", 1), ("refund", 2)), id="desk"), [pay, refund, wire])
@@ -479,16 +486,36 @@ async def test_a_schedule_allows_the_writes_its_task_names_when_it_is_confirmed(
         assert interrupt is not None, asked
         # only the write it names that asks: not an irreversible one, not an unknown name
         assert "pay" in interrupt.question and "wire" not in interrupt.question
-        assert interrupt.option_values == [ALLOW, EACH_TIME, NEITHER]
+        assert interrupt.option_values == [CONFIRM, NEITHER]
         made = await agent.resume(interrupt.interrupt_id, "answer", answer=picked, reviewer="ada")
         assert made.status is RunStatus.SUCCESS, made
         [schedule] = h.runs._schedules.values()  # type: ignore[attr-defined]
-        assert schedule.metadata.get(ALLOWED, []) == (["pay"] if picked == ALLOW else [])
+        allow = picked["allow"]
+        assert schedule.metadata.get(ALLOWED, []) == (["pay"] if allow else [])
+        assert schedule.metadata[UNAPPROVED] == "wait"
         run = await fired(h, agent)
         # an uncovered write pauses, in the chat's thread, for its user: never run silently
         assert run.status is RunStatus.PAUSED and run.thread_id == THREAD, run
-        assert run.awaiting.tool_call.tool == ("refund" if picked == ALLOW else "pay")
-        assert done == (["pay 1"] if picked == ALLOW else [])
+        assert run.awaiting.tool_call.tool == ("refund" if allow else "pay")
+        assert done == (["pay 1"] if allow else [])
+
+
+async def test_an_unattended_run_skips_a_write_nobody_approved_and_says_so() -> None:
+    """Item 9: by default a fired run never waits for nobody: a write its schedule allowed
+    runs, one nobody approved is not run, and the run goes on, its reply told why; an
+    irreversible tool is never run unattended."""
+    async with Harness(config=Settings()) as h:
+        agent = arm(h.wrap(Chat(("pay", 1), ("refund", 2)), id="desk"), [pay, refund, wire])
+        asked = await agent.run("pay my rent monthly", user="ada", thread=THREAD)
+        assert asked.interrupt is not None, asked
+        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=CONFIRM, reviewer="ada")
+        [schedule] = h.runs._schedules.values()  # type: ignore[attr-defined]
+        assert schedule.metadata[UNAPPROVED] == "skip"
+        run = await fired(h, agent)
+        assert run.status is RunStatus.SUCCESS and run.awaiting is None, run
+        assert done == ["pay 1"]  # refund not run
+        said = str(run.output)
+        assert "refund was not run" in said and "approve" in said, said
 
 
 async def test_cancelling_the_confirmation_makes_no_schedule() -> None:
@@ -508,7 +535,7 @@ async def test_a_fired_run_waiting_for_approval_is_listed_and_its_next_tick_star
         agent = arm(h.wrap(Chat(("refund", 2)), id="desk"), [pay, refund, wire])
         asked = await agent.run("pay my rent monthly", user="ada", thread=THREAD)
         assert asked.interrupt is not None
-        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=ALLOW, reviewer="ada")
+        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=WAIT, reviewer="ada")
         run = await fired(h, agent)
         assert run.status is RunStatus.PAUSED, run
         listed = await agent.run("list", user="ada", thread=THREAD)
@@ -522,3 +549,26 @@ async def test_a_fired_run_waiting_for_approval_is_listed_and_its_next_tick_star
         assert len(runs._runs) == before  # type: ignore[union-attr]
         after = runs._schedules[schedule.schedule_id]  # type: ignore[union-attr]
         assert after.last_run_id == run.run_id and after.next_fire_at > later
+
+
+async def test_a_fired_run_waits_a_day_for_its_user_then_ends_saying_why() -> None:
+    """Item 11: a "wait for me" schedule's run waits for its user's answer until a day has
+    passed (the interrupt's deadline, as agent-runs keeps it), then ends ``TIMEOUT`` saying
+    nobody answered; answered before then, it goes on."""
+    async with Harness(config=Settings()) as h:
+        agent = arm(h.wrap(Chat(("refund", 2)), id="desk"), [pay, refund, wire])
+        asked = await agent.run("pay my rent monthly", user="ada", thread=THREAD)
+        assert asked.interrupt is not None
+        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=WAIT, reviewer="ada")
+        run = await fired(h, agent)
+        assert run.status is RunStatus.PAUSED and run.awaiting is not None, run
+        due = run.awaiting.deadline
+        assert due is not None and timedelta(hours=23) < due - datetime.now(UTC) <= UNANSWERED
+        runs = h.runs
+        assert isinstance(runs, LocalRuns)
+        runs._expire_interrupts(due - timedelta(minutes=1))
+        assert (await runs.get(run.run_id)).status is RunStatus.PAUSED  # not yet
+        runs._expire_interrupts(due + timedelta(minutes=1))
+        ended = await runs.get(run.run_id)
+        assert ended is not None and ended.status is RunStatus.TIMEOUT
+        assert ended.error is not None and "nobody answered" in ended.error.message

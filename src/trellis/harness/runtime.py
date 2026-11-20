@@ -19,7 +19,7 @@ from collections import Counter
 from collections.abc import AsyncIterator, Callable, Hashable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import jsonpatch
@@ -99,6 +99,10 @@ PROGRESS_SECONDS: Final = 20.0
 #: without an answer when nothing tighter bounds it (a ``call_timeout``, the run's time left):
 #: past it the step has stalled, and the run ends with a :class:`ModelTimeout`.
 STALL_SECONDS: Final = 600.0
+#: The most a run its schedule fired waits for its user's answer, when its schedule waits for
+#: what nobody approved (``schedules.UNAPPROVED``): past it the run ends ``TIMEOUT``, nobody
+#: answered (the interrupt's ``deadline``, which agent-runs and ``LocalRuns`` keep).
+UNANSWERED: Final = timedelta(hours=24)
 #: The message a stalled step's watchdog cancels the attempt with.
 STALLED: Final = "trellis: the model call stalled"
 #: The run's last tool calls a kept file's record names (``Runtime.save_file``).
@@ -979,9 +983,18 @@ class Runtime:
             assignee=decision.assignee,
             component=decision.component,
             props=None if decision.props is None else dict(decision.props),
+            deadline=self._answered_by(),
         )
         approval_read(call)  # answered (a pause raises): for ``journal.approvals_read``
         return resolution
+
+    def _answered_by(self) -> datetime | None:
+        """When an approval in an unattended run must be answered (:data:`UNANSWERED` from
+        now): in a run its schedule fired, ``None`` in any other."""
+        root = self
+        while root.parent is not None:  # a child run waits as its parent's schedule does
+            root = root.parent
+        return None if root.scheduled is None else datetime.now(UTC) + UNANSWERED
 
     def files_folder(self) -> str:
         """Where this run's files are kept in the store: its tenant, user, conversation and run
