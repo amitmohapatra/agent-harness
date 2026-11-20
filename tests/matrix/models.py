@@ -104,12 +104,15 @@ class ModelLog:
 
         monkeypatch.setattr(Script, "reply", replied)
 
+        bind = ScriptedChatModel.bind_tools
+
         def bind_tools(model: ScriptedChatModel, tools: Sequence[Any], **kw: Any) -> Any:
             log._bound[id(model)] = [getattr(t, "name", str(t)) for t in tools]
             for t in tools:
                 if hasattr(t, "name"):
                     log.described[t.name] = getattr(t, "description", "") or ""
-            return model
+            # bound as the model binds them: a call's ``tool_choice`` reaches the model
+            return bind(model, tools, **kw)
 
         generate = ScriptedChatModel._generate
 
