@@ -339,8 +339,9 @@ def or_asks(check: Check, *about: str) -> Check:
     def either(chat: Chat) -> list[str]:
         problems = check(chat)
         options = (chat.asked[-1] if chat.asked else None) or []
-        text = (chat.answers[-1] + " " + " ".join(options)).lower()
-        asked = asked_in(chat) and any(a.lower() in text for a in about)
+        # "every-other-week" names "every other": words compared however they are joined
+        text = (chat.answers[-1] + " " + " ".join(options)).lower().replace("-", " ")
+        asked = asked_in(chat) and any(a.lower().replace("-", " ") in text for a in about)
         return [] if problems and asked and not chat.made() else problems
 
     return either
