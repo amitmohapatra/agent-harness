@@ -19,10 +19,11 @@ from langgraph.types import Command
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, ReAct, tool
+from trellis import middleware as trellis_middleware
 from trellis.contracts import RunStatus
 from trellis.harness import middleware, react
 from trellis.harness.automatic import LONG_AT, SCRATCH, TASK, JournalBackend, long_task
-from trellis.harness.middleware import SCRATCH_NOTE
+from trellis.harness.middleware import SCRATCH_NOTE, SCRATCH_TO_USER
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
 
@@ -213,6 +214,8 @@ async def test_a_scratch_file_written_says_the_user_cannot_open_it(harness: Harn
     )
     assert (await agent.run(STEPS + "chart it", user="u")).answer == "done"
     assert SCRATCH_NOTE in result_of(model.seen[1])  # the run's first write says it
+    # and why it has no file to give: nothing in this run makes one (no result kept to save)
+    assert result_of(model.seen[1]).endswith(SCRATCH_TO_USER["none"])
     assert SCRATCH_NOTE not in result_of(model.seen[2])  # once a run: the history keeps it
     assert SCRATCH_NOTE not in result_of(model.seen[3])  # a read says nothing of the kind
 
@@ -233,6 +236,37 @@ async def test_a_deep_agents_state_write_says_it_and_a_failed_one_does_not(
     assert (await agent.run("chart it", user="u")).answer == "done"
     assert SCRATCH_NOTE not in result_of(model.seen[1])  # refused: nothing written
     assert SCRATCH_NOTE in result_of(model.seen[2])
+
+
+TOP: str = "sku,units\n" + "\n".join(f"SKU-{n:05d},{100 - n}" for n in range(1, 21))
+
+
+@tool(side_effects="read")
+def top_skus() -> str:
+    """The 20 SKUs that sold the most units, as CSV."""
+    return TOP
+
+
+async def test_a_scratch_write_says_what_gives_the_user_a_file_where_the_run_has_one(
+    harness: Harness,
+) -> None:
+    """Asked for an Excel file, a Deep Agents model wrote one in its scratch space and told the
+    user "I can't produce a native Excel file … the file I wrote is in my scratch space" — no
+    reason they could act on, with ``query_result(save_as=)`` there (``cantdo-03``). The note
+    says what the run has: a kept result's rows ``save_as`` saves; with nothing kept, no tool
+    makes a file, which the model is to say."""
+    model = ScriptedChatModel(
+        turns=[
+            ("top_skus", {}),
+            ("write_file", {"file_path": "/top.csv", "content": TOP}),
+            "done",
+        ]
+    )
+    graph = create_deep_agent(model=model, tools=[], middleware=trellis_middleware())
+    agent = arm(harness.wrap(graph, id="da-top"), [top_skus])
+    assert (await agent.run("export the top 20 as Excel", user="u")).answer == "done"
+    said = result_of(model.seen[2])
+    assert SCRATCH_NOTE in said and said.endswith(SCRATCH_TO_USER["save"]), said
 
 
 def test_a_writes_command_says_it_on_its_message_and_a_failed_one_is_left() -> None:

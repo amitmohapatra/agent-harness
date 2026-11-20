@@ -93,6 +93,80 @@ async def test_every_framework_saves_a_querys_whole_result_as_excel(
     assert rows == [("sku", "stock"), *LOW_ROWS]  # every row, exactly: not the 200 shown
 
 
+#: A small result, read whole (20 SKUs and their September units, as the ``cantdo-03`` question
+#: asks for): kept beside the answer it is (``results.TABLE_ROWS``), so ``query_result`` saves it
+TOP: Final = "sku,units\n" + "\n".join(f"SKU-{n:05d},{1000 - n * 7}" for n in range(1, 21))
+TOP_KEPT: Final = f"/large_tool_results/{content_key('result', TOP)}"
+
+
+@tool(side_effects="read")
+def top_skus() -> str:
+    """The 20 SKUs that sold the most units in September, as CSV."""
+    return TOP
+
+
+async def _deep_agents_with_middleware(
+    harness: Harness, tools: list[Any], tmp: Path, plan: list[Call], **_: Any
+) -> tuple[Any, list[Any]]:
+    """``create_deep_agent`` with the harness's middleware, as a Deep Agents team wraps it (the
+    benchmark's ``deepagents``): the run's tools come per model call."""
+    from deepagents import create_deep_agent
+
+    from tests.support.planned import PlannedChatModel
+    from trellis import middleware
+
+    model = PlannedChatModel(plan=plan)
+    graph = create_deep_agent(model=model, tools=[], system_prompt="s", middleware=middleware())
+    return graph, tools
+
+
+@pytest.mark.parametrize("framework", ["react", "middleware", "deepagents", "openai_agents"])
+async def test_every_framework_saves_a_small_result_read_whole_as_excel(
+    harness: Harness, stored: Path, framework: str, tmp_path: Path
+) -> None:
+    """Asked to "export the top 20 SKUs as Excel": a result of a few rows the model read whole
+    is kept beside it, its note saying how ``query_result(save_as=)`` gives the user a file,
+    and the call saves every row — on every adapter the harness gives its readers to (``ReAct``,
+    ``middleware()`` under LangChain's or Deep Agents' agent, OpenAI Agents; Claude and MCP
+    as OpenAI's). A graph built without ``middleware()`` gets no reader of the harness's
+    (``test_large_data``): offering ``query_result`` to it would cost every request its
+    definition (about 360 tokens)."""
+    sql = "SELECT * FROM result ORDER BY units DESC"
+    plan = [
+        ("top_skus", {}),
+        (
+            "query_result",
+            {"file_path": TOP_KEPT, "sql": sql, "save_as": "xlsx", "file_name": "top"},
+        ),
+    ]
+    build = _deep_agents_with_middleware if framework == "deepagents" else BUILDERS[framework]
+    target, own = await build(harness, [top_skus], tmp_path, plan)
+    result = await arm(harness.wrap(target, id=f"small-{framework}"), own).run("q", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer.startswith("Done. Saved top.xlsx for the user: 20 rows"), result.answer
+    rows = sheet_rows(kept(stored, "top.xlsx"))
+    assert rows[0] == ("sku", "units") and len(rows) == 21
+    assert rows[1] == ("SKU-00001", 993)
+
+
+def test_a_kept_tables_note_says_how_the_user_gets_a_file_where_the_run_saves(
+    root: Path,
+) -> None:
+    """The kept copy is the run's own: where ``query_result`` saves (no tool that runs code),
+    its note says that call gives the user a file, not to never offer one — a model told only
+    "never offer it to them as a file" answered "I can't create an Excel file" with save_as
+    offered (``cantdo-03``: graph, ReAct, ReAct on Deep Agents). The same words' length: no
+    tokens added."""
+    said = results.tabled(TOP, "top_skus")
+    assert results.PRIVATE_SAVING in said and results.PRIVATE not in said, said
+    assert len(results.PRIVATE_SAVING) <= len(results.PRIVATE)  # no token added
+    runtime = runtime_module.current()
+    assert runtime is not None
+    runtime.native = {"sandbox_exec": None}  # type: ignore[dict-item]  # code writes its files
+    said = results.tabled(TOP + "\n", "top_skus")
+    assert results.PRIVATE in said and results.PRIVATE_SAVING not in said, said
+
+
 def test_each_frameworks_tool_that_runs_code_is_known() -> None:
     """The harness's sandbox, Deep Agents' ``execute``, Claude Code's ``Bash``, OpenAI's code
     interpreter: a run with any of them writes its files with code."""
@@ -342,6 +416,17 @@ def test_more_rows_than_a_file_holds_are_refused(
     assert not root.exists()
 
 
+def test_a_query_is_a_tool_the_run_used(root: Path) -> None:
+    """``query_result`` is answered by the harness, past the tool hooks: the run's ``used`` now
+    names it as the run's other tools, so a run's record (a CLI's, whose requests no one
+    captures) shows it computed with the query (``cantdo-02``, Kimi)."""
+    runtime = runtime_module.current()
+    assert runtime is not None
+    runtime.used = set()  # type: ignore[misc]
+    ask(sql="SELECT count(*) FROM result")
+    assert runtime.used == {"query_result"}
+
+
 def test_a_saved_files_answer_shows_its_first_5_rows(root: Path) -> None:
     said = ask(sql="SELECT range AS n FROM range(7)", save_as="csv", file_name="seven.csv")
     assert said.startswith("Saved seven.csv for the user: 7 rows"), said
@@ -409,3 +494,24 @@ async def test_query_result_over_a_kept_result_is_the_same_after_a_resume(harnes
     assert await worker.run_once()
     assert (await handle.result(wait=5)).status is RunStatus.SUCCESS
     assert str(paused_model.requests[-1]["messages"][-1]["content"]) == answered
+
+
+async def test_deep_agents_execute_on_a_backend_that_runs_nothing_is_no_code_tool() -> None:
+    """``create_deep_agent`` lists ``execute`` whatever its backend; on one that runs no command
+    (its default ``StateBackend``) Deep Agents takes it off every model call. Read as a tool that
+    runs code, it took ``save_as`` away and told the model a kept result was a file in its
+    sandbox: asked for an Excel file, it wrote one in its scratch space and told the user it
+    could not give it (``cantdo-03``, deepagents). On a sandbox backend it is code's tool."""
+    from deepagents import create_deep_agent
+
+    from tests.support.planned import PlannedChatModel
+    from trellis.harness.adapters.langgraph import LangGraphAdapter
+
+    idle = create_deep_agent(model=PlannedChatModel(plan=[]), tools=[])
+    names = {s.name for s in await LangGraphAdapter().native(idle)}
+    assert "execute" not in names and "task" in names
+    from trellis.harness.sandbox.backend import SandboxBackend
+
+    box = SandboxBackend(object())  # a sandbox's: its commands run
+    coding = create_deep_agent(model=PlannedChatModel(plan=[]), tools=[], backend=box)
+    assert "execute" in {s.name for s in await LangGraphAdapter().native(coding)}

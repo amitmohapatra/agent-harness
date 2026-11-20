@@ -309,6 +309,38 @@ async def test_a_framework_kept_thread_marks_an_earlier_live_result_out_of_date(
     assert get_stock.calls == ["SKU-00123", "SKU-00123"]
 
 
+async def test_a_framework_kept_thread_says_in_the_question_which_tools_are_out_of_date(
+    harness: Harness,
+) -> None:
+    """With only the earlier result marked, models on a thread their framework keeps answered
+    the next question from the earlier stock (``freshness-03``: 0 of 7 runs of LangGraph, Deep
+    Agents and the CLIs fetched it again), where ``ReAct``'s replay, which also names the tools
+    in its context (``snapshots.note``), fetched it in 6 of 6. The same line goes with the
+    latest question of the request (its copy: the graph's state is unchanged, and the earlier
+    messages stay one cached prefix); a turn with nothing out of date gets none."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis import middleware
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    get_stock = stock_tool()
+    model = ScriptedChatModel(turns=[("get_stock", {"sku": "SKU-00123"}), "40", "7"])
+    graph = create_agent(model, tools=[], middleware=middleware(), checkpointer=InMemorySaver())
+    setattr(graph, TOOLS_ATTRIBUTE, [get_stock])
+    agent = harness.wrap(graph, id="kept-noted")
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    await agent.run("reorder qty for it?", user="u1", thread=THREAD)
+    note = snapshots.note(["get_stock"])
+    assert note is not None
+    first = [str(m.content) for m in model.seen[0] if m.type == "human"]
+    assert not any(note in said for said in first)  # nothing earlier: no line
+    asked = [m for m in model.seen[2] if m.type == "human"]
+    assert note in str(asked[-1].content) and "reorder qty for it?" in str(asked[-1].content)
+    assert note not in str(asked[0].content)
+
+
 async def test_a_framework_kept_threads_failed_call_is_not_marked_out_of_date(
     harness: Harness,
 ) -> None:

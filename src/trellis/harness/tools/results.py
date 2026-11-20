@@ -97,6 +97,13 @@ PRIVATE: Final = (
     "The path is this run's own working copy, for read_file and query_result: the user cannot "
     "open or download it, so never offer it to them as a file."
 )
+#: :data:`PRIVATE` in a run whose ``query_result`` saves a file for the user (``query.saving``):
+#: what does give them one, in place of "never offer it" — told only that, a model answered
+#: "I can't create an Excel file" with ``save_as`` offered (``cantdo-03``: graph, ReAct).
+PRIVATE_SAVING: Final = (
+    "The path is this run's own working copy, for read_file and query_result: the user cannot "
+    "open or download it; its save_as saves one they can."
+)
 #: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
 EXECUTE: Final = "execute"
 #: What a kept result's note adds for a run with a sandbox, after the query's: the result is a
@@ -148,19 +155,25 @@ def readable(output: Any, tool: str | None = None) -> str:
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=code, table=table)
 
 
+def private() -> str:
+    """What a kept result's note says of its path in the current run: :data:`PRIVATE_SAVING`
+    where ``query_result`` saves a file for the user (``query.saving``), else :data:`PRIVATE`."""
+    return PRIVATE_SAVING if query.saving(current()) else PRIVATE
+
+
 def table_said(path: str, text: str, name: str) -> str:
     """What a kept result's stub says of its rows: the table they are in a query (``name``) and
     its columns (:data:`QUERY`); or, when ``text`` holds none (a PDF, an image, binary data),
     where to compute instead."""
     what = query.document(text)
     if what is not None and what != query.MARKUP:  # no rows: where to compute instead
-        return f"{query.not_rows(path, what)} {PRIVATE}"
+        return f"{query.not_rows(path, what)} {private()}"
     parts = query.parts_of(text)
     table = QUERY.format(
         table=name,
         columns=", ".join(parts[0][1]),
         path=path,
-        private=PRIVATE,
+        private=private(),
     ) + query.also(parts, name)
     # markup: its lines, said first
     return table if what is None else f"{query.MARKED.format(path=path)} {table}"
@@ -211,7 +224,7 @@ def tabled(text: str, tool: str | None = None) -> str:
         table=name,
         columns=", ".join(query.column_names(columns)),
         path=path,
-        private=PRIVATE,
+        private=private(),
     ) + query.also(query.parts_of(text), name)
     code = coding_tool()  # a sandbox holds the kept file too (``SandboxSource.with_results``)
     there = "" if code is None else f" {CODE.format(path=path, tool=code)}"

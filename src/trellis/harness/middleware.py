@@ -163,7 +163,7 @@ from trellis.harness.schedules import schedule_tools
 from trellis.harness.skills import serves_skills
 from trellis.harness.telemetry import failed, gateway_headers, model_span, tool_span, usage
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools import ask, bridge, query, results, stored
+from trellis.harness.tools import ask, bridge, export, query, results, stored
 from trellis.harness.tools.base import (
     CUT_SHORT,
     FAILED,
@@ -252,9 +252,17 @@ SCRATCH_WRITES: Final = frozenset({"write_file", "edit_file"})
 #: The runs whose model was told :data:`SCRATCH_NOTE` (once a run, however many it writes).
 _SCRATCH_SAID: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
 SCRATCH_NOTE: Final = (
-    "This file is in this run's own scratch space: the user cannot open or download it, so "
-    "never offer it to them as a file; give them its content instead."
+    "This file is in this run's own scratch space: the user cannot open or download it."
 )
+#: What :data:`SCRATCH_NOTE` goes on to say, by what the run has to give the user a file
+#: (:func:`_scratch_to_user`): ``query_result``'s ``save_as`` over a result it keeps; code of
+#: its own; or nothing — said, so the model tells the user why (told only "give them its
+#: content", a Deep Agents model answered "I can't produce a native Excel file" with no reason).
+SCRATCH_TO_USER: Final = {
+    "save": " query_result's save_as saves a file they can.",
+    "code": " Never offer it to them as a file; give them its content instead.",
+    "none": " No tool of this run makes a file they can: give them its content, and say so.",
+}
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
 #: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
 OUTSIDE_STATE: Final = "trellis_outside_state"
@@ -491,27 +499,39 @@ _GOVERNING: ContextVar[tuple[str, str] | None] = ContextVar("trellis_governing",
 
 
 def _scratch_said(
-    runtime: Runtime, tool: str, done: ToolMessage | Command[Any]
+    runtime: Runtime, tool: str, done: ToolMessage | Command[Any], state: Any = None
 ) -> ToolMessage | Command[Any]:
     """A state tool's result: the run's first scratch write that worked says
-    :data:`SCRATCH_NOTE` (once a run: its history keeps saying it)."""
+    :data:`SCRATCH_NOTE` and what gives the user a file (:func:`_scratch_to_user`) — once a
+    run: its history keeps saying it."""
     if tool not in SCRATCH_WRITES or runtime.run_id in _SCRATCH_SAID:
         return done
-    noted = _scratch_noted(done)
+    noted = _scratch_noted(done, SCRATCH_NOTE + _scratch_to_user(runtime, state))
     if noted is not done:
         _SCRATCH_SAID.add(runtime.run_id)
     return noted
 
 
-def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[Any]:
-    """A scratch write's result with :data:`SCRATCH_NOTE` after it: on its message, or on the
-    message of the ``Command`` that also updates the graph's files (Deep Agents' state
-    backend). A failed write is left as it is."""
+def _scratch_to_user(runtime: Runtime, state: Any) -> str:
+    """What gives the run's user a file (:data:`SCRATCH_TO_USER`), from what the run has: code
+    of its own (``tools.export.runs_code``), else ``query_result``'s ``save_as`` once a result
+    is held for it to save (:func:`_saved`: it is offered then), else nothing."""
+    if export.runs_code(runtime) is not None:
+        return SCRATCH_TO_USER["code"]
+    return SCRATCH_TO_USER["save" if _saved(state) else "none"]
+
+
+def _scratch_noted(
+    done: ToolMessage | Command[Any], note: str = SCRATCH_NOTE
+) -> ToolMessage | Command[Any]:
+    """A scratch write's result with ``note`` after it: on its message, or on the message of
+    the ``Command`` that also updates the graph's files (Deep Agents' state backend). A failed
+    write is left as it is."""
 
     def noted(m: Any) -> Any:
         if not isinstance(m, ToolMessage) or m.status == "error" or not isinstance(m.content, str):
             return m
-        return m.model_copy(update={"content": f"{m.content}\n{SCRATCH_NOTE}"})
+        return m.model_copy(update={"content": f"{m.content}\n{note}"})
 
     if isinstance(done, ToolMessage):
         return noted(done)
@@ -582,7 +602,7 @@ async def governed_call(
         return await handler(request)
     if call["name"] in STATE_TOOLS and framework_made(own) and scratch(own, call):
         traced = await _scratch_traced(runtime, own, request, handler)
-        return _scratch_said(runtime, call["name"], traced)
+        return _scratch_said(runtime, call["name"], traced, request.state)
     if converted.made(own) or call["name"] in runtime.toolbox:
         # the harness's own: its call goes through the bridge, a repeat of its step's too
         first = _repeats(_step_of(request)[1]).get(str(call["id"]))
@@ -992,6 +1012,24 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
         mark = snapshots.EARLIER.format(tool=tool)
         out[n] = m.model_copy(update={"content": f"{mark}\n{m.content}"})
     return out, stale
+
+
+def _stale_noted(messages: list[AnyMessage], stale: Collection[str]) -> list[AnyMessage]:
+    """``messages`` with the latest user message saying which tools' earlier results are out of
+    date (``snapshots.note``, as a memory window's replay says it in the run's context), after
+    its text: the request's copy, the earlier messages untouched (one cached prefix)."""
+    asked = max((n for n, m in enumerate(messages) if typed(m)), default=-1)
+    note = snapshots.note(sorted(stale))
+    if asked < 0 or note is None:
+        return messages
+    said = messages[asked]
+    content = said.content
+    more: str | list[Any] = (
+        [*content, {"type": "text", "text": note}]
+        if isinstance(content, list)
+        else f"{content}\n\n{note}"
+    )
+    return [*messages[:asked], said.model_copy(update={"content": more}), *messages[asked + 1 :]]
 
 
 async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
@@ -1627,7 +1665,7 @@ class HarnessTools(AgentMiddleware):
         # tool stays offered (the memory window's replay is stamped where it is read)
         messages, stale = _earlier(runtime, request.messages)
         if stale:
-            request = request.override(messages=messages)
+            request = request.override(messages=_stale_noted(messages, stale))
             if runtime.offered is not None:
                 runtime.offered |= stale
         request = _stubs_tabled(runtime, request)

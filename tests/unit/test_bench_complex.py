@@ -238,7 +238,9 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
     asked = [json.loads(x) for x in _read(Path(f"{out}.requests.jsonl"))]
     last = next(q for q in asked if q["case"] == "conversation-01" and q["turn"] == 2)
     said = [m["content"] for m in last["messages"] if m["role"] == "user"]
-    assert said[0].startswith("What was the top SKU") and said[-1] == "And what's their lead time?"
+    assert said[0].startswith("What was the top SKU")
+    # the latest question, then the line naming the tools whose earlier results are out of date
+    assert said[-1].startswith("And what's their lead time?\n\nThe values sales_summary")
     assert len(last["tools"]) == len(r.TOOLS) + len(SCHEDULE_TOOLS)  # and the built-in ones
     # cross-chat: the other thread's request holds nothing of the first
     other = next(q for q in asked if q["case"] == "explain-07" and q["turn"] == 1)
@@ -2453,3 +2455,120 @@ def test_two_runs_are_compared_turn_by_turn(tmp_path: Path) -> None:
         "c-1 turn 0: checks failed — a.jsonl: []; b.jsonl: ['file']",
     ]
     assert parity.main([str(tmp_path / "a.jsonl"), str(tmp_path / "b.jsonl")]) == 1
+
+
+# --------------------------------------------------------------------------- triage fixes
+def _workbook(rows: list[list[Any]]) -> bytes:
+    from openpyxl import Workbook
+
+    book = Workbook()
+    for row in rows:
+        book.active.append(row)  # type: ignore[union-attr]
+    out = io.BytesIO()
+    book.save(out)
+    return out.getvalue()
+
+
+def test_an_export_is_scored_by_the_file_the_run_kept_not_by_its_words() -> None:
+    """cantdo-03 ("export the top 20 SKUs as Excel"): ``query_result(save_as=)`` makes the file
+    where no code runs, and Claude and Kimi make it with their own shells. A file the run kept
+    for its user and the answer names is checked by what it holds — every one of the 20 SKUs —
+    not by the answer's words, nor by the tool's message: kept with all 20 it is right; kept
+    short of them, wrong; named but never kept, still no file."""
+    t = _turn("cantdo-03", 0)
+    assert t.expect is not None
+    top = t.expect.value["made"]["holds"]
+    assert len(top) == 20 and top[0] == "SKU-01517"
+    answer = "The Excel file is ready: `outputs/top20_skus_september_2026.xlsx`, ranked 1 to 20."
+    whole = {
+        "top20_skus_september_2026.xlsx": _workbook([["sku", "units"], *[[s, 1] for s in top]])
+    }
+    scored = cx.score(t.expect, answer, [], t.text, files=whole)
+    assert scored["correct"] is True and not scored.get("unverified"), scored
+    short = {"top20_skus_september_2026.xlsx": _workbook([["sku"], *[[s] for s in top[:5]]])}
+    scored = cx.score(t.expect, answer, [], t.text, files=short)
+    assert scored["correct"] is False and scored["missing"], scored
+    assert not cx.score(t.expect, answer, [], t.text, files={})["correct"]  # never kept
+
+
+def test_a_chart_the_run_kept_for_its_user_is_no_made_up_file() -> None:
+    """cantdo-01, Claude: it drew the chart with its own Write tool and the row kept the SVG for
+    its user, yet "saved as an SVG at `outputs/…`" was scored a made-up file. A kept chart the
+    answer names is the chart asked for: an SVG holding the categories, or a real image."""
+    t = _turn("cantdo-01", 0)
+    assert t.expect is not None
+    answer = (
+        "I've made the bar chart of Q3 2026 revenue by category, saved as an SVG at "
+        "`outputs/q3_2026_revenue_by_category.svg`. Footwear is the largest at £1,123,571.70."
+    )
+    labels = "".join(f"<text>{c}</text>" for c in t.expect.value["made"]["holds"])
+    svg = {"q3_2026_revenue_by_category.svg": f"<svg>{labels}</svg>".encode()}
+    assert cx.score(t.expect, answer, [], t.text, files=svg)["correct"] is True
+    png = {"q3_2026_revenue_by_category.png": b"\x89PNG\r\n\x1a\n" + bytes(64)}
+    said = answer.replace(".svg", ".png").replace("an SVG", "a PNG")
+    assert cx.score(t.expect, said, [], t.text, files=png)["correct"] is True
+    empty = {"q3_2026_revenue_by_category.svg": b"<svg></svg>"}
+    assert cx.score(t.expect, answer, [], t.text, files=empty)["correct"] is False
+
+
+def test_a_file_kept_where_no_check_reads_it_is_unverified_not_made_up() -> None:
+    """bf2-mixed-04 (Claude wrote the CSV with its shell): a file the run kept that the case has
+    no check for is counted neither way — it exists, so it is not made up."""
+    t = _turn("bf2-mixed-04", 0)
+    assert t.expect is not None
+    answer = "I wrote every 2026 sales line for store S14 to `outputs/s14_sales_2026.csv`."
+    kept = {"s14_sales_2026.csv": b"date,store,sku,units,revenue\n2026-01-01,S14,SKU-1,1,2\n"}
+    scored = cx.score(t.expect, answer, [], t.text, files=kept)
+    assert scored["correct"] is None and scored["unverified"] and not scored["made_up"], scored
+
+
+def test_a_cannot_turn_a_cli_computed_with_the_query_is_scored_on_its_figure() -> None:
+    """cantdo-02, Kimi: it computed the population standard deviation with the query and said
+    1.677 — the figure the Python prints — scored as a refusal lacking "cannot": a CLI's
+    requests are not captured, so ``queried`` read none. The run's tools used now name
+    ``query_result`` (``tools.query``), which the suite reads (``queried``); the figure is
+    then checked, and a wrong one is wrong."""
+    t = _turn("cantdo-02", 0)
+    assert t.expect is not None
+    answer = (
+        "The Python would print **1.677**. That is the population standard deviation of units "
+        "across the 1,528 September 2026 west sales lines, computed with DuckDB's stddev_pop "
+        "over the same rows instead of running the Python itself."
+    )
+    assert cx.score(t.expect, answer, [], t.text, queried=True)["correct"] is True
+    wrong = answer.replace("1.677", "1.702")
+    assert cx.score(t.expect, wrong, [], t.text, queried=True)["correct"] is False
+
+
+def test_a_decimal_comma_and_bold_figures_read_as_said() -> None:
+    """advconv-06 answered "53,45 %" (French, a decimal comma) and advdata-07 "**40** and **4**"
+    (bold): both scored as missing what they said. A comma before one or two digits is a
+    decimal; a thousands comma ("1,234") still groups; emphasis is no part of the words."""
+    assert cx.score(cx.Expect("number", 53.4497, tol=0.06), "La marge est de 53,45 %.", [])[
+        "correct"
+    ]
+    assert cx.score(cx.Expect("number", 1234, tol=0), "1,234 units", [])["correct"]
+    flags = cx.flags(r"40 and 4|duplicate", "two counts")
+    assert cx.score(flags, "Two different values, **40** and **4**.", [])["correct"]
+
+
+def test_a_change_said_as_fewer_is_the_negative_change() -> None:
+    """advdom-03: "from 73 units to about 66 (roughly 7 fewer)" gave the -7 change, scored as
+    missing it: "fewer" is a word of falling, as "lower" and "less" are."""
+    change = cx.record({"final_units": 66, "change": -7}, tol={"final_units": 0, "change": 0})
+    said = "The final allocation would drop from 73 units to about 66 (roughly 7 fewer)."
+    assert cx.score(change, said, [])["correct"] is True
+
+
+def test_a_correct_figure_beside_an_earlier_one_named_for_comparison_is_right() -> None:
+    """conversation-02 (Claude): "August was £346,485.16 … For comparison, July was
+    £356,561.76" scored as giving the forbidden July figure: one named for comparison is not
+    the answer."""
+    t = _turn("conversation-02", 1)
+    assert t.expect is not None
+    said = (
+        "Total knitwear revenue for August 2026 was **£346,485.16**.  For comparison, July was "
+        "£356,561.76, so August was about £10,077 lower."
+    )
+    assert cx.score(t.expect, said, [])["correct"] is True
+    assert cx.score(t.expect, "August was £356,561.76.", [])["correct"] is False

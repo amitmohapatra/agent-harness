@@ -336,6 +336,18 @@ never has two ways. Each adapter offers the run's own variant (`results.readers(
 and `middleware()` per model call, OpenAI Agents, Claude and MCP per attempt. The parameters
 add about 50 tokens to `query_result`'s definition, and nothing to a run that is not offered it.
 
+A small result is saved the same way: a table of 5 rows or more read whole is kept beside it
+([large results](#large-results)), so "export the top 20 SKUs as Excel" saves the 20 rows
+it just read. In a run that saves, a kept result's note says so in the place of "never offer
+it as a file" (`results.PRIVATE_SAVING`, no longer: no token added): "the user cannot open or
+download it; its save_as saves one they can" (its: `query_result`'s, named just before). A file the model wrote in Deep
+Agents' scratch space says what the run has instead (`middleware.SCRATCH_TO_USER`): `save_as`,
+its code, or that no tool of the run makes a file — which the model is to tell the user. Deep
+Agents' `execute` on a backend that runs no command (its default `StateBackend`, which takes
+the tool off each model call) is no tool that runs code. A graph built without `middleware()`
+is offered no reader of the harness's, so it saves nothing: `query_result` there would add its
+definition (about 360 tokens) to every request.
+
 ### Files kept for the user, read back
 
 A file a run kept for its user (`query_result(save_as=)`, a sandbox's `outputs/`) is read back

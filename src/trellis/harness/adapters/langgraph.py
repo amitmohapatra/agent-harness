@@ -410,7 +410,8 @@ class LangGraphAdapter(Keeps):
         cannot be read; the graph's state tools (its plan, its virtual files) are not tools of
         the run's set, unless their backend is outside the state (``OUTSIDE_STATE``), nor is
         the graph's own machinery (``MACHINERY``: ``ReAct``'s idle ``execute``, its
-        general-purpose helper). Deep Agents' own (``task``, its file tools outside the
+        general-purpose helper), nor Deep Agents' ``execute`` on a backend that runs no command
+        (:func:`idle_execute`). Deep Agents' own (``task``, its file tools outside the
         state) are tagged ``BUILTIN``: the framework's, not counted for the narrowing. A graph
         that takes the run's tools per model call (``ReAct``, ``middleware()``) has its own
         LangChain tools and sub-agents here, beside the run's toolbox. Read once per graph."""
@@ -434,6 +435,7 @@ class LangGraphAdapter(Keeps):
                 )
                 and not (t.metadata or {}).get(MACHINERY)
                 and not made(t)
+                and not idle_execute(t)
             )
             provided = getattr(target, PROVIDER_TOOLS, None) or []  # ``ReAct``'s provider tools
             self._native = unique([*found, *provided])
@@ -1121,6 +1123,32 @@ def bound_tools(target: Any) -> list[Any]:
 #: How deep :func:`graph_tools` looks for a ``task`` tool's sub-agents: a sub-agent's own
 #: sub-agents, and theirs.
 SUBAGENT_DEPTH: Final = 3
+
+
+def idle_execute(tool: Any) -> bool:
+    """Whether ``tool`` is Deep Agents' ``execute`` on a backend that runs no command (its
+    default ``StateBackend``): ``create_deep_agent`` lists it whatever the backend, and its
+    ``FilesystemMiddleware`` takes it off each model call there — no tool of the run's that
+    runs code (``tools.export.runs_code``). Its backend is read from the middleware its
+    function closes over."""
+    if getattr(tool, "name", None) != "execute":
+        return False
+    try:
+        from deepagents.middleware.filesystem import FilesystemMiddleware, supports_execution
+    except ImportError:  # pragma: no cover - the deepagents extra
+        return False
+    functions = (getattr(tool, "func", None), getattr(tool, "coroutine", None))
+    cells = [c for f in functions for c in getattr(f, "__closure__", None) or ()]
+    owner = next((v for c in cells if isinstance(v := _held(c), FilesystemMiddleware)), None)
+    return owner is not None and not supports_execution(owner.backend)
+
+
+def _held(cell: Any) -> Any:
+    """What a closure's cell holds (``None`` while it is still empty)."""
+    try:
+        return cell.cell_contents
+    except ValueError:
+        return None
 
 
 def graph_tools(target: Any, depth: int = SUBAGENT_DEPTH) -> list[Any]:

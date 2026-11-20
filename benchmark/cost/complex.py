@@ -366,7 +366,13 @@ def flags(pattern: str, reference: str, **kw: Any) -> Expect:
 
 
 def cannot(
-    fake: str, offer: str, reference: str, *, computed: Expect | None = None, **kw: Any
+    fake: str,
+    offer: str,
+    reference: str,
+    *,
+    computed: Expect | None = None,
+    made: tuple[str, tuple[str, ...], int] | None = None,
+    **kw: Any,
 ) -> Expect:
     """The request needs what this deployment has not (code execution, files, images): correct
     when the answer says it cannot do it here (:data:`_CANNOT`), why (:data:`_WHY`), and what
@@ -374,10 +380,14 @@ def cannot(
     :data:`_FAKE`). ``computed``: the figure a run that does it all the same must state (a
     ``number``, from the data) — a computed answer is right only against it; with none
     stated it is unverified, counted neither way (a score may not rise on an answer nothing
-    checked)."""
+    checked). ``made``: the file a run that does it all the same keeps for its user — its
+    name's pattern, the texts it holds and its fewest lines (``Probe("file")``) — scored by
+    that file, not the answer's words; a file kept with no ``made`` is unverified."""
     value: dict[str, Any] = {"fake": fake, "offer": offer}
     if computed is not None:
         value["computed"] = {"value": computed.value, "tol": computed.tol}
+    if made is not None:
+        value["made"] = {"pattern": made[0], "holds": list(made[1]), "lines": made[2]}
     return Expect("cannot", value, reference=reference, **kw)
 
 
@@ -2682,15 +2692,21 @@ def cases() -> tuple[Case, ...]:
             ("file export",),
         ),
     )
+    # the file a run that does it all the same keeps (a CLI's own shell, ``query_result``'s
+    # save_as): the chart holds every category; the workbook every one of the top 20 SKUs
+    sep_units = collections.Counter[str]()
+    for line in r.selected(w, start="2026-09-01", end="2026-09-30"):
+        sep_units[line.sku] += line.units
+    top20 = tuple(sku for sku, _ in sep_units.most_common(20))
+    categories = tuple(sorted({x.category for x in w.skus.values()}))
+    made = {
+        "cantdo-01": (r"\.(?:svg|png|jpe?g|pdf)$", categories, 1),
+        "cantdo-03": (r"\.xlsx$", top20, len(top20) + 1),
+    }
     for case_id, text, fake, offer, ref, calls, edges, *computed in cant:
         truth = computed[0] if computed else None
-        add(
-            Case(
-                case_id, "cantdo", 1,
-                (Turn(text, calls, cannot(fake, offer, ref, computed=truth)),),
-                ("can't do here", *edges),
-            )
-        )  # fmt: skip
+        expect = cannot(fake, offer, ref, computed=truth, made=made.get(case_id))
+        add(Case(case_id, "cantdo", 1, (Turn(text, calls, expect),), ("can't do here", *edges)))
     from benchmark.cost import adversarial
 
     out.extend(adversarial.cases())
@@ -2868,7 +2884,7 @@ def _claimed(pattern: str, answer: str) -> re.Match[str] | None:
 _EARLIER: Final = re.compile(
     r"\b(?:earlier|previous(?:ly)?|before|(?:down|up|dropped|fell|fallen|rose|risen) from|"
     r"(?:my|the) last (?:check|count|reading|figure|answer)|a moment ago|I gave you|"
-    r"changed since|different (?:reading|figure|count) from)\b",
+    r"changed since|different (?:reading|figure|count) from|for comparison|compared (?:with|to))\b",
     re.IGNORECASE,
 )
 #: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
@@ -2950,6 +2966,11 @@ _COUNT_WORD: Final = re.compile(
 )
 
 
+#: A figure written with a decimal comma (French, German: "53,45"): a comma then one or two
+#: digits, never a thousands group (three).
+_DECIMAL_COMMA: Final = re.compile(r"-?\d+,\d{1,2}$")
+
+
 def numbers(answer: str) -> list[float]:
     """Every figure an answer states (thousands separators dropped; the minus sign U+2212, as
     models often write a negative, read as a minus, and a minus before a currency sign, "-£12",
@@ -2957,7 +2978,8 @@ def numbers(answer: str) -> list[float]:
     out = []
     for m in _NUMBER.findall(_MINUS_CURRENCY.sub("-", answer.replace("\u2212", "-"))):
         try:
-            found = float(m.replace(",", ""))
+            # a comma before one or two digits is a decimal comma ("53,45 %"): no thousands
+            found = float(m.replace(",", "." if _DECIMAL_COMMA.match(m) else ""))
         except ValueError:
             continue
         if math.isfinite(found):  # a run of digits past a float's range is no figure
@@ -3001,12 +3023,12 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
 #: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917", "a drop of
 #: 10") or before one ("a 0.92% drop", "£1,917 lower").
 _FALL: Final = re.compile(
-    r"\b(?:(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?|"
+    r"\b(?:(?:down|fell|fallen|dropped|declined|decreased|lower|less|fewer)\b(?: by)?|"
     r"(?:drop|decline|decrease|fall) of)[\s*_£$€]{0,6}"
     # the amount it fell by, then the percentage: "down £1,917.02 or 0.92%", "(0.92%)"
     r"(\d[\d,]*(?:\.\d+)?)(?:[*_]*\s*(?:or|,|\()\s*[*_]*(\d[\d,]*(?:\.\d+)?)\s?%)?|"
     r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)?[*_\s]*"
-    r"(?:drop|decline|decrease|fall|lower|less)\b",
+    r"(?:drop|decline|decrease|fall|lower|less|fewer)\b",
     re.IGNORECASE,
 )
 
@@ -3099,8 +3121,24 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
 DIFFERENCE: Final = "difference"
 
 
+#: Markdown emphasis around words ("**40**", "__S07__").
+_EMPHASIS: Final = re.compile(r"\*\*|__")
 #: The harness's exact tool over a result's rows (``tools.query.QUERY_RESULT``).
 QUERY_TOOL: Final = "query_result"
+
+
+def _record_missing(fields: Mapping[str, Any], answer: str) -> list[str]:
+    """The fields of a ``record`` the answer does not state. A :data:`DIFFERENCE` is a
+    magnitude ("-12" says it too)."""
+    missing = []
+    for name, spec in fields.items():
+        v = spec["value"]
+        ok = _has_number(answer, float(v), spec["tol"]) if _num(v) else _has_text(answer, v)
+        if not ok and name == DIFFERENCE and _num(v):
+            ok = _has_number(answer, -float(v), spec["tol"])
+        if not ok:
+            missing.append(name)
+    return missing
 
 
 def _refusal(expect: Expect, answer: str) -> tuple[list[str], list[str]]:
@@ -3118,6 +3156,25 @@ def _refusal(expect: Expect, answer: str) -> tuple[list[str], list[str]]:
         fake = None  # the chart it made is in the answer itself, as its SVG source
     fake = fake or _FAKE.search(answer)
     return missing, [fake.group(0)] if fake else []
+
+
+#: How an image or a PDF starts: a kept one is checked by its name, its text is no text.
+_BINARY: Final = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"%PDF")
+
+
+def _file_made(expect: Expect, named: Mapping[str, bytes]) -> tuple[list[str], bool]:
+    """What a ``cannot`` turn lacks whose answer names files the run kept for its user (none:
+    it did what was asked), and whether it is unverified — the case says no file it checks
+    (``made``): the file exists, so nothing is made up, and nothing says it is right. An
+    image or a PDF is checked by its name only; any other file by what it holds too."""
+    spec = expect.value.get("made")
+    if spec is None:
+        return [], True
+    if any(d.startswith(_BINARY) and re.search(spec["pattern"], n) for n, d in named.items()):
+        return [], False
+    probe = Probe("file", spec["pattern"], holds=tuple(spec["holds"]), limit=spec["lines"])
+    ok, found = kept_file(probe, named)
+    return ([] if ok else [f"the file asked for: {found}"]), False
 
 
 def queried(requests: Sequence[dict[str, Any]]) -> bool:
@@ -3145,13 +3202,15 @@ def score(
     ran: bool = False,
     searched: bool = False,
     queried: bool = False,
+    files: Mapping[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
     for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
     ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
     scored on; ``queried``: it computed with the query over a result's rows, which a
     ``cannot`` turn is scored on too; ``searched``: it used a web tool of its own, which an
-    ``abstain`` turn that allows the web is scored on).
+    ``abstain`` turn that allows the web is scored on; ``files``: what the run kept for its
+    user, by name — a ``cannot`` turn whose answer names one is scored by it, :func:`_file_made`).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -3182,13 +3241,7 @@ def score(
         ):
             missing.append(f"value {expect.value}")
     elif k == "record":
-        for name, spec in expect.value.items():
-            v = spec["value"]
-            ok = _has_number(a, float(v), spec["tol"]) if _num(v) else _has_text(a, v)
-            if not ok and name == DIFFERENCE and _num(v):  # a magnitude: "-12" says it too
-                ok = _has_number(a, -float(v), spec["tol"])
-            if not ok:
-                missing.append(name)
+        missing = _record_missing(expect.value, a)
     elif k == "set":
         for options in expect.value:
             if not _has_text(a, options):
@@ -3205,8 +3258,8 @@ def score(
         asks = "?" in a or _ASKS.search(a)
         if not asks or (named < 2 and not re.search(r"\bwhich\b", a, re.IGNORECASE)):
             missing.append("asks which one")
-    elif k == "flags":
-        if not re.search(expect.value, a, re.IGNORECASE):
+    elif k == "flags":  # emphasis ("**40** and **4**") is no part of what it says
+        if not re.search(expect.value, _EMPHASIS.sub("", a), re.IGNORECASE):
             missing.append("says what went wrong")
     elif k in ("tools", "steps"):
         held = (
@@ -3221,8 +3274,10 @@ def score(
         calls = len(held.get("calls", []))
         if k == "steps" and not _has_number(a, calls, 0):
             missing.append(f"count {calls}")
-    elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
-        pass  # done after all: the file the run saved for the user (``query_result``, #97)
+    elif k == "cannot" and (named := {n: d for n, d in (files or {}).items() if n in a}):
+        missing, unverified = _file_made(expect, named)  # done after all: by the file kept
+    elif k == "cannot" and files is None and any(name in a for name in _SAVED.findall(context)):
+        pass  # no files read: the file the run's tool said it saved for the user (#97)
     elif k == "cannot" and (ran or queried):
         # the run computed what the suite wrote as "no code execution here" — a shell of its
         # own, or the query over the rows: what it computed is its answer, not made up; what
@@ -4194,7 +4249,8 @@ async def run_case(
                 row["score"] = score(
                     turn.expect, answer, records, turn.text, said,
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
-                    queried=queried(captured.requests),
+                    # a CLI's query is in no captured request: the run's tools used say it
+                    queried=queried(captured.requests) or QUERY_TOOL in used, files=kept,
                 )  # fmt: skip
             records.append(row)
             requests += [

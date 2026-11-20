@@ -109,7 +109,8 @@ async def test_a_kept_result_says_it_is_the_runs_own_copy_not_a_file_for_the_use
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="own"), [inventory])
     await agent.run("export every SKU to a file I can download", user="u")
     preview = last(model.requests[1])
-    assert results.PRIVATE in preview, preview[-600:]
+    # where the run saves (no tool that runs code), what gives the user a file instead
+    assert results.PRIVATE_SAVING in preview, preview[-600:]
 
 
 async def test_every_row_of_a_kept_result_is_reachable_page_by_page(harness: Harness) -> None:
@@ -265,7 +266,7 @@ async def test_the_stub_names_the_table_and_its_columns_before_the_preview(
     stub = last(model.requests[1])
     # its table named by its tool: one query joins it with the run's other saved results
     said = results.QUERY.format(
-        table="inventory", columns="sku, stock, revenue", path=KEPT, private=results.PRIVATE
+        table="inventory", columns="sku, stock, revenue", path=KEPT, private=results.PRIVATE_SAVING
     )
     assert said in stub and stub.index(said) < stub.index("Here is a preview")
     assert {"read_file", "query_result"} <= set(names(model.requests[1]))
@@ -553,7 +554,10 @@ async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand
     told = last(model.requests[1])
     assert told.startswith(LINES)  # every row, as it came
     said = results.QUERY.format(
-        table="sales_lines", columns="date, sku, units", path=LINES_KEPT, private=results.PRIVATE
+        table="sales_lines",
+        columns="date, sku, units",
+        path=LINES_KEPT,
+        private=results.PRIVATE_SAVING,
     )
     assert said in told and "300 rows" in told
     assert "query_result" in names(model.requests[1])
@@ -590,7 +594,10 @@ async def test_a_sub_agent_that_names_a_run_tool_of_its_own_reads_its_table_quer
     told = str(helper.seen[1][-1].content)
     assert told.startswith(LINES)  # every row, as it came
     said = results.QUERY.format(
-        table="sales_lines", columns="date, sku, units", path=LINES_KEPT, private=results.PRIVATE
+        table="sales_lines",
+        columns="date, sku, units",
+        path=LINES_KEPT,
+        private=results.PRIVATE_SAVING,
     )
     assert said in told and "300 rows" in told
     assert str(helper.seen[2][-1].content).splitlines()[1] == "41"
