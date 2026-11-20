@@ -79,6 +79,13 @@ FAILURES: Final = "trellis_failures"
 MAX_FAILURES: Final = 3
 #: The schedule metadata key of when the user last made or changed it (ISO 8601).
 TOUCHED: Final = "trellis_touched"
+#: The schedule metadata key of its zone, for its runs: a fired run has no app to say it.
+ZONE: Final = "trellis_zone"
+#: The schedule metadata key of how a condition reports (:data:`REPORTS`), when not the default.
+REPORT: Final = "trellis_report"
+#: How a condition reports: until it clears (once while it holds, again after it stopped: the
+#: default), every run it holds, or once and then the schedule ends.
+REPORTS: Final = ("until_clears", "every_time", "once")
 #: How long a schedule runs untouched before its next run asks whether it is still needed.
 STALE: Final = timedelta(days=90)
 #: The tools' names.
@@ -163,6 +170,10 @@ class Fired:
     met: bool | None = None
     #: the writes the user allowed its runs when they confirmed it (:data:`ALLOWED`)
     allowed: tuple[str, ...] = ()
+    #: the schedule's zone: the day and hour its runs are told
+    zone: str | None = None
+    #: how its condition reports (:data:`REPORTS`)
+    report: str = REPORTS[0]
 
     @classmethod
     def of(cls, metadata: dict[str, Any]) -> Fired | None:
@@ -179,6 +190,8 @@ class Fired:
             failures=int(metadata.get(FAILURES) or 0),
             touched=datetime.fromisoformat(touched) if isinstance(touched, str) else None,
             allowed=tuple(str(name) for name in metadata.get(ALLOWED) or ()),
+            zone=metadata.get(ZONE) if isinstance(metadata.get(ZONE), str) else None,
+            report=str(metadata.get(REPORT) or REPORTS[0]),
         )
 
 
@@ -213,7 +226,8 @@ def quiet(runtime: Runtime, answer: Any) -> bool:
     if fired is None:
         return False
     fired.met = not (isinstance(answer, str) and re.sub(r"\W", "", answer) == NO_REPORT)
-    return not fired.met or (fired.condition is not None and fired.reported)
+    held_before = fired.condition is not None and fired.reported
+    return not fired.met or (held_before and fired.report == REPORTS[0])
 
 
 async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
@@ -229,8 +243,10 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
         kept[REPORTED] = fired.met
     if fired.failures and result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL):
         kept[FAILURES] = 0
+    ran = result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL)
+    told = fired.report == REPORTS[2] and fired.condition is not None and bool(fired.met)
     try:
-        if fired.once:
+        if (fired.once and ran) or told:  # done: a failed one-time run stays, paused
             await store.delete(fired.schedule_id, tenant=runtime.tenant)
         elif kept:
             await store.update(
@@ -248,10 +264,10 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
     Kubernetes CronJob and Temporal leave a failing schedule running; an unattended one that
     fails every time only costs)."""
     fired = runtime.scheduled
-    if fired is None or fired.once:
+    if fired is None:
         return error
     fired.failures += 1
-    stop = fired.failures >= MAX_FAILURES
+    stop = fired.once or fired.failures >= MAX_FAILURES
     counted = {FAILURES: fired.failures}
     change = (
         ScheduleUpdate(metadata=counted, enabled=False)
@@ -267,9 +283,10 @@ async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentErro
         return error
     if not stop:
         return error
+    why = "Its one run failed" if fired.once else f"It failed {fired.failures} times in a row"
     said = (
-        f"{error.message} This schedule failed {fired.failures} times in a row and is paused: "
-        f"{fired.task}. Ask me to resume it once the cause is fixed."
+        f"{error.message} {why} and is paused: {fired.task}. Ask me to resume it once the "
+        "cause is fixed."
     )
     return error.model_copy(update={"message": said})
 
@@ -351,8 +368,8 @@ SPECS: Final = (
         "vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your "
         "tools can run, the best first; the user picks one. With no time said it runs at "
         "{default_time}; say the time you used. One schedule can run at several times or days "
-        "('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every {every}. A condition is reported "
-        "when it holds, then not again until it has stopped holding. A schedule like one the "
+        "('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every {every}. A condition reports as "
+        "report says. A schedule like one the "
         "user has is asked about here. Tell the user when it runs as days and times in their "
         "zone, never the cron.",
         {
@@ -360,6 +377,13 @@ SPECS: Final = (
             "when": _WHEN,
             "condition": _CONDITION,
             "once": {"type": "boolean", "description": "Run once, then end."},
+            "report": {
+                "type": "string",
+                "enum": list(REPORTS),
+                "description": "For a condition: until_clears (default) reports when it holds, "
+                "then not again until it stopped holding; every_time each run it holds; once "
+                "the first time it holds, then the schedule ends.",
+            },
             "in_minutes": {
                 "type": "number",
                 "description": "Instead of when: run once this many minutes from now "
@@ -459,6 +483,8 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     if minutes := args.get("in_minutes"):  # once, at that minute
         start = datetime.now(ZoneInfo(zone_of(zone) or "UTC"))
         at = start + timedelta(minutes=float(minutes))
+        if at.second or at.microsecond:  # a cron's minute: the next whole one, never one gone
+            at = (at + timedelta(minutes=1)).replace(second=0, microsecond=0)
         when, once = f"{at.minute} {at.hour} {at.day} {at.month} *", True
         # the minute counted from, said where the model reads the time it got: the tool's
         # text says only the hour (cached), so 03:53 for "in 2 hours" at 01:53 is not an error
@@ -472,7 +498,9 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     if (said := twin or _full(mine, max_per_user)) is not None:
         return said
     agent = runtime.agent
-    metadata = {**agent._metadata(runtime.without, None), TASK: about, TOUCHED: _now()}
+    metadata = {**agent._metadata(runtime.without, None), TASK: about, TOUCHED: _now(), ZONE: zone}
+    if (report := str(args.get("report") or REPORTS[0])) in REPORTS[1:]:
+        metadata[REPORT] = report
     if runtime.conversation != runtime.run_id:  # the chat it was set in
         metadata[THREAD] = runtime.identity.thread
     writes = await _asking(runtime, args.get("tools") or [])
@@ -625,7 +653,10 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
 async def _changed(runtime: Runtime, schedule: Schedule, changes: dict[str, Any]) -> Any:
     store = runtime.agent.harness.runs.schedules
     # the user's own change: touched now, failures cleared
-    changes = {**changes, "metadata": {**changes.get("metadata", {}), TOUCHED: _now(), FAILURES: 0}}
+    kept = {**changes.get("metadata", {}), TOUCHED: _now(), FAILURES: 0}
+    if changes.get("timezone"):
+        kept[ZONE] = changes["timezone"]
+    changes = {**changes, "metadata": kept}
     try:
         updated = await store.update(
             schedule.schedule_id, ScheduleUpdate(**changes), tenant=runtime.tenant
@@ -861,7 +892,26 @@ def _shown(schedule: Schedule) -> dict[str, Any]:
         "condition": about.get("condition"),
         "once": once,
         "status": "active" if schedule.enabled else "paused",
+        **_history(schedule),
     }
+
+
+def _history(schedule: Schedule) -> dict[str, Any]:
+    """What the schedule keeps of its runs, said where there is something: the last run (in its
+    zone), its failed runs in a row, why its last fire failed, and for a condition how it
+    reports and whether it was reported (why a watch went quiet)."""
+    said: dict[str, Any] = {}
+    if (at := schedule.last_fired_at) is not None:
+        local = at.astimezone(ZoneInfo(zone_of(schedule.timezone) or "UTC"))
+        said["last_run"] = f"{local:%a} {local.day} {local:%b}, {local:%H:%M} ({schedule.timezone})"
+    if failures := int(schedule.metadata.get(FAILURES) or 0):
+        said["failed_runs_in_a_row"] = failures
+    if schedule.consecutive_failures and schedule.last_error is not None:
+        said["fire_error"] = schedule.last_error.message
+    if schedule.metadata[TASK].get("condition"):
+        said["reports"] = str(schedule.metadata.get(REPORT) or REPORTS[0])
+        said["reported"] = bool(schedule.metadata.get(REPORTED))
+    return said
 
 
 def _described(schedule: Schedule) -> str:

@@ -18,6 +18,7 @@ from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunRecord, RunStatus, ScheduleSpec
+from trellis.harness import snapshots
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import (
     BOTH,
@@ -47,11 +48,12 @@ class Chat:
 
     def __init__(self) -> None:
         self.calls: deque[tuple[str, dict[str, Any]]] = deque()
-        self.fired: deque[str] = deque()
+        self.fired: deque[str | Exception] = deque()
         self.inputs: list[str] = []
         self.toolboxes: list[set[str]] = []
         self.said: list[str] = []
         self.described: list[str] = []
+        self.zones: list[str | None] = []
 
     async def __call__(self, input: str, agent: Runtime) -> str:
         self.inputs.append(input)
@@ -59,7 +61,11 @@ class Chat:
         found = agent.toolbox.get("schedule_task")
         self.described.append(found.spec.description if found is not None else "")
         if input.startswith("Scheduled task:"):
-            return self.fired.popleft()
+            self.zones.append(snapshots.zone(agent))
+            answer = self.fired.popleft()
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         said = [text_of(await agent.tools.call(n, **a)) for n, a in self.calls]
         self.calls.clear()
         self.said = said
@@ -570,6 +576,94 @@ async def test_cancel_all_is_confirmed_and_several_that_fit_are_picked_from() ->
         assert a in local(h)._schedules and b not in local(h)._schedules
 
 
+async def test_a_fired_run_is_told_the_schedules_zone_not_utc() -> None:
+    """A fired run has no app to say the user's zone: it is the schedule's own (handoff 2.2:
+    never silently UTC), so "every Monday at 8" in Kolkata reads Monday there."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "sales summary", "when": "0 8 * * 1", "timezone": "Asia/Kolkata"}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        chat.fired.append("done")
+        await fire(h, agent, only(h).schedule_id)
+        assert chat.zones == ["Asia/Kolkata"]
+
+
+async def test_list_schedules_says_the_last_run_and_its_failures() -> None:
+    """Asked why a report stopped, the model reads it: the last run, failures in a row, and
+    for a condition whether it was reported (the facts the schedule keeps)."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "stock of A-1", "when": "0 8 * * 1", "condition": "under 5"}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        chat.fired.append(RuntimeError("Gmail: sign-in expired"))
+        assert (await fire(h, agent, only(h).schedule_id)).status is RunStatus.ERROR
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"failed_runs_in_a_row": 1' in listed and '"last_run": "' in listed, listed
+        assert '"reported": false' in listed
+
+
+async def test_a_failed_one_time_run_is_paused_and_said_not_deleted() -> None:
+    """A one-time schedule whose run fails stays, paused, and the error says so: "remind me
+    tomorrow at 9" is not lost to one tool's failure. A run that succeeds still ends it."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "remind me", "when": "0 9 4 11 *", "once": True}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        chat.fired.append(RuntimeError("the reminder tool is down"))
+        record = await fire(h, agent, only(h).schedule_id)
+        assert record.status is RunStatus.ERROR and record.error is not None
+        assert "paused" in record.error.message and "remind me" in record.error.message
+        kept = only(h)
+        assert kept.enabled is False
+        await local(h).schedules.update(kept.schedule_id, ScheduleUpdate(enabled=True))
+        chat.fired.append("done")
+        await fire(h, agent, kept.schedule_id)
+        assert not local(h)._schedules  # ran: ended
+
+
+async def test_in_minutes_rounds_up_to_the_next_whole_minute() -> None:
+    """A delay that ends inside a minute fires in the next one, never next year."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "check again", "in_minutes": 0.2}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        due = only(h).next_fire_at
+        assert due is not None and due - datetime.now(UTC) < timedelta(minutes=2), due
+
+
+@pytest.mark.parametrize(
+    ("report", "outputs", "left"),
+    [
+        ("until_clears", ["low: 2", "low: 1"], ["low: 2", NO_REPORT]),  # today's, the default
+        ("every_time", ["low: 2", "low: 1"], ["low: 2", "low: 1"]),
+        ("once", ["low: 2"], ["low: 2"]),  # told, then it ends
+    ],
+)
+async def test_a_condition_reports_as_the_user_asked(
+    report: str, outputs: list[str], left: list[str]
+) -> None:
+    """How often a watch reports is the model's choice from the user's words, said in the
+    tool: until it clears (once, then quiet until it stops holding: the default), every time
+    it holds, or once and then the schedule ends ("let me know when it is under 5")."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "stock of A-1", "when": "0 8 * * *", "condition": "under 5",
+                "report": report}  # fmt: skip
+        await said(agent, chat, "ada", ("schedule_task", args))
+        sid = only(h).schedule_id
+        got = []
+        for answer in outputs:
+            chat.fired.append(answer)
+            got.append((await fire(h, agent, sid)).output)
+        assert got == left
+        assert bool(local(h)._schedules) == (report != "once")
+
+
 def test_the_schedule_tool_says_its_rules_as_facts_from_the_settings() -> None:
     """What schedule_task's description says is true of this deployment, as facts the model
     decides by (handoff 2.x): the default time and the shortest repeat from the settings, the
@@ -583,7 +677,7 @@ def test_the_schedule_tool_says_its_rules_as_facts_from_the_settings() -> None:
     )
     assert "every 1 hour" in said  # the shortest repeat in force
     assert "0 9,17 * * *" in said and "' L " not in said and "L * *" in when  # last day: L
-    assert "not again until it has stopped holding" in said
+    assert "A condition reports as report says" in said
     assert "never the cron" in said
     default = next(t for t in schedule_tools() if t.name == "schedule_task").spec.description
     assert "09:00" in default and "every 5 minutes" in default  # the defaults, said

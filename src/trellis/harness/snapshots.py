@@ -67,8 +67,11 @@ def now() -> datetime:
 
 
 def zone(runtime: Any) -> str | None:
-    """The user's zone, as their app said it (``Frontend.timezone``: a valid one, or none)."""
-    return runtime.frontend.timezone if runtime.frontend is not None else None
+    """The user's zone, as their app said it (``Frontend.timezone``: a valid one, or none); a
+    fired run has no app: its schedule's zone (never silently UTC)."""
+    if runtime.frontend is not None and runtime.frontend.timezone:
+        return runtime.frontend.timezone
+    return getattr(getattr(runtime, "scheduled", None), "zone", None)
 
 
 def said(when: datetime, zone: str | None, *, hour: bool = False) -> str:

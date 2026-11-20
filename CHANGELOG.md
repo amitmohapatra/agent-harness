@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: how a condition reports, and what a schedule keeps of its runs
+
+`schedule_task` takes `report` for a condition: `until_clears` (the default, as before),
+`every_time` (each run it holds) or `once` (the first time it holds, then the schedule ends).
+`list_schedules` says, where there is one, a schedule's last run in its zone, its failed runs
+in a row, why agent-runs could not fire it, and for a condition whether it was reported.
+
+### Fixed: a fired run's zone, a failed one-time run, and `in_minutes` seconds
+
+A fired run was told the day and hour in UTC: it is now told them in its schedule's zone
+(`trellis_zone`, stored at creation and on a zone change). A one-time schedule whose run failed
+was deleted without a word: it is now paused, and the run's error says so. `in_minutes` with
+seconds left over (`1.5`) made a cron for a minute already gone, which fired a year later: it
+now rounds up to the next whole minute.
+
 ### Changed: the schedule tool says its rules as facts from the settings
 
 `schedule_task`'s description ordered "No time said: 9:00" and "One schedule a request", and
