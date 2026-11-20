@@ -126,6 +126,8 @@ _PROBE_FROM: Final = datetime(2024, 1, 1, tzinfo=UTC)
 #: A cron's fields: minute, hour, day of month, month, day of week.
 CRON_FIELDS: Final = 5
 MINUTE: Final = 60
+#: The longest ``in_minutes``: a cron names no year, so a year less its last day.
+YEAR: Final = 364 * 24 * MINUTE
 #: The most schedules a vague ask is offered to pick from.
 CHOICES: Final = 3
 #: The values of the options the user is asked with: update it (or cancel all), keep both,
@@ -610,21 +612,26 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     task, when = str(args["task"]).strip(), str(args.get("when") or "").strip()
     condition = (args.get("condition") or "").strip() or None
     zone = str(args.get("timezone") or "").strip() or snapshots.zone(runtime) or "UTC"
-    once, counted = bool(args.get("once")), ""
+    once, counted, place = bool(args.get("once")), "", zone
     if minutes := args.get("in_minutes"):  # once, at that minute
-        when, counted = _in_minutes(float(minutes), zone)
-        once = True
+        timed = _in_minutes(float(minutes), zone)
+        if isinstance(timed, str):
+            return timed
+        (when, counted, place), once = timed, True
     held = await limits(runtime)
     min_interval, max_per_user = float(held.min_interval or 0), int(held.max_per_user or 0)
     ends = _ending(args.get("end_at"), zone)
-    if refused := _refused(when, min_interval) or (ends if isinstance(ends, str) else None):
-        return refused
     mine = await _mine(runtime)
     about = {"task": task, "condition": condition, "once": once}
-    if (said := _already(mine, about, when, zone) or _full(mine, max_per_user)) is not None:
+    if said := (
+        _refused(when, min_interval)
+        or (ends if isinstance(ends, str) else _unending(ends, when, place))
+        or _already(mine, about, when, place)
+        or _full(mine, max_per_user)
+    ):
         return said
     metadata = _made_metadata(runtime, held, about, zone, args.get("report"))
-    when, answer = await _settled(runtime, args, mine, about, (when, zone), metadata=metadata)
+    when, answer = await _settled(runtime, args, mine, about, (when, place), metadata=metadata)
     if answer is not None:
         return answer
     agent = runtime.agent
@@ -634,7 +641,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             agent_id=agent.id,
             name=task[:200],
             cadence=when,
-            timezone=zone,
+            timezone=place,
             on_behalf_of=runtime.user,
             input=_input(task, condition),
             timeout_seconds=min(t for t in (agent.timeout, held.run_timeout) if t is not None),
@@ -684,16 +691,37 @@ async def _settled(
     return when, await _changed(runtime, open_["twin"], update)
 
 
-def _in_minutes(minutes: float, zone: str, start: datetime | None = None) -> tuple[str, str]:
-    """``in_minutes``' one run: its cron for the next whole minute that many minutes on (never
-    one gone), and the minute it was counted from, said where the model reads the time it got
-    (the tool's text says only the hour, cached: 03:53 for "in 2 hours" at 01:53 is right)."""
-    start = (start or datetime.now(UTC)).astimezone(ZoneInfo(zone_of(zone) or "UTC"))
-    at = start + timedelta(minutes=minutes)
-    if at.second or at.microsecond:
-        at = (at + timedelta(minutes=1)).replace(second=0, microsecond=0)
-    counted = f" That is {minutes:g} minutes from {start:%H:%M} ({zone}), as asked."
-    return f"{at.minute} {at.hour} {at.day} {at.month} *", counted
+def _in_minutes(
+    minutes: float, zone: str, start: datetime | None = None
+) -> tuple[str, str, str] | str:
+    """``in_minutes``' one run: its cron for the next whole minute that many minutes of real
+    time on (never one gone), the minute it was counted from, said where the model reads the
+    time it got (the tool's text says only the hour, cached: 03:53 for "in 2 hours" at 01:53
+    is right), and the zone the cron is in: ``zone``, or UTC where a clock change makes that
+    wall-clock minute come twice or not at all. A delay before now, or one no cron can name
+    (it has no year), is said back."""
+    start = (start or datetime.now(UTC)).astimezone(UTC)
+    place = zone_of(zone) or "UTC"
+    local = start.astimezone(ZoneInfo(place))
+    if not 0 <= minutes <= YEAR:
+        return (
+            f"{minutes:g} minutes from now ({local:%H:%M}, {zone}) cannot be scheduled: "
+            "in_minutes is a delay ahead of at most a year; for a later day, say a date with "
+            "when and once."
+        )
+    # up to the next whole minute: a delay that ends inside one fires in the next
+    at = start + timedelta(minutes=minutes, microseconds=-1)
+    at = at.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    counted = f" That is {minutes:g} minutes from {local:%H:%M} ({zone}), as asked."
+    cron = _date_cron(at.astimezone(local.tzinfo))
+    if croniter(cron, local).get_next(datetime) != at:  # the user's clock says it twice or never
+        return _date_cron(at), counted, "UTC"
+    return cron, counted, zone
+
+
+def _date_cron(at: datetime) -> str:
+    """The cron of ``at``'s minute on its day, in its own zone."""
+    return f"{at.minute} {at.hour} {at.day} {at.month} *"
 
 
 def _made_metadata(
@@ -769,6 +797,22 @@ def _ending(given: Any, zone: str) -> datetime | str | None:
     if ends <= datetime.now(UTC):
         return f"{text} is already past in {zone}: say a later end."
     return ends.astimezone(UTC)
+
+
+def _unending(ends: datetime | None, when: str, zone: str) -> str | None:
+    """What the user is told of an end that leaves the schedule no run, else ``None``."""
+    place = ZoneInfo(zone_of(zone) or "UTC")
+    if (
+        ends is None
+        or not croniter.is_valid(when)
+        or croniter(when, datetime.now(place)).get_next(datetime) < ends
+    ):
+        return None
+    first = runs_said(when, zone, once=True).removeprefix("next ")
+    return (
+        f"It would never run: its first run, {first}, is not before its end, "
+        f"{_ends_said(ends, zone)}: say a later end or another time."
+    )
 
 
 def _ends_said(ends: datetime, zone: str) -> str:
@@ -990,6 +1034,9 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
     more = _more_changes(args, schedule)
     if isinstance(more, str):
         return more
+    ends = more.get("end_at", getattr(schedule, "end_at", None))
+    if refused := _unending(ends, changes.get("cadence", schedule.cadence), schedule.timezone):
+        return refused
     metadata = {**changes.get("metadata", {}), **more.pop("metadata", {})}
     return await _changed(runtime, schedule, {**changes, **more, "metadata": metadata})
 
