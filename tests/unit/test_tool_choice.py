@@ -258,6 +258,7 @@ async def test_the_harness_own_tools_pass_the_check() -> None:
         "schedule_task": {
             **task,
             "once": ("boolean", None),
+            "report": ("string", None),
             "in_minutes": ("number", None),
             "choices": ("array", task),
             "timezone": ("string", None),

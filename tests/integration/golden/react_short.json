@@ -133,7 +133,7 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. No time said: 9:00. A schedule like one the user has is asked about here. One schedule a request. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 5 minutes. A condition reports as report says. A schedule like one the user has is asked about here. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
@@ -174,6 +174,15 @@
                 "description": "Run once, then end.",
                 "type": "boolean"
               },
+              "report": {
+                "description": "For a condition: until_clears (default) reports when it holds, then not again until it stopped holding; every_time each run it holds; once the first time it holds, then the schedule ends.",
+                "enum": [
+                  "until_clears",
+                  "every_time",
+                  "once"
+                ],
+                "type": "string"
+              },
               "task": {
                 "description": "What to do, as the user said it.",
                 "type": "string"
@@ -190,7 +199,7 @@
                 "type": "array"
               },
               "when": {
-                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
+                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st, '0 18 L * *' the last day of the month; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
               }
             },
@@ -420,7 +429,7 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. No time said: 9:00. A schedule like one the user has is asked about here. One schedule a request. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. With no time said it runs at 09:00; say the time you used. One schedule can run at several times or days ('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every 5 minutes. A condition reports as report says. A schedule like one the user has is asked about here. Tell the user when it runs as days and times in their zone, never the cron. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
@@ -461,6 +470,15 @@
                 "description": "Run once, then end.",
                 "type": "boolean"
               },
+              "report": {
+                "description": "For a condition: until_clears (default) reports when it holds, then not again until it stopped holding; every_time each run it holds; once the first time it holds, then the schedule ends.",
+                "enum": [
+                  "until_clears",
+                  "every_time",
+                  "once"
+                ],
+                "type": "string"
+              },
               "task": {
                 "description": "What to do, as the user said it.",
                 "type": "string"
@@ -477,7 +495,7 @@
                 "type": "array"
               },
               "when": {
-                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
+                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st, '0 18 L * *' the last day of the month; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
               }
             },
