@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: the schedule tool says its rules as facts from the settings
+
+`schedule_task`'s description ordered "No time said: 9:00" and "One schedule a request", and
+left out what the deployment allows. It now says, from the run's settings: the time a schedule
+runs at when the user names none (`TRELLIS_SCHEDULE_DEFAULT_TIME`, new, default 09:00), and
+that the model says the time it used; the shortest repeat in force; that one schedule can run
+at several times or days; that a condition is reported when it holds, then not again until it
+has stopped holding; and that the user is told days and times, never a cron. `when` names
+`L` for the last day of a month (models wrote days 28-30).
+
 ### Fixed: a schedule question takes any time the user gives, not only its suggestions
 
 When `schedule_task` offered choices, an answer that was none of them ("Tuesdays at 7 pm")

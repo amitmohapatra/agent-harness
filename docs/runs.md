@@ -527,6 +527,9 @@ with its tools bound takes them when it is built, with the harness's other tools
   it stops holding (`trellis_reported` in the schedule's metadata).
 - **Limits.** `TRELLIS_SCHEDULE_MIN_INTERVAL` (default 300 s) and
   `TRELLIS_SCHEDULE_MAX_PER_USER` (default 20, per agent) ([configuration.md](configuration.md));
+  `TRELLIS_SCHEDULE_DEFAULT_TIME` (default 09:00) is the time a schedule runs at when the user
+  names none. `schedule_task`'s description says the default time and the shortest repeat in
+  force, as facts the model decides by;
   per user or plan, `Harness(schedule_limits=async (user, tenant) -> ScheduleLimits | None)`
   (a `ScheduleLimits(min_interval=, max_per_user=)` field left `None` is the environment's).
   agent-runs' own floor (one run an hour), its tenant rate limit and `max_running_per_tenant`

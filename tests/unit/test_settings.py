@@ -30,6 +30,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "TRELLIS_FILES_URL": "gs://acme/files",
         "TRELLIS_SCHEDULE_MIN_INTERVAL": "600",
         "TRELLIS_SCHEDULE_MAX_PER_USER": "5",
+        "TRELLIS_SCHEDULE_DEFAULT_TIME": "08:30",
         "TRELLIS_HOST_EXECUTION": "allow",
     }
     settings = Settings.from_env(env)
@@ -46,6 +47,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "files_url": "gs://acme/files",
         "schedule_min_interval": 600.0,
         "schedule_max_per_user": 5,
+        "schedule_default_time": "08:30",
         "host_execution": "allow",
     }
     assert set(env) == set(settings_module.VARIABLES.values())  # every one, and only them
@@ -76,7 +78,13 @@ def test_the_schedule_limits_default_to_5_minutes_and_20_and_are_checked() -> No
     settings = Settings()
     assert (settings.schedule_min_interval, settings.schedule_max_per_user) == (300.0, 20)
     assert Settings(schedule_max_per_user=0).schedule_max_per_user == 0  # none may be set
-    for wrong in ({"schedule_min_interval": 0}, {"schedule_max_per_user": -1}):
+    assert Settings().schedule_default_time == "09:00"
+    for wrong in (
+        {"schedule_min_interval": 0},
+        {"schedule_max_per_user": -1},
+        {"schedule_default_time": "9am"},
+        {"schedule_default_time": "24:00"},
+    ):
         with pytest.raises(ValidationError):
             Settings(**wrong)  # type: ignore[arg-type]
     with pytest.raises(ValidationError, match="frozen"):

@@ -33,6 +33,7 @@ from trellis.harness.schedules import (
     UPDATE,
     ScheduleLimits,
     runs_said,
+    schedule_tools,
 )
 from trellis.harness.tools.convert import text_of
 from trellis.runs import ScheduleUpdate
@@ -567,6 +568,27 @@ async def test_cancel_all_is_confirmed_and_several_that_fit_are_picked_from() ->
         assert [o.value for o in interrupt.options] == [a, b]
         await picked(which, interrupt, b)
         assert a in local(h)._schedules and b not in local(h)._schedules
+
+
+def test_the_schedule_tool_says_its_rules_as_facts_from_the_settings() -> None:
+    """What schedule_task's description says is true of this deployment, as facts the model
+    decides by (handoff 2.x): the default time and the shortest repeat from the settings, the
+    last day of a month, several times in one schedule, the report rule, and times in words."""
+    settings = Settings(schedule_min_interval=3600, schedule_default_time="08:30")
+    [schedule] = [t for t in schedule_tools(settings=settings) if t.name == "schedule_task"]
+    said = schedule.spec.description
+    when = str((schedule.spec.input_schema or {})["properties"]["when"]["description"])
+    assert (
+        "08:30" in said and "One schedule a request" not in said and "No time said: 9" not in said
+    )
+    assert "every 1 hour" in said  # the shortest repeat in force
+    assert "0 9,17 * * *" in said and "' L " not in said and "L * *" in when  # last day: L
+    assert "not again until it has stopped holding" in said
+    assert "never the cron" in said
+    default = next(t for t in schedule_tools() if t.name == "schedule_task").spec.description
+    assert "09:00" in default and "every 5 minutes" in default  # the defaults, said
+    odd = Settings(schedule_min_interval=90)
+    assert "every 90 seconds" in next(iter(schedule_tools(settings=odd))).spec.description
 
 
 async def test_a_schedule_question_takes_any_time_the_user_gives_not_only_its_suggestions() -> None:

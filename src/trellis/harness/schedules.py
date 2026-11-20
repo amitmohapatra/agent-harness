@@ -56,6 +56,7 @@ from trellis.contracts import AgentError, Option, RunStatus, Schedule, ScheduleS
 from trellis.harness import snapshots
 from trellis.harness.runs import THREAD
 from trellis.harness.runtime import Runtime, current
+from trellis.harness.settings import Settings
 from trellis.harness.tools.base import Tool
 from trellis.runs import ConflictError, NotFoundError, ScheduleUpdate, ValidationError
 
@@ -308,8 +309,9 @@ _TASK: Final = {"type": "string", "description": "What to do, as the user said i
 _WHEN: Final = {
     "type": "string",
     "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' "
-    "9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one "
-    "day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
+    "9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st, "
+    "'0 18 L * *' the last day of the month; one day ('tomorrow at 9', 'next Monday at 10') "
+    "counted from today: '0 9 4 11 *' with once.",
 }
 _CONDITION: Final = {"type": "string", "description": "Report only when this holds."}
 _ID: Final = {"type": "string", "description": "An id from list_schedules."}
@@ -347,8 +349,12 @@ SPECS: Final = (
         "schedule only if they want to hear again. If no tool of yours can check it, do not "
         "schedule: say so and offer two or three things your tools can watch, by name. A "
         "vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your "
-        "tools can run, the best first; the user picks one. No time said: "
-        "9:00. A schedule like one the user has is asked about here. One schedule a request.",
+        "tools can run, the best first; the user picks one. With no time said it runs at "
+        "{default_time}; say the time you used. One schedule can run at several times or days "
+        "('0 9,17 * * *', '0 9 * * 1,4'). Runs at most every {every}. A condition is reported "
+        "when it holds, then not again until it has stopped holding. A schedule like one the "
+        "user has is asked about here. Tell the user when it runs as days and times in their "
+        "zone, never the cron.",
         {
             "task": _TASK,
             "when": _WHEN,
@@ -416,13 +422,29 @@ SPECS: Final = (
 )
 
 
-def schedule_tools(runtime: Runtime | None = None) -> list[Tool]:
-    """The tools; in a run, ``schedule_task``'s description says when it is (:func:`now_said`)."""
-    specs = list(SPECS)
+def schedule_tools(
+    runtime: Runtime | None = None, *, settings: Settings | None = None
+) -> list[Tool]:
+    """The tools; ``schedule_task``'s description says the deployment's default time and
+    shortest repeat (the run's harness's settings, else ``settings``, else the defaults) and,
+    in a run, when it is (:func:`now_said`)."""
+    given = runtime.agent.harness.settings if runtime is not None else settings or Settings()
+    said = SPECS[0].description.format(
+        default_time=given.schedule_default_time, every=_every(given.schedule_min_interval)
+    )
     if runtime is not None:
-        dated = f"{specs[0].description} {now_said(runtime)}"
-        specs[0] = specs[0].model_copy(update={"description": dated})
+        said = f"{said} {now_said(runtime)}"
+    specs = [SPECS[0].model_copy(update={"description": said}), *SPECS[1:]]
     return [Tool(spec, _RUN[spec.name], feature="schedules", confined=True) for spec in specs]
+
+
+def _every(seconds: float) -> str:
+    """A shortest repeat in words: whole hours, else whole minutes, else seconds."""
+    for unit, size in (("hour", 3600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            n = int(seconds // size)
+            return f"{n} {unit}{'s' if n != 1 else ''}"
+    return f"{seconds:g} seconds"
 
 
 async def _schedule_task(args: dict[str, Any]) -> Any:
