@@ -12,10 +12,26 @@ from zoneinfo import ZoneInfo
 import pytest
 from croniter import croniter
 
-from tests.integration.test_schedules import Chat, Failing, fire, local, only, said
+from tests.integration.test_schedules import (
+    WATCH,
+    Chat,
+    Failing,
+    asked,
+    fire,
+    local,
+    only,
+    planned,
+    said,
+    seeded,
+)
+from tests.integration.test_write_asks import THREAD as THREAD_
+from tests.integration.test_write_asks import WAIT, fired, pay, refund, wire
+from tests.integration.test_write_asks import Chat as Asks
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.harness import schedules, snapshots
+from trellis.contracts import RunStatus, ScheduleSpec
+from trellis.harness import runs, schedules, snapshots
 from trellis.harness.schedules import FAILURES, TOUCHED, ScheduleLimits
 from trellis.runs import ScheduleUpdate
 
@@ -156,8 +172,9 @@ async def test_the_same_user_in_another_tenant_sees_and_changes_none_of_it() -> 
 
 
 async def test_ids_naming_another_users_schedule_offer_only_the_users_own() -> None:
-    """The model passing ids that fit the words, one of them someone else's: that one is not
-    offered nor changed; the user's one left is changed with no question."""
+    """The model passing ids that fit the words, one of them someone else's: that one is
+    neither offered nor changed; the user's one left is asked about (the words fit several),
+    and changed once picked."""
     chat = Chat()
     async with Harness(config=Settings()) as h:
         agent = h.wrap(chat, id="desk")
@@ -166,8 +183,14 @@ async def test_ids_naming_another_users_schedule_offer_only_the_users_own() -> N
         await said(agent, chat, "bob", ("schedule_task", {"task": "stock", "when": "0 7 * * *"}))
         [theirs] = [s for s in local(h)._schedules if s != mine]
         for name in ("update_schedule", "cancel_schedule"):
-            args = {"id": theirs, "ids": [theirs, mine], "enabled": False}
-            await said(agent, chat, "ada", (name, args))
+            chat.calls.append((name, {"id": theirs, "ids": [theirs, mine], "enabled": False}))
+            result = await agent.run("change it", user="ada", thread="c-1")
+            assert result.interrupt is not None, result
+            assert result.interrupt.option_values == [mine]
+            done = await agent.resume(
+                result.interrupt.interrupt_id, "answer", answer=mine, reviewer="ada"
+            )
+            assert done.status is RunStatus.SUCCESS, done
             assert local(h)._schedules[theirs].enabled is True
         assert mine not in local(h)._schedules
 
@@ -258,3 +281,78 @@ async def test_a_users_own_days_before_asking_beat_the_settings() -> None:
         enabled = {s.on_behalf_of: s.enabled for s in local(h)._schedules.values()}
         assert enabled == {"ada": False, "bob": True}
         assert "still need" in chat.inputs[-2] and "still need" not in chat.inputs[-1]
+
+
+@pytest.mark.parametrize(
+    ("cadence", "times"),
+    [("30 2 * * *", ["02:30 CEST"]), ("0 * * * *", ["02:00 CEST", "02:00 CET", "03:00 CET"])],
+)
+def test_a_time_the_autumn_change_repeats_fires_once_and_hourly_every_real_hour(
+    cadence: str, times: list[str]
+) -> None:
+    """02:00-03:00 comes twice in Berlin on 25 October 2026: a schedule at that time of day
+    fires on its first pass only, as cron and agent-runs do; an hourly one, a rate, fires on
+    both."""
+    spec = ScheduleSpec(
+        tenant_id="t", agent_id="a", name="n", cadence=cadence, timezone="Europe/Berlin",
+        on_behalf_of="ada", input=1,
+    )  # fmt: skip
+    fires, after = [], datetime(2026, 10, 24, 23, 30, tzinfo=UTC)  # 01:30 CEST
+    while (due := runs._next_fire(spec, after)) is not None and due < datetime(
+        2026, 10, 25, 2, 30, tzinfo=UTC
+    ):
+        fires.append(f"{due.astimezone(ZoneInfo('Europe/Berlin')):%H:%M %Z}")
+        after = due
+    assert fires == times
+
+
+async def test_a_pick_whose_schedule_went_meanwhile_asks_again_never_acts_on_another() -> None:
+    """The user's words fit two and they pick one; before the run resumes, that one is gone
+    (cancelled elsewhere, or a one-time run ended it). The one left is not what they picked:
+    they are asked again about it, and nothing is changed meanwhile."""
+    async with Harness(config=Settings()) as h:
+        for name in ("update_schedule", "cancel_schedule"):
+            a, b = await seeded(
+                h, name, WATCH, {"task": "check stock of SKU-2", "when": "0 6 * * *"}
+            )
+            args = {"id": a, "ids": [a, b], "enabled": False}
+            agent = await planned(h, (name, args), name=name)
+            interrupt = await asked(agent)
+            assert [o.value for o in interrupt.options] == [a, b]
+            await local(h).schedules.delete(a)
+            again = await agent.resume(interrupt.interrupt_id, "answer", answer=a, reviewer="ada")
+            assert again.status is RunStatus.PAUSED and again.interrupt is not None, again
+            assert [o.value for o in again.interrupt.options] == [b]
+            kept = local(h)._schedules[b]
+            assert kept.enabled is True
+
+
+async def test_runs_nobody_answered_count_as_failures_in_a_row_and_pause_the_schedule() -> None:
+    """A "wait for me" schedule whose runs each wait a day for an answer nobody gives (the
+    store ends them ``TIMEOUT``, never the harness): each counts as a failure in a row, found
+    by the next run, and the one that makes them as many as pause it pauses the schedule; that
+    run says so in the chat and does nothing else. An answered wait is no failure."""
+    async with Harness(config=Settings(schedule_pause_after_failures=2)) as h:
+        agent = arm(h.wrap(Asks(("refund", 2)), id="desk"), [pay, refund, wire])
+        asked_ = await agent.run("pay my rent monthly", user="ada", thread=THREAD_)
+        assert asked_.interrupt is not None
+        await agent.resume(asked_.interrupt.interrupt_id, "answer", answer=WAIT, reviewer="ada")
+        runs_ = local(h)
+        first = await fired(h, agent)
+        assert first.status is RunStatus.PAUSED and first.awaiting is not None
+        await agent.resume(first.awaiting.interrupt_id, "approve", reviewer="ada")
+        assert await h.worker([agent]).run_once() is True
+        answered = await h.runs.get(first.run_id)
+        assert answered is not None and answered.status is RunStatus.SUCCESS  # no failure
+        for n in (1, 2):
+            waits = await fired(h, agent)
+            assert waits.status is RunStatus.PAUSED and waits.awaiting is not None, waits
+            assert only(h).metadata.get(FAILURES, 0) == n - 1
+            runs_._expire_interrupts(waits.awaiting.deadline + timedelta(minutes=1))
+        told = await fired(h, agent)
+        assert told.status is RunStatus.SUCCESS and told.awaiting is None, told
+        assert "paused" in str(told.output) and "pay the rent" in str(told.output), told.output
+        schedule = only(h)
+        assert schedule.enabled is False and schedule.metadata[FAILURES] == 2
+        listed = await agent.run("list", user="ada", thread=THREAD_)
+        assert '"paused_because": "its runs failed 2 times in a row"' in str(listed.answer)
