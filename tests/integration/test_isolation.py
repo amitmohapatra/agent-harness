@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final
@@ -29,15 +29,24 @@ from trellis.harness.sandbox import ExecResult, SandboxLost, SandboxRef, Sandbox
 from trellis.harness.sandbox.base import RUN, TENANT
 from trellis.harness.sandbox.isolation import (
     AUDIT,
+    OUTPUT_BYTES,
     REGISTRY,
     HostSandbox,
     Limits,
+    Ran,
+    Runner,
     isolated_end,
     isolated_run,
     name_of,
 )
 
 SECRET: Final = "sk-service-0123456789"
+#: A ``mkdir`` that succeeds on a folder that is there, as uutils' (``/bin/mkdir`` on Ubuntu
+#: 26.04, GitHub's ubuntu-latest) does when two calls race to make one folder: it checks that the
+#: folder is not there, then takes its EEXIST for success when the other call made it first.
+NOT_EXCLUSIVE: Final = (
+    'mkdir() { command mkdir "$@" 2>/dev/null; for d; do :; done; [ -d "$d" ]; }\n'
+)
 
 
 @pytest.fixture
@@ -64,6 +73,22 @@ class Runs:
     async def get(self, run_id: str, *, tenant: str) -> Any:
         known = self.ended.get(run_id)
         return None if known is None else SimpleNamespace(final=known)
+
+
+class RacingMkdir:
+    """Root commands whose ``mkdir`` is not exclusive (:data:`NOT_EXCLUSIVE`): every call
+    loses the race."""
+
+    def __init__(self, runner: Runner) -> None:
+        self.runner = runner
+
+    async def run(
+        self, argv: Sequence[str], *, stdin: bytes | None = None, keep: int | None = OUTPUT_BYTES
+    ) -> Ran:
+        shell, flag, script, *rest = argv
+        return await self.runner.run(
+            [shell, flag, NOT_EXCLUSIVE + script, *rest], stdin=stdin, keep=keep
+        )
 
 
 async def run(layer: HostSandbox, run_id: str, command: str, **kw: Any) -> ExecResult:
@@ -179,6 +204,26 @@ async def test_tenants_have_base_directories_and_uid_ranges_of_their_own(
     assert seen.stdout.strip().endswith("rc=2")  # another tenant's base: not listed
     with pytest.raises(ConfigurationError, match="a tenant"):
         await layer.create(SandboxRef(provider="host", id="x"), SandboxSpec())
+
+
+async def test_runs_and_tenants_never_share_a_uid_where_mkdir_is_not_exclusive(
+    layer: HostSandbox,
+) -> None:
+    """A run's uid, its workspace and its tenant's uid range are claimed by a file made only if
+    it is not there (the shell's own ``set -C``), never by ``mkdir`` alone: two runs started
+    at once on a runner whose ``mkdir`` succeeds on a folder another call just made got one uid,
+    and each one's start killed the other's ("the processes of uid ... do not end")."""
+    layer.isolation.runner = RacingMkdir(layer.isolation.runner)
+    one = await layer.workspace("acme", "ada", "r1")
+    two, three = await asyncio.gather(
+        layer.workspace("acme", "ada", "r2"), layer.workspace("acme", "ada", "r3")
+    )
+    other = await layer.workspace("globex", "bob", "r4")
+    assert len({one.uid, two.uid, three.uid, other.uid}) == 4
+    per = layer.isolation.tenant_uids
+    assert one.uid // per == two.uid // per == three.uid // per != other.uid // per
+    assert (await layer.workspace("acme", "ada", "r1")).uid == one.uid  # found again
+    assert (await run(layer, "r2", "echo still here")).stdout == "still here\n"
 
 
 @pytest.mark.parametrize(

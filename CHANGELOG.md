@@ -141,6 +141,16 @@ the harness publishes to the catalog itself): `irreversible` at every call (held
 own gate, its approved call continuing the paused run), and so does an `approve_when`. Only the
 SDK's own `Shell` capability's tools are the sandbox shell, and the mark survives the harness's
 copies of the tool. `apply_patch` asks as a write, as `Write` does.
+
+### Fixed: two runs started at once on one machine never get one uid
+
+The isolation layer claimed a run's uid, its workspace and its tenant's uid range by `mkdir`.
+uutils' `mkdir` (`/bin/mkdir` on Ubuntu 26.04) is not exclusive: it checks that the folder is
+not there and takes the error of a call that made it first for success, so two runs started at
+once could both get one uid — able to signal each other's processes — and each start killed the
+other's ("the processes of uid ... do not end"). A claim is now a file made only if it is not
+there (the shell's own `set -C`) in that folder.
+
 ### Fixed: a conversation's transcript is no longer refused by the memory service
 
 A sub-agent's question (stored as the agent's message, below) went as visible chat, which the

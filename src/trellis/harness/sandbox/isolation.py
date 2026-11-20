@@ -126,11 +126,17 @@ _KILLALL = (
     + _KILL_OWN
     + '\' || { echo "the processes of uid $1 do not end" >&2; return 1; }; }\n'
 )
+#: Claims a folder of the registry: made, and a file in it made only if it is not there (the
+#: shell's own ``set -C``, an exclusive open). ``mkdir`` alone is not a claim: uutils' (Ubuntu
+#: 26.04's) checks that the folder is not there, then takes the EEXIST of a call that made it
+#: first for success, so two calls at once both had it (one uid for two runs).
+_CLAIM = 'claim() { mkdir "$1" 2>/dev/null && (set -C; : > "$1/.claim") 2>/dev/null; }\n'
 #: Makes (or finds) a run's workspace: ``R tenant name labels base per most`` → ``uid home
 #: new|old``. The tenant's uid range is taken the first time (a block of its own), the run's
 #: uid is the first free one in it, the workspace is made empty, the run's uid's.
 OPEN: Final = (
     _KILLALL
+    + _CLAIM
     + r"""set -u
 R=$1 t=$2 n=$3 labels=$4 base=$5 per=$6 most=$7
 reg=$R/.trellis
@@ -141,11 +147,11 @@ mkdir -p "$reg/ws" "$reg/uids" "$reg/blocks" "$reg/tenants" "$reg/stage" "$reg/p
 if [ -s "$reg/ws/$n/uid" ]; then
   echo "$(cat "$reg/ws/$n/uid") $(cat "$reg/ws/$n/home") old"; exit 0
 fi
-if mkdir "$reg/tenants/$t" 2>/dev/null; then
+if claim "$reg/tenants/$t"; then
   b=0
-  while [ "$b" -lt "$most" ] && ! mkdir "$reg/blocks/$b" 2>/dev/null; do b=$((b + 1)); done
+  while [ "$b" -lt "$most" ] && ! claim "$reg/blocks/$b"; do b=$((b + 1)); done
   if [ "$b" -ge "$most" ]; then
-    rmdir "$reg/tenants/$t"; echo "no uid range is left for a tenant ($most tenants)" >&2; exit 75
+    rm -rf "$reg/tenants/$t"; echo "no uid range is left for a tenant ($most tenants)" >&2; exit 75
   fi
   echo "$b" > "$reg/tenants/$t/.block" && mv "$reg/tenants/$t/.block" "$reg/tenants/$t/block"
 fi
@@ -153,7 +159,7 @@ i=0
 while [ ! -s "$reg/tenants/$t/block" ]; do
   i=$((i + 1)); [ "$i" -lt 100 ] || exit 70; sleep 0.05
 done
-if ! mkdir "$reg/ws/$n" 2>/dev/null; then  # another call is making it: its workspace
+if ! claim "$reg/ws/$n"; then  # another call is making it: its workspace
   i=0
   while [ ! -s "$reg/ws/$n/uid" ] && [ "$i" -lt 200 ]; do i=$((i + 1)); sleep 0.05; done
   if [ -s "$reg/ws/$n/uid" ]; then
@@ -161,9 +167,9 @@ if ! mkdir "$reg/ws/$n" 2>/dev/null; then  # another call is making it: its work
   fi  # else what a call that died left: made again
 fi
 b=$(cat "$reg/tenants/$t/block"); lo=$((base + b * per)); hi=$((lo + per)); u=$lo
-while [ "$u" -lt "$hi" ] && ! mkdir "$reg/uids/$u" 2>/dev/null; do u=$((u + 1)); done
+while [ "$u" -lt "$hi" ] && ! claim "$reg/uids/$u"; do u=$((u + 1)); done
 if [ "$u" -ge "$hi" ]; then
-  rmdir "$reg/ws/$n"; echo "no uid is free for this tenant ($per runs at once)" >&2; exit 75
+  rm -rf "$reg/ws/$n"; echo "no uid is free for this tenant ($per runs at once)" >&2; exit 75
 fi
 printf '%s' "$n" > "$reg/uids/$u/ws"; printf '%s' "$labels" > "$reg/ws/$n/labels"
 w=$R/$t/$n
