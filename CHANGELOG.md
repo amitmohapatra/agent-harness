@@ -127,6 +127,13 @@ and questions whose answers are facts of this harness. Cases waiting on a featur
 `update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
 reported apart.
 
+### Fixed: a saved file promises a download link only where an app shows one
+
+`query_result(save_as=)` told the model "the chat shows its download link" on every surface,
+and the model repeated it on A2A, MCP, fired runs and the API, where no link is shown. It now
+says so only in a run with a front end (AG-UI, which shows the run's files); elsewhere it says
+the file is kept with this run.
+
 ### Fixed: a paged tool past 200 pages keeps the cursor of the rest
 
 A `paged=True` tool fetched to its 200-page cap said `more_pages` but dropped the next cursor,

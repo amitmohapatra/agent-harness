@@ -31,6 +31,7 @@ from trellis.contracts import RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness import runtime as runtime_module
 from trellis.harness.files import FileStore
+from trellis.harness.frontend import Frontend
 from trellis.harness.journal import Journal, content_key
 from trellis.harness.tools import export, query, results
 from trellis.harness.tools.convert import claude, mcp, openai_agents
@@ -157,6 +158,7 @@ class Run:
         self.replay = SimpleNamespace(journal=Journal())
         self.toolbox: dict[str, Any] = {}
         self.native = dict.fromkeys(native)
+        self.frontend: Frontend | None = None
 
 
 @pytest.fixture(params=[(), ("sandbox_exec",), ("Bash",)], ids=["no-code", "sandbox", "bash"])
@@ -274,6 +276,18 @@ def test_a_csv_has_every_row_and_its_answer_the_first_few(root: Path) -> None:
     assert said.startswith("Saved all.csv for the user: 3 rows, 19 bytes;"), said
     assert said.endswith("Its first rows:\nn,name\n1,a\n2,b\n3,c")
     assert kept(root, "all.csv").read_text() == "n,name\n1,a\n2,b\n3,c\n"
+
+
+def test_a_download_link_is_said_only_where_an_app_shows_it(root: Path) -> None:
+    """With no front end (A2A, MCP, a fired run, the API) no link is promised; with one (AG-UI,
+    which shows the run's files) the chat's link is said."""
+    said = ask(sql="SELECT n FROM result", save_as="csv", file_name="plain.csv")
+    assert "download link" not in said and "kept with this run" in said, said
+    runtime = runtime_module.current()
+    assert runtime is not None
+    runtime.frontend = Frontend()  # type: ignore[misc]
+    said = ask(sql="SELECT n FROM result", save_as="csv", file_name="app.csv")
+    assert "the chat shows its download link" in said, said
 
 
 def test_an_excel_cell_that_is_no_number_or_text_is_its_text(root: Path) -> None:
