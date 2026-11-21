@@ -88,15 +88,24 @@ async def thread(runtime: Runtime) -> list[Said]:
     """The earlier turns of ``runtime``'s conversation as the memory service's thread holds
     them, oldest first — the chat and the results of the tool calls made in it, the run's own
     left out —, as :class:`MemorySession` replays them and ``Agent.earlier_noted`` reads which
-    tools' results are out of date (with memory on, a run's transcript is kept in the thread
-    only: ``Agent.recorded_run``). A thread the service does not have yet (``404``: nothing
-    was said in it) has none; one it cannot read (``DependencyUnavailableError``) is the
-    caller's to say."""
+    tools' results are out of date: read once for the attempt (``Runtime.thread_read``). A
+    thread the service does not have yet (``404``: nothing was said in it) has none; one it
+    cannot read (``DependencyUnavailableError``) is the caller's to say."""
+    if runtime.thread_read is None:
+        runtime.thread_read = await _read(runtime)
+    if isinstance(runtime.thread_read, DependencyUnavailableError):
+        raise runtime.thread_read
+    return list(runtime.thread_read)
+
+
+async def _read(runtime: Runtime) -> list[Said] | DependencyUnavailableError:
     assert runtime.run_memory is not None
     try:
         messages = await runtime.run_memory.ctx.history(limit=HISTORY_LIMIT, include_internal=True)
     except NotFoundError:
         return []
+    except DependencyUnavailableError as exc:
+        return exc
     return [
         said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})
         for m in messages

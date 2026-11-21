@@ -8,6 +8,7 @@ fetches the value again instead of answering from the old one."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -369,7 +370,10 @@ async def test_a_run_whose_model_calls_the_harness_cannot_see_is_told_too(
 
 
 def _sent(model: Any) -> str:
-    """What a scripted model was sent, its latest call last: OpenAI's inputs, LangChain's."""
+    """What a scripted model was sent, its latest call last: OpenAI's inputs, Kimi's requests,
+    LangChain's; what the fake Claude CLI was started with in its latest turn (its record)."""
+    if isinstance(model, Path):
+        return model.read_text()
     said = getattr(model, "said", None)
     return str(said()) if callable(said) else str(model.requests[-1])
 
@@ -470,7 +474,7 @@ async def test_a_graph_that_binds_the_harnesss_tools_itself_is_told_they_are_out
     assert sent.count(str(snapshots.note(["get_stock"]))) == 1, sent
 
 
-@pytest.mark.parametrize("framework", ["openai_agents", "graph"])
+@pytest.mark.parametrize("framework", ["openai_agents", "graph", "claude_agent_sdk", "kimi"])
 async def test_a_run_with_memory_on_whose_model_calls_the_harness_cannot_see_is_told_too(
     memory_harness: Harness, framework: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -497,3 +501,33 @@ async def test_a_run_with_memory_on_whose_model_calls_the_harness_cannot_see_is_
     if framework == "openai_agents":
         assert snapshots.STALE.format(tool="get_stock") in sent, sent
     assert sent.count(note) == 1, sent
+
+
+#: the memory service's reads of a conversation's thread one turn makes, by adapter, as
+#: before the out-of-date note was read from memory's thread: OpenAI's session, none else
+THREAD_READS: dict[str, int] = {"openai_agents": 1, "graph": 0, "claude_agent_sdk": 0, "kimi": 0}
+
+
+@pytest.mark.parametrize("framework", list(THREAD_READS))
+async def test_telling_a_run_its_results_are_out_of_date_reads_memorys_thread_no_more(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    framework: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note (``snapshots.note``) costs no read of memory's thread of its own: OpenAI's
+    session and the note share the one read of the run, and the other adapters read the
+    turns this process kept, as before."""
+    from tests.support.adapters import BUILDERS
+
+    get_stock = stock_tool()
+    plan = [("get_stock", {"sku": "SKU-00123"})]
+    target, own = await BUILDERS[framework](memory_harness, [get_stock], tmp_path, plan)
+    agent = arm(memory_harness.wrap(target, id=f"reads-{framework}"), own)
+    monkeypatch.setattr(snapshots, "now", at(FETCHED))
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    before = len(memory_service.named("thread_messages"))
+    monkeypatch.setattr(snapshots, "now", at(FETCHED + timedelta(hours=1)))
+    await agent.run("reorder qty for it?", user="u1", thread=THREAD)
+    assert len(memory_service.named("thread_messages")) - before == THREAD_READS[framework]

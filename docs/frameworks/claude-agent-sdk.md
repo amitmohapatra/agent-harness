@@ -391,7 +391,8 @@ this process is sent into it (the SDK's `ClaudeSDKClient`), with the turn's own 
 no such process (it closed, or the server restarted) the turn starts one that resumes the
 session the last turn ran in (`resume=`, through the journal's session store:
 [runs.md](../runs.md#a-claude-or-acp-session-across-turns)); in another process, or the first turn, a new session — with memory off given
-the run store's earlier turns in its context.
+the run store's earlier turns in its context. Memory on or off, a turn whose earlier turns in this process hold
+a live tool's result past its age is told which tools in its context, once (`snapshots.note`).
 
 **Background work.** What Claude starts in the background — a subagent with `background`, a
 `Bash` command with `run_in_background` — therefore goes on between the turns: the turn that

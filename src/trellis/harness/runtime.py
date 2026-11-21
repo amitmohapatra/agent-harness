@@ -284,6 +284,9 @@ class Runtime:
     #: its tool, its arguments as the model wrote them: the earlier call's id, taken once by
     #: the repeat, which does not run (``tools.bridge.same``)
     repeats: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    #: memory's thread as the attempt read it (``bridges.session.thread``: read once, for the
+    #: out-of-date note and an OpenAI run's session alike), or why it could not be
+    thread_read: Any = field(default=None, repr=False)
     #: what the attempt keeps of the calls its framework carries out on this machine, made on
     #: first use by the code that governs them (``tools.convert.openai_local.Local``)
     local_calls: Any = field(default=None, repr=False)

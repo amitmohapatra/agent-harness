@@ -163,6 +163,7 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
         toolbox={},
         native={},
         offered=None,
+        thread_read=None,  # the attempt's read of the thread (Runtime.thread_read): none yet
     )
     session = MemorySession(runtime)  # type: ignore[arg-type]
     assert session.session_id == "conv_t1"  # the run's conversation (Runtime.conversation)
@@ -211,7 +212,7 @@ async def test_an_earlier_live_value_in_the_thread_reads_as_out_of_date(
     runtime = SimpleNamespace(
         run_memory=SimpleNamespace(ctx=SimpleNamespace(history=history)),
         conversation="conv_t1", run_id="run_1", toolbox={"stock": live}, native={},
-        offered={"other"},
+        offered={"other"}, thread_read=None,
     )  # fmt: skip
     items = await MemorySession(runtime).get_items()  # type: ignore[arg-type]
     told = next(i["output"] for i in items if i.get("type") == "function_call_output")

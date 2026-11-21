@@ -1300,15 +1300,18 @@ class Agent:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, note) if p)
 
     async def _earlier_turns(self, runtime: Runtime) -> list[Said]:
-        """The earlier turns :meth:`earlier_noted` reads: with memory on, its thread
-        (``bridges.session.thread``: a run's transcript is kept there only, as an OpenAI run's
-        session replays it) — none where memory's window was replayed as the run's messages,
-        marked and noted already (:meth:`remembered`); with memory off, the run store's."""
-        if runtime.run_memory is None:
-            return await conversation.earlier(runtime, whole=True)
-        if self.window(runtime) is Window.MESSAGES:
-            return []
-        return await session.thread(runtime)
+        """The earlier turns :meth:`earlier_noted` reads: memory's thread where an OpenAI
+        run's session replays it (``bridges.session.thread``: the one read of the attempt,
+        shared); none where memory's window was replayed as the run's messages, marked and
+        noted already (:meth:`remembered`); else the run store's, with the transcripts this
+        process kept (:meth:`recorded_run`)."""
+        if runtime.run_memory is not None:
+            store = self.adapter.thread_store(self.target, runtime.framework_options)
+            if store is history.MEMORY_THREAD:
+                return await session.thread(runtime)
+            if self.window(runtime) is Window.MESSAGES:
+                return []
+        return await conversation.earlier(runtime, whole=True)
 
     def offers_a_question(self, runtime: Runtime) -> bool:
         """Whether the run's model has a question tool: ``ask_user`` among the run's tools, or
@@ -1607,16 +1610,18 @@ class Agent:
         """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
         owns the conversation (``history.owner``), it is written before the run returns, so
         the next turn's window holds it wherever that turn runs; a write that fails there is
-        queued like every other (:mod:`trellis.harness.writes`: retried, spooled). With memory
-        off it is kept in this process for the conversation's later turns (``Agent.results``,
-        ``conversation.earlier``)."""
+        queued like every other (:mod:`trellis.harness.writes`: retried, spooled). It is kept in
+        this process for the conversation's later turns too (``Agent.results``,
+        ``conversation.earlier``): their earlier turns with memory off, and with memory on
+        which tools' earlier results are out of date (:meth:`earlier_noted`)."""
         memory = runtime.run_memory
-        if not messages or (memory is not None and not runtime.uses("records")):
+        if not messages:
             return
-        if memory is None:
-            # nothing keeps the conversation: its later turns read this one here (``earlier``)
-            if runtime.parent is None and runtime.conversation != runtime.run_id:
-                self.results.said(runtime.conversation, runtime.run_id, messages)
+        if runtime.parent is None and runtime.conversation != runtime.run_id:
+            # its later turns read this one here (``conversation.earlier``): with memory off,
+            # nothing else keeps it; with memory on, which tools' results are out of date
+            self.results.said(runtime.conversation, runtime.run_id, messages)
+        if memory is None or not runtime.uses("records"):
             return
         run_id, attempt = runtime.run_id, runtime.attempt
         conversation_key = runtime.conversation
