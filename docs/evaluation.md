@@ -572,14 +572,23 @@ tools from its first call: `--adapter react --variant deep`, `--adapter deepagen
 checkpointer) and `--adapter deepagents --variant unthreaded` (built with no checkpointer, so
 the harness carries its files and todos).
 
+Every run has code by default, as the harness gives every agent (`variants.codes`: ReAct's
+`execute`, `sandbox_exec` on `langgraph`, `deepagents`, `graph` and `openai`; Claude Code and
+Kimi keep their own shells): the default sandbox is Docker of the image
+`TRELLIS_BENCH_SANDBOX_IMAGE` names (`variants.give_code`; a fake one under `--scripted`). A
+case that was "can't do it here (no code execution)" (`cantdo-01..03`, the `bf*-cantdo` and
+chart/export turns, `advexp-04`, `advfile-01`) is then scored on doing it: by the file kept for
+the user (its name, texts and lines), else the figure the code computes, else unverified — a
+refusal there is wrong, and a wrong file or figure is never accepted. `--variant main-nocode`
+(`without={"code"}`), `baseline` and the variants given a backend of their own (`deep`,
+`memory-files`, `permissions`) have none and score those turns as refusals, as before.
 `--variant` builds `ReAct` given one Deep Agents capability (`benchmark.cost.variants.CAPABILITIES`):
-`sandbox` (the run's sandbox as its backend: Docker, the image `TRELLIS_BENCH_SANDBOX_IMAGE`
-names; a fake one under `--scripted`), `subagents`, `memory-files`, `permissions`. Every case
+`subagents`, `memory-files`, `permissions`; `sandbox` is now `main` (an alias). Every case
 runs on each, at any `--window`. `python -m benchmark.cost.parity one.jsonl other.jsonl` compares
-two runs turn by turn (with and without a sandbox, two windows): a turn right one way only, or a
+two runs turn by turn (with and without code, two windows): a turn right one way only, or a
 check failed one way only, is a difference. `--scripted` replays the gold calls on any variant;
-it cannot write the code a sandbox runs, so with a sandbox the files are checked on a real
-model only.
+it cannot write the code a sandbox runs, so with code the files are checked on a real model
+only (unverified under `--scripted`).
 
 ## Scheduling benchmark
 

@@ -7,11 +7,15 @@ same instructions and model. A new cost feature lands as one more entry of :data
   ``StallGuard``, LangChain's ``ModelCallLimitMiddleware``, ``PatchToolCallsMiddleware``,
   ``ModelHooks``), no context editing, no summarization, no automatic feature (a large result
   is still kept and paged: ``HarnessTools`` runs the harness's tools with the convention every
-  adapter's model reads, ``tools.results``); ``without={"code_mode", "tool_search"}``.
+  adapter's model reads, ``tools.results``); ``without={"code_mode", "tool_search", "code"}``.
 * ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: with no Deep Agents
   capability asked for, LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep
   Agents' ``PatchToolCallsMiddleware``) — planning on a long task, older results cleared past
-  half the window, the request fitted to the window (``FitWindow``).
+  half the window, the request fitted to the window (``FitWindow``) — and code in the run's
+  sandbox, as the harness gives every agent by default (Deep Agents' ``execute`` on its
+  ``CodeBackend``; every other adapter ``sandbox_exec``): the sandbox :func:`give_code` makes
+  the default — Docker, the image ``TRELLIS_BENCH_SANDBOX_IMAGE`` names; a fake one under the
+  scripted model, which needs no daemon.
 * ``deep`` — ``ReAct`` on Deep Agents (a backend given: the journal's), ``create_deep_agent``
   with the harness's middleware: result paging (``FilesystemMiddleware``: a large result saved,
   a preview sent), summarization near the window's end, the scratch files and the ``task``
@@ -21,17 +25,20 @@ same instructions and model. A new cost feature lands as one more entry of :data
   summarization placed after the narrowing, ``PatchToolCallsMiddleware``; the scratch tools on a
   long task): Deep Agents' capabilities gated per call without ``create_deep_agent``'s assembly.
 * ``main-planning``, ``deep-files`` — without a feature turned on by itself (:data:`AUTOMATIC`:
-  its middleware left out); ``main@8k`` — ``main`` on an 8,192-token window;
+  its middleware left out); ``main-nocode`` — ``main`` without the harness's default code
+  (``without={"code"}``); ``main@8k`` — ``main`` on an 8,192-token window;
 * ``deep-<piece>`` — ``deep`` with one of Deep Agents' pieces off (:data:`PIECES`: ``paging``,
   ``context_editing``, ``summarization``), each measured on its own (``react.defaults_off``);
   with Deep Agents' paging off a large result is paged by the harness's own convention.
 
-* ``sandbox``, ``subagents``, ``memory-files``, ``permissions`` — ``ReAct`` given one Deep
-  Agents capability (:data:`CAPABILITIES`): the run's sandbox as its backend (Docker, the image
-  ``TRELLIS_BENCH_SANDBOX_IMAGE`` names, else the provider's; a fake one under the scripted
-  model, which needs no daemon), a sub-agent of its own, a memory file on a disk backend, and
-  permissions on one. Every case of the suite runs on each, at any ``--window``: what a
-  capability must not change is the answer.
+* ``sandbox`` — ``main`` (an alias kept for earlier commands): code runs by default.
+* ``subagents``, ``memory-files``, ``permissions`` — ``ReAct`` given one Deep Agents capability
+  (:data:`CAPABILITIES`): a sub-agent of its own (code in its sandbox, as ``main``), a memory
+  file on a disk backend, and permissions on one (a backend given: no code). Every case of the
+  suite runs on each, at any ``--window``: what a capability must not change is the answer.
+
+:func:`codes` says which runs have code (``complex``: a ``cannot`` turn there is scored on
+doing what was asked).
 
 :data:`DEFAULT` are the variants a run compares unless ``--variants`` says.
 """
@@ -96,7 +103,7 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
         name="baseline",
     )
     setattr(graph, TOOLS_ATTRIBUTE, list(setup.tools))  # run by HarnessTools, as ReAct's are
-    return graph, {"without": {"code_mode", "tool_search"}}
+    return graph, {"without": {"code_mode", "tool_search", "code"}}
 
 
 def main(
@@ -121,6 +128,13 @@ def main(
             skills=setup.skills,
         )
     return target, {}
+
+
+def without_code(setup: Setup) -> tuple[Any, dict[str, Any]]:
+    """``main`` with the harness's default code turned off (``without={"code"}``): what code
+    by default costs and changes, measured against ``main``."""
+    target, options = main(setup)
+    return target, {**options, "without": {"code"}}
 
 
 def pieces(setup: Setup) -> tuple[Any, dict[str, Any]]:
@@ -176,16 +190,28 @@ def capable(setup: Setup, **given: Any) -> tuple[Any, dict[str, Any]]:
     return target, {}
 
 
-def with_sandbox(setup: Setup) -> tuple[Any, dict[str, Any]]:
-    """``ReAct(backend=sandbox())``: a real one for a model on an endpoint, a fake one (no
-    daemon, no interpreter: files and the listing only) for the scripted model."""
+def give_code(model: Any) -> None:
+    """The sandbox the harness gives every agent by itself (``sandbox.use_default``), for the
+    runs that follow: on a model on an endpoint, Docker of the image
+    ``TRELLIS_BENCH_SANDBOX_IMAGE`` names (else the harness's own choice: Docker's default
+    image, else this machine's isolation layer); for the scripted model a fake one (no daemon,
+    no interpreter: files and the listing only)."""
     from trellis import sandbox
+    from trellis.harness.sandbox import use_default
 
-    if isinstance(setup.model, str):
-        return capable(setup, backend=sandbox(image=os.environ.get(SANDBOX_IMAGE) or None))
-    from tests.support.sandbox import FakeSandboxes
+    if not isinstance(model, str):
+        from tests.support.sandbox import FakeSandboxes
 
-    return capable(setup, backend=sandbox(FakeSandboxes()))
+        use_default(sandbox(FakeSandboxes()))
+    elif os.environ.get(SANDBOX_IMAGE):
+        use_default(sandbox(image=os.environ[SANDBOX_IMAGE]))
+
+
+def codes(adapter: str, variant: str) -> bool:
+    """Whether a run of ``adapter`` built as ``variant`` has code: the harness's default
+    (:data:`CODED`), unless the variant turns it off or gives a backend of its own
+    (:data:`NO_CODE`). Claude Code's and Kimi's own shells are scored as before."""
+    return adapter in CODED and variant not in NO_CODE
 
 
 def _disk(files: dict[str, str]) -> Any:
@@ -226,7 +252,7 @@ HELPER: Final = {
 }
 #: ``ReAct`` given one Deep Agents capability each: the variants an answer must not change on.
 CAPABILITIES: Final[dict[str, Variant]] = {
-    "sandbox": Variant("sandbox", "ReAct(backend=sandbox()): the run's sandbox", with_sandbox),
+    "sandbox": Variant("sandbox", "main (an alias): code runs by default", main),
     "subagents": Variant(
         "subagents",
         "ReAct(subagents=[a helper]): a sub-agent of its own",
@@ -239,8 +265,16 @@ CAPABILITIES: Final[dict[str, Variant]] = {
         "permissions", "ReAct(permissions=[...]) on a disk backend", with_permissions
     ),
 }
-#: The capability variants in which code runs (a sandbox): what a ``cando`` case's file needs.
-CODING: Final = frozenset({"sandbox"})
+#: The adapters the harness gives code by default (``sandbox.code_for``): ``ReAct``'s
+#: ``execute``, ``sandbox_exec`` for the others (a graph built by hand binds it with
+#: ``h.harness_tools()``).
+CODED: Final = frozenset({"react", "langgraph", "deepagents", "graph", "openai"})
+#: The variants with no code: ``baseline`` (everything off), ``main-nocode``, and those given a
+#: backend of their own (``ReAct(backend=...)`` wins over the default).
+NO_CODE: Final = frozenset(
+    {"baseline", "main-nocode", "deep", "deep-files", "memory-files", "permissions"}
+    | {f"deep-{piece}" for piece in ("paging", "context_editing", "summarization")}
+)
 
 
 #: ``deep``'s pieces a ``deep-<piece>`` variant turns off, by the name of their middleware.
@@ -278,6 +312,9 @@ VARIANTS: Final[dict[str, Variant]] = {
         )
         for piece in PIECES
     },
+    "main-nocode": Variant(
+        "main-nocode", "main without the harness's default code (without={'code'})", without_code
+    ),
     "main-planning": Variant(
         "main-planning", "main without planning", functools.partial(main, off=("planning",))
     ),

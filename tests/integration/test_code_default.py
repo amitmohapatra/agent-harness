@@ -21,6 +21,7 @@ from trellis import Harness, ReAct, Runtime, Settings, middleware, sandbox
 from trellis.contracts import RunStatus
 from trellis.harness import sandbox as sandbox_module
 from trellis.harness.adapters.acp import kimi
+from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 from trellis.harness.sandbox import CODE, EXEC, HostSandbox, SandboxSource
 from trellis.harness.sandbox.backend import NO_CODE, CodeBackend
 
@@ -220,8 +221,6 @@ async def test_a_backend_given_wins(harness: Harness, boxes: FakeSandboxes) -> N
 
 
 async def test_a_sandbox_among_its_tools_wins(harness: Harness, boxes: FakeSandboxes) -> None:
-    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
-
     theirs = FakeSandboxes()
     model = ScriptedChatModel(turns=[(EXEC, {"command": "echo theirs"}), "done"])
     built = graph(model)
@@ -293,3 +292,129 @@ async def test_deny_adds_nothing(boxes: FakeSandboxes) -> None:
 
 async def test_a_command_in_a_run_without_code_is_refused() -> None:
     assert (await CodeBackend().aexecute("echo hi")).output == NO_CODE  # outside a run too
+
+
+# --------------------------------------------------------------------------- scratch, not asked
+async def test_files_written_in_the_runs_own_sandbox_need_no_approval(harness: Harness) -> None:
+    """``ReAct(backend=sandbox())``: Deep Agents' ``write_file`` (and ``edit_file``,
+    ``delete``) on the run's own sandbox are its scratch work — governed and recorded, never a
+    person's approval — and its next step reads the file back (an unattended run paused on
+    every note it wrote). The sandbox is the run's: a later run starts another."""
+    provider = FakeSandboxes()
+    model = ScriptedChatModel(
+        turns=[
+            ("write_file", {"file_path": "/notes/x.md", "content": "stock: 14"}),
+            ("execute", {"command": "cat /notes/x.md"}),  # the fake runs no Python: its reads
+            "it says 14",
+        ]
+    )
+    agent = harness.wrap(ReAct("s", model, backend=sandbox(provider)), id="notes")
+    done = await agent.run("note the stock, then read it", user="ada")
+    assert done.status is RunStatus.SUCCESS, (done.status, done.error)
+    assert any("stock: 14" in r for r in results(model)), results(model)
+
+
+@pytest.mark.parametrize("family", ["function", "graph", "openai"])
+async def test_sandbox_exec_and_write_need_no_approval(harness: Harness, family: str) -> None:
+    box = sandbox(FakeSandboxes())
+    calls: list[tuple[str, dict[str, Any]]] = [
+        ("sandbox_write", {"path": "a.txt", "content": "x"}),
+        (EXEC, {"command": "echo ran"}),
+    ]
+    if family == "function":
+
+        async def work(input: str, agent: Runtime) -> str:
+            await agent.tools.use(box.tools())
+            for name, args in calls:
+                await agent.tools.call(name, **args)
+            return "done"
+
+        target: Any = work
+    elif family == "graph":
+        target = graph(ScriptedChatModel(turns=[*calls, "done"]))
+        setattr(target, TOOLS_ATTRIBUTE, [box.tools()])
+    else:
+        target = Agent(name="a", model=ScriptedModel([*calls, "done"]))
+        setattr(target, TOOLS_ATTRIBUTE, [box.tools()])
+    done = await harness.wrap(target, id=f"exec-{family}").run("go", user="ada")
+    assert done.status is RunStatus.SUCCESS, (done.status, done.error)
+
+
+async def test_a_real_write_still_asks(harness: Harness) -> None:
+    from trellis import tool
+
+    @tool(side_effects="write")
+    async def send(to: str) -> str:
+        """Send the report."""
+        return "sent"
+
+    model = ScriptedChatModel(turns=[("send", {"to": "cfo"}), "sent"])
+    done = await harness.wrap(
+        ReAct("s", model, tools=[send], backend=sandbox(FakeSandboxes())), id="w"
+    ).run("send it", user="ada")
+    assert done.status is RunStatus.PAUSED
+
+
+# --------------------------------------------------------------------------- what brings its own
+def test_what_runs_code_in_an_agent_is_read_from_it(harness: Harness, boxes: FakeSandboxes) -> None:
+    """``Adapter.code``: a Deep Agent on a backend that runs commands, LangChain's shell, an
+    OpenAI run config's sandbox (an object or a dict) — each its own; ReAct's ``CodeBackend``
+    the default's; a graph with neither none."""
+    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import ShellToolMiddleware
+
+    model = ScriptedChatModel(turns=["x"])
+    own_box = create_deep_agent(model=model, tools=[], **sandbox(FakeSandboxes()).deep_agent())
+    shell = create_agent(model, tools=[], middleware=[ShellToolMiddleware()])
+    adapter = harness.wrap(graph(model), id="plain").adapter
+    assert adapter.code(own_box, {}) == "own"
+    assert adapter.code(shell, {}) == "own"
+    assert adapter.code(ReAct("s", model), {}) == "default"
+    assert adapter.code(graph(model), {}) == "none"
+    openai = harness.wrap(Agent(name="a", model=ScriptedModel(["x"])), id="oa")
+    assert openai.codes == "none" and openai.code is not None
+    given = {"run_config": {"sandbox": object()}}
+    assert openai.adapter.code(openai.target, given) == "own"
+    assert openai.adapter.code(openai.target, {"run_config": None}) == "none"
+
+
+async def test_codes_backend_refuses_synchronously_and_names_itself() -> None:
+    from trellis.contracts import ConfigurationError
+
+    backend = CodeBackend()
+    assert backend.id == "trellis-code"
+    with pytest.raises(ConfigurationError, match="asynchronously"):
+        backend.execute("echo hi")
+
+
+def test_use_default_returns_the_one_it_replaces() -> None:
+    given = sandbox(FakeSandboxes())
+    assert sandbox_module.use_default(given) is None  # the suite's: none
+    assert sandbox_module.use_default(None) is given
+    assert sandbox_module.default_files().__class__.__name__ == "JournalBackend"
+
+
+async def test_a_tool_of_the_runs_own_stays_beside_the_default(
+    harness: Harness, boxes: FakeSandboxes
+) -> None:
+    """``agent.tools.use``: a tool of the same name stays as it was, but the default's code
+    tool gives way to a sandbox the run adds."""
+    from trellis import tool
+
+    @tool(side_effects="read")
+    async def lookup(q: str) -> str:
+        """Look it up."""
+        return "first"
+
+    @tool(name="lookup", side_effects="read")
+    async def other(q: str) -> str:
+        """Look it up again."""
+        return "second"
+
+    async def work(input: str, agent: Runtime) -> str:
+        await agent.tools.use(lookup)
+        await agent.tools.use(other)
+        return str(await agent.tools.call("lookup", q="x"))
+
+    assert (await harness.wrap(work, id="kept").run("go", user="ada")).answer == "first"

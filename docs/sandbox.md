@@ -34,6 +34,43 @@ result = await agent.run("How many units did we sell?", user="ada")
 | `ReAct(backend=sandbox())`, `create_deep_agent(**sandbox().deep_agent())`, or a function target's `agent.tools.use(sandbox().tools())` | one sandbox per run: made at its first call, named and labelled after the run, recorded in its journal before any call uses it, attached again after a pause or a crash, snapshotted and paused while a person answers, deleted at the end; orphans reaped |
 | optionally `sandbox(provider, image=, spec=SandboxSpec(...), call_timeout=)` | the provider (else Docker), the image, CPU, memory, network and starting files (else the provider's image, its limits, no network), the most one call may take (else 120 s) |
 
+## Code by default
+
+Every agent the harness wraps gets a code tool, in a sandbox of the run's own, with nothing to
+write — wherever an isolated sandbox can be made:
+
+| Agent | Its code tool by default |
+|---|---|
+| `ReAct` (lean, or on Deep Agents with no backend given) | Deep Agents' own `execute`, on its backend (`CodeBackend`: its files stay the graph's state, `execute` runs in the run's sandbox) |
+| LangGraph `create_agent(..., middleware=middleware())`, `create_deep_agent(..., middleware=middleware())` | `sandbox_exec`, offered per model call |
+| a graph built by hand | `sandbox_exec` among `h.harness_tools()`, bound when it is built |
+| OpenAI Agents SDK | `sandbox_exec`, a function tool of the run |
+| a function target | `agent.tools.call("sandbox_exec", command=...)` |
+| Claude Code, Kimi Code | none: their own shells, as they are |
+
+The tool is one command, described in a few words (`sandbox.CODE`: 93 tokens for `sandbox_exec`
+with its schema, 139 for ReAct's `execute`; the explicit three tools with the environment card
+take 432). It is decided once at `h.wrap` (`sandbox.code_for`): the sandbox is
+`sandbox()` on Docker where its daemon answers, else on this machine's isolation layer
+(`host.install`'s, else its default) where it can isolate; where neither can, no tool is added
+and it is said once in a warning — never an unconfined shell. The sandbox itself is made at the
+run's first command, as any (a run that never calls it makes none, and no environment card is
+read for it). Its commands, and Deep Agents' file writes in it, are the run's scratch work:
+governed and recorded, never a person's approval ([governance.md](governance.md)).
+
+None is given:
+
+* `without=["code"]` on `h.wrap` (every run) or on a run;
+* where the deployment says `TRELLIS_HOST_EXECUTION=deny`;
+* to an agent that brings its own: `ReAct(backend=...)` (a sandbox or any backend), a Deep Agents
+  backend that runs commands, LangChain's `shell`, an OpenAI `SandboxAgent`, code interpreter or
+  shell tool, a `sandbox()` among its tools, or one a function adds (`agent.tools.use`, which
+  replaces the default's tool of the same name).
+
+A deployment picks the default's image or provider once at start:
+`trellis.harness.sandbox.use_default(sandbox(image="my-image:1"))` (`None`: no code by
+default), as `host.install` picks the isolation layer.
+
 ## What
 
 As a backend (`backend=sandbox()`, `sandbox().deep_agent()`), Deep Agents' `BaseSandbox` builds every file tool on three

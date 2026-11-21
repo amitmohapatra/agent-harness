@@ -305,10 +305,21 @@ def confined(tool: Any) -> bool:
     sub-agent's task, whose own calls are governed in its run) — never a tool of the agent's,
     and never a Deep Agents file tool that changes real files (:data:`FILE_WRITES` on a disk, a
     store or a sandbox: :data:`OUTSIDE_STATE`): a write is a write, and asks as any does. One
-    that only changes the graph's state is its scratch, not governed at all (:func:`scratch`)."""
-    if getattr(tool, "name", None) in FILE_WRITES and (tool.metadata or {}).get(OUTSIDE_STATE):
+    that only changes the graph's state is its scratch, not governed at all (:func:`scratch`).
+    One on the run's own sandbox (:func:`in_sandbox`) changes only what the run owns: its
+    scratch work, governed and recorded, announced rather than asked — as the sandbox's
+    commands are."""
+    marked = (tool.metadata or {}).get(OUTSIDE_STATE)
+    if getattr(tool, "name", None) in FILE_WRITES and marked and not in_sandbox(tool):
         return False
     return framework_made(tool) or _code_of(tool).startswith(HARNESS_CODE)
+
+
+def in_sandbox(tool: Any) -> bool:
+    """Whether Deep Agents' file ``tool`` works in the run's own sandbox: its backend is the
+    sandbox's (``sandbox.backend.SandboxBackend``, marked ``trellis_sandbox``; read with no
+    import of it) — all its paths there, none routed anywhere else."""
+    return bool(getattr(files_backend(tool), "trellis_sandbox", False))
 
 
 def _code_of(tool: Any) -> str:

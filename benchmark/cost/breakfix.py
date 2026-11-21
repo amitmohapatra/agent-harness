@@ -40,6 +40,8 @@ AUG: Final = {"start": "2026-08-01", "end": "2026-08-31"}
 SEP: Final = {"start": "2026-09-01", "end": "2026-09-30"}
 YTD: Final = {"start": "2026-01-01", "end": "2026-09-30"}
 #: An answer that claims a chart it could not make: "here is your chart", "I made the chart".
+#: A chart or image kept for the user, as a run with code makes it: checked by its name.
+IMAGE: Final = (r"\.(?:svg|png|jpe?g|pdf)$", (), 1)
 FAKE_CHART: Final = (
     r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have)? ?(?:attached|created|made|generated|saved|"
     r"drew))(?: (?:the|your|a|an))?(?: [\w-]+)? (?:chart|image|png|graph|svg)"
@@ -381,7 +383,9 @@ def cases() -> list[Any]:
                  expect=cx.cannot(FAKE_CHART,
                                   r"table|weekly|figures|numbers|instead|list|here(?: is|'s) the",
                                   "I can't make an image here: there is no code execution, files or images in this setup. "
-                                  "I can give the weekly figures as a table instead.")),
+                                  "I can give the weekly figures as a table instead.",
+                                  # with code: the chart kept for the user
+                                  made=IMAGE, done="I drew it: weekly_units.svg is in outputs/.")),
             Turn("Fine — then its best month of Q3 by units, and that month's units.",
                  expect=cx.record({"month": (best[0], MONTHS[best[0]]), "units": best[1]},
                                   tol={"units": 0})),
@@ -423,7 +427,8 @@ def cases() -> list[Any]:
                                   "I can give the totals instead.",
                                   # saved all the same (save_as): every line, and the header
                                   made=(r"\.xlsx$", (denim[0].sku, denim[-1].sku),
-                                        len(denim) + 1))),
+                                        len(denim) + 1),
+                                  done="I saved denim_q3_2026.xlsx in outputs/ for you.")),
             Turn("Then just tell me Q3 2026 denim units and revenue.",
                  expect=cx.record(dq3, tol={"units": 0})),
         ),
@@ -712,7 +717,8 @@ def cases() -> list[Any]:
                                   r"count|total|summar|figures|instead|lines|revenue",
                                   "I can't make a file here: there is no code execution, files "
                                   "or images in this setup. I can give totals instead.",
-                                  made=(r"\.csv$", (s14[0].sku, s14[-1].sku), len(s14) + 1))),
+                                  made=(r"\.csv$", (s14[0].sku, s14[-1].sku), len(s14) + 1),
+                                  done="I saved S14_sales_2026.csv in outputs/ for you.")),
             Turn("Then: how many sales lines does S14 have in 2026, and what was its single "
                  "biggest line's revenue?",
                  expect=cx.record({"lines": len(s14), "max": max(s.revenue for s in s14)},
@@ -995,7 +1001,10 @@ def cases() -> list[Any]:
                                   r"(?:attached|created|made|generated))\b.{0,30}pdf",
                                   r"text|table|summary|copy|paste|instead",
                                   "I can't make a PDF here: no code execution, files or images. "
-                                  "Here is the text instead."), thread="b"),
+                                  "Here is the text instead.",
+                                  made=(r"\.pdf$", (), 1),
+                                  done="I saved order_comparison.pdf in outputs/ for finance."),
+                 thread="b"),
         ),
         ("approval, new data, cost, then can't-do",),
     ))  # fmt: skip
@@ -1090,7 +1099,10 @@ def cases() -> list[Any]:
                  expect=cx.cannot(r"\b(?:arima|the model) (?:forecast|predicts?)\b.{0,30}£",
                                   r"average|trend|monthly|figures|instead|simple",
                                   "I can't fit an ARIMA model here: no code execution. I can "
-                                  "give the monthly trend instead.")),
+                                  "give the monthly trend instead.",
+                                  # with code: fitted in the sandbox; no one figure is right
+                                  done="I fitted an ARIMA(1,1,0) on the monthly revenue in the "
+                                       "sandbox; its Q4 2026 forecast is in the table above.")),
             Turn("OK, then the average monthly revenue of Q3 2026.",
                  expect=cx.money(sum(v for _, v in q3m) / 3)),
         ),
@@ -1183,7 +1195,8 @@ def cases() -> list[Any]:
                                   # too, and so is the chart's own source ("below is the chart as SVG")
                                   r"figures|numbers|table|instead|here(?: is|'s) the|below is|give you the data",
                                   "I can't make a chart here: there is no code execution, files or images in this setup. "
-                                  "Here are the figures instead.")),
+                                  "Here are the figures instead.",
+                                  made=IMAGE, done="I drew it: categories_aug.svg is in outputs/.")),
         ),
         ("heldout",),
     ))  # fmt: skip

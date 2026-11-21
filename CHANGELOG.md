@@ -5,6 +5,58 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: every agent runs code by default, in a sandbox of the run's own
+
+An agent the harness wraps now gets a code tool with nothing to write, wherever an isolated
+sandbox can be made — Docker where its daemon answers, else this machine's isolation layer
+(`host.install`'s, else its default); where neither can, nothing is added and it is said once in
+a warning, never an unconfined shell (`sandbox.default_sandbox`). It is decided at `h.wrap`
+(`sandbox.code_for`, `Agent.code`):
+
+* `ReAct` with no `backend=` (lean, or on Deep Agents through another capability): Deep Agents'
+  own `execute` runs in the run's sandbox (`sandbox.backend.CodeBackend`: its files stay the
+  graph's state, so the lean graph and its long-task files are unchanged), described in a few
+  words (`sandbox.CODE`, `CodeCard`; in its helpers too);
+* LangGraph `create_agent`/`create_deep_agent` with `middleware()`, OpenAI Agents and function
+  targets: `sandbox_exec` alone (one command), a tool of the run; a graph built by hand finds
+  it among `h.harness_tools()`;
+* Claude Code and Kimi Code keep their own shells.
+
+What it costs a request: 93 tokens for `sandbox_exec` with its schema, 139 for ReAct's
+`execute` (Deep Agents' own description of it is 304; the explicit `sandbox().tools()` with the
+environment card 432). The sandbox is made at the run's first command — a run that never runs
+code makes none, and no environment card is read for the default. None is given
+`without=["code"]` (a new `without=` name, on `h.wrap` or a run), where the deployment says
+`TRELLIS_HOST_EXECUTION=deny`, or to an agent that brings its own (`Adapter.code`: a backend
+given to `ReAct`, a Deep Agents backend that runs commands, LangChain's `shell`, an OpenAI
+`SandboxAgent`, code interpreter or shell tool, a `sandbox()` among its tools; one a function
+adds with `agent.tools.use` replaces the default's tool). A deployment picks the default's image
+or provider with `sandbox.use_default(sandbox(image=...))`, as `host.install` picks the
+isolation layer; `default_provider` now uses the installed layer, as documented. A run with
+code is offered no `query_result(save_as=)` (code writes the user's files in `outputs/`), and a
+scratch file's note now says its commands do not see it.
+
+### Fixed: what a run does in its own sandbox needs no person's approval
+
+Deep Agents' `write_file`, `edit_file` and `delete` on the run's sandbox backend
+(`ReAct(backend=sandbox())`, `create_deep_agent(**sandbox().deep_agent())`) asked a person as a
+write on a disk does, so an unattended run paused on every scratch note it wrote
+(`carry-01/02/05/06` on `react-sandbox`) and barely used code. A write confined to the run's own
+isolated sandbox is now the run's scratch work (`middleware.in_sandbox`): governed, journaled
+and recorded, announced, never asked — as its commands, `sandbox_exec` and `sandbox_write`
+already were. The sandbox's network, the files it hands the user (`outputs/`) and every tool
+that writes outside it keep their governance; a disk or store backend's writes still ask, and
+so does a composite's route outside the sandbox.
+
+The benchmark follows the default: `--variant main` runs with code on every adapter the harness
+gives it to (`variants.codes`), in Docker of `TRELLIS_BENCH_SANDBOX_IMAGE` (`variants.give_code`;
+a fake sandbox under `--scripted`); `sandbox` is an alias of `main`, `main-nocode` is `main`
+`without={"code"}`, and `baseline` is without it too. A case that was "can't do it here (no
+code execution)" is scored, where the run has code, on doing it right (`complex._done`): by the
+file kept for the user, else the figure the code computes, else unverified — its refusal is
+wrong there, and a wrong file or figure is never accepted; `cannot(..., done=)` is what the
+scripted model says having done it, and the chart and PDF turns check their file by name.
+
 ### Fixed: a new message on a thread whose run waits for a person is told what waits
 
 A run paused on an approval or a question leaves the conversation's line, so a new message on

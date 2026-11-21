@@ -61,6 +61,10 @@ class SandboxBackend(BaseSandbox):
     """Deep Agents' ``BaseSandbox`` on the run's sandbox (``source``: ``SandboxSource``, its
     provider and spec), each command at most ``call_timeout`` seconds."""
 
+    #: the run's own sandbox: a file written here is its scratch work, announced rather than
+    #: asked (``middleware.in_sandbox``), as its commands are
+    trellis_sandbox = True
+
     def __init__(self, source: Any, *, call_timeout: float = REMOTE_TIMEOUT_SECONDS) -> None:
         if call_timeout <= 0:
             raise ConfigurationError("call_timeout is a number of seconds over 0")
