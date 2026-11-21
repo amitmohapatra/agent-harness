@@ -234,3 +234,30 @@ async def test_a_frameworks_call_with_no_question_is_a_tool_error(harness: Harne
 
     done = await harness.wrap(fn, id="own-none").run("go", user="u1")
     assert done.error is not None and "asks no question" in done.error.message, done
+
+
+async def test_a_question_past_its_deadline_goes_to_who_it_escalates_to(harness: Harness) -> None:
+    """A question asked with ``escalate_to`` that nobody answers by its deadline is not ended:
+    it moves to that assignee, once (with no deadline of its own it then waits), who answers."""
+    due = datetime.now(UTC) + timedelta(hours=1)
+
+    async def budgeter(input: str, agent: Runtime) -> str:
+        found = await agent.ask(
+            "Budget?", expects={"type": "number"}, escalate_to="user:boss", deadline=due
+        )
+        return f"budget {found}"
+
+    agent = harness.wrap(budgeter, id="ask-escalates")
+    paused = await agent.run("plan", user="u1")
+    assert paused.interrupt is not None
+    runs = harness.runs
+    assert isinstance(runs, LocalRuns)
+    runs._expire_interrupts(due + timedelta(minutes=1))
+    moved = await runs.get(paused.run_id)
+    assert moved is not None and moved.status is RunStatus.PAUSED and moved.awaiting is not None
+    asked = moved.awaiting
+    assert (asked.assignee, asked.escalate_to, asked.deadline) == ("user:boss", None, None)
+    runs._expire_interrupts(due + timedelta(days=30))  # no deadline now: it waits
+    assert (await runs.get(paused.run_id)).status is RunStatus.PAUSED  # type: ignore[union-attr]
+    done = await agent.resume(asked.interrupt_id, "answer", answer=900, reviewer="boss")
+    assert done.status is RunStatus.SUCCESS and done.answer == "budget 900"

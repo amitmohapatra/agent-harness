@@ -218,3 +218,16 @@ def test_a_graphs_interrupt_value_is_the_question_ask_would_build() -> None:
     assert Question.described({"topic": "x"}).question == "{'topic': 'x'}"
     picked = Question.described({"question": "Which?", "options": ["a", {"value": "b"}]})
     assert picked.options == ["a", Option(value="b")] and picked.ui == "choice"
+
+
+def test_a_forms_field_that_picks_from_no_values_keeps_its_answer_as_given() -> None:
+    """In a form's answer only a field that picks from values reads an option handed back in
+    another case as that option; a list of anything (``items: true``) picks from none, so what
+    was given for it is kept as it was."""
+    expects = {
+        "type": "object",
+        "properties": {"size": {"enum": ["S", "L"]}, "tags": {"type": "array", "items": True}},
+    }
+    order = Question("Order?", expects=expects)
+    given = {"size": " l", "tags": [" l", "gift"]}
+    assert order.answer(resolution("ANSWER", given)) == {"size": "L", "tags": [" l", "gift"]}

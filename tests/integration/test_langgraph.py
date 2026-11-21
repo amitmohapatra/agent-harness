@@ -645,3 +645,37 @@ async def test_a_call_left_waiting_for_an_approval_is_answered_when_the_user_mov
     assert not _unanswered(model.seen[1]), [(m.type, m.content) for m in model.seen[1]]
     assert STOPPED_CALL.format(tool="order") in [m.content for m in model.seen[1]]
     assert executed == []
+
+
+async def test_a_graphs_own_tool_named_execute_is_its_tool_not_deep_agents_idle_one(
+    harness: Harness,
+) -> None:
+    """A tool of the graph's own named ``execute`` (here a ``BaseTool`` subclass: no function
+    to read a Deep Agents backend from) runs commands: it is one of the run's tools, governed
+    as any other, not left out as Deep Agents' ``execute`` on a backend that runs none."""
+    from langchain_core.tools import ArgsSchema, BaseTool
+    from pydantic import BaseModel
+
+    class Command(BaseModel):
+        command: str
+
+    class Shell(BaseTool):
+        name: str = "execute"
+        description: str = "Run a shell command."
+        args_schema: ArgsSchema | None = Command
+
+        def _run(self, command: str) -> str:
+            executed.append(f"execute:{command}")
+            return f"ran {command}"
+
+    run = ("execute", {"command": "ls"})
+    model = ScriptedChatModel(turns=[run, run, "listed"])  # replayed from the journal
+    graph = create_agent(model, tools=[Shell()])
+    agent = harness.wrap(graph, id="shell")
+    assert "execute" in {s.name for s in await agent.adapter.native(graph)}
+    paused = await agent.run("list the files", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    assert executed == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "listed", done.error
+    assert executed == ["execute:ls"]

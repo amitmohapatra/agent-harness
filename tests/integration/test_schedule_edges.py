@@ -377,3 +377,20 @@ async def test_why_the_last_run_failed_is_read_from_its_record_with_no_memory() 
         chat.fired.append("done")
         await fire(h, agent, only(h).schedule_id)
         assert "last_run_error" not in await said(agent, chat, "ada", ("list_schedules", {}))
+
+
+async def test_a_last_run_the_store_no_longer_keeps_says_nothing_of_it() -> None:
+    """A run store keeps a few finished runs (``keep_finished``): once the schedule's last run
+    is gone from it, list_schedules lists the schedule saying nothing of that run, no error."""
+    chat = Chat()
+    async with Harness(config=Settings(), runs=runs.LocalRuns(keep_finished=1)) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sales", "when": "0 8 * * 1"}))
+        chat.fired.append(RuntimeError("Gmail: sign-in expired"))
+        last = await fire(h, agent, only(h).schedule_id)
+        assert last.status is RunStatus.ERROR and only(h).last_run_id == last.run_id
+        await agent.run("hi", user="ada", thread="chat-2")  # a later run pushes it out
+        assert await h.runs.get(last.run_id) is None
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert "sales" in listed and "last_run_error" not in listed, listed
+        assert "Gmail" not in listed and "waiting" not in listed, listed

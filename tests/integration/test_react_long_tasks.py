@@ -220,6 +220,33 @@ async def test_a_scratch_file_written_says_the_user_cannot_open_it(harness: Harn
     assert SCRATCH_NOTE not in result_of(model.seen[3])  # a read says nothing of the kind
 
 
+@tool(name="sandbox_exec", side_effects="write")
+def run_code(code: str) -> str:
+    """Run Python in the run's sandbox; a file it writes under outputs/ goes to the user.
+
+    Args:
+        code: The Python to run.
+    """
+    return "ran"
+
+
+async def test_a_scratch_write_of_a_run_with_code_says_to_give_its_content_not_a_file(
+    harness: Harness,
+) -> None:
+    """A run that runs code of its own (``sandbox_exec``) still cannot hand over its scratch
+    copy: the note says never to offer it as a file but to give its content."""
+    model = ScriptedChatModel(
+        turns=[("write_file", {"file_path": "/chart.svg", "content": "<svg/>"}), "done"]
+    )
+    agent = arm(
+        harness.wrap(ReAct("s", model, backend=JournalBackend(), context_window=ROOM), id="code"),
+        [stock, run_code],
+    )
+    assert (await agent.run(STEPS + "chart it", user="u")).answer == "done"
+    said = result_of(model.seen[1])
+    assert SCRATCH_NOTE in said and said.endswith(SCRATCH_TO_USER["code"]), said
+
+
 async def test_a_deep_agents_state_write_says_it_and_a_failed_one_does_not(
     harness: Harness,
 ) -> None:

@@ -109,6 +109,36 @@ async def test_a_form_the_agent_sends_while_no_turn_is_served_is_left_unfilled()
     assert answer.action == "cancel"
 
 
+class Answering:
+    """A run whose person answers each question with the next of ``answers``."""
+
+    def __init__(self, *answers: Any) -> None:
+        self.answers = list(answers)
+        self.asked: list[tuple[str, dict[str, Any]]] = []
+
+    async def ask(self, question: str, **fields: Any) -> Any:
+        self.asked.append((question, fields))
+        return self.answers.pop(0)
+
+
+async def test_a_form_of_no_choice_is_filled_by_its_fields_and_left_by_words() -> None:
+    """A form the agent sends whose fields pick from no values is asked as a form that may be
+    answered in words: its fields fill it (``accept`` with them), words fill none of it (the
+    agent is told them instead)."""
+    from acp.schema import ElicitationSchema
+
+    schema = {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]}
+    mode = SimpleNamespace(requested_schema=ElicitationSchema.model_validate(schema))
+    run = Answering({"repo": "acme/api"}, "whichever has the failing build")
+    filled, answer = await acp._filled(run, "Which repo?", mode)  # type: ignore[arg-type]
+    assert filled.action == "accept" and filled.content == {"repo": "acme/api"}
+    assert answer == {"repo": "acme/api"}
+    question, fields = run.asked[0]
+    assert question == "Which repo?" and fields["expects"]["type"] == ["object", "string"]
+    filled, answer = await acp._filled(run, "Which repo?", mode)  # type: ignore[arg-type]
+    assert (filled, answer) == (None, "whichever has the failing build")
+
+
 def test_a_version_outside_the_range_is_refused_saying_how_to_install() -> None:
     compat.require_binary("kimi-code", "2.6.2", command="kimi")
     compat.require_binary("kimi-code", "2.6.9", command="kimi")
