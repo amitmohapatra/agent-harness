@@ -101,7 +101,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | X03 a burst of twenty runs at once: each ends well with its own answer | partly 2 (42) | partly 2 (42) | no (2) | partly 2 (42) | partly 2 (42) | partly 2 (42) | partly 2 (42) | partly 2 (42) |
 | X04 a slow run store: every call 30 ms late, the run still ends well | partly 4 (43) | partly 4 (43) | partly 4 (43) | partly 4 (43) | partly 4 (43) | partly 4 (43) | partly 4 (43) | partly 4 (43) |
 | X05 malformed tool calls (an unknown tool, a wrong type): answered, and the run goes on | partly 6 (44) | partly 6 (44) | no (2) | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) |
-| X06 a model repeating one call: stopped well before, and the run still answers | partly 6 (45) | partly 6 (45), waits on ADV-4m | no (2) | partly 6 (45) | partly 6 (45) | partly 6 (45) | partly 6 (45) | partly 6 (45) |
+| X06 a model repeating one call: stopped well before, and the run still answers | partly 6 (45) | partly 6 (45) | no (2) | partly 6 (45) | partly 6 (45) | partly 6 (45) | partly 6 (45) | partly 6 (45) |
 | X07 fan-out: twenty-four helpers in one turn, every one answered, at most the admission limit at once | partly 4 (46) | partly 4 (46) | no (12) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) |
 | X08 nested helpers: three runs deep, each the child of the one above | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) |
 | X09 a helper that fails and one past its time limit: errors the parent reads, the parent answers | partly 4 (46) | partly 4 (46) | no (2) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) | partly 4 (46) |

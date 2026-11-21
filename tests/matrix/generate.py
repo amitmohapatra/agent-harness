@@ -58,19 +58,8 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
 #: (``pytest tests/matrix -k <cell>``) and the script in the bug's ``why``. Remove an entry
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
 KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
-    # the adversarial rows' findings (tests/matrix/adversarial.py; the backlog's Adversarial
-    # suite section has each as an issue)
-    (
-        {"features": {"X06"}, "adapters": {"middleware"}},
-        Bug(
-            "ADV-4m",
-            "the stall's last call offers no tool by tool_choice='none' only when the request has "
-            "tools; this cell's planned model is bound with none on every call and calls lookup "
-            "regardless, so it answers the last call with a call too (a test double that a "
-            "provider would refuse; ReAct's gateway double honours tool_choice='none' and passes)",
-            raises=AssertionError,
-        ),
-    ),
+    # ADV-4m (X06 on middleware()) was the matrix's own model log binding no tools: the stall's
+    # last call, offered no tool by tool_choice='none', never reached the planned model
 ]
 
 

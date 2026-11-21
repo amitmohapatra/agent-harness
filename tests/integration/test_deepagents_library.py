@@ -618,6 +618,28 @@ async def test_a_large_result_of_the_agents_own_tool_is_moved_to_a_file_it_reads
     assert any(path.startswith("/large_tool_results/") for path in files)
 
 
+async def test_a_large_result_of_the_agents_own_tool_is_read_to_its_last_row(
+    harness: Harness,
+) -> None:
+    """The moved result is within reach to its last row: ``read_file`` from an offset past the
+    preview reads the lines there."""
+
+    @lc_tool
+    def export(sku: str) -> str:
+        """Export a SKU's history."""
+        return "\n".join(f"{sku} row {n}" for n in range(12_000))
+
+    export.metadata = {"side_effects": "read"}
+    page = {"file_path": "/large_tool_results/call_1_0", "offset": 11_990, "limit": 10}
+    model = ScriptedChatModel(turns=[("export", {"sku": "a"}), ("read_file", page), "read"])
+    graph = create_deep_agent(model=model, tools=[export], checkpointer=InMemorySaver())
+    result = await harness.wrap(graph, id="deep").run("export a", user="u", thread="t")
+    assert result.answer == "read", result.error
+    assert "/large_tool_results/call_1_0" in str(model.seen[1][-1].content)
+    read = str(model.seen[-1][-1].content)
+    assert "a row 11999" in read and "a row 11990" in read and "a row 11989" not in read, read
+
+
 # ---------------------------------------------------------------- structured answer, context
 class Shop(BaseModel):
     region: str
