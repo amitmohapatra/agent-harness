@@ -412,6 +412,7 @@ def cases() -> list[Any]:
 
     # ---------------------------------------------------------------- can't-do
     dq3 = {"units": units(category="denim", **Q3), "revenue": rev(category="denim", **Q3)}
+    denim = r.selected(w, category="denim", **Q3)
     out.append(Case(
         "bf1-cantdo-01", "bf_cantdo", 2,
         (
@@ -419,7 +420,10 @@ def cases() -> list[Any]:
                  expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have) (?:attached|created|exported|saved))\b.{0,40}(?:xlsx|excel|file)",
                                   r"total|summar|figures|table|instead|units|revenue",
                                   "I can't make a file here: there is no code execution, files or images in this setup. "
-                                  "I can give the totals instead.")),
+                                  "I can give the totals instead.",
+                                  # saved all the same (save_as): every line, and the header
+                                  made=(r"\.xlsx$", (denim[0].sku, denim[-1].sku),
+                                        len(denim) + 1))),
             Turn("Then just tell me Q3 2026 denim units and revenue.",
                  expect=cx.record(dq3, tol={"units": 0})),
         ),
@@ -707,7 +711,8 @@ def cases() -> list[Any]:
                                   r"(?:csv|file)",
                                   r"count|total|summar|figures|instead|lines|revenue",
                                   "I can't make a file here: there is no code execution, files "
-                                  "or images in this setup. I can give totals instead.")),
+                                  "or images in this setup. I can give totals instead.",
+                                  made=(r"\.csv$", (s14[0].sku, s14[-1].sku), len(s14) + 1))),
             Turn("Then: how many sales lines does S14 have in 2026, and what was its single "
                  "biggest line's revenue?",
                  expect=cx.record({"lines": len(s14), "max": max(s.revenue for s in s14)},
@@ -764,7 +769,10 @@ def cases() -> list[Any]:
     out.append(Case(
         "bf2-cantdo-02", "bf_cantdo", 2,
         (
+            # the morning's time is assumed: the new schedule is confirmed in one question,
+            # which the user who asked for it confirms
             Turn("Set this up to run every Monday morning and send me the top 5 SKUs by units.",
+                 approve=True,
                  expect=cx.judge("Schedules it for Monday mornings (schedule_task, the top 5 "
                                  "SKUs by units) and says when it runs; where no schedule tool "
                                  "is offered (without=['schedules']), says it cannot schedule "

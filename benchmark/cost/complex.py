@@ -2839,7 +2839,9 @@ _NOT_IN: Final = re.compile(
 _EXCLUDED: Final = re.compile(
     r"\b(?:not|no|nor|neither|never|none|excluded?|excluding|except|apart from|other than|"
     r"rather than|non-\w+|runner[- ]up|nearest|closest|next|"
-    r"just (?:missed|missing|outside|short)|miss(?:es|ed) (?:out|the cut))\b|n't\b",
+    r"just (?:missed|missing|outside|short)|miss(?:es|ed) (?:out|the cut)|"
+    # the rest of the result's candidates, said not to make it ("the other four missed: ...")
+    r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short))\b|n't\b",
     re.IGNORECASE,
 )
 #: A place said in a clause ("4th place", "the fourth"): past the size of the result, it is
@@ -2899,7 +2901,9 @@ _EARLIER: Final = re.compile(
 #: the agreed source is the portal"). Read only where the answer's own figure is said.
 _CONTRAST: Final = re.compile(
     r"\bnext (?:are|is|comes?)\b|\brunners?-up\b|"
-    r"\b(?:says?|said|records?|lists?|shows?)\b[^.\n]{0,60}, but\b",
+    r"\b(?:says?|said|records?|lists?|shows?)\b[^.\n]{0,60}, but\b|"
+    # "the master's 42 days is not the figure to use"
+    r"\bis not the (?:figure|one|value|number|source) (?:to use|we use|we agreed)\b",
     re.IGNORECASE,
 )
 #: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
@@ -3142,15 +3146,61 @@ _EMPHASIS: Final = re.compile(r"\*\*|__")
 QUERY_TOOL: Final = "query_result"
 
 
+#: A move from one figure to another, said with an arrow ("110 → 135", "96 -> 110") or after a
+#: word of change ("the drop from 14 to 4", "rose from 96 to 110"): its change is the second
+#: less the first. A hedge between them ("to about 65") is no move.
+_MOVE: Final = re.compile(
+    r"(?<![\w.])(-?\d[\d,]*(?:\.\d+)?)\s*(?:→|->|⟶)\s*(-?\d[\d,]*(?:\.\d+)?)(?![\d.]\d)|"
+    r"\b(?:drop|dropped|fall|fell|fallen|decline|declined|decrease|decreased|rise|rose|risen|"
+    r"increase|increased|went|moved|changed?|down|up)\s+from\s+[£$€]?(\d[\d,]*(?:\.\d+)?)"
+    r"(?:\s+units?)?\s+to\s+[£$€]?(\d[\d,]*(?:\.\d+)?)(?![\d.]\d)",
+    re.IGNORECASE,
+)
+
+
+def _moves(answer: str) -> list[float]:
+    """The changes an answer states as moves (:data:`_MOVE`), emphasis read through."""
+    out = []
+    for m in _MOVE.finditer(_EMPHASIS.sub("", answer)):
+        first, second = (m[1], m[2]) if m[1] is not None else (m[3], m[4])
+        out.append(float(second.replace(",", "")) - float(first.replace(",", "")))
+    return out
+
+
+#: An id written with a prefix ("SKU-00012", "S04", "AL-13"): its digits are no figure.
+_ID: Final = re.compile(r"\b[A-Z]{1,5}-?\d+\b")
+
+
+def _undated(text: str) -> str:
+    """``text`` without its dates, times and ids: their numbers are no figures it cites."""
+    text = _ID.sub(" ", _ISO_DATE_TIME.sub(" ", text))
+    return _CLOCK.sub(" ", _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", text)))
+
+
+def _small_figures(rubric: str) -> set[float]:
+    """The whole numbers up to 100 a case's rubric names as its evidence ("the file says 23;
+    stock_level says 10"): an answer that says them cites them, as it would a larger one."""
+    return {n for n in numbers(_undated(rubric)) if n == int(n) and 0 < abs(n) <= 100}
+
+
+#: An ISO date, with its time when it has one ("2026-10-30T09:00:00Z"), and a clock time
+#: ("09:00", "11:00 UTC").
+_ISO_DATE_TIME: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?Z?)?")
+_CLOCK: Final = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
+
+
 def _record_missing(fields: Mapping[str, Any], answer: str) -> list[str]:
     """The fields of a ``record`` the answer does not state. A :data:`DIFFERENCE` is a
-    magnitude ("-12" says it too)."""
+    magnitude ("-12" says it too); a change (a field named ``change`` or ``... change``) may be
+    said as a move from one figure to the other (:func:`_moves`)."""
     missing = []
     for name, spec in fields.items():
         v = spec["value"]
         ok = _has_number(answer, float(v), spec["tol"]) if _num(v) else _has_text(answer, v)
         if not ok and name == DIFFERENCE and _num(v):
             ok = _has_number(answer, -float(v), spec["tol"])
+        if not ok and _num(v) and name.split()[-1] == "change":
+            ok = any(abs(m - float(v)) <= spec["tol"] + 1e-9 for m in _moves(answer))
         if not ok:
             missing.append(name)
     return missing
@@ -3235,7 +3285,10 @@ def score(
     unverified = False
     k = expect.kind
     if k == "grounded":
-        cited = [n for n in numbers(a) if not (n == int(n) and abs(n) <= 100)]
+        small = _small_figures(expect.rubric)  # the case's own: said, they are evidence
+        cited = [n for n in numbers(a) if not (n == int(n) and abs(n) <= 100)] + sorted(
+            {n for n in numbers(_undated(a)) if n in small}
+        )
         if len(cited) < int(expect.value or 0):
             missing.append(f"cites at least {expect.value} figures")
         # a field's name as the data writes it ("as_of") says the words ("as of")

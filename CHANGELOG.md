@@ -5,6 +5,33 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a stall on a failing call keeps the other tools, and a query of a kept table succeeded
+
+`ReAct`'s stall guard (the same call made three times in a row) held back every tool for the
+one answer after it. Two bin scans that timed out and a third attempt left the stock the model
+could read in one call unread (`advdata-09`). Now a call that failed each time it was made (a
+source down, a scan timing out) is held back alone at its first stall: the model is told not to
+call it again and may get what it needs from another tool, else answer
+(`middleware.STALLED_ELSEWHERE`). A stall on a call that answered, a second stall, or a run whose
+answer is a schema ends with one answer offered no tool, as before; calling the held-back tool
+anyway stops the run. Runs that never stall are sent exactly what they were.
+
+`read_file` and `query_result` are answered by the harness, past the tool hooks, so the run
+record written to memory gave their results no status: the memory service's evidence read
+"1 of 2 calls succeeded" under every turn that queried a kept table, and the model then said it
+had not verified figures it had computed exactly (`advscen-02`, `advscen-03`). Their results now
+say `ok`, or `error` for an answer that is one.
+
+A new schedule's confirmation answered with a plain approve (an approvals client, a reviewer) is
+Confirm, and a reject Cancel; an approve was read as the user's own words "true", and nothing was
+scheduled.
+
+The benchmark reads a change said as a move ("110 → 135", "the drop from 14 to 4"), another
+source's figure said not to be the one to use, the rest of a set said to have missed, a figure
+said to come from no tool, a stage named by its rule (R2), and a case's own small figures as
+cited. Three exports a run saves are scored by the file it kept (`advfile-01`, `bf1-cantdo-01`,
+`bf2-mixed-04`), and `bf2-cantdo-02` confirms the schedule it asks for.
+
 ### Fixed: a file the user asks for, and why not where none can be made
 
 "Export the top 20 SKUs as Excel" was answered "I can't create an Excel file" on ReAct, ReAct on
