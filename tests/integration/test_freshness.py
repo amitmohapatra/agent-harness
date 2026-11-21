@@ -467,4 +467,33 @@ async def test_a_graph_that_binds_the_harnesss_tools_itself_is_told_they_are_out
     [later] = [r for r in model.script.requests if "And now?" in str(r["messages"][-1])][:1]
     sent = str(later["messages"])
     assert snapshots.EARLIER.format(tool="get_stock") in sent, sent
-    assert str(snapshots.note(["get_stock"])) in sent, sent
+    assert sent.count(str(snapshots.note(["get_stock"]))) == 1, sent
+
+
+@pytest.mark.parametrize("framework", ["openai_agents", "graph"])
+async def test_a_run_with_memory_on_whose_model_calls_the_harness_cannot_see_is_told_too(
+    memory_harness: Harness, framework: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Memory on, a run's transcript is kept in memory's thread only, not the run store: OpenAI
+    Agents (its session replays the thread, a live result past its age marked
+    ``snapshots.STALE``) and a graph built by hand were told nothing of which tools' earlier
+    results are out of date (``freshness-03``: OpenAI reused the old stock). The question
+    says it (``snapshots.note``), once; a turn after none of them is told nothing."""
+    from tests.support.adapters import BUILDERS
+
+    get_stock = stock_tool()
+    seen: list[Any] = []
+    plan = [("get_stock", {"sku": "SKU-00123"})]
+    target, own = await BUILDERS[framework](memory_harness, [get_stock], tmp_path, plan, seen=seen)
+    agent = arm(memory_harness.wrap(target, id=f"told-{framework}-memory"), own)
+    monkeypatch.setattr(snapshots, "now", at(FETCHED))
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    note = str(snapshots.note(["get_stock"]))
+    [model] = seen
+    assert note not in _sent(model)
+    monkeypatch.setattr(snapshots, "now", at(FETCHED + timedelta(hours=1)))
+    await agent.run("reorder qty for it?", user="u1", thread=THREAD)
+    sent = _sent(model)
+    if framework == "openai_agents":
+        assert snapshots.STALE.format(tool="get_stock") in sent, sent
+    assert sent.count(note) == 1, sent

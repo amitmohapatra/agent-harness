@@ -58,26 +58,12 @@ class MemorySession:
 
     async def get_items(self, limit: int | None = None) -> list[Any]:
         """The thread's earlier turns, oldest first (``limit``: the newest that many), as the
-        SDK's input items: the messages with the tool calls made in them and their results, a
-        call and its result never parted (``history.answered``). A thread the service does not
-        have yet (``404``: nothing was said in it) has none."""
-        assert self.runtime.run_memory is not None
-        ctx = self.runtime.run_memory.ctx
+        SDK's input items (:func:`thread`): the messages with the tool calls made in them and
+        their results, a call and its result never parted (``history.answered``)."""
         try:
-            messages = await ctx.history(limit=HISTORY_LIMIT, include_internal=True)
-        except NotFoundError:
-            return []
+            said = await thread(self.runtime)
         except DependencyUnavailableError as exc:
-            said = await self._from_run_store(exc)
-        else:
-            run_id = self.runtime.run_id
-            said = [
-                said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})
-                for m in messages
-                if m.role in ROLES
-                and (m.kind == "VISIBLE" or (m.model_extra or {}).get("tool_call_id"))
-                and (m.model_extra or {}).get("agent_run_id") != run_id
-            ]
+            said = await _from_run_store(self.runtime, exc)
         # an earlier value of a live tool is out of date, as the memory window's replay says,
         # and its tool stays offered: the model fetches it again
         said, stale = snapshots.out_of_date(
@@ -88,18 +74,6 @@ class MemorySession:
         items = [item for s in answered(said) for item in input_items(s)]
         return items if limit is None else items[-limit:] if limit > 0 else []
 
-    async def _from_run_store(self, down: DependencyUnavailableError) -> list[Said]:
-        """The memory service unreachable: the run goes on as any run does without memory —
-        the conversation's earlier turns as the run store keeps them (``conversation.earlier``),
-        and a warning that memory's thread could not be read (none at all when neither can)."""
-        runtime = self.runtime
-        runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {down}")
-        try:
-            return await conversation.earlier(runtime)
-        except Exception as exc:
-            runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
-            return []
-
     async def add_items(self, items: list[Any]) -> None:
         """Nothing: the harness records the run's turns in the thread itself."""
 
@@ -108,6 +82,40 @@ class MemorySession:
 
     async def clear_session(self) -> None:
         raise ThreadReadOnly("the conversation is the memory service's thread: it only grows")
+
+
+async def thread(runtime: Runtime) -> list[Said]:
+    """The earlier turns of ``runtime``'s conversation as the memory service's thread holds
+    them, oldest first — the chat and the results of the tool calls made in it, the run's own
+    left out —, as :class:`MemorySession` replays them and ``Agent.earlier_noted`` reads which
+    tools' results are out of date (with memory on, a run's transcript is kept in the thread
+    only: ``Agent.recorded_run``). A thread the service does not have yet (``404``: nothing
+    was said in it) has none; one it cannot read (``DependencyUnavailableError``) is the
+    caller's to say."""
+    assert runtime.run_memory is not None
+    try:
+        messages = await runtime.run_memory.ctx.history(limit=HISTORY_LIMIT, include_internal=True)
+    except NotFoundError:
+        return []
+    return [
+        said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})
+        for m in messages
+        if m.role in ROLES
+        and (m.kind == "VISIBLE" or (m.model_extra or {}).get("tool_call_id"))
+        and (m.model_extra or {}).get("agent_run_id") != runtime.run_id
+    ]
+
+
+async def _from_run_store(runtime: Runtime, down: DependencyUnavailableError) -> list[Said]:
+    """The memory service unreachable: the run goes on as any run does without memory —
+    the conversation's earlier turns as the run store keeps them (``conversation.earlier``),
+    and a warning that memory's thread could not be read (none at all when neither can)."""
+    runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {down}")
+    try:
+        return await conversation.earlier(runtime)
+    except Exception as exc:
+        runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+        return []
 
 
 def input_items(said: Said) -> list[dict[str, Any]]:
@@ -139,4 +147,5 @@ __all__ = [
     "MemorySession",
     "ThreadReadOnly",
     "input_items",
+    "thread",
 ]

@@ -79,7 +79,7 @@ from trellis.harness.adapters.langgraph import (
 )
 from trellis.harness.asking import DECIDED, asked_by_model, picked
 from trellis.harness.bounded import LRU
-from trellis.harness.bridges import helpers
+from trellis.harness.bridges import helpers, session
 from trellis.harness.budget import BUDGET, Budget
 from trellis.harness.clients.memory import (
     CITED_MAX,
@@ -1284,19 +1284,31 @@ class Agent:
         ``Adapter.marks_earlier``), the run's context names the tools whose results the
         conversation's earlier turns hold past their age (``snapshots.note``) — what memory's
         replay and ``middleware._stale_noted`` say; once, and nothing when none is out of date
-        (``freshness-03``: those adapters answered from the earlier stock)."""
+        (``freshness-03``: those adapters answered from the earlier stock; OpenAI with memory on
+        too, its session's replay marked and no note: :meth:`_earlier_turns`)."""
         if getattr(self.adapter, "marks_earlier", False) or _NOTE_START in str(
             runtime.pushed_context
         ):
             return
         try:
-            earlier = await conversation.earlier(runtime, whole=True)
+            earlier = await self._earlier_turns(runtime)
         except Exception:  # a store that cannot say: nothing is marked, as before
             return
         age = functools.partial(snapshots.declared_max_age, runtime)
         note = snapshots.note(snapshots.out_of_date(earlier, age)[1])
         if note is not None:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, note) if p)
+
+    async def _earlier_turns(self, runtime: Runtime) -> list[Said]:
+        """The earlier turns :meth:`earlier_noted` reads: with memory on, its thread
+        (``bridges.session.thread``: a run's transcript is kept there only, as an OpenAI run's
+        session replays it) — none where memory's window was replayed as the run's messages,
+        marked and noted already (:meth:`remembered`); with memory off, the run store's."""
+        if runtime.run_memory is None:
+            return await conversation.earlier(runtime, whole=True)
+        if self.window(runtime) is Window.MESSAGES:
+            return []
+        return await session.thread(runtime)
 
     def offers_a_question(self, runtime: Runtime) -> bool:
         """Whether the run's model has a question tool: ``ask_user`` among the run's tools, or

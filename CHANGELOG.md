@@ -36,6 +36,16 @@ variants with a backend only (`adapter:variant` in `Case.adapters`), the malform
 loop cases on the scripted model only (`Case.scripted`), and `fits` on adapters whose window
 the harness keeps.
 
+### Fixed: OpenAI Agents with memory on is told which earlier results are out of date
+
+With memory on, an OpenAI Agents run's session replayed an earlier live result marked out of
+date, but the line naming those tools (`snapshots.note`) never reached the model
+(`freshness-03`: it answered from the old stock). The note was read from the run store, which
+keeps a turn's transcript only with memory off; with memory on it is read from memory's thread,
+as the session replays it (`bridges.session.thread`), and sent once, with the question, on
+every adapter whose framework replays the turns itself. A turn with nothing out of date is sent
+nothing more, and `ReAct`'s replayed window is noted as before (no second read of the thread).
+
 ### Fixed: schedules at their edges
 
 "In 2 hours" is two real hours across a clock change, and a delay before now or past a year
