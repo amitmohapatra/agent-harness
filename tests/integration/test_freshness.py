@@ -437,3 +437,34 @@ async def test_a_framework_kept_threads_live_tool_stays_offered_when_hints_narro
     assert "get_stock" not in model.requests[0]["tools"]  # narrowed to the hinted tool
     await agent.run("and now?", user="u1", thread=THREAD)
     assert "get_stock" in model.requests[2]["tools"]
+
+
+@pytest.mark.parametrize("memory", [False, True])
+async def test_a_graph_that_binds_the_harnesss_tools_itself_is_told_they_are_out_of_date(
+    harness: Harness, memory_harness: Harness, memory: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graph built by hand that binds the harness's tools itself (converted, as
+    docs/frameworks/langgraph.md shows: the run's toolbox does not have them) is marked as one
+    whose tools the harness was given: the earlier turn's live result out of date, and the
+    question saying so (``freshness-01`` on the ``graph`` adapter: it answered from the stock
+    of an earlier turn, told nothing). Memory on or off."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from trellis.harness.adapters import convert
+
+    get_stock = stock_tool()
+    bound = convert("langchain", [get_stock.tool])
+    model = ScriptedChat(
+        [("get_stock", {"sku": "SKU-00123"}), "40.", ("get_stock", {"sku": "SKU-00123"}), "7."]
+    )
+    graph = create_agent(model, tools=bound, checkpointer=InMemorySaver(), name="bound")
+    agent = (memory_harness if memory else harness).wrap(graph, id=f"bound-{memory}")
+    monkeypatch.setattr(snapshots, "now", at(FETCHED))
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    monkeypatch.setattr(snapshots, "now", at(FETCHED + timedelta(hours=1)))
+    await agent.run("And now?", user="u1", thread=THREAD)
+    [later] = [r for r in model.script.requests if "And now?" in str(r["messages"][-1])][:1]
+    sent = str(later["messages"])
+    assert snapshots.EARLIER.format(tool="get_stock") in sent, sent
+    assert str(snapshots.note(["get_stock"])) in sent, sent

@@ -992,7 +992,9 @@ def _asked_at(messages: Sequence[AnyMessage]) -> int:
     )
 
 
-def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[AnyMessage], set[str]]:
+def _earlier(
+    runtime: Runtime, messages: Sequence[AnyMessage], tools: Sequence[Any] = ()
+) -> tuple[list[AnyMessage], set[str]]:
     """``messages`` (a thread the framework keeps, as the model is sent it) with each result
     from before the run's question (:func:`_asked_at`) of a live tool of the run (``max_age``
     0: every earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
@@ -1006,6 +1008,7 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
         if isinstance(m, AIMessage)
         for c in m.tool_calls
     }
+    bound = {t.name: spec_of(t) for t in tools if isinstance(t, BaseTool)}
     out = list(messages)
     stale: set[str] = set()
     for n, m in enumerate(messages[:asked]):
@@ -1013,7 +1016,9 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
             continue
         tool = called.get(m.tool_call_id) or m.name or ""
         found = runtime.toolbox.get(tool)
-        spec = found.spec if found is not None else runtime.native.get(tool)
+        # a tool the graph binds itself is its request's (a harness tool it converted is in
+        # neither the toolbox nor the graph's own: ``LangGraphAdapter.native``)
+        spec = found.spec if found is not None else runtime.native.get(tool) or bound.get(tool)
         marked = m.content.startswith(snapshots.STALE.format(tool=tool))  # memory's replay
         if spec is None or marked or max_age(spec) != 0:
             continue
@@ -1038,7 +1043,7 @@ def _stale_marked(
 ) -> tuple[ModelRequest[Any], set[str]]:
     """The request with each earlier turn's live result marked out of date (:func:`_earlier`)
     and its latest question saying which tools (:func:`_stale_noted`), and those tools."""
-    messages, stale = _earlier(runtime, request.messages)
+    messages, stale = _earlier(runtime, request.messages, request.tools)
     return (request.override(messages=_stale_noted(messages, stale)) if stale else request), stale
 
 

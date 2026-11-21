@@ -161,6 +161,15 @@ and questions whose answers are facts of this harness. Cases waiting on a featur
 `update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
 reported apart.
 
+### Fixed: a graph that binds the harness's tools itself is told their results are out of date
+
+A graph built by hand that binds the harness's tools itself (converted, as the LangGraph guide
+shows) had none of its earlier live results marked out of date: the tools are in neither the
+run's toolbox nor the graph's own tool list, so their freshness was not known, and a later turn
+answered from an earlier turn's stock (seen live on the `graph` adapter, `freshness-01` and
+`freshness-03`). The tool's definition is now read from the request, as the narrowing already
+does for a call.
+
 ### Fixed: a turn sent again behind a slow one is no longer lost
 
 When a turn's transcript write was slow, the next turn sent it again before its own, but under
