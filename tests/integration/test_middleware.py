@@ -542,6 +542,40 @@ async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: 
         StallGuard(1)
 
 
+async def test_a_call_that_failed_each_time_stalls_with_the_other_tools_still_offered(
+    harness: Harness,
+) -> None:
+    """A stall on a call that failed every time (a source down, a scan timing out) holds back
+    that tool alone: the model is told not to call it again and may get what it needs from
+    another tool, else answer (advdata-09: two bin scans timed out, the third was a stall, and
+    with every tool held back the stock it could read in one call was never read). Called again
+    all the same, the held-back tool stops the run, as a stall answered with a call does."""
+
+    @tool(side_effects="read")
+    def scan(item: str) -> str:
+        """Scan the bins for an item."""
+        raise TimeoutError("scan timed out")
+
+    scan_a: Any = ("scan", {"item": "a"})
+    model = ScriptedChatModel(turns=[scan_a, scan_a, scan_a, ("look", {"item": "a"}), "a found"])
+    target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
+    agent = arm(harness.wrap(target, id="elsewhere", without={"schedules"}), [scan, look])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "a found"
+    stalled = model.seen[3][-1].content
+    assert stalled == ours.STALLED_ELSEWHERE.format(tool="scan", times=3)
+    assert "scan" not in model.requests[3]["tools"] and "look" in model.requests[3]["tools"]
+    assert model.requests[3].get("tool_choice") != "none"
+    assert tool_messages(model, 4)[-1][1] == "a found"  # the other tool ran
+
+    again = ScriptedChatModel(turns=[scan_a, scan_a, scan_a, scan_a])
+    target = graph(again, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
+    agent = arm(harness.wrap(target, id="elsewhere-2", without={"schedules"}), [scan, look])
+    result = await agent.run("x", user="u")
+    assert result.error is not None and "3 times in a row (a stall)" in result.error.message
+
+
 async def test_a_stall_outside_a_run_ends_with_one_answer_too() -> None:
     def step(n: int) -> list[Any]:
         call = {"name": "nothing", "args": {}, "id": f"c{n}", "type": "tool_call"}

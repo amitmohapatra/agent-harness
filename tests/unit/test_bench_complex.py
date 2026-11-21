@@ -2515,12 +2515,13 @@ def test_a_chart_the_run_kept_for_its_user_is_no_made_up_file() -> None:
 
 
 def test_a_file_kept_where_no_check_reads_it_is_unverified_not_made_up() -> None:
-    """bf2-mixed-04 (Claude wrote the CSV with its shell): a file the run kept that the case has
-    no check for is counted neither way — it exists, so it is not made up."""
-    t = _turn("bf2-mixed-04", 0)
-    assert t.expect is not None
-    answer = "I wrote every 2026 sales line for store S14 to `outputs/s14_sales_2026.csv`."
-    kept = {"s14_sales_2026.csv": b"date,store,sku,units,revenue\n2026-01-01,S14,SKU-1,1,2\n"}
+    """bfh-mixed-02 (a chart made with the run's own shell): a file the run kept that the case
+    has no check for is counted neither way — it exists, so it is not made up. (bf2-mixed-04,
+    the example before, now checks its CSV: ``made``.)"""
+    t = _turn("bfh-mixed-02", 2)
+    assert t.expect is not None and "made" not in t.expect.value
+    answer = "I drew the chart and saved it as `outputs/weekly_units.svg`."
+    kept = {"weekly_units.svg": b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"}
     scored = cx.score(t.expect, answer, [], t.text, files=kept)
     assert scored["correct"] is None and scored["unverified"] and not scored["made_up"], scored
 
@@ -2714,3 +2715,130 @@ def test_an_id_that_names_nothing_said_so_is_an_abstain() -> None:
     assert not cx.score(turn.expect, "Store S55 sold 412 units in Q3 2026.", [], turn.text)[
         "correct"
     ]
+
+
+# --------------------------------------------------------------------------- the sets, 2026-11-21
+def test_a_change_said_as_a_move_from_one_figure_to_another_is_the_change() -> None:
+    """explain-06 t1 ("The drop from 14 to 4 happened between those two readings") and
+    advpipe-01 t0 (a waterfall whose rows say "110 → 135", "135 → 120") state each change as
+    its two ends, and were scored as missing it. Only a change field reads a move; ends that
+    give another change, a figure beside an earlier one with no move ("Now 4 units, 14
+    before"), and a move in no change field still fail."""
+    said = (
+        "Yes, it changed. The stock level now shows 4 units of Merino Crew Sweater Navy. "
+        "Earlier it was 14. The drop from 14 to 4 happened between those two readings."
+    )
+    assert _right("explain-06", 1, said)
+    assert not _right("explain-06", 1, said.replace("from 14 to 4", "from 14 to 5"))
+    assert not _right("explain-06", 1, "Now **4 units**, 14 before; read at 10:00 UTC.")
+    waterfall = (
+        "| Stage | Rule | Units in → out |\n|---|---|---|\n| Forecast | R1 | 0 → 96 |\n"
+        "| Preprocess | R2 | 96 → 110 |\n| Optimiser | R3 | 110 → 135 |\n"
+        "| Postprocess | R4 | 135 → 120 |\n| Final | R5 | 120 → 120 |"
+    )
+    assert _right("advpipe-01", 0, waterfall)
+    assert not _right("advpipe-01", 0, waterfall.replace("110 → 135 |", "110 → 130 |"))
+    assert not _right("advpipe-01", 0, waterfall.replace("→", "and"))
+    final = cx.record({"final": 120}, tol={"final": 0})
+    assert not cx.score(final, "It went from 100 to 220 units.", [])["correct"]
+
+
+def test_another_sources_figure_said_not_to_be_used_is_not_the_answer() -> None:
+    """advconv-10 t2: "49 days ... The supplier master's 42 days is not the figure to use"
+    scored as giving the master's forbidden 42. Answering with the 42 still fails."""
+    lead = _turn("advconv-10", 2)
+    said = (
+        "We agreed to use the supplier portal's lead time for SUP-03 (Oslo Apparel): **49 "
+        "days**. The supplier master's 42 days is not the figure to use, because you said you "
+        "trust the portal."
+    )
+    assert cx.score(lead.expect, said, [], lead.text)["correct"] is True
+    wrong = "We use the master's 42 days. The portal's 49 days is not the figure to use."
+    assert cx.score(lead.expect, wrong, [], lead.text)["correct"] is False
+
+
+def test_the_rest_named_as_missing_is_no_member_of_the_set() -> None:
+    """advdata-13: six stores beat their target, and "The other four missed: S40 Shrewsbury
+    (£15,544.45 short), ..." named the rest as missing it, scored as presenting them as
+    members. The rest said to have made it too still fails."""
+    t = _turn("advdata-13", 0)
+    winners = "\n".join(f"| {s} | beat |" for s in ("S20", "S08", "S32", "S24", "S12", "S36"))
+    said = (
+        f"Six of the ten west stores beat their target:\n\n{winners}\n\nThe other four missed: "
+        "S40 Shrewsbury (£15,544.45 short), S28 Taunton (£15,417.75 short), S16 Hereford "
+        "(£15,049.30 short) and S04 Bristol (£14,029.78 short)."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    also = said.replace("The other four missed:", "The other four beat it too:")
+    assert cx.score(t.expect, also, [], t.text)["correct"] is False
+
+
+def test_a_figure_no_tool_read_said_so_answers_which_tools_got_it() -> None:
+    """advexp-03 t2: "I made one tool call for that figure: memory_remember, which saved [what
+    you told me] ... It didn't read the figure from any source" says no tool got it, scored
+    as not saying so. A tool said to have got it still fails."""
+    t = _turn("advexp-03", 2)
+    said = (
+        "I made one tool call for that figure: `memory_remember`, which saved it as a note. "
+        "That call only stored what you told me. It didn't read the figure from any source."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    assert cx.score(t.expect, "I called sales_summary to get it.", [], t.text)["correct"] is False
+
+
+def test_the_missing_stage_named_by_its_rule_is_named() -> None:
+    """advdom-08: the gap was named as "Whether R2's 15% safety stock was considered ... the
+    logs don't say", R2 being the preprocess stage's rule (``adversarial.RULES``). An answer
+    that names no gap still fails."""
+    t = _turn("advdom-08", 0)
+    said = "Missing: whether R2's 15% safety stock was considered; the logs don't say."
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    assert cx.score(t.expect, "Nothing is missing.", [], t.text)["correct"] is False
+
+
+def test_the_cases_own_small_figures_count_as_cited() -> None:
+    """advfile-02 t3: "Export (09:00 UTC, 30 Oct): 23 units. stock_level (11:00 UTC): 10
+    units" cites the two figures its rubric names, scored as citing none: whole numbers up to
+    100 are skipped as list numbers and counts. Only the figures the case's own rubric names
+    count (never its dates or ids); other small numbers still do not."""
+    t = _turn("advfile-02", 3)
+    said = (
+        "I can't say why the numbers differ.\n- **Export (09:00 UTC, 30 Oct):** 23 units.\n"
+        "- **stock_level (11:00 UTC, 30 Oct):** 10 units."
+    )
+    context = "SKU-00012 23 as of 2026-10-30T09:00:00Z; 10 as of 2026-10-30T11:00:00Z"
+    assert cx.score(t.expect, said, [], t.text, context)["correct"] is True
+    other = said.replace("23 units", "3 units").replace("10 units", "4 units")
+    assert "cites at least 2 figures" in cx.score(t.expect, other, [], t.text, context)["missing"]
+    dated = "The file is from 30 Oct at 09:00, the read from 2026-10-30 at 11:00."
+    assert "cites at least 2 figures" in cx.score(t.expect, dated, [], t.text, context)["missing"]
+
+
+@pytest.mark.parametrize(("case", "name"), [
+    ("advfile-01", "refunds_2026-09.csv"),
+    ("bf1-cantdo-01", "denim_sales_Q3_2026.xlsx"),
+    ("bf2-mixed-04", "S14_sales_2026.csv"),
+])  # fmt: skip
+def test_an_export_the_case_asked_for_is_scored_by_the_file_kept(case: str, name: str) -> None:
+    """advfile-01, bf1-cantdo-01 and bf2-mixed-04: the run saved the export with
+    ``query_result(save_as=)``, kept for the user, and the turn was unverified (no file check):
+    each now says the file it asks for (every line, a header among them). A file short of
+    lines still fails."""
+    import openpyxl
+
+    def made(rows: list[str]) -> bytes:
+        if not name.endswith(".xlsx"):
+            return "\n".join(rows).encode()
+        book, out = openpyxl.Workbook(), io.BytesIO()
+        for row in rows:
+            book.active.append([row])  # type: ignore[union-attr]
+        book.save(out)
+        return out.getvalue()
+
+    t = _turn(case, 0)
+    spec = t.expect.value["made"]
+    said = f"I've saved it as **{name}**."
+    whole = {name: made(["h", *spec["holds"], *["x"] * spec["lines"]])}
+    assert cx.score(t.expect, said, [], t.text, files=whole)["correct"] is True
+    short = {name: made(["h", *spec["holds"]])}
+    assert cx.score(t.expect, said, [], t.text, files=short)["correct"] is False

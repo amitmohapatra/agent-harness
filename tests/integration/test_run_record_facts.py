@@ -116,3 +116,35 @@ def test_each_decision_a_person_made_is_said_in_the_run_record() -> None:
         "a tool call rejected; the run abandoned at a question; "
         "a tool call approved in the framework's own gate",
     }
+
+
+def test_a_kept_result_read_by_the_harness_says_whether_it_succeeded() -> None:
+    """``read_file`` and ``query_result`` are answered by the harness, past the tool hooks, so
+    the journal records no call of theirs: their result still says whether it succeeded (an
+    ``Error`` is a failure). A result no record matches carried nothing, and the memory
+    service's evidence read "1 of 2 calls succeeded" under every turn that queried a kept
+    table (advscen-02/03: "I haven't verified the figures against the saved file")."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import RunStatus
+    from trellis.harness import pipeline
+    from trellis.harness.history import Called
+    from trellis.harness.journal import Journal
+
+    runtime = SimpleNamespace(
+        replay=SimpleNamespace(journal=Journal()), started_at=None, fetched={}, toolbox={},
+        native={},
+    )  # fmt: skip
+    asked = {"file_path": "/large_tool_results/r1", "sql": "SELECT 1"}
+    said = [
+        Said(Speaker.USER, "q"),
+        Said(Speaker.ASSISTANT, "", tool_calls=(Called("c1", "query_result", asked),)),
+        Said(Speaker.TOOL, "x\n1", tool_call_id="c1"),
+        Said(Speaker.ASSISTANT, "", tool_calls=(Called("c2", "read_file", asked),)),
+        Said(Speaker.TOOL, "Error: File '/r9' not found", tool_call_id="c2"),
+        Said(Speaker.ASSISTANT, "", tool_calls=(Called("c3", "stock_quote", {}),)),
+        Said(Speaker.TOOL, "7", tool_call_id="c3"),  # a call of the toolbox nothing recorded
+        Said(Speaker.ASSISTANT, "1"),
+    ]
+    out = pipeline._with_facts(said, runtime, RunStatus.SUCCESS)  # type: ignore[arg-type]
+    assert [s.facts for s in out[2:7:2]] == [{"status": "ok"}, {"status": "error"}, None]

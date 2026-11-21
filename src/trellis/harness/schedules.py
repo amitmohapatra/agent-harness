@@ -928,7 +928,8 @@ async def _confirmed(
     """The one question a new schedule asks, every open detail in it (``open_``: the time it
     assumed, the schedule the model judged alike, the writes its runs make): Confirm with
     each as offered (recommended), the details changed in the app's form, Cancel, or the
-    user's own words — what the model then reads (:data:`OWN_ANSWER`)."""
+    user's own words — what the model then reads (:data:`OWN_ANSWER`). A plain approve is
+    Confirm, a reject Cancel (``asking.answer_of``'s ``True`` and ``False``: no option named)."""
     fields = _fields(open_)
     question = " ".join(
         [f"Set up this schedule? {said}."]
@@ -944,6 +945,7 @@ async def _confirmed(
         ],
         expects={"anyOf": [{"type": "string"}, {"type": "object", "properties": fields}]},
     )
+    answer = _decided(answer)
     if answer == NEITHER:
         return "Nothing scheduled: the user did not want it."
     if answer != CONFIRM and not isinstance(answer, dict):
@@ -957,6 +959,13 @@ async def _confirmed(
         allow=picked.get("allow") is True,
         unapproved=unapproved if unapproved in UNATTENDED else UNATTENDED[0],
     )
+
+
+def _decided(answer: Any) -> Any:
+    """A confirmation's answer: a plain approve (``True``) is Confirm, a reject Cancel."""
+    if isinstance(answer, bool):
+        return CONFIRM if answer else NEITHER
+    return answer
 
 
 def _fields(open_: dict[str, Any]) -> dict[str, Any]:

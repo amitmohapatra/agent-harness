@@ -2614,14 +2614,50 @@ class StallGuard(AgentMiddleware):
                         break
                     streak += 1
                 if streak >= self.max_repeats:
-                    return await _answer_now(
-                        request,
-                        handler,
-                        bridge.STALLED.format(tool=call["name"], times=streak),
+                    stopped = (
                         f"stopped: the model called {call['name']!r} with the same arguments "
-                        f"{streak} times in a row (a stall)",
+                        f"{streak} times in a row (a stall)"
                     )
+                    others = _elsewhere(request, history, call, self.max_repeats)
+                    if others is not None:
+                        told = STALLED_ELSEWHERE.format(tool=call["name"], times=streak)
+                        return await _answer_elsewhere(others, handler, told, stopped, call["name"])
+                    told = bridge.STALLED.format(tool=call["name"], times=streak)
+                    return await _answer_now(request, handler, told, stopped)
         return reply
+
+
+#: What a model whose call failed each time it made it is told at its stall: that tool is held
+#: back, the others are still offered (:func:`_elsewhere`).
+STALLED_ELSEWHERE: Final = (
+    "You called {tool} with the same arguments {times} times in a row and it failed each time: "
+    "do not call it again. If another tool can give what you need, use it; otherwise answer now "
+    "with what you have, and say what went wrong."
+)
+
+
+def _elsewhere(
+    request: ModelRequest[Any], history: Sequence[AnyMessage], call: Any, repeats: int
+) -> ModelRequest[Any] | None:
+    """The request without the stalled ``call``'s tool, when that call failed each time it was
+    made this turn and this is its first stall (it was made ``repeats`` - 1 times before), and
+    other tools are left: another source may give what it could not (a 503, a scan timing
+    out). ``None`` otherwise — a call that answered, one that stalled before, a run whose
+    answer is a schema: the stall ends with one answer offered no tool."""
+    made = _results_of(history, _call_key(call))
+    failed = len(made) == repeats - 1 and all(getattr(r, "status", "") == "error" for r in made)
+    kept = [t for t in request.tools if _named(t) != call["name"]]
+    if not failed or not kept or request.response_format is not None:
+        return None
+    return request.override(tools=kept)
+
+
+def _results_of(history: Sequence[AnyMessage], key: str) -> list[ToolMessage | None]:
+    """The result of each call ``key`` (:func:`_call_key`) this turn made, the latest first
+    (``None``: none came back)."""
+    results = {m.tool_call_id: m for m in _turn_back(history) if isinstance(m, ToolMessage)}
+    calls = (c for m in _turn_back(history) if isinstance(m, AIMessage) for c in m.tool_calls)
+    return [results.get(c["id"] or "") for c in calls if _call_key(c) == key]
 
 
 #: What a run whose answer's reply reached the model's output limit says of it (a warning: the
@@ -2652,10 +2688,7 @@ async def answered_in_full(
             request, handler, budget.CUT_OFF, CUT_STOPPED, warning="output_limit"
         )
     if not message.tool_calls:  # an answer, cut where the limit fell: the run's, said so
-        runtime = current()
-        log.warning("run %s %s", runtime.run_id if runtime else "-", ANSWER_CUT)
-        if runtime is not None:
-            runtime.events.warning("output_limit", ANSWER_CUT)
+        _warned("output_limit", ANSWER_CUT)
     return reply
 
 
@@ -2696,11 +2729,35 @@ async def _answer_now(
     in_schema = reply.structured_response is not None
     if message is None or (not in_schema and (message.tool_calls or not message.text)):
         raise ModelError(stopped, source="langgraph")
+    _warned(warning, stopped)
+    return reply
+
+
+async def _answer_elsewhere(
+    others: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    told: str,
+    stopped: str,
+    held: str,
+) -> ModelResponse[Any]:
+    """The model called once more, told ``told``, offered every tool but ``held``
+    (:func:`_elsewhere`): its answer, or its calls of other tools, which the run goes on with;
+    a reply with neither, or calling ``held`` all the same, stops the run."""
+    reply = await handler(others.override(messages=[*others.messages, HumanMessage(content=told)]))
+    message = _ai(reply)
+    calls = {c["name"] for c in message.tool_calls} if message is not None else {held}
+    if held in calls or not (calls or (message and message.text)):
+        raise ModelError(stopped, source="langgraph")
+    _warned("stalled", stopped)
+    return reply
+
+
+def _warned(warning: str, stopped: str) -> None:
+    """Why the run's model was stopped, in the log and on the run's stream (``warning``)."""
     runtime = current()
     log.warning("run %s %s", runtime.run_id if runtime else "-", stopped)
     if runtime is not None:
         runtime.events.warning(warning, stopped)
-    return reply
 
 
 def _call_key(call: Any) -> str:

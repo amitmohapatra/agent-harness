@@ -52,6 +52,7 @@ from trellis.contracts import (
     RunStatus,
     ToolCall,
     ToolOutcome,
+    ToolStatus,
 )
 from trellis.harness import (
     background,
@@ -118,6 +119,7 @@ from trellis.harness.schedules import Fired
 from trellis.harness.telemetry import RunTrace, agent_span, concluded, decided, metrics, output
 from trellis.harness.tools import bridge, stored
 from trellis.harness.tools.base import SOURCES
+from trellis.harness.tools.results import READERS
 from trellis.harness.tools.results import merged as merged_state
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
@@ -1671,7 +1673,8 @@ def _with_facts(
     and, a run that failed, why (:data:`ERROR_SAID` of its error's message: "why did my report
     fail?" is answered from it, as any "why" is) — what the memory service's steps list of the
     turn shows (not when it is a tool result: a run stopped at a call keeps that call's own).
-    A result no recorded call matches carries nothing."""
+    A result no recorded call matches carries nothing, but a harness reader's its status
+    (:func:`_read_facts`)."""
     journal = runtime.replay.journal
     outcomes: dict[str, list[tuple[Any, ToolOutcome]]] = {}
     for call, outcome in journal.trajectory:
@@ -1682,7 +1685,7 @@ def _with_facts(
         called = calls.get(s.tool_call_id or "")
         found = outcomes.get(call_key(called.name, dict(called.arguments))) if called else None
         if s.role is not Speaker.TOOL or not found:
-            out.append(s)
+            out.append(_read_facts(s, called))
             continue
         call, outcome = found.pop(0)
         facts: dict[str, Any] = {"status": outcome.status.value}
@@ -1720,6 +1723,23 @@ def _with_facts(
     run["approvals"] = "; ".join(approvals) or "none"
     out[-1] = dataclasses.replace(out[-1], facts=run)
     return out
+
+
+#: The harness's readers of a kept result (``read_file``, ``query_result``): answered past the
+#: tool hooks, so the journal records no call of theirs.
+_READERS: Final = frozenset(r[0] for r in READERS)
+
+
+def _read_facts(said: Said, called: Any) -> Said:
+    """``said``, a tool result of a harness reader (:data:`_READERS`) no recorded call
+    matches, with its status (an ``Error`` it answered is a failure); anything else as it is.
+    Without it the memory service's evidence counted every query of a kept table as a call
+    that did not succeed ("1 of 2 calls succeeded"), and the model then doubted figures it had
+    computed exactly."""
+    if getattr(called, "name", None) not in _READERS:  # a tool result's call: a reader's?
+        return said
+    status = ToolStatus.ERROR if said.content.startswith("Error") else ToolStatus.OK
+    return dataclasses.replace(said, facts={"status": status.value})
 
 
 async def _settle_cancelled(

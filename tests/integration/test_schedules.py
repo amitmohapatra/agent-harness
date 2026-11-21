@@ -1323,6 +1323,24 @@ async def test_a_schedule_said_in_full_is_made_with_no_question() -> None:
         assert made.startswith("Scheduled") and len(local(h)._schedules) == 1
 
 
+async def test_a_confirmation_approved_makes_the_schedule_and_rejected_makes_none() -> None:
+    """The confirmation answered with a plain approve (an approvals client, a reviewer, the
+    benchmark's turn that approves what it asks) is its recommended answer, Confirm; a reject
+    is Cancel. An approve read as the user's own words "true" made nothing and told the model
+    the user had answered "true"."""
+    async with Harness(config=Settings()) as h:
+        args = {"task": "sales summary", "when": "0 9 * * 1", "inferred": ["time"]}
+        agent = await planned(h, ("schedule_task", args))
+        interrupt = await asked(agent)
+        done = await agent.resume(interrupt.interrupt_id, "approve", reviewer="ada")
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert only(h).cadence == "0 9 * * 1"
+        other = await planned(h, ("schedule_task", args), name="other")
+        interrupt = await asked(other)
+        done = await other.resume(interrupt.interrupt_id, "reject", reviewer="ada")
+        assert "Nothing scheduled" in str(done.answer) and len(local(h)._schedules) == 1
+
+
 async def test_a_confirmation_cancelled_or_answered_in_words_makes_nothing() -> None:
     async with Harness(config=Settings()) as h:
         args = {"task": "sales summary", "when": "0 9 * * 1", "inferred": ["time"]}
