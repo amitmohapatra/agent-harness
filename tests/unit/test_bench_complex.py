@@ -2028,6 +2028,8 @@ LEFT_OUT = (
     (OUTLIERS, "S05", "S05 is not an outlier: £399,149.97 is under the upper fence."),
     (OUTLIERS, "S05", "Every other store, S05 included, isn't outside the fences."),
     (OUTLIERS, "S05", "S05 is close, but it is no outlier."),
+    (OUTLIERS, "S05", "Store S05 (£399,149.97) sits just inside the upper fence."),
+    (OUTLIERS, "S05", "S05 is within the fences, if only just."),
 )
 #: A forbidden item presented as part of the result: the answer is wrong.
 PRESENTED = (
@@ -2038,6 +2040,7 @@ PRESENTED = (
     (OUTLIERS, "S05", "Six stores are outliers, S05 among them."),
     (OUTLIERS, "S05", "S22 is not the only one; S05 is an outlier too."),
     (OUTLIERS, "S05", "High outliers: S22, S07, S20 and S05."),
+    (OUTLIERS, "S05", "S05 (£399,149.97) sits outside the upper fence, an outlier too."),
 )
 
 
@@ -2572,6 +2575,32 @@ def test_a_correct_figure_beside_an_earlier_one_named_for_comparison_is_right() 
     )
     assert cx.score(t.expect, said, [])["correct"] is True
     assert cx.score(t.expect, "August was £356,561.76.", [])["correct"] is False
+
+
+@pytest.mark.parametrize(
+    "against",
+    [
+        "That is about £10,076 less than July's £356,561.76.",
+        "That is down from £356,561.76 in July.",
+        "That is about £10,076 lower than July (£356,561.76).",
+        "Compared with July's £356,561.76, it fell about 2.8%.",
+    ],
+)
+def test_a_correct_figure_set_against_the_earlier_one_is_right(against: str) -> None:
+    """conversation-02 turn 2 (Kimi): "Knitwear revenue for August 2026 was £346,485.16. That
+    is about £10,076 less than July's £356,561.76" scored as giving the forbidden July figure:
+    the earlier figure named as what the answer is less than, down from or compared with is
+    not the answer. July's figure given as August's still is."""
+    t = _turn("conversation-02", 1)
+    assert t.expect is not None
+    said = f"Knitwear revenue for August 2026 was £346,485.16. {against}"
+    assert cx.score(t.expect, said, [])["correct"] is True, said
+    for wrong in (
+        "Knitwear revenue for August 2026 was £356,561.76.",
+        "Knitwear revenue for August 2026 was £356,561.76. July was £346,485.16.",
+        "Knitwear revenue for August 2026 was £356,561.76. That is more than July's £346,485.16.",
+    ):
+        assert cx.score(t.expect, wrong, [])["correct"] is False, wrong
 
 
 def test_a_cli_write_paused_for_a_person_in_a_cannot_turn_ends_rightly() -> None:

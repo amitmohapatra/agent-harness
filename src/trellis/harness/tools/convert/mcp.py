@@ -48,7 +48,8 @@ STOP_SECONDS: Final = 1
 class Tools(Server[Any]):
     """The harness's tools as an MCP server, and the calls it has under way: each runs in a
     task of its own, which the attempt's end cancels (:meth:`stopped`). ``listing`` lists them,
-    ``called`` makes a call (in the context it is awaited in)."""
+    ``called`` makes a call (in the context it is awaited in); ``reached`` is set once a client
+    was given the listing (a connection alone is not a client that has the tools)."""
 
     def __init__(
         self,
@@ -59,7 +60,13 @@ class Tools(Server[Any]):
         async def call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
             return await called(params.name, dict(params.arguments or {}))
 
-        super().__init__(SERVER, on_list_tools=listing, on_call_tool=call_tool)
+        async def list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
+            listed = await listing(ctx, params)
+            self.reached.set()
+            return listed
+
+        super().__init__(SERVER, on_list_tools=list_tools, on_call_tool=call_tool)
+        self.reached = asyncio.Event()
         self.calls = calls
         self.listing = listing
         self.called = called
@@ -155,7 +162,7 @@ def _result(text: str, *, error: bool) -> types.CallToolResult:
 @dataclass(frozen=True, slots=True)
 class Served:
     """Where an attempt's server answers, the header every request must carry, and whether a
-    request carrying it came (``reached``: the client connected)."""
+    client carrying it was given the server's tools (``reached``: :attr:`Tools.reached`)."""
 
     url: str
     token: str
@@ -197,14 +204,11 @@ async def served(server: Tools) -> AsyncIterator[Served]:
         streamable_http_path=PATH, stateless_http=True, json_response=True
     )
     expected = f"Bearer {token}".encode()
-    reached = asyncio.Event()
 
     async def guarded(scope: Any, receive: Any, send: Any) -> None:
-        if scope["type"] == "http":
-            if dict(scope["headers"]).get(b"authorization") != expected:
-                await Response(status_code=401)(scope, receive, send)
-                return
-            reached.set()
+        if scope["type"] == "http" and dict(scope["headers"]).get(b"authorization") != expected:
+            await Response(status_code=401)(scope, receive, send)
+            return
         await app(scope, receive, send)
 
     config = uvicorn.Config(
@@ -224,7 +228,7 @@ async def served(server: Tools) -> AsyncIterator[Served]:
             while not web.started:  # noqa: ASYNC110 - uvicorn says so with a flag only
                 await asyncio.sleep(0.01)
         port = web.servers[0].sockets[0].getsockname()[1]
-        yield Served(f"http://127.0.0.1:{port}{PATH}", token, reached)
+        yield Served(f"http://127.0.0.1:{port}{PATH}", token, server.reached)
     finally:
         await server.stopped()
         web.should_exit = True

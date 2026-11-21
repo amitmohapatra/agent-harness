@@ -160,17 +160,33 @@ async def test_the_harness_mcp_server_refuses_a_request_without_its_token() -> N
         assert refused.status_code == 401
 
 
-async def test_the_harness_mcp_server_says_when_a_client_reached_it() -> None:
-    """Only a request carrying its token counts as its client connecting."""
+async def test_the_harness_mcp_server_says_when_a_client_listed_its_tools() -> None:
+    """Only a listing of its tools by a client carrying its token counts as the client having
+    them: a request without the token does not, nor a connection that listed nothing (an
+    ``initialize`` alone: a Kimi whose listing then failed answers without the tools)."""
     import httpx
 
     from trellis.harness.tools.convert import mcp as convert
 
+    listing = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    accept = {"Accept": "application/json, text/event-stream"}
     async with convert.served(convert.convert([])) as served, httpx.AsyncClient() as client:
-        await client.post(served.url, json={})
+        await client.post(served.url, json=listing, headers=accept)
         assert not served.reached.is_set()
-        await client.post(served.url, json={}, headers=served.headers)
-        assert served.reached.is_set()
+        hello = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"},
+            },
+        }
+        await client.post(served.url, json=hello, headers={**served.headers, **accept})
+        assert not served.reached.is_set()
+        listed = await client.post(served.url, json=listing, headers={**served.headers, **accept})
+        assert listed.status_code == 200 and served.reached.is_set()
 
 
 async def test_a_kimi_that_never_reached_the_harness_tools_is_started_again_then_fails(
@@ -190,6 +206,30 @@ async def test_a_kimi_that_never_reached_the_harness_tools_is_started_again_then
     warnings = [e.data["message"] for e in events if e.data.get("code") == "acp_tools"]
     assert warnings == ["Kimi Code did not connect to the harness's tools: started again"]
     assert len(recorded(tmp_path)["sessions"]) == 2 and "prompts" not in recorded(tmp_path)
+    result = await agent.run("how many sold?", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "did not connect to the harness's tools (2 tries)" in result.error.message
+
+
+async def test_a_kimi_that_connected_but_never_listed_the_harness_tools_is_not_prompted(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Kimi that reached the harness's MCP server but never had its tools (its listing
+    failed after the connection: the accuracy run's long-chain-04, a new conversation in the
+    middle of the run whose Kimi said the run's tools were not in its list) is not prompted
+    as if it had them: a conversation before it had its tools; this one's process is started
+    again, said on the run, and when the next one has no tools either the run fails."""
+    monkeypatch.setattr(acp, "CONNECT_SECONDS", 0.5)
+    had = [{"tool": "lookup", "args": {"topic": "tea"}}, {"text": "found: {last}"}]
+    before = await arm(harness.wrap(fake(tmp_path, had), id="ok"), [lookup]).run("tea?", user="u1")
+    assert before.status is RunStatus.SUCCESS and before.answer == "found: facts about tea"
+    script = [{"text": "those tools aren't in my tool list"}]
+    target = fake(tmp_path, script, env={"FAKE_ACP_CONNECT": "partial"})
+    agent = arm(harness.wrap(target, id="partial"), [lookup])
+    events = [e async for e in agent.stream("how many sold?", user="u1")]
+    warnings = [e.data["message"] for e in events if e.data.get("code") == "acp_tools"]
+    assert warnings == ["Kimi Code did not connect to the harness's tools: started again"]
+    assert len(recorded(tmp_path)["prompts"]) == 1  # the conversation before's only
     result = await agent.run("how many sold?", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert "did not connect to the harness's tools (2 tries)" in result.error.message

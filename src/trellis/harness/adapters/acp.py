@@ -159,7 +159,8 @@ ACP_MODEL: Final = "acp"
 SETTLE_SECONDS: Final = 2.0
 SETTLE_STEP: Final = 0.1
 #: How long, once its session opened, an agent that connects to its MCP servers as a session
-#: opens (``Profile.connects``) has to have reached the harness's; and how many processes are
+#: opens (``Profile.connects``) has to have listed the harness's tools (a connection alone is
+#: not enough: one whose listing failed answers without them); and how many processes are
 #: started for a turn before one that never does fails it.
 CONNECT_SECONDS: Final = 10.0
 CONNECT_TRIES: Final = 2
@@ -389,7 +390,7 @@ class Profile:
     homed: Callable[[Mapping[str, str], str, tuple[str, str]], str] | None = None
     label: str = THE_AGENT
     #: it connects to the MCP servers a session is given while it opens the session (Kimi Code
-    #: waits for them before its first model request): one that did not reach the harness's
+    #: waits for them before its first model request): one that did not list the harness's tools
     #: would answer without the run's tools, so it is started again (:data:`CONNECT_TRIES`)
     connects: bool = False
 
@@ -1143,11 +1144,13 @@ class ACPAdapter(Keeps):
     async def _connected(
         self, key: str | None, form: str, started: Started, run: Invocation
     ) -> ACPSession:
-        """A new process for the turn (:meth:`_started`) whose agent reached the harness's
-        tools. An agent that connects to its MCP servers as a session opens
-        (``Profile.connects``) and did not reach the harness's in :data:`CONNECT_SECONDS` would
-        answer without them, as if the run had no tools: its process ends, said on the run,
-        and another starts; at :data:`CONNECT_TRIES` the attempt fails instead."""
+        """A new process for the turn (:meth:`_started`) whose agent has the harness's tools. An
+        agent that connects to its MCP servers as a session opens (``Profile.connects``) and
+        did not list the harness's tools in :data:`CONNECT_SECONDS` — never connected, or
+        connected and its listing failed — would answer without them, as if the run had no
+        tools: its process ends, said on the run, and another starts; at :data:`CONNECT_TRIES`
+        the attempt fails instead. Every new process is held to it (a session new, resumed,
+        loaded or forked); one that listed them as its session opened is not waited for."""
         profile = started.target.profile
         label = profile.label if profile is not None else THE_AGENT
         for tried in range(CONNECT_TRIES):
@@ -1346,7 +1349,7 @@ def _server(config: Mapping[str, Any]) -> Any:
 @contextlib.asynccontextmanager
 async def _harness_server(server: Any, relay: ACPSession) -> AsyncIterator[Any]:
     """The harness's tools as an MCP server for the attempt, as ACP hands it to the agent
-    (``relay.reached``: set when the agent reaches it)."""
+    (``relay.reached``: set when the agent lists its tools)."""
     from acp.schema import HttpHeader, HttpMcpServer
 
     from trellis.harness.tools.convert import mcp as convert

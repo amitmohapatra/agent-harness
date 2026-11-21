@@ -823,19 +823,22 @@ class FakeAgent:
         return text
 
     async def connected(self, session_id: str) -> None:
-        """The harness's MCP server reached as the session opens, as Kimi Code connects to its
-        servers before answering (nothing recorded); never with ``FAKE_ACP_CONNECT=never``, a
-        Kimi whose connection failed."""
+        """The harness's MCP server reached as the session opens and its tools listed, as Kimi
+        Code connects to its servers before answering (nothing recorded); never with
+        ``FAKE_ACP_CONNECT=never``, a Kimi whose connection failed; connected but its tools
+        never listed with ``FAKE_ACP_CONNECT=partial``, a Kimi whose listing failed."""
         from mcp import Client
         from mcp.client.streamable_http import streamable_http_client
         from mcp.shared._httpx_utils import create_mcp_http_client
 
         server = next((s for s in self.servers[session_id] if s.name == "trellis"), None)
-        if server is None or os.environ.get("FAKE_ACP_CONNECT") == "never":
+        how = os.environ.get("FAKE_ACP_CONNECT")
+        if server is None or how == "never":
             return
         http = create_mcp_http_client(headers={h.name: h.value for h in server.headers})
-        async with http, Client(streamable_http_client(server.url, http_client=http)):
-            pass
+        async with http, Client(streamable_http_client(server.url, http_client=http)) as client:
+            if how != "partial":
+                await client.list_tools()
 
     async def called(
         self, session_id: str, tool: str, args: dict[str, Any], *, listed: bool = False

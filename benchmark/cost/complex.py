@@ -2833,12 +2833,14 @@ _NOT_IN: Final = re.compile(
     re.IGNORECASE,
 )
 #: What says, in the statement that names it, that an item is no part of the result: a negation,
-#: an exception, or a place after the result's ("the next-highest", "the runner-up", "the
-#: nearest inside the fences") — an answer is wrong for presenting a forbidden item as part of
+#: an exception, a place after the result's ("the next-highest", "the runner-up", "the
+#: nearest inside the fences"), or a place inside the line the result is outside of ("sits just
+#: inside the upper fence") — an answer is wrong for presenting a forbidden item as part of
 #: its result, not for naming it as left out.
 _EXCLUDED: Final = re.compile(
     r"\b(?:not|no|nor|neither|never|none|excluded?|excluding|except|apart from|other than|"
     r"rather than|non-\w+|runner[- ]up|nearest|closest|next|"
+    r"(?:inside|within) (?:the )?(?:(?:upper|lower) )?fences?|"
     r"just (?:missed|missing|outside|short)|miss(?:es|ed) (?:out|the cut))\b|n't\b",
     re.IGNORECASE,
 )
@@ -2887,11 +2889,13 @@ def _claimed(pattern: str, answer: str) -> re.Match[str] | None:
 
 
 #: A sentence that names a value as the earlier one ("down from the 40 I reported earlier",
-#: "has dropped from 40 since my last check").
+#: "has dropped from 40 since my last check"), or as what the answer is set against ("for
+#: comparison", "compared with", "£10,076 less than July's").
 _EARLIER: Final = re.compile(
     r"\b(?:earlier|previous(?:ly)?|before|(?:down|up|dropped|fell|fallen|rose|risen) from|"
     r"(?:my|the) last (?:check|count|reading|figure|answer)|a moment ago|I gave you|"
-    r"changed since|different (?:reading|figure|count) from|for comparison|compared (?:with|to))\b",
+    r"changed since|different (?:reading|figure|count) from|for comparison|compared (?:with|to)|"
+    r"(?:less|lower|more|higher|fewer|greater) than)\b",
     re.IGNORECASE,
 )
 #: A sentence naming another figure than the answer, set against it: the runner-up ("Next are

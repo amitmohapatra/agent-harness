@@ -5,6 +5,23 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a Kimi that connected to the harness's tools but never listed them is not prompted
+
+In the accuracy run, one Kimi Code conversation in the middle of a run (`long-chain-04`; the
+ones before and after had their tools) answered that the run's tools were "not in my tool list
+for this session". The wait before the first prompt counted any request carrying the server's
+token as Kimi having the tools; Kimi connects (`initialize`) and then lists them, and when the
+listing fails it opens the session without that server and says nothing over ACP. The harness's
+server now counts a client as having its tools only once it was given their listing
+(`Tools.reached`, behind `Served.reached`), so such a Kimi is started again and, when the next
+one has no tools either, the run fails saying why. A session that listed them as it opened (the
+usual case) waits no longer than before.
+
+The benchmark no longer scores a store named as inside the fences as claimed an outlier
+(`stats-05`: "S05 sits just inside the upper fence"), nor an earlier figure named as what the
+answer is less or more than as the answer (`conversation-02`: "£10,076 less than July's
+£356,561.76"); one listed as an outlier, or given as the answer, still fails.
+
 ### Fixed: a file the user asks for, and why not where none can be made
 
 "Export the top 20 SKUs as Excel" was answered "I can't create an Excel file" on ReAct, ReAct on
