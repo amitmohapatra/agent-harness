@@ -2842,3 +2842,112 @@ def test_an_export_the_case_asked_for_is_scored_by_the_file_kept(case: str, name
     assert cx.score(t.expect, said, [], t.text, files=whole)["correct"] is True
     short = {name: made(["h", *spec["holds"]])}
     assert cx.score(t.expect, said, [], t.text, files=short)["correct"] is False
+
+
+def test_a_figure_said_set_aside_or_next_best_is_not_the_answer() -> None:
+    """ReAct on Deep Agents (advconv-10 t2, advdata-04 t0): "**49 days** ... The supplier
+    master's 42 days (last updated 2026-03-02) was set aside in favour of the portal figure"
+    and "Bursa Cotton (V-02) ... The next best are Aldgate Knit (V-01) at 91%" scored as giving
+    the forbidden 42 and the runner-up. Giving the forbidden one as the answer still fails."""
+    lead = _turn("advconv-10", 2)
+    said = (
+        "The agreed lead time for SUP-03 (Oslo Apparel) is **49 days**, the figure from the "
+        "supplier portal. The supplier master's 42 days (last updated 2026-03-02) was set aside "
+        "in favour of the portal figure, which you trust."
+    )
+    assert cx.score(lead.expect, said, [], lead.text)["correct"] is True
+    wrong = "The agreed lead time is 42 days. The portal's 49 days was set aside."
+    assert cx.score(lead.expect, wrong, [], lead.text)["correct"] is False
+    best = _turn("advdata-04", 0)
+    said = (
+        "**Bursa Cotton (V-02)** has the best on-time rate on the scorecard, at 93%.\n\n"
+        "The next best are Aldgate Knit (V-01) at 91% and Faro Linen (V-06) at 90%."
+    )
+    assert cx.score(best.expect, said, [], best.text)["correct"] is True
+    wrong = "**Aldgate Knit** has the best on-time rate. The next best is Bursa Cotton."
+    assert cx.score(best.expect, wrong, [], best.text)["correct"] is False
+
+
+def test_a_table_under_a_heading_that_says_its_rows_missed_is_no_member_of_the_set() -> None:
+    """ReAct on Deep Agents (advdata-13 t0): a table of the six stores that beat their target,
+    then "Four stores missed:" over a table of the other four, and the id scheme said as
+    ""S01" to "S40"", scored as presenting those four as members. G20 stands: one table of all ten, a column telling them apart, still fails, and
+    so does a wrong store in the winners' table."""
+    t = _turn("advdata-13", 0)
+    row = "| {} | £150,000 | £140,000 |"
+    winners = "\n".join(row.format(s) for s in ("S20", "S32", "S24", "S08", "S12", "S36"))
+    losers = "\n".join(row.format(s) for s in ("S04", "S16", "S28", "S40"))
+    head = "| Store | Q3 revenue | Target |\n|---|---|---|\n"
+    said = (
+        f"**Six of the ten west stores beat their Q3 2026 target:**\n\n{head}{winners}\n\n"
+        f"Four stores missed:\n\n{head}{losers}\n\nThe planning tool names its stores "
+        '"store-01" to "store-40", while the store list uses "S01" to "S40".'
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    one = f"Six of the ten beat their target:\n\n{head}{winners}\n{losers}"
+    assert cx.score(t.expect, one, [], t.text)["correct"] is False
+    also = said.replace(row.format("S36"), row.format("S36") + "\n" + row.format("S04"), 1)
+    assert cx.score(t.expect, also, [], t.text)["correct"] is False  # S04 among the winners
+    named = said.replace('"S01" to "S40"', '"S01" to "S40"; S40 beat it too')
+    assert cx.score(t.expect, named, [], t.text)["correct"] is False
+
+
+def test_a_small_figure_said_with_its_unit_counts_as_cited() -> None:
+    """ReAct on Deep Agents (advscen-02 t4 and t5): "the £40 fee and 25% holding rate ... The
+    ranking flips at about £53 per order or about 19% holding" cites the run's figures, scored
+    as citing none or one: whole numbers up to 100 are skipped as list numbers and counts
+    (G24). A pound or percent sign says a figure; "3 reasons" or "38 SKUs" still do not."""
+    t = _turn("advscen-02", 5)
+    said = (
+        "The main risks are the assumptions. **The £40 fee and 25% holding rate are the two "
+        "inputs that matter most.** The ranking flips at about £53 per order or about 19% "
+        "holding. A real plan would round the 3.29 orders a quarter."
+    )
+    context = "fee £40 per order; holding 25% a year; 92 / 28 = 3.29 orders"
+    assert (
+        "cites at least 2 figures" not in cx.score(t.expect, said, [], t.text, context)["missing"]
+    )
+    counts = "There are 3 reasons, and 38 SKUs are ordered; a plan would round the 3.29 orders."
+    missing = cx.score(t.expect, counts, [], t.text, context)["missing"]
+    assert "cites at least 2 figures" in missing
+
+
+def test_a_plan_said_in_proportion_to_sales_is_the_plan() -> None:
+    """ReAct on Deep Agents (advscen-04 t1): "I recommend **Plan B: split the 1,200 units in
+    proportion to Q3 sales.**" scored as naming no plan ("proportional" was the word looked
+    for). Recommending another plan still fails."""
+    assert _right(
+        "advscen-04", 1, "I recommend **Plan B: split the units in proportion to Q3 sales.**"
+    )
+    assert not _right("advscen-04", 1, "I recommend the equal split: 300 units to each region.")
+
+
+def test_no_files_on_record_says_the_report_is_not_there() -> None:
+    """ReAct on Deep Agents (advfile-02 t5, another user): "I haven't exported a stock report in
+    this conversation, and there are no files on record for you, so there's nothing to show
+    you" scored as not saying the report is not there. Describing a report still fails."""
+    said = (
+        "I haven't exported a stock report in this conversation, and there are no files on "
+        "record for you, so there's nothing to show you."
+    )
+    assert _right("advfile-02", 5, said)
+    assert not _right(
+        "advfile-02", 5, "The report you exported has 5 rows: SKU-00010 had 18 units."
+    )
+
+
+def test_a_chart_given_as_svg_code_because_no_tool_can_publish_the_file_is_a_refusal() -> None:
+    """ReAct on Deep Agents (bfh-mixed-02 t2): "I couldn't make a file you can download. The
+    file I wrote is in this session's scratch space, and I have no tool that can publish it.
+    Below is the chart as SVG code" with the SVG scored as giving no reason and offering
+    nothing. A refusal with neither still fails."""
+    turn = next(c for c in breakfix.cases() if c.id == "bfh-mixed-02").turns[-1]
+    svg = '\n```svg\n<svg xmlns="http://www.w3.org/2000/svg"><rect width="34"/></svg>\n```'
+    said = (
+        "I couldn't make a file you can download. The file I wrote is in this session's scratch "
+        "space, and I have no tool that can publish it. Below is the chart as SVG code. Paste "
+        "it into a text file and save it as `august.svg`."
+    )
+    assert cx.score(turn.expect, said + svg, [], turn.text)["correct"]
+    bare = "I couldn't make a file you can download."
+    assert not cx.score(turn.expect, bare, [], turn.text)["correct"]

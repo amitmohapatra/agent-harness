@@ -386,7 +386,10 @@ a dated snapshot. A tool says otherwise beside its other metadata: `tool(fn, max
 (seconds a value stays current) or `tool(fn, freshness="static")` (reference data: an earlier
 value is as good as a new one); `freshness="live"` also says the default in the tool's
 description (`tools.base.CHANGES`). The same keys go in a LangChain tool's `metadata` (beside
-`side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`).
+`side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`). A tool
+that writes (`side_effects="write"` or `"irreversible"`) and declares no age returns the record
+of what it did, not a value that changes: its earlier result is never called out of date, so the
+model is never told to call it again (which would do it again).
 
 Where memory owns the conversation, when each tool result was fetched is kept in one place:
 the run record of its call (`custom_metadata["run_record"]["fetched"]`, UTC, with its tool's

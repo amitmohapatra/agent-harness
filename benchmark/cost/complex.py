@@ -2762,8 +2762,8 @@ _WHY: Final = re.compile(
     r"(?:no|(?:don't|do not|doesn't|does not) have (?:an? |any )?)(?:[\w-]+ ){0,2}"
     r"(?:python|code|shell|script)[- ](?:[\w-]+ )?(?:runtime|runner|interpreter|execution|"
     r"environment|tools?)|"
-    r"(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
-    r"draw|render|run|generat|export|fit)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
+    r"(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:can |could )?(?:writ|creat|mak|"
+    r"draw|render|run|generat|export|fit|publish)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
     r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
     r"plots?|graphs?|\.?xlsx)|"
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
@@ -2806,10 +2806,10 @@ WEB_SEARCH: Final = frozenset({"WebSearch", "WebFetch", "FetchURL"})
 #: A source cited as a link.
 _CITED: Final = re.compile(r"https?://\S+")
 _ABSTAIN: Final = re.compile(
-    r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
+    r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|files?|"
     r"information|returns?|sales data|stock history|history|\w+ rows)|not (?:available|tracked|recorded|covered|"
     r"in the data|exist)|isn't (?:available|tracked|an? \w+|in the (?:data|list|\w+ list))|"
-    r"there(?:'s| is) no\b|"
+    r"there(?:'s| is) no\b|nothing to show|"
     r"only (?:covers?|goes|from|has|the current)|"
     r"(?:can't|cannot|couldn't|could not|unable to) (?:find|answer|provide|give|tell|see|get|"
     r"retrieve|fetch|report)|outside|"
@@ -2871,6 +2871,33 @@ def _left_out(said: str, size: int) -> bool:
     return any(place > size for place in places)
 
 
+#: A heading that says the rows under it missed ("Four stores missed:", "These fell short:").
+_MISSED: Final = re.compile(r"\b(?:missed|fell short)\b[^:\n]*:\s*$", re.IGNORECASE)
+
+
+#: A range of ids, each end quoted: the scheme the data names its things by ("the store list
+#: uses "S01" to "S40""), no member of a result.
+_QUOTED_RANGE: Final = re.compile(r'"([A-Za-z]+-?)\d+"\s*(?:to|through|-|\u2013)\s*"\1\d+"')
+
+
+def _unlisted(answer: str, size: int) -> str:
+    """``answer`` without the rows of each table whose heading — the line before it, ending
+    in a colon — says they are left out of a result of ``size`` items ("Four stores missed:"),
+    and without a quoted range of ids (:data:`_QUOTED_RANGE`): a table under any other heading,
+    or with none, is kept as it is."""
+    out, left_out = [], False
+    for line in answer.split("\n"):
+        if _TABLE_ROW.fullmatch(line):
+            out.append(" " if left_out else line)
+        elif line.strip():
+            heading = line.rstrip().endswith(":")
+            left_out = heading and bool(_MISSED.search(line) or _left_out(line, size))
+            out.append(line)
+        else:
+            out.append(line)
+    return _QUOTED_RANGE.sub(" ", "\n".join(out))
+
+
 def _presented(answer: str, item: str, size: int) -> bool:
     """Whether ``answer`` presents a forbidden ``item`` as part of its result of ``size``
     items: named in some statement that does not say it is left out (one pass, linear time)."""
@@ -2904,10 +2931,12 @@ _EARLIER: Final = re.compile(
 #: Aldgate Knit at 91%"), or what another source says ("the master record says 42 days, but
 #: the agreed source is the portal"). Read only where the answer's own figure is said.
 _CONTRAST: Final = re.compile(
-    r"\bnext (?:are|is|comes?)\b|\brunners?-up\b|"
+    r"\bnext (?:best |highest |closest )?(?:are|is|comes?)\b|\brunners?-up\b|"
     r"\b(?:says?|said|records?|lists?|shows?)\b[^.\n]{0,60}, but\b|"
     # "the master's 42 days is not the figure to use"
-    r"\bis not the (?:figure|one|value|number|source) (?:to use|we use|we agreed)\b",
+    r"\bis not the (?:figure|one|value|number|source) (?:to use|we use|we agreed)\b|"
+    # "the master's 42 days was set aside in favour of the portal figure"
+    r"\b(?:was|were|is|are) set aside\b",
     re.IGNORECASE,
 )
 #: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
@@ -3181,6 +3210,16 @@ def _undated(text: str) -> str:
     return _CLOCK.sub(" ", _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", text)))
 
 
+#: A small whole number said with its unit ("£40", "25%"): a figure, never a list number or a
+#: count ("3 reasons").
+_UNIT_FIGURE: Final = re.compile(r"[£$€]\s?(\d{1,3})(?![\d,.]\d)|(?<![\d.,])(\d{1,3})\s?%")
+
+
+def _with_unit(text: str) -> set[float]:
+    """The whole numbers up to 100 ``text`` says with a currency or percent sign."""
+    return {float(m[1] or m[2]) for m in _UNIT_FIGURE.finditer(text)} - {0.0}
+
+
 def _small_figures(rubric: str) -> set[float]:
     """The whole numbers up to 100 a case's rubric names as its evidence ("the file says 23;
     stock_level says 10"): an answer that says them cites them, as it would a larger one."""
@@ -3291,7 +3330,7 @@ def score(
     if k == "grounded":
         small = _small_figures(expect.rubric)  # the case's own: said, they are evidence
         cited = [n for n in numbers(a) if not (n == int(n) and abs(n) <= 100)] + sorted(
-            {n for n in numbers(_undated(a)) if n in small}
+            {n for n in numbers(_undated(a)) if n in small} | _with_unit(a)
         )
         if len(cited) < int(expect.value or 0):
             missing.append(f"cites at least {expect.value} figures")
@@ -3382,6 +3421,7 @@ def score(
     if k in ("number", "record") and not missing:  # the figure said, the others for contrast
         said = _blanked(_CONTRAST, _blanked(_EARLIER, said))
     if k == "set":  # a wrong member named only as left out of the result is no member
+        said = _unlisted(said, len(expect.value))
         hit = [f for f in expect.forbidden if f and _presented(said, f, len(expect.value))]
     else:
         hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]

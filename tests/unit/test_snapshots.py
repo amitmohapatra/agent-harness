@@ -91,6 +91,38 @@ def test_a_tools_declared_age_is_read_from_the_run() -> None:
     assert snapshots.declared_max_age(runtime, "other") is None
 
 
+def test_a_write_tools_result_is_never_out_of_date_unless_it_says_so(
+    clock: list[datetime],
+) -> None:
+    """An export's result ("stock-report-1.csv, 5 rows") was replayed as "[out of date: call
+    export_stock_report again for the current value]", and the run's context and record said
+    the same: the next turn's model exported again to "check for current counts", and the run
+    waited for approval of a write nobody asked for. A write's result is the record of what it
+    did, not a value that changes: never marked, unless the tool declares an age itself."""
+    export = ToolSpec(name="export", side_effects="write", input_schema={"type": "object"})
+    wipe = ToolSpec(name="wipe", side_effects="irreversible", input_schema={"type": "object"})
+    live = ToolSpec.model_validate(
+        {"name": "send", "side_effects": "write", "input_schema": {"type": "object"}, "max_age": 0}
+    )
+    runtime = SimpleNamespace(
+        toolbox={s.name: SimpleNamespace(spec=s) for s in (export, wipe, live)},
+        native={},
+        bound={},
+    )
+    assert snapshots.declared_max_age(runtime, "export") is None
+    assert snapshots.declared_max_age(runtime, "wipe") is None
+    assert snapshots.declared_max_age(runtime, "send") == 0.0  # it says its result changes
+    history = [
+        m
+        if m.role is not Speaker.ASSISTANT or not m.tool_calls
+        else Said(Speaker.ASSISTANT, "", (Called("c1", "export", {"sku": "a"}),))
+        for m in turn()
+    ]
+    clock[0] = T0 + timedelta(hours=1)
+    ages = lambda name: snapshots.declared_max_age(runtime, name)  # noqa: E731
+    assert snapshots.out_of_date(history, ages) == (history, [])
+
+
 def test_the_time_is_utc() -> None:
     assert REAL_NOW().tzinfo is UTC
 

@@ -5,6 +5,26 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a write's earlier result is no value to fetch again
+
+A tool that writes (`side_effects="write"` or `"irreversible"`) was live by default like any
+other, so its result in a later turn was marked "[out of date: call export_stock_report again
+for the current value]", and the run's record and context said the same. On ReAct with Deep
+Agents' backend the next turn ("What's in that file?") exported the report again "to check for
+current counts" instead of answering from the file it had just opened, and the run waited for
+approval of a write nobody asked for (`advfile-02`; plain ReAct did the same the day before). A
+write's result is the record of what it did: `tools.base.max_age` gives it no age, so it is
+never marked, recorded or noted as out of date — unless the tool declares an age itself
+(`max_age=`, `freshness="live"`). Read tools are unchanged, and nothing is added to any request.
+
+The benchmark now reads a runner-up named "the next best" and a figure "set aside" as set
+against the answer, a table under a heading that says its rows missed ("Four stores missed:")
+and a quoted range of ids (""S01" to "S40"") as naming no member, a small figure said with its
+unit ("£40", "25%") as cited, "in proportion to Q3 sales" as the proportional plan, "no files on
+record ... nothing to show" as saying a report is not there, and "no tool that can publish it.
+Below is the chart as SVG code" as a refusal with its reason and an offer. The answers these
+patterns stand for still fail when they give the wrong figure, member or plan.
+
 ### Fixed: a Kimi that connected to the harness's tools but never listed them is not prompted
 
 In the accuracy run, one Kimi Code conversation in the middle of a run (`long-chain-04`; the

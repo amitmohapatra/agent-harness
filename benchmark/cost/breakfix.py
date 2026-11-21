@@ -1179,8 +1179,9 @@ def cases() -> list[Any]:
                  expect=cx.record({"gap": abs(hs[0][1] * 0.88 - hs[1][1])})),
             Turn("Make that a chart I can download.",
                  expect=cx.cannot(FAKE_CHART,
-                                  # the data given to chart elsewhere ("here is the data") is an offer too
-                                  r"figures|numbers|table|instead|here(?: is|'s) the|give you the data",
+                                  # the data given to chart elsewhere ("here is the data") is an offer
+                                  # too, and so is the chart's own source ("below is the chart as SVG")
+                                  r"figures|numbers|table|instead|here(?: is|'s) the|below is|give you the data",
                                   "I can't make a chart here: there is no code execution, files or images in this setup. "
                                   "Here are the figures instead.")),
         ),

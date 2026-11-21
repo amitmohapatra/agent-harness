@@ -29,7 +29,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic import ValidationError as PydanticError
@@ -205,13 +205,19 @@ class Tool:
 def max_age(spec: ToolSpec) -> float | None:
     """How long a value the tool returns stays current, in seconds: as it declared it
     (:data:`MAX_AGE`); ``None`` for a tool that declared its data static (reference data: an
-    earlier value is as good as a new one); else 0 — live, by default: a tool's data changes,
-    so a value of an earlier turn, a replayed window or memory is a dated snapshot."""
+    earlier value is as good as a new one), and for a write that declared no age (its result
+    is the record of what it did: "call it again for the current value" would do it again);
+    else 0 — live, by default: a tool's data changes, so a value of an earlier turn, a
+    replayed window or memory is a dated snapshot."""
     extra = spec.model_extra or {}
-    if extra.get(FRESHNESS) == STATIC:
-        return None
     found = extra.get(MAX_AGE)
-    return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else 0.0
+    if isinstance(found, int | float) and not isinstance(found, bool):
+        return float(found)
+    return None if extra.get(FRESHNESS) == STATIC or spec.side_effects in _WRITES else 0.0
+
+
+#: The risks of a tool that does more than read (:data:`SideEffects`).
+_WRITES: Final = frozenset(get_args(SideEffects)) - {"read"}
 
 
 def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict[str, Any]:

@@ -2620,7 +2620,7 @@ def scenario_cases() -> list[Any]:
     pick_fewer = min(fewer, key=lambda k: (fewer[k]["under_14"], -fewer[k]["lowest"]))
     names = {
         "equal": ("equal",),
-        "by_sales": ("by sales", "by_sales", "sales share", "proportional"),
+        "by_sales": ("by sales", "by_sales", "sales share", "proportion"),  # ...al, in ... to
         "lowest_cover": ("lowest cover", "lowest_cover"),
     }
     out.append(
