@@ -406,10 +406,13 @@ async def test_a_call_made_twice_in_one_step_runs_twice_as_the_library_runs_it(
     assert read == ["a: 7", "a: 7"]
 
 
-async def test_a_large_result_reaches_a_graph_of_its_own_loop_whole(harness: Harness) -> None:
-    """Without the harness's middleware the graph runs its own loop, and its tool's result is
-    the library's: a result past the size the harness keeps, and a table, reach the model as the
-    tool returned them, with no tool of the harness's added to read them back."""
+async def test_a_large_result_of_a_graph_of_its_own_loop_is_kept_and_read_back(
+    harness: Harness,
+) -> None:
+    """Without the harness's middleware the graph still runs its own loop, and a result past
+    the size the harness keeps is kept as it is in ReAct: the model is told where it is and is
+    offered the harness's readers for it — only once a result is held (a run that holds none is
+    sent as it was: test_large_data)."""
 
     @lc_tool
     def big(n: int) -> str:
@@ -421,8 +424,10 @@ async def test_a_large_result_reaches_a_graph_of_its_own_loop_whole(harness: Har
     graph = create_agent(model, tools=[big])
     assert (await harness.wrap(graph, id="big").run("x", user="u")).answer == "read"
     [read] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
-    assert read.content == "word " * 20_000
-    assert model.requests[-1]["tools"] == ["big"]
+    assert "/large_tool_results/" in read.content and len(read.content) < 20_000, len(
+        read.content
+    )  # a sample of 100,000
+    assert model.requests[-1]["tools"] == ["big", "read_file", "query_result"]
 
 
 # ------------------------------------------------------------------ a decision model's verdict

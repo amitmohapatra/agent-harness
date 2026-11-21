@@ -982,14 +982,24 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
     )
 
 
+def _asked_at(messages: Sequence[AnyMessage]) -> int:
+    """Where the run's question is in ``messages``: its last user message not steered into it
+    (a message steered in joins the run under way: what the run fetched before it is this
+    turn's, not an earlier one's); ``-1``: none."""
+    return max(
+        (n for n, m in enumerate(messages) if typed(m) and STEERED not in m.response_metadata),
+        default=-1,
+    )
+
+
 def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[AnyMessage], set[str]]:
     """``messages`` (a thread the framework keeps, as the model is sent it) with each result
-    from before the latest user message of a live tool of the run (``max_age`` 0: every
-    earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
+    from before the run's question (:func:`_asked_at`) of a live tool of the run (``max_age``
+    0: every earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
     already stamped (a memory window's replay), or of a tool whose value stays current a while
     (its age is not known here) or for good, is left as it is; and so is the result of a call
     that failed or was stopped before it came back: it returned no value to be out of date."""
-    asked = max((n for n, m in enumerate(messages) if typed(m)), default=-1)
+    asked = _asked_at(messages)
     called = {
         c["id"]: c["name"]
         for m in messages[:asked]
@@ -1036,7 +1046,7 @@ def _stale_noted(messages: list[AnyMessage], stale: Collection[str]) -> list[Any
     """``messages`` with the latest user message saying which tools' earlier results are out of
     date (``snapshots.note``, as a memory window's replay says it in the run's context), after
     its text: the request's copy, the earlier messages untouched (one cached prefix)."""
-    asked = max((n for n, m in enumerate(messages) if typed(m)), default=-1)
+    asked = _asked_at(messages)
     note = snapshots.note(sorted(stale))
     if asked < 0 or note is None:
         return messages
