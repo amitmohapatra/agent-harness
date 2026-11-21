@@ -449,9 +449,10 @@ class Agent:
         #: turn says them (:meth:`unwritten_said`), as a messages window's reads them from the
         #: run store (:meth:`caught_up`)
         self.unwritten: LRU[str, dict[str, list[Said]]] = LRU(SESSIONS_KEPT)
-        #: the attempt each of those turns was said in, by conversation and run id: a later
-        #: turn's write sends them again under their own keys (:meth:`_queued_turn`)
-        self.attempts_of: LRU[str, dict[str, int]] = LRU(SESSIONS_KEPT)
+        #: the attempt each of those turns was said in, and its run's memory scope, by
+        #: conversation and run id: a later turn's write sends them again under their own keys
+        #: and scopes, as they were first sent (:meth:`_queued_turn`)
+        self.attempts_of: LRU[str, dict[str, tuple[int, RunMemory]]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -1637,17 +1638,18 @@ class Agent:
         another."""
         run_id, attempt, conversation_key = runtime.run_id, runtime.attempt, runtime.conversation
         attempts = self.attempts_of.get(conversation_key) or {}
-        attempts[run_id] = attempt
+        attempts[run_id] = (attempt, memory)
         self.attempts_of[conversation_key] = attempts
         on_its_way[run_id] = list(messages)
         self.unwritten[conversation_key] = on_its_way
-        # in the order they were said, this one last
-        turns = [(r, said, attempts.get(r, 1)) for r, said in on_its_way.items()]
+        # in the order they were said, this one last; each under its own run's scope, so a turn
+        # sent again is its first write byte for byte (its retry key's payload)
+        turns = [(r, said, *attempts.get(r, (1, memory))) for r, said in on_its_way.items()]
 
         async def written() -> None:
-            for turn_id, said, said_in in turns:
+            for turn_id, said, said_in, its_memory in turns:
                 if turn_id in on_its_way:  # else in memory already
-                    await memory.record_messages(said, turn_id, said_in)
+                    await its_memory.record_messages(said, turn_id, said_in)
                     on_its_way.pop(turn_id, None)  # its window says it from now on
                     attempts.pop(turn_id, None)
 

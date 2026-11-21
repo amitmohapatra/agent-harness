@@ -161,6 +161,13 @@ and questions whose answers are facts of this harness. Cases waiting on a featur
 `update_schedule`, `end_at`, the organisation's schedule limit) are listed in `PENDING` and
 reported apart.
 
+### Fixed: a turn sent again behind a slow one is no longer lost
+
+When a turn's transcript write was slow, the next turn sent it again before its own, but under
+the next turn's memory scope with the first turn's retry key. The memory service refused the
+key reused with another payload, and the earlier turn was lost (seen under load). Each turn is
+now sent again under its own run's scope, exactly as first sent.
+
 ### Fixed: why a schedule's last run failed is said from its own record
 
 `list_schedules` said a schedule failed in a row but not why unless the memory service had the

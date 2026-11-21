@@ -139,11 +139,15 @@ async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_w
         firsts.append(model.script.requests[before]["messages"])
     # a ReAct is told what the harness keeps of a large result; a graph of its own is not
     said = kept_dated("s") if kept == "window" else dated("s")
-    for messages, text in zip(firsts, questions, strict=True):
+    # a graph keeping its own thread is told, after the question, that the earlier live result
+    # is out of date (a window's replay marks it on the result itself): the request's copy only
+    stale = f"\n\n{snapshots.note(['stock'])}" if kept == "checkpointer" else ""
+    for n, (messages, text) in enumerate(zip(firsts, questions, strict=True)):
         assert [m["role"] for m in messages].count("system") == 1  # the instructions alone
         assert messages[0] == {"role": "system", "content": said}
         context, question = messages[-1]["content"]
-        assert messages[-1]["role"] == "user" and question == {"type": "text", "text": text}
+        asked = text + (stale if n else "")
+        assert messages[-1]["role"] == "user" and question == {"type": "text", "text": asked}
         assert context["text"].startswith(OPENED + f"Facts for: {text}")
     for earlier, later in itertools.pairwise(firsts):
         assert later[: len(earlier) - 1] == earlier[:-1]  # the history, as it was sent
@@ -371,6 +375,42 @@ async def test_a_later_turn_is_stored_after_an_earlier_one_still_on_its_way(
             assert result.status is RunStatus.SUCCESS
         await h.writes.drain()
         assert [m["content"] for m in service.threads[KEPT]] == ["one", "1", "two", "2"]
+
+
+async def test_an_earlier_turn_sent_again_is_sent_as_it_was_under_its_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first turn's write is slow; the second turn sends it again (in order, before its
+    own): under the first turn's key it must be the first turn's write, byte for byte — its
+    own scope — or the service refuses the key reused with another payload and the turn is
+    lost (seen under load: "Idempotency-Key reused with a different payload")."""
+    from trellis.harness import agent as agent_module
+    from trellis.harness.clients.memory import RunMemory
+
+    service = FakeMemoryService()
+    plain = RunMemory.record_messages
+    first = asyncio.Event()
+
+    async def slow_first(self: RunMemory, messages: Any, run_id: str, attempt: int) -> None:
+        if messages[0].content == "one" and not first.is_set():
+            await asyncio.sleep(0.3)  # past the run's wait: queued, and still on its way
+            first.set()
+        await plain(self, messages, run_id, attempt)
+
+    monkeypatch.setattr(RunMemory, "record_messages", slow_first)
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.05)
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        agent = h.wrap(create_agent(ScriptedChat(["1", "2"]), tools=[]), id="resent")
+        for said in ("one", "two"):
+            result = await agent.run(said, user="u1", thread=THREAD)
+            assert result.status is RunStatus.SUCCESS
+        await h.writes.drain()
+    sent: dict[str, Any] = {}
+    for call in service.calls:
+        if call.name == "messages" and call.idempotency_key:
+            assert sent.setdefault(call.idempotency_key, call.body) == call.body, (
+                call.idempotency_key
+            )
 
 
 async def test_a_later_turn_never_waits_for_a_stuck_earlier_one(
