@@ -284,6 +284,11 @@ class Runtime:
     #: its tool, its arguments as the model wrote them: the earlier call's id, taken once by
     #: the repeat, which does not run (``tools.bridge.same``)
     repeats: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    #: the tools the run's model requests bind themselves that are neither the toolbox's nor
+    #: its framework's own (a graph built by hand binding the harness's tools), by name, as
+    #: the requests were seen (``middleware._earlier``): their freshness is read there too
+    #: (``snapshots.declared_max_age``)
+    bound: dict[str, ToolSpec] = field(default_factory=dict, repr=False)
     #: memory's thread as the attempt read it (``bridges.session.thread``: read once, for the
     #: out-of-date note and an OpenAI run's session alike), or why it could not be
     thread_read: Any = field(default=None, repr=False)

@@ -177,7 +177,6 @@ from trellis.harness.tools.base import (
     cut_short,
     data_of,
     failed_output,
-    max_age,
     not_run,
 )
 from trellis.harness.tools.bridge import MAX_REPEATS
@@ -1008,19 +1007,20 @@ def _earlier(
         if isinstance(m, AIMessage)
         for c in m.tool_calls
     }
-    bound = {t.name: spec_of(t) for t in tools if isinstance(t, BaseTool)}
+    known = runtime.toolbox.keys() | runtime.native.keys()
+    runtime.bound.update(
+        (t.name, spec_of(t)) for t in tools if isinstance(t, BaseTool) and t.name not in known
+    )
     out = list(messages)
     stale: set[str] = set()
     for n, m in enumerate(messages[:asked]):
         if not isinstance(m, ToolMessage) or not isinstance(m.content, str) or m.status == "error":
             continue
         tool = called.get(m.tool_call_id) or m.name or ""
-        found = runtime.toolbox.get(tool)
-        # a tool the graph binds itself is its request's (a harness tool it converted is in
-        # neither the toolbox nor the graph's own: ``LangGraphAdapter.native``)
-        spec = found.spec if found is not None else runtime.native.get(tool) or bound.get(tool)
         marked = m.content.startswith(snapshots.STALE.format(tool=tool))  # memory's replay
-        if spec is None or marked or max_age(spec) != 0:
+        # a tool the graph binds itself is its request's (a harness tool it converted is in
+        # neither the toolbox nor the graph's own: ``LangGraphAdapter.native``), recorded above
+        if marked or snapshots.declared_max_age(runtime, tool) != 0:
             continue
         stale.add(tool)
         # the request's copy is marked, never the graph's state: each call marks it anew

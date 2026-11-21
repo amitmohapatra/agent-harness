@@ -53,11 +53,14 @@ TIME: Final = "%Y-%m-%dT%H:%M:%SZ"
 
 def declared_max_age(runtime: Any, name: str) -> float | None:
     """How long a value of ``runtime``'s tool ``name`` stays current, as it declared it
-    (``tools.base.max_age``; ``None``: it did not say, or it is not the run's tool)."""
+    (``tools.base.max_age``; ``None``: it did not say, or it is not the run's tool) — the one
+    lookup of a tool's freshness: the run's toolbox, its framework's own tools, then the tools
+    its model requests bind themselves (``Runtime.bound``: a graph built by hand binding the
+    harness's tools)."""
     from trellis.harness.tools.base import max_age  # noqa: PLC0415 - the tools import this
 
     found = runtime.toolbox.get(name)
-    spec = found.spec if found is not None else runtime.native.get(name)
+    spec = found.spec if found is not None else runtime.native.get(name) or runtime.bound.get(name)
     return None if spec is None else max_age(spec)
 
 
@@ -95,7 +98,8 @@ def out_of_date(
 ) -> tuple[list[Said], list[str]]:
     """``history`` with each tool result whose recorded fetch time (``Said.facts``,
     :data:`FETCHED`) is past its tool's ``max_age`` (seconds; ``None``: the tool did not say)
-    starting with :data:`STALE`, and those tools, in the order met. The result of a call that
+    starting with :data:`STALE` — its age, where ``max_age`` cannot say, the one its call's
+    record says (:data:`MAX_AGE`) —, and those tools, in the order met. The result of a call that
     failed (its recorded status) is left as it is: it returned no value to be out of date."""
     from trellis.harness.tools.base import FAILED  # noqa: PLC0415 - the tools import this
 
@@ -107,7 +111,8 @@ def out_of_date(
         tool = tools.get(m.tool_call_id or "") if m.role is Speaker.TOOL else None
         facts = m.facts or {}
         when = None if facts.get("status") in FAILED else _parsed(facts.get(FETCHED))
-        limit = None if tool is None else max_age(tool)
+        # what the run says of the tool now, else what its call's record says it declared
+        limit = None if tool is None else _first(max_age(tool), facts.get(MAX_AGE))
         if tool is None or when is None or limit is None or (at - when).total_seconds() <= limit:
             return m
         stale[tool] = None
@@ -115,6 +120,12 @@ def out_of_date(
 
     marked = [one(m) for m in history]
     return marked, list(stale)
+
+
+def _first(said: float | None, recorded: object) -> float | None:
+    if said is not None:
+        return said
+    return float(recorded) if isinstance(recorded, int | float) else None
 
 
 def note(tools: Iterable[str]) -> str | None:

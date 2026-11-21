@@ -531,3 +531,33 @@ async def test_telling_a_run_its_results_are_out_of_date_reads_memorys_thread_no
     monkeypatch.setattr(snapshots, "now", at(FETCHED + timedelta(hours=1)))
     await agent.run("reorder qty for it?", user="u1", thread=THREAD)
     assert len(memory_service.named("thread_messages")) - before == THREAD_READS[framework]
+
+
+async def test_a_tool_the_graph_binds_itself_has_its_age_recorded_and_read_back(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool a graph built by hand binds itself (in neither the run's toolbox nor the graph's
+    own list) is looked up where its requests bind it (``snapshots.declared_max_age``, one
+    lookup for the request's mark and the run record): its call's record says how long its
+    value stays current, and a replay of it (``snapshots.out_of_date``, which reads that record
+    when the run cannot say) is marked out of date."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from trellis.harness.adapters import convert
+    from trellis.harness.history import said_of
+
+    get_stock = stock_tool()
+    bound = convert("langchain", [get_stock.tool])
+    model = ScriptedChat([("get_stock", {"sku": "SKU-00123"}), "40."])
+    graph = create_agent(model, tools=bound, checkpointer=InMemorySaver(), name="bound")
+    agent = memory_harness.wrap(graph, id="bound-recorded")
+    monkeypatch.setattr(snapshots, "now", at(FETCHED))
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    stored = [m for m in memory_service.threads[KEPT] if m["role"] in {"ASSISTANT", "TOOL"}]
+    assert stored[-2]["custom_metadata"]["run_record"]["max_age"] == 0.0
+    monkeypatch.setattr(snapshots, "now", at(FETCHED + timedelta(hours=1)))
+    said = [said_of({**m, **m.get("custom_metadata", {})}) for m in stored]
+    marked, stale = snapshots.out_of_date(said, lambda name: None)  # the run cannot say
+    assert stale == ["get_stock"]
+    assert str(marked[-2].content).startswith(snapshots.STALE.format(tool="get_stock"))

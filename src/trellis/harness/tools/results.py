@@ -302,9 +302,10 @@ class Conversations:
     """What each conversation's turns left for its later turns, kept in this process
     (``Agent.results``) — as a framework's own thread keeps it (Deep Agents' files in its
     state, a checkpointer's messages): the large results they saved, the graph state its last
-    turn ended with where the graph's thread is its run (``adapters.langgraph.CARRIED``), and,
-    where nothing else keeps the conversation (memory off), each turn's transcript — its
-    question, tool calls, their results and its answer (``conversation.earlier``). The least
+    turn ended with where the graph's thread is its run (``adapters.langgraph.CARRIED``), and
+    each turn's transcript — its question, tool calls, their results and its answer
+    (``conversation.earlier``: the earlier turns with memory off, which tools' results are out
+    of date with memory on, ``Agent.earlier_noted``). The least
     recently used conversation is forgotten past :data:`KEPT_CHARS` in all. A turn on another
     worker, or after a restart, finds none: a path read then says so (``query.GONE``), its
     history is each turn's question and answer from the run store, and its graph starts with

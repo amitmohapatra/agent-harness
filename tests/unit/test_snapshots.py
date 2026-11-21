@@ -82,8 +82,12 @@ def test_a_failed_call_has_no_value_to_be_out_of_date(clock: list[datetime], sta
 
 def test_a_tools_declared_age_is_read_from_the_run() -> None:
     live = ToolSpec(name="get_stock", description="d", input_schema={"type": "object"})
-    runtime = SimpleNamespace(toolbox={"get_stock": SimpleNamespace(spec=live)}, native={})
+    bound = ToolSpec(name="bound", description="d", input_schema={"type": "object"})
+    runtime = SimpleNamespace(
+        toolbox={"get_stock": SimpleNamespace(spec=live)}, native={}, bound={"bound": bound}
+    )
     assert snapshots.declared_max_age(runtime, "get_stock") == 0.0
+    assert snapshots.declared_max_age(runtime, "bound") == 0.0  # a tool its requests bind
     assert snapshots.declared_max_age(runtime, "other") is None
 
 

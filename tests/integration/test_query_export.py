@@ -233,6 +233,7 @@ class Run:
         self.replay = SimpleNamespace(journal=Journal())
         self.toolbox: dict[str, Any] = {}
         self.native = dict.fromkeys(native)
+        self.bound: dict[str, Any] = {}  # the tools its requests bind (Runtime.bound)
         self.frontend: Frontend | None = None
 
 

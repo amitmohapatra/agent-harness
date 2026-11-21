@@ -50,6 +50,12 @@ turn with nothing out of date is sent nothing more, and `ReAct`'s replayed windo
 before. A turn served by another process than the one before it is not told (as with memory
 off).
 
+A tool's freshness is looked up in one place (`snapshots.declared_max_age`): the run's toolbox,
+its framework's own tools, then the tools its model requests bind themselves (a graph built by
+hand binding the harness's tools, `Runtime.bound`). Such a tool's call now records its age in
+the run record, and a replay of it is marked out of date by the run record's age where the run
+cannot say (`snapshots.out_of_date`), not only by the request's mark.
+
 ### Fixed: schedules at their edges
 
 "In 2 hours" is two real hours across a clock change, and a delay before now or past a year
