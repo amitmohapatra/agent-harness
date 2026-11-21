@@ -2807,8 +2807,9 @@ WEB_SEARCH: Final = frozenset({"WebSearch", "WebFetch", "FetchURL"})
 _CITED: Final = re.compile(r"https?://\S+")
 _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
-    r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
-    r"in the data|exist)|isn't (?:available|tracked|in the (?:data|list|\w+ list))|"
+    r"information|returns?|sales data|stock history|history|\w+ rows)|not (?:available|tracked|recorded|covered|"
+    r"in the data|exist)|isn't (?:available|tracked|an? \w+|in the (?:data|list|\w+ list))|"
+    r"there(?:'s| is) no\b|"
     r"only (?:covers?|goes|from|has|the current)|"
     r"(?:can't|cannot|couldn't|could not|unable to) (?:find|answer|provide|give|tell|see|get|"
     r"retrieve|fetch|report)|outside|"

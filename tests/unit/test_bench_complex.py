@@ -2664,3 +2664,24 @@ def test_a_has_probe_reads_through_emphasis_and_fits_is_the_harnesss_window() ->
     big = [{"messages": [{"role": "user", "content": "word " * 200}]}]
     assert not cx.checked(fits, "SUCCESS", big, 1, adapter="react")[1]["ok"]
     assert len(cx.checked(fits, "SUCCESS", big, 1, adapter="openai")) == 1  # not checked
+
+
+def test_an_id_that_names_nothing_said_so_is_an_abstain() -> None:
+    """A store that does not exist, said so in any of the ways a model puts it ("isn't a
+    store", "there's no S55", "no sales rows"), is the data not there; a figure given for it
+    still is not."""
+    case = next(c for c in cx.cases() if c.id == "nodata-02")
+    turn = case.turns[0]
+    assert turn.expect is not None and turn.expect.kind == "abstain"
+    said = (
+        "S55 isn't a store in the network. The store list has 40 stores, S01 to S40, so there's "
+        "no S55 to report on. I returned no sales rows for S55 in Q3 2026 (1 July to 30 "
+        "September), which fits that."
+    )
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    assert cx.score(
+        turn.expect, "There is no store S55: the stores run S01 to S40.", [], turn.text
+    )["correct"]
+    assert not cx.score(turn.expect, "Store S55 sold 412 units in Q3 2026.", [], turn.text)[
+        "correct"
+    ]
