@@ -2572,3 +2572,95 @@ def test_a_correct_figure_beside_an_earlier_one_named_for_comparison_is_right() 
     )
     assert cx.score(t.expect, said, [])["correct"] is True
     assert cx.score(t.expect, "August was £356,561.76.", [])["correct"] is False
+
+
+def test_a_cli_write_paused_for_a_person_in_a_cannot_turn_ends_rightly() -> None:
+    """G4, bf1-mixed-05 (Claude): asked for a chart image, it set out to draw one with its own
+    shell, and the command, which writes, waited for a person: the run is right to pause there.
+    Any other turn, or a pause nobody asked about, still fails ``ends``."""
+    cannot = _turn("bf1-mixed-05", 2)
+    ends = cx.checked(cannot, "PAUSED", None, 1, happened={"asks"})[0]
+    assert ends["check"] == "ends" and ends["ok"], ends
+    assert not cx.checked(cannot, "PAUSED", None, 1)[0]["ok"]
+    assert not cx.checked(_turn("explain-06", 1), "PAUSED", None, 1, happened={"asks"})[0]["ok"]
+
+
+def test_a_revocation_remembered_or_asked_about_handles_it_as_a_pause_does() -> None:
+    """G18, bf3-past-02 and histx-03: "revoke my approval" was handled by remembering the
+    revocation (``memory_remember``) or by asking the user before forgetting; the probe took
+    only a paused ``memory_forget``. Doing nothing still fails."""
+    t = next(c for c in cx.cases() if c.id == "bf3-past-02").turns[1]
+
+    def asks(**kw: Any) -> bool:
+        found = cx.checked(t, "SUCCESS", None, 1, history="memory", **kw)
+        return next(c for c in found if c["check"].startswith("asks"))["ok"]
+
+    assert asks(happened={"asks"})
+    assert asks(calls=[{"tool": "memory_remember", "status": "ok"}])
+    assert asks(answer="I can remove my record of it. Should I do that?")
+    assert not asks(answer="I can't revoke it.")
+    assert not asks(calls=[{"tool": "memory_remember", "status": "error"}])
+
+
+def test_the_carry_cases_run_on_react_only_where_it_has_deep_agents_tools() -> None:
+    """G19: ``ReAct`` as built (``main``) offers the file tools only on a long task, and said
+    honestly it had none (react-plain carry-01/02/05): the carry cases run on its variants
+    with a backend, and on Deep Agents."""
+    case = next(c for c in cx.cases() if c.id == "carry-01")
+    assert not cx.applies(case, "react", "main")
+    assert cx.applies(case, "react", "deep") and cx.applies(case, "react", "sandbox")
+    assert cx.applies(case, "deepagents", "main")
+    assert cx.applies(next(c for c in cx.cases() if c.id == "multihop-01"), "react", "main")
+
+
+def test_a_figure_set_against_the_answer_is_not_the_answer() -> None:
+    """G20, advdata-04 and advconv-10: "Bursa Cotton (V-02) … Next are Aldgate Knit" and "49
+    days … The supplier master record says 42 days, but the agreed source is the portal"
+    scored as giving the forbidden runner-up and the master's figure. An answer that gives
+    only the forbidden one still fails."""
+    t = _turn("advdata-04", 0)
+    said = (
+        "**Bursa Cotton (V-02)** has the best on-time rate, 93%.\n\nNext are Aldgate Knit at 91%."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    assert (
+        cx.score(t.expect, "Aldgate Knit has the best on-time rate.", [], t.text)["correct"]
+        is False
+    )
+    lead = _turn("advconv-10", 2)
+    said = (
+        "We agreed to use the portal's lead time for SUP-03: **49 days**. The supplier master "
+        "record says 42 days, but the agreed source is the portal."
+    )
+    assert cx.score(lead.expect, said, [], lead.text)["correct"] is True
+    assert cx.score(lead.expect, "We agreed on 42 days.", [], lead.text)["correct"] is False
+
+
+def test_probes_of_the_scripted_models_calls_apply_to_it_alone() -> None:
+    """G21, advres-01/02: a probe that each malformed call is answered, or that a loop is
+    stopped, has nothing to see in a live model that calls well."""
+    assert {c.id for c in cx.cases() if c.scripted} >= {"advres-01", "advres-02"}
+
+
+def test_a_field_name_with_an_underscore_says_its_words() -> None:
+    """G24, advfile-02 t4: "as_of 2026-10-30 09:00 UTC" says the file's figures are as of then."""
+    t = _turn("advfile-02", 4)
+    assert t.expect is not None and t.expect.kind == "grounded"
+    said = "The file's rows have as_of 2026-10-30 09:00 UTC; the live read is 11:00. 23 and 10."
+    assert not any("says" in m for m in cx.score(t.expect, said, [], t.text, said)["missing"])
+
+
+def test_a_has_probe_reads_through_emphasis_and_fits_is_the_harnesss_window() -> None:
+    """G28, advconv-12: the earlier answer "There are **10 stores** in the north" is in the
+    request, read through its bold. G29, advconv-05 on graph and OpenAI: a window the harness
+    does not keep is not its ``fits`` to fail."""
+    probe = cx.Probe("has", "There are 10 stores in the north", why="earlier answer")
+    turn = cx.Turn("And in the south?", sent=(probe,))
+    sent = [
+        {"messages": [{"role": "assistant", "content": "There are **10 stores** in the north."}]}
+    ]
+    assert cx.checked(turn, "SUCCESS", sent, 1)[1]["ok"]
+    fits = cx.Turn("x", sent=(cx.Probe("fits", why="fits", limit=5),))
+    big = [{"messages": [{"role": "user", "content": "word " * 200}]}]
+    assert not cx.checked(fits, "SUCCESS", big, 1, adapter="react")[1]["ok"]
+    assert len(cx.checked(fits, "SUCCESS", big, 1, adapter="openai")) == 1  # not checked

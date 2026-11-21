@@ -341,6 +341,39 @@ async def test_a_framework_kept_thread_says_in_the_question_which_tools_are_out_
     assert note not in str(asked[0].content)
 
 
+@pytest.mark.parametrize("framework", ["openai_agents", "graph"])
+async def test_a_run_whose_model_calls_the_harness_cannot_see_is_told_too(
+    harness: Harness, framework: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenAI Agents and a graph built by hand (and the CLIs, whose sessions keep their own
+    turns) send their model a request the harness never sees, so no earlier result is marked
+    in it: the run's context names the tools whose results the conversation's earlier turns
+    hold, past their age (``freshness-03``: OpenAI, the graph, Claude and Kimi answered from
+    the earlier stock). A turn after none of them is told nothing."""
+    from tests.support.adapters import BUILDERS
+
+    get_stock = stock_tool()
+    seen: list[Any] = []
+    plan = [("get_stock", {"sku": "SKU-00123"})]
+    target, own = await BUILDERS[framework](harness, [get_stock], tmp_path, plan, seen=seen)
+    agent = arm(harness.wrap(target, id=f"told-{framework}"), own)
+    monkeypatch.setattr(snapshots, "now", at(FETCHED))
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    note = snapshots.note(["get_stock"])
+    assert note is not None
+    [model] = seen
+    assert note not in _sent(model)
+    monkeypatch.setattr(snapshots, "now", at(FETCHED + timedelta(hours=1)))
+    await agent.run("reorder qty for it?", user="u1", thread=THREAD)
+    assert note in _sent(model)
+
+
+def _sent(model: Any) -> str:
+    """What a scripted model was sent, its latest call last: OpenAI's inputs, LangChain's."""
+    said = getattr(model, "said", None)
+    return str(said()) if callable(said) else str(model.requests[-1])
+
+
 async def test_a_framework_kept_threads_failed_call_is_not_marked_out_of_date(
     harness: Harness,
 ) -> None:

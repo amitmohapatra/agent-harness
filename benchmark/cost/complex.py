@@ -217,9 +217,11 @@ class Probe:
 
 
 #: The ``asks`` probe of a turn that pauses to forget what the user said: the memory tools are
-#: memory's, so only with memory on.
+#: memory's, so only with memory on. Recording the change instead (``memory_remember``: the
+#: newer statement supersedes, the earlier one kept), or asking the user in the answer first,
+#: handles it too — what memory holds after it is judged by the case's last turn.
 ASKS_MEMORY: Final = Probe(
-    "asks", why="the run asks a person, then goes on approved", when="memory"
+    "asks", "memory_remember", why="the run asks a person, then goes on approved", when="memory"
 )
 #: How a turn may be sent while the turn before it still works (``Turn.mode``): the harness's
 #: busy-conversation modes (``trellis.harness.conversation.Mode``).
@@ -271,12 +273,16 @@ class Case:
     edges: tuple[str, ...] = ()  # the edge cases it covers
     #: tools offered beside the retailer's (``retail.TOOLS``)
     tools: tuple[Any, ...] = ()
-    #: the adapters it applies to (empty: every one), and why not the others
+    #: the adapters it applies to (empty: every one; ``adapter:variant`` for one variant of
+    #: it: :func:`applies`), and why not the others
     adapters: tuple[str, ...] = ()
     only_because: str = ""
     #: whether it needs code to run (a ``react`` variant of ``variants.CODING``): elsewhere it
     #: does not apply
     coding: bool = False
+    #: whether its probes need the scripted model's own calls (a malformed call, a loop): a
+    #: live model that calls well has nothing for them to see, and it does not apply
+    scripted: bool = False
     #: the model's context window for this case (over ``--window``)
     window: int | None = None
     #: the scripted model answers each call by the message it answers (``KeyedChatModel``),
@@ -2887,6 +2893,14 @@ _EARLIER: Final = re.compile(
     r"changed since|different (?:reading|figure|count) from|for comparison|compared (?:with|to))\b",
     re.IGNORECASE,
 )
+#: A sentence naming another figure than the answer, set against it: the runner-up ("Next are
+#: Aldgate Knit at 91%"), or what another source says ("the master record says 42 days, but
+#: the agreed source is the portal"). Read only where the answer's own figure is said.
+_CONTRAST: Final = re.compile(
+    r"\bnext (?:are|is|comes?)\b|\brunners?-up\b|"
+    r"\b(?:says?|said|records?|lists?|shows?)\b[^.\n]{0,60}, but\b",
+    re.IGNORECASE,
+)
 #: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
 _SENTENCE_END: Final = re.compile(r"(\n|\.(?!\S))")
 
@@ -3223,7 +3237,8 @@ def score(
         cited = [n for n in numbers(a) if not (n == int(n) and abs(n) <= 100)]
         if len(cited) < int(expect.value or 0):
             missing.append(f"cites at least {expect.value} figures")
-        if not re.search(expect.truth or ".", a, re.IGNORECASE | re.DOTALL):
+        # a field's name as the data writes it ("as_of") says the words ("as of")
+        if not re.search(expect.truth or ".", a.replace("_", " "), re.IGNORECASE | re.DOTALL):
             missing.append(f"says {expect.truth}")
         made_up = ungrounded(a, context, question)
         hit = [f for f in expect.forbidden if f and _forbidden_in(a, f)]
@@ -3306,8 +3321,8 @@ def score(
         prose = _TABLE_ROW.sub(" ", said)
         if all(_has_text(prose, options) for options in expect.value):
             said = prose  # the answer is in its prose; a table of every candidate is evidence
-    if k in ("number", "record") and not missing:
-        said = _blanked(_EARLIER, said)
+    if k in ("number", "record") and not missing:  # the figure said, the others for contrast
+        said = _blanked(_CONTRAST, _blanked(_EARLIER, said))
     if k == "set":  # a wrong member named only as left out of the result is no member
         hit = [f for f in expect.forbidden if f and _presented(said, f, len(expect.value))]
     else:
@@ -3401,6 +3416,19 @@ def kept_file(probe: Probe, files: Mapping[str, bytes]) -> tuple[bool, str]:
     return False, lacks
 
 
+#: The adapters whose requests the harness fits to the model's window (its middleware's
+#: ``FitWindow``: ``ReAct``, ``middleware()`` under LangChain's and Deep Agents' agents): a
+#: ``fits`` probe is theirs (the longtasks cases say the same of their window).
+WINDOW_KEPT: Final = ("react", "langgraph", "deepagents")
+
+
+def _shell_paused(result: Any) -> bool:
+    """Whether a run paused on a shell command of its framework's (Claude's or Kimi's ``Bash``)
+    that nobody approved: one that writes (``approvals.approved_reads`` approves the rest)."""
+    asked = getattr(result, "interrupt", None) if result.status is RunStatus.PAUSED else None
+    return getattr(getattr(asked, "tool_call", None), "tool", None) in approvals.SHELLS
+
+
 def checked(
     turn: Turn,
     status: str,
@@ -3412,6 +3440,8 @@ def checked(
     happened: Collection[str] = (),
     files: Mapping[str, bytes] | None = None,
     coding: bool = False,
+    answer: str = "",
+    adapter: str = "",
 ) -> list[dict[str, Any]]:
     """A turn's harness checks: how its run ended (``Turn.ends``) and each :class:`Probe` on
     what was sent — each ``{"check", "ok", "why", "found"}``. ``happened``: what the turn's
@@ -3419,10 +3449,15 @@ def checked(
     finished it). ``requests`` ``None``: what the model was sent is not seen (a CLI calling a
     real model itself: Claude, Kimi), so no probe of it (:data:`SENT_PROBES`) is checked."""
     seen = () if requests is None else requests
+    # a request this deployment was said not to meet, which the run set out to meet all the
+    # same with a command that writes (a CLI's shell): paused for a person, as it should be
+    asked = (
+        status == "PAUSED" and "asks" in happened and getattr(turn.expect, "kind", "") == "cannot"
+    )
     out = [
         {
             "check": "ends",
-            "ok": status in turn.ends,
+            "ok": status in turn.ends or asked,
             "why": f"the run ends {' or '.join(turn.ends)}",
             "found": status,
         }
@@ -3434,6 +3469,8 @@ def checked(
             continue
         if p.kind == "file" and (files is None or (p.coding and not coding)):
             continue  # not checked: the scripted model where only code makes the file
+        if p.kind == "fits" and adapter and adapter not in WINDOW_KEPT:
+            continue  # not checked: the window is its framework's, the harness keeps none
         found: Any = None
         if p.kind == "file":
             ok, found = kept_file(p, files or {})
@@ -3446,7 +3483,7 @@ def checked(
                 for q in seen
                 for msg in q.get("messages") or []
                 if p.role is None or _role(msg) == p.role
-                for m in [pattern.search(_texts(msg))]
+                for m in [pattern.search(_EMPHASIS.sub("", _texts(msg)))]
                 if m
             ]
             ok = bool(hits) if p.kind == "has" else not hits
@@ -3502,9 +3539,15 @@ def checked(
             ok, found = not twice, twice[:3]
         elif p.kind in ("asks", "restarts"):
             ok, found = p.kind in happened, sorted(happened)
+            if not ok and p.pattern:  # or what else handles it (:data:`ASKS_MEMORY`)
+                ok = "?" in answer or any(
+                    c["tool"] == p.pattern and c["status"] == "ok" for c in calls
+                )
         else:
             raise ValueError(f"no probe kind {p.kind!r}")
-        check = f"{p.kind} {p.pattern or p.limit or ''}".strip()
+        # an ``asks`` probe's pattern is what else handles it, no part of what it checks
+        named = "" if p.kind == "asks" else p.pattern or p.limit or ""
+        check = f"{p.kind} {named}".strip()
         out.append({"check": check, "ok": ok, "why": p.why, "found": found})
     return out
 
@@ -4019,12 +4062,16 @@ async def run_case(
         "stopped": None,
         "turns": [],
     }
-    if case.adapters and kind not in case.adapters:
+    if not applies(case, kind, variant):
         return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
     coding = kind == "react" and variant in variants.CODING
     scripted = not isinstance(model, str)
     if case.coding and not coding:
         return found | {"not_applicable": "needs code to run: a sandbox variant"}, []
+    if case.scripted and not scripted:
+        return found | {
+            "not_applicable": "its calls are the scripted model's (malformed, looping)"
+        }, []
     wire: list[dict[str, Any]] = []
     if kind == "kimi" and not isinstance(model, str):  # the scripted model: Kimi calls it
         model = await scripted_endpoint(model, wire)
@@ -4138,6 +4185,8 @@ async def run_case(
         result, approved[id(t)] = await approvals.approved_reads(
             agent, result, REVIEWER, work_folder(kind)
         )
+        if _shell_paused(result):  # a command that writes, left for a person to approve
+            happened.setdefault(id(t), set()).add("asks")
         return result
 
     i = 0
@@ -4232,6 +4281,8 @@ async def run_case(
                     # variant with a sandbox, which has no ``save_as``), it is not checked
                     files=None if coding and scripted else kept,
                     coding=coding,
+                    answer=answer,
+                    adapter=kind,
                 ),
             }
             if turn.expect is not None:
@@ -4261,6 +4312,13 @@ async def run_case(
         if stopped:
             break
     return found | {"stopped": stopped, "turns": records}, requests
+
+
+def applies(case: Case, adapter: str, variant: str) -> bool:
+    """Whether ``case`` runs on ``adapter`` built as ``variant``: its ``adapters`` name the
+    adapter (every variant of it), or ``adapter:variant`` (that variant only); none: every one."""
+    named = set(case.adapters)
+    return not named or adapter in named or f"{adapter}:{variant}" in named
 
 
 def _expect_row(e: Expect) -> dict[str, Any]:

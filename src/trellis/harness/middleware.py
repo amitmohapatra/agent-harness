@@ -1014,6 +1014,24 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
     return out, stale
 
 
+def _with_readers(runtime: Runtime, request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request offering the harness's readers too, once a result is held (:func:`_readers`)
+    — as schemas: ``create_agent`` refuses a tool it was not built with, and the governed tool
+    node answers a reader's call before it looks for the tool (:func:`_kept_read`)."""
+    present = {_named(t) for t in request.tools}
+    held = [convert_to_openai_tool(t) for t in _readers(runtime, request.state, present)]
+    return request.override(tools=[*request.tools, *held]) if held else request
+
+
+def _stale_marked(
+    runtime: Runtime, request: ModelRequest[Any]
+) -> tuple[ModelRequest[Any], set[str]]:
+    """The request with each earlier turn's live result marked out of date (:func:`_earlier`)
+    and its latest question saying which tools (:func:`_stale_noted`), and those tools."""
+    messages, stale = _earlier(runtime, request.messages)
+    return (request.override(messages=_stale_noted(messages, stale)) if stale else request), stale
+
+
 def _stale_noted(messages: list[AnyMessage], stale: Collection[str]) -> list[AnyMessage]:
     """``messages`` with the latest user message saying which tools' earlier results are out of
     date (``snapshots.note``, as a memory window's replay says it in the run's context), after
@@ -1663,11 +1681,9 @@ class HarnessTools(AgentMiddleware):
         _PAGED.add(runtime)
         # a thread the framework keeps: an earlier turn's live value is out of date, and its
         # tool stays offered (the memory window's replay is stamped where it is read)
-        messages, stale = _earlier(runtime, request.messages)
-        if stale:
-            request = request.override(messages=_stale_noted(messages, stale))
-            if runtime.offered is not None:
-                runtime.offered |= stale
+        request, stale = _stale_marked(runtime, request)
+        if stale and runtime.offered is not None:
+            runtime.offered |= stale
         request = _stubs_tabled(runtime, request)
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
@@ -1892,10 +1908,15 @@ async def _narrow(
     """A model call offered only the tools the run offers (:func:`_offered`), the memory
     context sent with the question (:func:`with_question`), the end of the history marked when
     a caching middleware marks the request (:func:`history_marked`), and the day it is after
-    the instructions (:func:`_dated`). Its tools' results are the library's, as they are: the
-    harness keeps and previews large results, and keeps tables for ``query_result``, only
-    where it runs the loop (``HarnessTools``: ``ReAct``, ``middleware()``)."""
+    the instructions (:func:`_dated`). The run's results are kept as ``HarnessTools`` keeps
+    them (:data:`_PAGED`: a table read whole kept for ``query_result``, its calls answered by
+    the governed tool node), and the harness's readers offered once one is held
+    (:func:`_readers`: a run that holds none is sent nothing more); an earlier turn's live
+    result is marked out of date, and the question says which (:func:`_stale_noted`)."""
     runtime = current()
+    if runtime is not None:
+        _PAGED.add(runtime)
+        request = _with_readers(runtime, _stale_marked(runtime, request)[0])
     asked = history_marked(with_question(_offered(request, runtime)))
     return await handler(_dated(asked, runtime))
 

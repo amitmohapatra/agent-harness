@@ -25,7 +25,13 @@ from benchmark.cost import retail as r
 #: "File '/x' not found").
 LOST: Final = r"not found"
 #: The adapters the cases apply to: Deep Agents' tools from the first call.
-ADAPTERS: Final = ("react", "deepagents")
+ADAPTERS: Final = (
+    "deepagents",
+    # ``ReAct`` with a backend: Deep Agents' tools from the first call (``main`` offers the
+    # file tools only on a long task, and said honestly it had none: react-plain carry-01/02/05)
+    *(f"react:{v}" for v in ("deep", "deep-paging", "deep-context_editing")),
+    *(f"react:{v}" for v in ("deep-summarization", "sandbox", "memory-files", "permissions")),
+)
 WHY: Final = "the files and todos are Deep Agents' own (ReAct offers them with a backend)"
 
 

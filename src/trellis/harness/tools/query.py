@@ -518,9 +518,7 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
     problem = _problem(runtime, args)
     if problem is not None:
         return problem
-    used = getattr(runtime, "used", None)
-    if isinstance(used, set):  # a tool the run used, as its others are
-        used.add(QUERY_RESULT)
+    getattr(runtime, "used", set()).add(QUERY_RESULT)  # a tool the run used, as its others
     sql = str(args["sql"]).strip().rstrip(";")
     refs = [str(r) for r in args.get("results") or ()]
     past = await _past(runtime, refs)

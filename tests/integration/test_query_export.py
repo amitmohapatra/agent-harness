@@ -120,17 +120,18 @@ async def _deep_agents_with_middleware(
     return graph, tools
 
 
-@pytest.mark.parametrize("framework", ["react", "middleware", "deepagents", "openai_agents"])
+@pytest.mark.parametrize(
+    "framework", ["react", "middleware", "langgraph", "deepagents", "openai_agents"]
+)
 async def test_every_framework_saves_a_small_result_read_whole_as_excel(
     harness: Harness, stored: Path, framework: str, tmp_path: Path
 ) -> None:
     """Asked to "export the top 20 SKUs as Excel": a result of a few rows the model read whole
     is kept beside it, its note saying how ``query_result(save_as=)`` gives the user a file,
-    and the call saves every row — on every adapter the harness gives its readers to (``ReAct``,
-    ``middleware()`` under LangChain's or Deep Agents' agent, OpenAI Agents; Claude and MCP
-    as OpenAI's). A graph built without ``middleware()`` gets no reader of the harness's
-    (``test_large_data``): offering ``query_result`` to it would cost every request its
-    definition (about 360 tokens)."""
+    and the call saves every row — on every adapter the harness gives its readers to
+    (``ReAct``, ``middleware()`` under LangChain's or Deep Agents' agent, a ``create_agent``
+    graph without it, OpenAI Agents; Claude and MCP as OpenAI's). Only a graph built by
+    hand, whose model call the harness cannot reach, gets none (``test_large_data``)."""
     sql = "SELECT * FROM result ORDER BY units DESC"
     plan = [
         ("top_skus", {}),

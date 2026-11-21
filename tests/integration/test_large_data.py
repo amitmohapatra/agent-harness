@@ -28,6 +28,7 @@ from tests.support.planned import Call
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, ReAct, sandbox, tool
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness import middleware
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.journal import content_key
 from trellis.harness.tools import query, results
@@ -777,18 +778,59 @@ async def test_every_framework_counts_a_table_read_whole_exactly(
     assert result.answer.endswith("41")
 
 
-@pytest.mark.parametrize("framework", ["langgraph", "graph", "deepagents"])
-async def test_a_graph_without_the_harnesss_middleware_reads_a_table_as_its_tool_returned_it(
-    harness: Harness, framework: str, tmp_path: Path
+async def test_a_graph_built_by_hand_reads_a_table_as_its_tool_returned_it(
+    harness: Harness, tmp_path: Path
 ) -> None:
-    """A LangGraph graph built without ``middleware()`` runs its own loop: its tool's result
-    reaches its model as the tool returned it — no table kept, no ``query_result`` note — and
-    the harness offers it no tool of its own to read results with."""
+    """A graph built by hand (``StateGraph``, its own model node binding its tools) runs a model
+    call the harness cannot reach: its tool's result reaches its model as the tool returned it
+    — no table kept, no ``query_result`` note — and no tool of the harness's is offered."""
     seen: list[Any] = []
     plan: list[Call] = [("sales_lines", {})]
-    target, own = await BUILDERS[framework](harness, [sales_lines], tmp_path, plan, seen=seen)
-    result = await arm(harness.wrap(target, id=f"lines-{framework}"), own).run("q", user="u")
+    target, own = await BUILDERS["graph"](harness, [sales_lines], tmp_path, plan, seen=seen)
+    result = await arm(harness.wrap(target, id="lines-graph"), own).run("q", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     [model] = seen
     assert result.answer == f"Done. {LINES}"
     assert all("query_result" not in str(r.get("tools")) for r in model.requests)
+
+
+@pytest.mark.parametrize("framework", ["langgraph", "deepagents"])
+async def test_an_agent_graph_without_the_harnesss_middleware_queries_a_kept_table(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """A ``create_agent`` or Deep Agents graph built without ``middleware()`` (the benchmark's
+    ``graph``) runs a model call the harness narrows (``middleware.narrowing``): a table it
+    reads whole is kept and noted as ``ReAct``'s are, and the harness's readers are offered
+    from the call after — so it counts, ranks and saves exactly, where it did the arithmetic
+    by hand (12 turns of ``graph`` in the baselines: k-means centres, gross profit, medians)."""
+    seen: list[Any] = []
+    plan: list[Call] = [
+        ("sales_lines", {}),
+        ("query_result", {"file_path": LINES_KEPT, "sql": DISTINCT}),
+    ]
+    target, own = await BUILDERS[framework](harness, [sales_lines], tmp_path, plan, seen=seen)
+    result = await arm(harness.wrap(target, id=f"kept-{framework}"), own).run("q", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer.endswith("41"), result.answer
+    [model] = seen
+    assert "query_result" not in str(model.requests[0].get("tools"))  # nothing kept yet
+    assert "query_result" in str(model.requests[1].get("tools"))
+
+
+@pytest.mark.parametrize("framework", ["langgraph", "deepagents"])
+async def test_an_agent_graph_without_the_middleware_and_no_kept_result_is_sent_as_it_was(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """A run that keeps no result pays nothing for the readers: its requests offer the graph's
+    tools and nothing of the harness's, and its instructions are the graph's own."""
+    seen: list[Any] = []
+    target, own = await BUILDERS[framework](
+        harness, [few_lines], tmp_path, [("few_lines", {})], seen=seen
+    )
+    result = await arm(harness.wrap(target, id=f"few-{framework}"), own).run("q", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    [model] = seen
+    assert len(model.requests) == 2
+    assert str(model.requests[0].get("tools")) == str(model.requests[1].get("tools"))
+    assert all("query_result" not in str(r.get("tools")) for r in model.requests)
+    assert all(middleware.KEPT_SAID not in str(r) for r in model.requests)

@@ -158,7 +158,7 @@ def readable(output: Any, tool: str | None = None) -> str:
 def private() -> str:
     """What a kept result's note says of its path in the current run: :data:`PRIVATE_SAVING`
     where ``query_result`` saves a file for the user (``query.saving``), else :data:`PRIVATE`."""
-    return PRIVATE_SAVING if query.saving(current()) else PRIVATE
+    return (PRIVATE, PRIVATE_SAVING)[query.saving(current())]
 
 
 def table_said(path: str, text: str, name: str) -> str:

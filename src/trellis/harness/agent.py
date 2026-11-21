@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import re
@@ -232,6 +233,8 @@ EARLIER_CHATS: Final = (
 #: app's own tool when one fits (AG-UI front-end tools), else its question tool (``ask_user``,
 #: Claude's and Kimi's ``AskUserQuestion``), else its reply. A risky action is never asked
 #: about here: governance asks for its approval.
+#: How the line naming out-of-date tools starts (``snapshots.NOTE``): said once a context.
+_NOTE_START: Final = snapshots.NOTE.split("{", 1)[0]
 ASKING: Final = (
     "## Asking the user\n"
     "Most turns ask nothing. When several things fit the user's words and they mean one (a "
@@ -1266,12 +1269,33 @@ class Agent:
             await self.recalled(runtime)
         else:
             pushed = await self.remembered(runtime, budget=self.context_budget - used)
+        await self.earlier_noted(runtime)
         if app:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, app) if p)
         if ASKING not in (runtime.pushed_context or "") and self.offers_a_question(runtime):
             # when to ask reaches the model wherever it has a question tool, memory or none
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, ASKING) if p)
         return pushed
+
+    async def earlier_noted(self, runtime: Runtime) -> None:
+        """Where the harness sees none of the model's requests to mark an earlier turn's result
+        in (OpenAI Agents, Claude's and Kimi's own sessions, a graph built by hand: not
+        ``Adapter.marks_earlier``), the run's context names the tools whose results the
+        conversation's earlier turns hold past their age (``snapshots.note``) — what memory's
+        replay and ``middleware._stale_noted`` say; once, and nothing when none is out of date
+        (``freshness-03``: those adapters answered from the earlier stock)."""
+        if getattr(self.adapter, "marks_earlier", False) or _NOTE_START in str(
+            runtime.pushed_context
+        ):
+            return
+        try:
+            earlier = await conversation.earlier(runtime, whole=True)
+        except Exception:  # a store that cannot say: nothing is marked, as before
+            return
+        age = functools.partial(snapshots.declared_max_age, runtime)
+        note = snapshots.note(snapshots.out_of_date(earlier, age)[1])
+        if note is not None:
+            runtime.context = "\n\n".join(p for p in (runtime.pushed_context, note) if p)
 
     def offers_a_question(self, runtime: Runtime) -> bool:
         """Whether the run's model has a question tool: ``ask_user`` among the run's tools, or

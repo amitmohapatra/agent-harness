@@ -73,6 +73,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import inspect
 import json
 import logging
 import warnings
@@ -190,6 +191,9 @@ class LangGraphAdapter(Keeps):
             _without_middleware(str(getattr(target, "name", None) or "LangGraph"))
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
+        #: its model calls are the harness's to change (``HarnessTools``, the narrowing copy):
+        #: an earlier turn's result is marked in the request (``middleware._stale_noted``)
+        self.marks_earlier = per_turn
         #: the graph's own tools (:meth:`native`), once read
         self._native: list[ToolSpec] | None = None
         #: the async tasks (Deep Agents' ``start_async_task``) its runs started that this
@@ -643,8 +647,8 @@ def _without_middleware(name: str) -> None:
     what the middleware gives."""
     log.warning(
         "the graph %s is wrapped without the harness's middleware: its tools are governed and "
-        "narrowed, and their results are the library's as they are (none kept for read_file "
-        "or query_result), but it has no memory or gateway MCP tools, no step limit or stall "
+        "narrowed, and its results kept for read_file and query_result as ReAct's are, but it "
+        "has no memory or gateway MCP tools, no step limit or stall "
         "guard, no "
         "model spans, call_timeout or budget stop, and no checkpoint in the run — build it with "
         "middleware=trellis.middleware() (its checkpoint is then kept in the run)",
@@ -1130,25 +1134,17 @@ def idle_execute(tool: Any) -> bool:
     default ``StateBackend``): ``create_deep_agent`` lists it whatever the backend, and its
     ``FilesystemMiddleware`` takes it off each model call there — no tool of the run's that
     runs code (``tools.export.runs_code``). Its backend is read from the middleware its
-    function closes over."""
+    function closes over (``self``)."""
     if getattr(tool, "name", None) != "execute":
         return False
+    from deepagents.middleware.filesystem import supports_execution
+
     try:
-        from deepagents.middleware.filesystem import FilesystemMiddleware, supports_execution
-    except ImportError:  # pragma: no cover - the deepagents extra
+        owner = inspect.getclosurevars(tool.coroutine or tool.func).nonlocals.get("self")
+    except (AttributeError, TypeError, ValueError):  # not Deep Agents' own
         return False
-    functions = (getattr(tool, "func", None), getattr(tool, "coroutine", None))
-    cells = [c for f in functions for c in getattr(f, "__closure__", None) or ()]
-    owner = next((v for c in cells if isinstance(v := _held(c), FilesystemMiddleware)), None)
-    return owner is not None and not supports_execution(owner.backend)
-
-
-def _held(cell: Any) -> Any:
-    """What a closure's cell holds (``None`` while it is still empty)."""
-    try:
-        return cell.cell_contents
-    except ValueError:
-        return None
+    backend = getattr(owner, "backend", None)
+    return backend is not None and not supports_execution(backend)
 
 
 def graph_tools(target: Any, depth: int = SUBAGENT_DEPTH) -> list[Any]:

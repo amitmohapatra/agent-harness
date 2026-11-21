@@ -14,16 +14,27 @@ the user can (`results.PRIVATE_SAVING`, the same length). Deep Agents' `execute`
 backend, which runs no command, counted as a tool that runs code: `save_as` was taken away and
 the note said the result was a file in a sandbox there was not. A file written in Deep Agents'
 scratch space now says what gives the user a file in this run: `save_as`, its code, or no tool,
-which the model is to say. On a thread its framework keeps (LangGraph, Deep Agents) the latest
-question also says which tools' earlier results are out of date, as `ReAct`'s replay does
-(`freshness-03`: 0 of 7 runs fetched the stock again, `ReAct` 6 of 6).
+which the model is to say. A turn that replays an earlier live result past its age now says
+which tools' results are out of date on every adapter, as `ReAct`'s replay does (`freshness-03`:
+0 of 7 runs fetched the stock again, `ReAct` 6 of 6): in the latest question where the harness
+changes the model's requests (LangGraph, Deep Agents, with or without `middleware()`), in the
+run's context elsewhere (OpenAI Agents, Claude, Kimi, a graph built by hand). A call a graph's
+tool node ran had no fetch time recorded, so no later turn could tell it was out of date.
+A `create_agent` or Deep Agents graph without `middleware()` keeps its tables and is offered
+`read_file` and `query_result` once a result is held, nothing before.
 
 The benchmark scores a `cannot` turn whose answer names a file the run kept by that file
 (cantdo-01: every category in the chart; cantdo-03: every one of the 20 SKUs in the workbook);
 a kept file no case checks is unverified, not made up. `query_result`, answered past the tool
 hooks, is now among the run's tools used, so a CLI's query (Kimi's, whose requests are not
 captured) is scored on its figure. The scorer reads a decimal comma ("53,45 %"), bold figures
-in a flag, a change said as "7 fewer", and an earlier figure named "for comparison".
+in a flag, a change said as "7 fewer", and an earlier figure named "for comparison"; a figure
+set against the answer's (a runner-up, another source's); a field name with an underscore; bold
+text in a `has` probe. A CLI's write paused for a person ends a `cannot` turn rightly; a
+revocation remembered or asked about handles the `asks` probe; the carry cases run on `ReAct`
+variants with a backend only (`adapter:variant` in `Case.adapters`), the malformed-call and
+loop cases on the scripted model only (`Case.scripted`), and `fits` on adapters whose window
+the harness keeps.
 
 ### Fixed: schedules at their edges
 

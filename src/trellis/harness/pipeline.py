@@ -1673,9 +1673,9 @@ def _with_facts(
     turn shows (not when it is a tool result: a run stopped at a call keeps that call's own).
     A result no recorded call matches carries nothing."""
     journal = runtime.replay.journal
-    outcomes: dict[str, list[ToolOutcome]] = {}
+    outcomes: dict[str, list[tuple[Any, ToolOutcome]]] = {}
     for call, outcome in journal.trajectory:
-        outcomes.setdefault(call_key(call.tool, call.args), []).append(outcome)
+        outcomes.setdefault(call_key(call.tool, call.args), []).append((call, outcome))
     calls = {c.id: c for s in said for c in s.tool_calls}
     out: list[Said] = []
     for s in said:
@@ -1684,7 +1684,7 @@ def _with_facts(
         if s.role is not Speaker.TOOL or not found:
             out.append(s)
             continue
-        outcome = found.pop(0)
+        call, outcome = found.pop(0)
         facts: dict[str, Any] = {"status": outcome.status.value}
         if outcome.latency_ms is not None:
             facts["seconds"] = round(outcome.latency_ms / 1000, 3)
@@ -1694,7 +1694,9 @@ def _with_facts(
         )
         if sources:
             facts["sources"] = sources
-        fetched = runtime.fetched.get(s.tool_call_id or "")
+        # by the key its record has: the model's call id, else (a graph's tool node ran it)
+        # what the call is (``bridge``)
+        fetched = runtime.fetched.get(call.idempotency_key or "")
         if fetched is not None:
             facts[snapshots.FETCHED] = fetched.strftime(snapshots.TIME)
         age = snapshots.declared_max_age(runtime, called.name) if called else None

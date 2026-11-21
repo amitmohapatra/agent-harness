@@ -606,7 +606,9 @@ async def _ended_or_owed(
     async def finish() -> None:
         if owed is not None:  # the failure of the call's last try: the call's
             await runtime.agent.hooks.failed("tool", owed)
-        runtime.fetched[ref] = snapshots.now()  # what a later turn's replay says it is from
+        # what a later turn's replay says it is from: by the call's ref, and by the key its
+        # record has (a call a graph's tool node ran knows no call id: the two differ)
+        runtime.fetched[ref] = runtime.fetched[tool_call.idempotency_key or ref] = snapshots.now()
         _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
         await _record(runtime, tool_call, outcome, decision, key=key)
 

@@ -344,9 +344,10 @@ download it; its save_as saves one they can" (its: `query_result`'s, named just 
 Agents' scratch space says what the run has instead (`middleware.SCRATCH_TO_USER`): `save_as`,
 its code, or that no tool of the run makes a file — which the model is to tell the user. Deep
 Agents' `execute` on a backend that runs no command (its default `StateBackend`, which takes
-the tool off each model call) is no tool that runs code. A graph built without `middleware()`
-is offered no reader of the harness's, so it saves nothing: `query_result` there would add its
-definition (about 360 tokens) to every request.
+the tool off each model call) is no tool that runs code. A `create_agent` or Deep Agents graph
+built without `middleware()` keeps its results the same way (the harness narrows its model calls
+already) and is offered the readers once one is held: a run that keeps nothing is sent exactly
+what it was. Only a graph built by hand, whose model call the harness cannot reach, gets none.
 
 ### Files kept for the user, read back
 

@@ -1631,6 +1631,7 @@ def cases() -> tuple[Any, ...]:
             ),
             ("malformed tool calls (wrong type, missing argument, unknown tool)",),
             keyed=True,
+            scripted=True,  # a live model that calls well makes no malformed call to answer
         )
     )  # fmt: skip
 
@@ -1647,6 +1648,7 @@ def cases() -> tuple[Any, ...]:
             ),
             ("model looping on one call",),
             keyed=True,
+            scripted=True,  # a live model that does not loop is never stopped
         )
     )  # fmt: skip
 
