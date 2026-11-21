@@ -2842,8 +2842,8 @@ _EXCLUDED: Final = re.compile(
     r"rather than|non-\w+|runner[- ]up|nearest|closest|next|"
     r"(?:inside|within) (?:the )?(?:(?:upper|lower) )?fences?|"
     r"just (?:missed|missing|outside|short)|miss(?:es|ed) (?:out|the cut)|"
-    # the rest of the result's candidates, said not to make it ("the other four missed: ...")
-    r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short))\b|n't\b",
+    # the rest of the result's candidates, said not to make it ("the other four missed: ...", "would miss: ...")
+    r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short|would miss))\b|n't\b",
     re.IGNORECASE,
 )
 #: A place said in a clause ("4th place", "the fourth"): past the size of the result, it is
@@ -2928,10 +2928,11 @@ _EARLIER: Final = re.compile(
     re.IGNORECASE,
 )
 #: A sentence naming another figure than the answer, set against it: the runner-up ("Next are
-#: Aldgate Knit at 91%"), or what another source says ("the master record says 42 days, but
+#: Aldgate Knit at 91%", "Aldgate Knit is next"), or what another source says ("the master record says 42 days, but
 #: the agreed source is the portal"). Read only where the answer's own figure is said.
 _CONTRAST: Final = re.compile(
-    r"\bnext (?:best |highest |closest )?(?:are|is|comes?)\b|\brunners?-up\b|"
+    r"\bnext (?:best |highest |closest )?(?:are|is|comes?)\b|\b(?:is|are|comes?) next\b|"
+    r"\brunners?-up\b|"
     r"\b(?:says?|said|records?|lists?|shows?)\b[^.\n]{0,60}, but\b|"
     # "the master's 42 days is not the figure to use"
     r"\bis not the (?:figure|one|value|number|source) (?:to use|we use|we agreed)\b|"
@@ -3075,10 +3076,12 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
 #: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917", "a drop of
 #: 10") or before one ("a 0.92% drop", "£1,917 lower").
 _FALL: Final = re.compile(
-    r"\b(?:(?:down|fell|fallen|dropped|declined|decreased|lower|less|fewer)\b(?: by)?|"
-    r"(?:drop|decline|decrease|fall) of)[\s*_£$€]{0,6}"
-    # the amount it fell by, then the percentage: "down £1,917.02 or 0.92%", "(0.92%)"
-    r"(\d[\d,]*(?:\.\d+)?)(?:[*_]*\s*(?:or|,|\()\s*[*_]*(\d[\d,]*(?:\.\d+)?)\s?%)?|"
+    r"\b(?:(?:down|fell|fallen|dropped|declined|decreased|lower|less|fewer|cut|removing|"
+    r"removed)\b(?: by)?|(?:drop|decline|decrease|fall) of)[\s*_£$€]{0,6}"
+    # the amount it fell by, then the percentage: "down £1,917.02 or 0.92%", "(0.92%)",
+    # ", or about 0.92%"
+    r"(\d[\d,]*(?:\.\d+)?)(?:[*_]*\s*(?:,\s*or|or|,|\()\s*(?:(?:about|around|roughly)\s+)?"
+    r"[*_]*(\d[\d,]*(?:\.\d+)?)\s?%)?|"
     r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)?[*_\s]*"
     r"(?:drop|decline|decrease|fall|lower|less|fewer)\b",
     re.IGNORECASE,

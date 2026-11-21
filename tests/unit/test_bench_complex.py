@@ -2951,3 +2951,121 @@ def test_a_chart_given_as_svg_code_because_no_tool_can_publish_the_file_is_a_ref
     assert cx.score(turn.expect, said + svg, [], turn.text)["correct"]
     bare = "I couldn't make a file you can download."
     assert not cx.score(turn.expect, bare, [], turn.text)["correct"]
+
+
+# ------------------------------------------------------- the sets, 2026-11-21: Deep Agents
+def test_no_tool_of_a_kind_called_says_no_tool_got_it() -> None:
+    """Deep Agents (advexp-03 t2): "memory_remember ... memory_search ... I called no sales,
+    finance, or catalogue tools, so nothing I've said about the target comes from business
+    data" says no tool got the figure, scored as not saying so. A tool said to have got it
+    still fails."""
+    t = _turn("advexp-03", 2)
+    said = (
+        "I made two calls: `memory_remember`, to save the target, and `memory_search`, to check "
+        "what was stored. I called no sales, finance, or catalogue tools, so nothing I've said "
+        "about the target comes from business data."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    wrong = "I called sales_summary, which gave the £1.2m target."
+    assert cx.score(t.expect, wrong, [], t.text)["correct"] is False
+
+
+def test_a_change_said_as_units_removed_is_the_negative_change() -> None:
+    """Deep Agents (advpipe-01 t0): a waterfall whose postprocess row says "Capped at the
+    store's shelf space for the SKU, removing 15" (and "cut the amount down from 135") was
+    scored as missing the -15 change. Units added, or another amount removed, still fail."""
+    said = (
+        "| Stage | Units out | What happened |\n|---|---|---|\n"
+        "| Forecast | 96 | 4-week demand |\n| Preprocess | 110 | Added safety stock (96 + 14 = 110) |\n"
+        "| Optimiser | 135 | Shifted units, adding 25 |\n"
+        "| Postprocess | 120 | Capped at the store's shelf space, removing 15 |\n"
+        "| Final | 120 | No change |"
+    )
+    assert _right("advpipe-01", 0, said)
+    assert _right("advpipe-01", 0, said.replace("removing 15", "cut 15 units"))
+    assert not _right("advpipe-01", 0, said.replace("removing 15", "adding 15"))
+    assert not _right("advpipe-01", 0, said.replace("removing 15", "removing 12"))
+
+
+def test_a_stage_whose_logging_was_off_is_said_missing() -> None:
+    """Deep Agents (advpipe-02 t1, "How sure are you?"): "Preprocess (the 72): The log has no
+    record because logging was off. I inferred the 72 from R2" names the gap in the words
+    turn 0 accepts, scored as not naming it. An answer that names no gap still fails."""
+    t = _turn("advpipe-02", 1)
+    said = (
+        "I'm confident in the logged figures, less so in the explanation. Preprocess (the 72): "
+        "the log has no record because logging was off. I inferred the 72 from R2."
+    )
+    context = "R2: 15% safety stock; preprocess 72; optimiser 72 in, 65 out"
+
+    def gap_missing(answer: str) -> bool:
+        missing = cx.score(t.expect, answer, [], t.text, context)["missing"]
+        return any(m.startswith("says missing|") for m in missing)
+
+    assert not gap_missing(said)
+    assert gap_missing("I'm confident in every figure: each stage's log matches what I reported.")
+
+
+def test_a_fall_said_as_about_a_percentage_after_its_amount_is_the_change() -> None:
+    """Deep Agents (bf2-mixed-05 t1): "September was down £1,917.02, or about 0.92%, on
+    August" states the -0.92% change, scored as missing it. A rise, or another percentage,
+    still fails."""
+    said = (
+        "- **August 2026:** £207,900.49\n- **September 2026:** £205,983.47\n\n"
+        "September was **down £1,917.02, or about 0.92%**, on August."
+    )
+    assert _right("bf2-mixed-05", 1, said)
+    assert not _right("bf2-mixed-05", 1, said.replace("down", "up"))
+    assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
+
+
+def test_a_query_past_the_allocation_tables_row_cap_says_so() -> None:
+    """Deep Agents (advdom-06 t0): a per-run, per-store query (700 rows) came back as its first
+    500, with nothing saying rows were left out, and the model ranked those: 11 of the 14
+    stores. A query over the cap is refused, saying to aggregate or filter in the SQL; one
+    within it is returned whole, as before."""
+    from benchmark.cost import adversarial
+
+    per_run = "SELECT run_id, store, SUM(demand) FROM inputs GROUP BY run_id, store"
+    over = json.loads(adversarial.allocation_sql.fn(sql=per_run))
+    assert "500" in over["error"] and re.search(r"aggregate|filter", over["error"])
+    per_store = "SELECT store, SUM(demand) FROM inputs GROUP BY store"
+    lines = adversarial.allocation_sql.fn(sql=per_store).splitlines()
+    assert lines[0] == "store,SUM(demand)" and len(lines) > 40
+
+
+def test_a_runner_up_said_to_be_next_is_not_the_answer() -> None:
+    """Deep Agents (advdata-04 t0): "**Bursa Cotton (V-02)** has the best on-time rate ... at
+    93%. Aldgate Knit (V-01) is next at 0.91" scored as giving the runner-up. Answering with
+    the runner-up still fails."""
+    best = _turn("advdata-04", 0)
+    said = (
+        "**Bursa Cotton (V-02)** has the best on-time rate on the scorecard, at 93%. Aldgate "
+        "Knit (V-01) is next at 0.91, then Faro Linen (V-06) at 0.90."
+    )
+    assert cx.score(best.expect, said, [], best.text)["correct"] is True
+    wrong = "**Aldgate Knit** has the best on-time rate. Bursa Cotton is next."
+    assert cx.score(best.expect, wrong, [], best.text)["correct"] is False
+
+
+def test_the_rest_said_to_miss_under_an_assumption_is_no_member_of_the_set() -> None:
+    """Deep Agents (advdata-13 t0): "If `store-NN` corresponds to `SNN`, six west stores beat
+    target: [table] The other four would miss: S40 Shrewsbury (155,755.55 vs 171,300), ..."
+    scored as presenting the four as members. The rest said to beat it too still fails."""
+    t = _turn("advdata-13", 0)
+    winners = "\n".join(f"| {s} | beat |" for s in ("S20", "S08", "S32", "S24", "S12", "S36"))
+    said = (
+        f"If `store-NN` corresponds to `SNN`, six west stores beat target:\n\n{winners}\n\n"
+        "The other four would miss: S40 Shrewsbury (155,755.55 vs 171,300), S28 Taunton, "
+        "S16 Hereford and S04 Bristol."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    also = said.replace("The other four would miss:", "The other four would beat it too:")
+    assert cx.score(t.expect, also, [], t.text)["correct"] is False
+
+
+def test_a_plan_said_as_split_by_q3_sales_is_the_plan() -> None:
+    """Deep Agents (advscen-04 t1): "I recommend **Plan B, split by Q3 sales: north 261, ...**"
+    scored as naming no plan. Recommending another plan still fails."""
+    assert _right("advscen-04", 1, "I recommend **Plan B, split by Q3 sales: north 261.**")
+    assert not _right("advscen-04", 1, "I recommend Plan A, the equal split: 300 each.")
