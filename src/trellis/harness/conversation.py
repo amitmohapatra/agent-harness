@@ -289,11 +289,13 @@ async def waiting(runtime: Runtime) -> str | None:
     """The context's line (:data:`WAITING`) for what the conversation's earlier turns still
     wait on a person for: each paused run of this agent, tenant, user and thread (not the
     run's own, nor a child's: its parent's run asks it), by the question its record awaits
-    and the call it holds back — ``None`` when none waits, or for a run with no conversation
-    of its own. A paused run leaves the line, so a new message is a new run, never the answer
-    (that is ``agent.resume``'s): told nothing, its model did the waiting action again."""
-    thread = runtime.thread
-    if runtime.parent is not None or thread is None or thread == runtime.run_id:
+    and the call it holds back — ``None`` when none waits. A paused run leaves the line, so a
+    new message is a new run, never the answer (that is ``agent.resume``'s): told nothing, its
+    model did the waiting action again. Listed only for a conversation a turn of which paused
+    in this process (``Agent.waiting_in``), so a turn with nothing waiting costs the run store
+    nothing more; a run paused in another process is not known here."""
+    thread, waits = runtime.thread, runtime.agent.waiting_in
+    if runtime.parent is not None or thread is None or runtime.conversation not in waits:
         return None
     runs, tenant = runtime.agent.harness.runs, runtime.tenant
     asked: list[str] = []
@@ -310,7 +312,10 @@ async def waiting(runtime: Runtime) -> str | None:
         record = await runs.get(summary.run_id, tenant=tenant)
         if record is not None and record.user_id == runtime.user and not record.parent_run_id:
             asked.append(_awaited(summary.awaiting))
-    return WAITING.format(waiting="; ".join(asked)) if asked else None
+    if not asked:
+        waits.discard(runtime.conversation)  # answered or ended: nothing to list next turn
+        return None
+    return WAITING.format(waiting="; ".join(asked))
 
 
 def _awaited(interrupt: Interrupt) -> str:

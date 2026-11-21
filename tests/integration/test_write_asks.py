@@ -203,6 +203,60 @@ async def test_every_adapter_tells_a_new_message_what_its_thread_waits_on(
     assert WAITS in told(seen) and "pay" in told(seen)
 
 
+@pytest.mark.parametrize("memory", ["on", "off"])
+@pytest.mark.parametrize("framework", sorted(BUILDERS))
+async def test_a_turn_with_nothing_waiting_costs_the_run_store_nothing_more(
+    memory_harness: Harness,
+    tmp_path: Path,
+    framework: str,
+    memory: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The thread's paused runs are listed only for a conversation a turn of which paused in
+    this process (``Agent.waiting_in``): a turn on a thread with nothing waiting lists and
+    reads exactly the runs it did before the line existed."""
+    target, tools = await BUILDERS[framework](memory_harness, [], tmp_path, [])
+    without = {"memory"} if memory == "off" else set()
+    agent = arm(memory_harness.wrap(target, id=f"cost-{framework}", without=without), tools)
+    await agent.run("hello", user="ada", thread=THREAD)
+    await memory_harness.writes.drain()
+    runs = memory_harness.runs
+    listed, read = runs.iterate, runs.get
+    calls: list[dict[str, Any]] = []
+
+    def iterate(**named: Any) -> Any:
+        calls.append(named)
+        return listed(**named)
+
+    async def get(*args: Any, **named: Any) -> Any:
+        calls.append({"get": True})
+        return await read(*args, **named)
+
+    monkeypatch.setattr(runs, "iterate", iterate)
+    monkeypatch.setattr(runs, "get", get)
+
+    async def turn() -> list[dict[str, Any]]:
+        calls.clear()
+        done = await agent.run("again", user="ada", thread=THREAD)
+        assert done.status is RunStatus.SUCCESS, done.error
+        return list(calls)
+
+    told_it = await turn()
+    monkeypatch.setattr(conversation, "waiting", _nothing)
+    untold = await turn()
+    assert _shapes(told_it) == _shapes(untold)
+    assert not any(c.get("status") is RunStatus.PAUSED and "thread_id" in c for c in told_it)
+
+
+async def _nothing(runtime: Runtime) -> None:
+    return None
+
+
+def _shapes(calls: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    """Each run-store call by what it asks (its run ids, new each turn, left out)."""
+    return [tuple(sorted((k, str(v)) for k, v in c.items() if k != "parent_run_id")) for c in calls]
+
+
 # --------------------------------------------------------------------------- this conversation
 
 

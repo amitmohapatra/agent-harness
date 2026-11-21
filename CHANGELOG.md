@@ -15,7 +15,9 @@ twice (`bf2-cantdo-02` t1, after its Confirm/Cancel waited), an export asked for
 `Agent.waiting_noted` in `Agent.push`, on every adapter): each paused run of the agent, user and
 thread, by its record's question and the call it holds back, and that the new message is not the
 answer. The message still is no answer, and the paused run still waits; nothing is added when
-nothing waits (one listing of the thread's paused runs per attempt).
+nothing waits, and such a turn makes no more run-store calls than before: the thread's paused
+runs are listed only for a conversation a turn of which paused in this process
+(`Agent.waiting_in`, forgotten once none waits). A run paused in another process is not said.
 
 ### Fixed: a write's earlier result is no value to fetch again
 

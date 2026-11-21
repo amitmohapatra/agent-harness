@@ -1474,6 +1474,8 @@ async def _paused(
         ),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
+    if runtime.parent is None and runtime.conversation != runtime.run_id:
+        agent.waiting_in.add(runtime.conversation)  # its next turns are told what waits
     said = _transcript(runtime, extracted, RunStatus.PAUSED)
     await agent.recorded_run(runtime, said)  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)

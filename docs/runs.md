@@ -57,7 +57,10 @@ call or question still waiting, so it is told in one line of its context
 (`conversation.WAITING`, on every adapter, after the memory context): each paused run of this
 agent, user and thread, by the question its record awaits and the call it holds back
 (`refund({"amount": 2})`). The model then neither does it again nor says it happened; the run
-still waits for its answer. A thread with nothing waiting is sent exactly what it was.
+still waits for its answer. A thread with nothing waiting is sent exactly what it was, and
+costs the run store nothing more: the thread's paused runs are listed only for a conversation a
+turn of which paused in this process (`Agent.waiting_in`, forgotten once none waits), so a run
+paused by another replica or a worker is not said to a turn served elsewhere.
 
 ## Spending: a budget per run
 

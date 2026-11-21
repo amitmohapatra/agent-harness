@@ -78,7 +78,7 @@ from trellis.harness.adapters.langgraph import (
     run_scoped,
 )
 from trellis.harness.asking import DECIDED, asked_by_model, picked
-from trellis.harness.bounded import LRU
+from trellis.harness.bounded import LRU, LRUSet
 from trellis.harness.bridges import helpers, session
 from trellis.harness.budget import BUDGET, Budget
 from trellis.harness.clients.memory import (
@@ -433,6 +433,10 @@ class Agent:
         self.turns = Turns()
         #: the conversations' ended turns ``conversation.earlier`` read (each ended run once)
         self.earlier_turns: LRU[str, Turn] = LRU()
+        #: the conversations a turn of which paused here and may still wait for a person: only
+        #: their next turns list the thread's paused runs (``conversation.waiting``), which
+        #: forgets one where none of them waits any more
+        self.waiting_in: LRUSet[str] = LRUSet()
         #: the session its framework kept for each conversation's last turn in this process
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept; one let go of is
