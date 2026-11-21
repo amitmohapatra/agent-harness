@@ -230,11 +230,12 @@ def run_code(code: str) -> str:
     return "ran"
 
 
-async def test_a_scratch_write_of_a_run_with_code_says_to_give_its_content_not_a_file(
+async def test_a_scratch_write_of_a_run_with_code_says_a_file_for_the_user_is_a_commands(
     harness: Harness,
 ) -> None:
     """A run that runs code of its own (``sandbox_exec``) still cannot hand over its scratch
-    copy: the note says never to offer it as a file but to give its content."""
+    copy, and its commands do not see it: the note says a file for the user is one a command
+    writes in ``outputs/`` (the scratch space is the graph's state, the sandbox apart)."""
     model = ScriptedChatModel(
         turns=[("write_file", {"file_path": "/chart.svg", "content": "<svg/>"}), "done"]
     )
@@ -245,6 +246,7 @@ async def test_a_scratch_write_of_a_run_with_code_says_to_give_its_content_not_a
     assert (await agent.run(STEPS + "chart it", user="u")).answer == "done"
     said = result_of(model.seen[1])
     assert SCRATCH_NOTE in said and said.endswith(SCRATCH_TO_USER["code"]), said
+    assert "outputs/" in said and "commands" in said
 
 
 async def test_a_deep_agents_state_write_says_it_and_a_failed_one_does_not(

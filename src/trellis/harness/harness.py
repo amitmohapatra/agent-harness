@@ -27,7 +27,7 @@ from trellis.contracts import (
     ToolCall,
     ToolSpec,
 )
-from trellis.harness import host, stopping, telemetry
+from trellis.harness import host, sandbox, stopping, telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
@@ -693,16 +693,19 @@ class Harness:
         you build yourself: bind them to its model and put them in its ``ToolNode`` when it is
         built (``HarnessTools`` gives a ``create_agent`` graph the same per model call). They
         are the MCP tools the virtual key allows (each as a tool of its own: no Code Mode),
-        the memory tools (:meth:`memory_tools`), the schedule tools (:meth:`schedule_tools`)
-        and ``ask_user`` (``tools/ask.py``). Each call is the harness's own tool, run as the
-        run making it: governed, journaled and recorded; ``ask_user`` pauses the run and its
-        answer is the call's result; a part the run is without (``without=["mcp"]``,
-        ``["memory"]``, ``["schedules"]``, ``["ask"]``) answers that it is off in this run, and
-        a schedule tool answers so in a run a schedule fired. Outside a run a call is refused
-        (``ToolError``). ``tenant`` as :meth:`memory_tools`'s."""
+        the memory tools (:meth:`memory_tools`), the schedule tools (:meth:`schedule_tools`),
+        ``ask_user`` (``tools/ask.py``) and the code tool (``sandbox_exec``, in a sandbox of
+        the run's own: ``sandbox.given_code``) where an isolated one can be made. Each call is
+        the harness's own tool, run as the run making it: governed, journaled and recorded;
+        ``ask_user`` pauses the run and its answer is the call's result; a part the run is
+        without (``without=["mcp"]``, ``["memory"]``, ``["schedules"]``, ``["ask"]``,
+        ``["code"]``) answers that it is off in this run, and a schedule tool answers so in a
+        run a schedule fired. Outside a run a call is refused (``ToolError``). ``tenant`` as
+        :meth:`memory_tools`'s."""
         box = self._toolbox([], tenant=await self._tenant(tenant))
         tools = [*await box.tools(code_mode=False), *await self._pulled(tenant)]
-        return convert("langchain", [*tools, *schedule_tools(), ask.offered()])  # type: ignore[no-any-return]
+        code = sandbox.given_code(self.settings.host_execution)
+        return convert("langchain", [*tools, *schedule_tools(), ask.offered(), *code])  # type: ignore[no-any-return]
 
     async def _pull_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""

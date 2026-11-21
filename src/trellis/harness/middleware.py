@@ -259,7 +259,7 @@ SCRATCH_NOTE: Final = (
 #: content", a Deep Agents model answered "I can't produce a native Excel file" with no reason).
 SCRATCH_TO_USER: Final = {
     "save": " query_result's save_as saves a file they can.",
-    "code": " Never offer it to them as a file; give them its content instead.",
+    "code": " Nor can your commands: a file for them is one a command writes in outputs/.",
     "none": " No tool of this run makes a file they can: give them its content, and say so.",
 }
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
