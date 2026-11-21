@@ -36,6 +36,7 @@ import dataclasses
 import functools
 import hashlib
 import itertools
+import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass, field
@@ -72,6 +73,13 @@ ASKED: Final = ANSWERED | {RunStatus.CANCELLED}
 STEERED_INTO: Final = "steered_into"
 #: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
 INTERRUPTED: Final = "interrupted by a newer message of the conversation"
+#: The context's line for what an earlier turn of the conversation still waits on a person for
+#: (:func:`waiting`): each paused run's question, and the call it holds back.
+WAITING: Final = (
+    "An earlier turn of this conversation still waits for the user, so it has not happened "
+    "yet: {waiting}. The user's new message is not their answer to it (they answer it where "
+    "it was asked): do not do it again, and do not say it was done."
+)
 
 
 class Mode(StrEnum):
@@ -275,6 +283,43 @@ async def earlier(
             )
         previous = record if answer not in (None, "") else None
     return [s for turn in (turns if budget is None else _fitted(turns, budget)) for s in turn]
+
+
+async def waiting(runtime: Runtime) -> str | None:
+    """The context's line (:data:`WAITING`) for what the conversation's earlier turns still
+    wait on a person for: each paused run of this agent, tenant, user and thread (not the
+    run's own, nor a child's: its parent's run asks it), by the question its record awaits
+    and the call it holds back — ``None`` when none waits, or for a run with no conversation
+    of its own. A paused run leaves the line, so a new message is a new run, never the answer
+    (that is ``agent.resume``'s): told nothing, its model did the waiting action again."""
+    thread = runtime.thread
+    if runtime.parent is not None or thread is None or thread == runtime.run_id:
+        return None
+    runs, tenant = runtime.agent.harness.runs, runtime.tenant
+    asked: list[str] = []
+    async for summary in runs.iterate(
+        agent_id=runtime.agent_id,
+        thread_id=thread,
+        status=RunStatus.PAUSED,
+        tenant=tenant,
+        limit=EARLIER_PAGE,
+        max_pages=1,
+    ):
+        if summary.awaiting is None or summary.run_id == runtime.run_id:
+            continue
+        record = await runs.get(summary.run_id, tenant=tenant)
+        if record is not None and record.user_id == runtime.user and not record.parent_run_id:
+            asked.append(_awaited(summary.awaiting))
+    return WAITING.format(waiting="; ".join(asked)) if asked else None
+
+
+def _awaited(interrupt: Interrupt) -> str:
+    """A paused run's question, as asked, and the call it holds back (``tool(args)``)."""
+    call = interrupt.tool_call
+    if call is None:
+        return interrupt.question
+    args = json.dumps(call.args, ensure_ascii=False, default=str)
+    return f"{interrupt.question} {call.tool}({args})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +630,7 @@ __all__ = [
     "EARLIER_RUNS",
     "INTERRUPTED",
     "STEERED_INTO",
+    "WAITING",
     "Live",
     "Mode",
     "Steer",
@@ -598,4 +644,5 @@ __all__ = [
     "result_id",
     "steering",
     "steering_elsewhere",
+    "waiting",
 ]

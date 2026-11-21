@@ -5,6 +5,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a new message on a thread whose run waits for a person is told what waits
+
+A run paused on an approval or a question leaves the conversation's line, so a new message on
+the same thread (not an answer through `agent.resume`) starts a new run. Its history dropped the
+call still waiting and its question, so the model did it again and paused again: a schedule set
+twice (`bf2-cantdo-02` t1, after its Confirm/Cancel waited), an export asked for approval twice
+(`advfile-02` t2). Such a run's context now carries one line (`conversation.WAITING`, from
+`Agent.waiting_noted` in `Agent.push`, on every adapter): each paused run of the agent, user and
+thread, by its record's question and the call it holds back, and that the new message is not the
+answer. The message still is no answer, and the paused run still waits; nothing is added when
+nothing waits (one listing of the thread's paused runs per attempt).
+
 ### Fixed: a write's earlier result is no value to fetch again
 
 A tool that writes (`side_effects="write"` or `"irreversible"`) was live by default like any

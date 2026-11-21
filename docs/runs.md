@@ -50,6 +50,15 @@ approved call runs once ([interrupts.md](interrupts.md)). After a crash nothing 
 called: the run's lease lapses and another worker continues it from its last progress
 checkpoint ([below](#workers), [reliability.md](reliability.md#crash-behaviour-end-to-end)).
 
+**A new message while a run waits.** A paused run leaves its conversation's line, so a message
+sent to the thread meanwhile (not an answer through `agent.resume`, a chat's buttons or a front
+end's tool result) is a new run, never the answer. Its replayed history holds no trace of the
+call or question still waiting, so it is told in one line of its context
+(`conversation.WAITING`, on every adapter, after the memory context): each paused run of this
+agent, user and thread, by the question its record awaits and the call it holds back
+(`refund({"amount": 2})`). The model then neither does it again nor says it happened; the run
+still waits for its answer. A thread with nothing waiting is sent exactly what it was.
+
 ## Spending: a budget per run
 
 `h.wrap(budget=Budget(...))` caps every run of the agent, `agent.run(budget=)` (and `stream`,

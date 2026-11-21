@@ -10,17 +10,20 @@ tools keep their own way (``test_govern_framework_tools``, ``test_claude``, ``te
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
 
+from tests.integration.test_conversation import forget, told
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
+from tests.support.models import Script, ScriptedChat
 from tests.support.planned import Call
-from trellis import Ask, Harness, Hooks, Runtime, Settings, tool
+from trellis import Ask, Harness, Hooks, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, InterruptReason, RunStatus, ToolCall, ToolSpec
 from trellis.harness import conversation
 from trellis.harness.governance.decision import ALWAYS, CONVERSATION, DENY, ONCE
@@ -128,6 +131,76 @@ async def test_deny_never_runs_and_a_picked_option_is_the_decision_it_names(
     assert finished.answer[0] == "pay was not run: the approver rejected it"
     again = await agent.run("go", user="ada", thread=THREAD)  # the pick reached the conversation
     assert again.status is RunStatus.SUCCESS and done == ["pay 2", "pay 1", "pay 2"], again
+
+
+# --------------------------------------------------------------------------- a new message
+#: what the context says of a write an earlier turn still waits on approval for
+WAITS: Final = conversation.WAITING.split("{", 1)[0]
+
+
+class _Heeding(Script):
+    """A model that pays when asked — unless its request says that payment still waits for
+    the user, which it then says instead (what a model does with the line)."""
+
+    def next(self, body: dict[str, Any]) -> Any:
+        if WAITS in json.dumps(body):
+            return "Your payment of 5 still waits for your approval."
+        if body["messages"][-1].get("role") == "tool":
+            return "Paid."
+        return ("pay", {"amount": 5})
+
+
+async def test_a_new_message_to_a_thread_whose_run_waits_on_approval_is_told_so(
+    harness: Harness,
+) -> None:
+    """bf2-cantdo-02, advfile-02: a run paused on a write's approval leaves the conversation's
+    line, and a new message (not an answer through ``agent.resume``) starts a new run. Its
+    history held no trace of the call waiting, so the model paid again and the thread had two
+    approvals waiting. Its context now names what waits (the paused run's question and call),
+    and the message is no answer to it; a thread with nothing waiting is sent what it was."""
+    model = ScriptedChat(script=_Heeding([]))
+    agent = arm(harness.wrap(ReAct(system_prompt="You work.", model=model), id="heeds"), [pay])
+    first = await agent.run("pay 5", user="ada", thread=THREAD)
+    assert first.status is RunStatus.PAUSED and first.interrupt is not None, first
+    second = await agent.run("is it done?", user="ada", thread=THREAD)
+    assert second.status is RunStatus.SUCCESS, second  # not paused again on a second payment
+    assert done == [] and "still waits" in str(second.answer)
+    sent = json.dumps(model.requests[-1])
+    assert WAITS in sent and json.dumps(first.interrupt.question)[1:-1] in sent
+    assert 'pay({\\"amount\\": 5})' in sent  # the call held back
+    still = await harness.runs.get(first.run_id)
+    assert still is not None and still.status is RunStatus.PAUSED  # not answered
+    # another user's thread named alike, and another thread, have nothing waiting
+    for user, thread in (("bob", THREAD), ("ada", "chat-2")):
+        count = len(model.requests)
+        other = await agent.run("pay 5", user=user, thread=thread)
+        assert other.status is RunStatus.PAUSED, other
+        assert model.requests[count]["messages"][-1]["content"] == "pay 5"  # as it was
+    # answered, it waits no more: the next message is told nothing
+    await approved(agent, first)
+    assert done == ["pay 5"]
+    count = len(model.requests)
+    await agent.run("pay 5", user="ada", thread=THREAD)
+    assert WAITS not in json.dumps(model.requests[count])
+
+
+@pytest.mark.parametrize("memory", ["on", "off"])
+@pytest.mark.parametrize("framework", sorted(set(BUILDERS) - {"function"}))
+async def test_every_adapter_tells_a_new_message_what_its_thread_waits_on(
+    memory_harness: Harness, tmp_path: Path, framework: str, memory: str
+) -> None:
+    seen: list[Any] = []
+    plan: list[Call] = [("pay", {"amount": 5})]
+    target, tools = await BUILDERS[framework](memory_harness, [pay], tmp_path, plan, seen=seen)
+    without = {"memory"} if memory == "off" else set()
+    agent = arm(memory_harness.wrap(target, id=f"told-{framework}", without=without), tools)
+    first = await agent.run("pay 5", user="ada", thread=THREAD)
+    assert first.status is RunStatus.PAUSED, first
+    await memory_harness.writes.drain()
+    assert WAITS not in told(seen)  # nothing waited before it
+    forget(seen)
+    await agent.run("is it done?", user="ada", thread=THREAD)
+    assert WAITS in told(seen) and "pay" in told(seen)
 
 
 # --------------------------------------------------------------------------- this conversation

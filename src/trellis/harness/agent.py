@@ -235,6 +235,8 @@ EARLIER_CHATS: Final = (
 #: about here: governance asks for its approval.
 #: How the line naming out-of-date tools starts (``snapshots.NOTE``): said once a context.
 _NOTE_START: Final = snapshots.NOTE.split("{", 1)[0]
+#: How the line of what the conversation still waits on begins (said once: ``waiting_noted``).
+_WAITING_START: Final = conversation.WAITING.split("{", 1)[0]
 ASKING: Final = (
     "## Asking the user\n"
     "Most turns ask nothing. When several things fit the user's words and they mean one (a "
@@ -1271,6 +1273,7 @@ class Agent:
         else:
             pushed = await self.remembered(runtime, budget=self.context_budget - used)
         await self.earlier_noted(runtime)
+        await self.waiting_noted(runtime)
         if app:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, app) if p)
         if ASKING not in (runtime.pushed_context or "") and self.offers_a_question(runtime):
@@ -1298,6 +1301,19 @@ class Agent:
         note = snapshots.note(snapshots.out_of_date(earlier, age)[1])
         if note is not None:
             runtime.context = "\n\n".join(p for p in (runtime.pushed_context, note) if p)
+
+    async def waiting_noted(self, runtime: Runtime) -> None:
+        """The run's context names what an earlier turn of its conversation still waits on a
+        person for (``conversation.waiting``: a new message is a new run, not the answer), on
+        every adapter; once, and nothing when nothing waits or the store cannot say."""
+        if _WAITING_START in str(runtime.pushed_context):
+            return
+        try:
+            line = await conversation.waiting(runtime)
+        except Exception:  # a store that cannot say: nothing is said, as before
+            return
+        if line is not None:
+            runtime.context = "\n\n".join(p for p in (runtime.pushed_context, line) if p)
 
     async def _earlier_turns(self, runtime: Runtime) -> list[Said]:
         """The earlier turns :meth:`earlier_noted` reads: memory's thread where an OpenAI
