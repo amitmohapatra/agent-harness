@@ -285,6 +285,18 @@ async def earlier(
     return [s for turn in (turns if budget is None else _fitted(turns, budget)) for s in turn]
 
 
+async def held(runtime: Runtime, runs: Set[str]) -> bool:
+    """Whether ``runs`` hold every turn of the conversation the run store lists (the newest
+    :data:`EARLIER_RUNS` that ended asked, the run's own left out), and there is one: a turn
+    answered elsewhere in between (another replica, a worker since restarted) is not among
+    them."""
+    thread = runtime.thread
+    if not runs or runtime.parent is not None or thread is None or thread == runtime.run_id:
+        return False
+    found = await _asked(runtime, thread)
+    return bool(found) and all(turn.run_id in runs for turn in found)
+
+
 async def waiting(runtime: Runtime) -> str | None:
     """The context's line (:data:`WAITING`) for what the conversation's earlier turns still
     wait on a person for: each paused run of this agent, tenant, user and thread (not the

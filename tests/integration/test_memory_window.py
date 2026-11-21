@@ -178,8 +178,9 @@ async def test_a_framework_that_keeps_the_thread_replays_it_once(
     await agent.run("second", user="u1", thread=THREAD)
     asked = memory_service.named("context")
     # a durable store owns the thread: no window; one kept in RAM gets memory's window as
-    # text (a restart loses the store), never as messages next to the ones it replays
-    assert all(c.body["window"] is not durable for c in asked)
+    # text (a restart loses the store) until it holds every turn itself, never as messages
+    # next to the ones it replays
+    assert [c.body["window"] for c in asked] == ([False, False] if durable else [True, False])
     assert all("window_format" not in c.body for c in asked)
     # its own thread replays the first turn, once
     assert _said(model.script.requests[-1]) == [

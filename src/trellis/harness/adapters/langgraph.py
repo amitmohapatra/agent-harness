@@ -237,6 +237,15 @@ class LangGraphAdapter(Keeps):
             log.warning(DUPLICATE_STORAGE.format(name=name))
         return target.checkpointer
 
+    async def held_runs(self, target: Any, runtime: Any) -> frozenset[str]:
+        """The runs that wrote the checkpoints the graph's own checkpointer holds of the run's
+        thread (:data:`RUN_METADATA`)."""
+        if not _checkpointed(target) or run_scoped(target):
+            return frozenset()
+        config = {"configurable": {"thread_id": thread_of(target, runtime)}}
+        marks = [c.metadata.get(RUN_METADATA) async for c in target.checkpointer.alist(config)]
+        return frozenset(m for m in marks if isinstance(m, str))
+
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
     ) -> Any:

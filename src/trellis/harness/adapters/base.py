@@ -195,6 +195,9 @@ class Keeps:
     def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
         return True  # Claude's built-in tools, an ACP agent's own: the safe answer
 
+    async def held_runs(self, target: Any, runtime: Any) -> frozenset[str]:
+        return frozenset()
+
 
 class Adapter(Protocol):
     name: ClassVar[str]
@@ -288,6 +291,13 @@ class Adapter(Protocol):
     ) -> Any: ...
 
     def check_options(self, options: Mapping[str, Any]) -> None: ...
+
+    async def held_runs(self, target: Any, runtime: Any) -> frozenset[str]:
+        """The runs whose turns the framework's thread store, kept in this process's RAM, holds
+        of ``runtime``'s thread (none: it keeps none, or does not say whose they are): memory's
+        rendered window is left out where they are every turn the run store lists
+        (``Agent.replays_itself``)."""
+        ...
 
     async def native(self, target: Any) -> list[ToolSpec]: ...
 

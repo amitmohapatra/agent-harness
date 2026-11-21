@@ -5,6 +5,23 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a graph whose in-RAM checkpointer holds the thread is sent the conversation once
+
+A LangGraph graph (`create_agent`, Deep Agents' `create_deep_agent`) compiled with an
+`InMemorySaver` keeps its thread in this process only, so memory's window kept the history too
+and its context carried a "Recent conversation" section. But while the process lives, the
+checkpointer also replays the same turns, so the model read every earlier turn twice. That
+happened on 411 of Deep Agents' 1,047 requests on the further sets (about 89k tokens) and on
+362 of LangGraph's. `Agent.window`'s "the window is never given twice" was not what happened.
+Memory's rendered window is now left out only when the saver holds every turn of the thread
+that the run store lists (`Agent.replays_itself`): the runs that wrote its checkpoints
+(`Adapter.held_runs`, from the run id each checkpoint is marked with) must include each of
+them (`conversation.held`). If a turn is missing, memory's window stays on as before: a
+restarted worker's empty saver, or a saver another replica's turn went past. The same applies
+when the saver or the run store cannot be read (a warning), and on a thread's first turn. Such
+a turn reads the run store's listing of the thread (the run reads are cached per process), and
+nothing more. Other frameworks' in-RAM stores are unchanged.
+
 ### Fixed: a new message on a thread whose run waits for a person is told what waits
 
 A run paused on an approval or a question leaves the conversation's line, so a new message on

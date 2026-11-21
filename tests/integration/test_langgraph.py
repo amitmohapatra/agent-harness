@@ -15,7 +15,7 @@ from langgraph.types import interrupt
 from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
-from trellis import Harness, current, tool
+from trellis import Harness, current, middleware, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
 from trellis.harness.harness import LOCAL_TENANT
 from trellis.harness.history import ASKED_WITH
@@ -504,6 +504,93 @@ async def test_a_checkpointer_kept_in_ram_leaves_memorys_window_on(
     assert memory_service.named("context")[-1].body.get("window") is not durable
 
 
+def _said_in(seen: list[Any], text: str) -> int:
+    """How many times ``text`` reaches the model in one request (``seen``: its messages)."""
+    return sum(str(m.content).count(text) for m in seen)
+
+
+async def _two_turns(harness: Harness, *, lost: bool = False, id: str) -> list[Any]:
+    """Two turns of one thread on a graph with the harness's middleware and an
+    ``InMemorySaver`` (``lost``: emptied between them, as a restarted worker's is); what the
+    second turn's model call was sent."""
+    saver = InMemorySaver()
+    model = ScriptedChatModel(turns=["Ada's locker is 4242.", "Still 4242."])
+    agent = harness.wrap(create_agent(model, middleware=middleware(), checkpointer=saver), id=id)
+    await agent.run("Ada's locker?", user="u1", thread=id)
+    await harness.writes.drain()
+    if lost:
+        for kept in (saver.storage, saver.writes, saver.blobs):
+            kept.clear()
+    result = await agent.run("And now?", user="u1", thread=id)
+    assert result.status is RunStatus.SUCCESS, result.error
+    return model.seen[-1]
+
+
+async def test_an_in_ram_checkpointer_holding_the_thread_is_sent_the_conversation_once(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """An ``InMemorySaver`` that holds the thread up to its newest turn replays it: memory's
+    rendered window would say the same turns again. It is left out — the request is smaller —
+    and the turns are sent once, as the checkpointer replays them."""
+    seen = await _two_turns(memory_harness, id="held")
+    assert memory_service.named("context")[-1].body.get("window") is False
+    assert _said_in(seen, "Ada's locker is 4242.") == 1
+
+
+async def test_an_in_ram_checkpointer_behind_the_thread_keeps_memorys_window(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A saver that lacks the thread's newest turn — a worker restarted (its saver empty) —
+    gets memory's window as before (another replica's turn: the test after)."""
+    seen = await _two_turns(memory_harness, lost=True, id="lost")
+    assert memory_service.named("context")[-1].body.get("window") is not False
+    assert _said_in(seen, "Ada's locker is 4242.") == 1  # memory's copy, alone
+
+
+async def test_an_in_ram_checkpointer_missing_a_turn_answered_elsewhere_keeps_memorys_window(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another replica answered the thread's first turn: this process's saver holds the later
+    ones, its newest among them, but not that one — memory's window stays on."""
+    from trellis.harness.adapters.langgraph import LangGraphAdapter
+
+    model = ScriptedChatModel(turns=["Ada's locker is 4242.", "Noted.", "Still 4242."])
+    agent = memory_harness.wrap(
+        create_agent(model, middleware=middleware(), checkpointer=InMemorySaver()), id="gap"
+    )
+    first = await agent.run("Ada's locker?", user="u1", thread="gap")
+    await agent.run("Thanks.", user="u1", thread="gap")
+    await memory_harness.writes.drain()
+    holds = LangGraphAdapter.held_runs
+
+    async def elsewhere(self: Any, target: Any, runtime: Any) -> frozenset[str]:
+        return await holds(self, target, runtime) - {first.run_id}
+
+    monkeypatch.setattr(LangGraphAdapter, "held_runs", elsewhere)
+    await agent.run("And now?", user="u1", thread="gap")
+    assert memory_service.named("context")[-1].body.get("window") is not False
+
+
+async def test_leaving_out_the_window_a_checkpointer_replays_makes_the_request_smaller(
+    memory_harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The request of a turn whose saver holds the thread, against the same turn with
+    memory's window given as well (the saver taken as holding nothing)."""
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    from trellis.harness.adapters.langgraph import LangGraphAdapter
+
+    once = await _two_turns(memory_harness, id="once")
+
+    async def nothing(self: Any, target: Any, runtime: Any) -> frozenset[str]:
+        return frozenset()
+
+    monkeypatch.setattr(LangGraphAdapter, "held_runs", nothing)
+    twice = await _two_turns(memory_harness, id="twice")
+    assert _said_in(twice, "Ada's locker is 4242.") == 2
+    assert count_tokens_approximately(once) < count_tokens_approximately(twice)
+
+
 async def test_the_graphs_context_and_durability_pass_through(harness: Harness) -> None:
     from dataclasses import dataclass
 
@@ -542,7 +629,6 @@ def test_a_workers_run_of_a_run_checkpointed_graph_saves_each_step_before_the_ne
     in its caller's process, or a graph with a checkpointer of its own, is left as it is."""
     from types import SimpleNamespace
 
-    from trellis import middleware
     from trellis.harness.adapters.langgraph import _run_arguments, checkpointing
 
     graph = checkpointing(create_agent(ScriptedChatModel(turns=["hi"]), middleware=middleware()))
@@ -584,7 +670,6 @@ async def test_a_call_a_newer_message_stopped_is_answered_in_the_kept_thread(
     from deepagents import create_deep_agent
     from langchain_core.messages import ToolMessage
 
-    from trellis import middleware
     from trellis.harness import snapshots
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
     from trellis.harness.adapters.langgraph import STOPPED_CALL

@@ -1401,7 +1401,7 @@ class Agent:
         behind = box.hidden(code_mode=runtime.uses("code_mode")) if hints else []
         if hints:
             await box.indexed()
-        window = self.window(runtime)
+        window = await self.asked_window(runtime)
         replayed = self.conversation_budget(runtime) if window is Window.MESSAGES else None
         with retrieval_span(runtime.task) as span:
             try:
@@ -1564,8 +1564,8 @@ class Agent:
         it kept for the conversation's last turn (``Runtime.continued``: that session replays
         the turns, ADR 0005 §4); as the framework's own
         messages where memory owns it, the framework keeps no store and replays messages; in
-        the context's text otherwise (a store kept in RAM replays the thread itself while the
-        process lives: the window is never given twice)."""
+        the context's text otherwise — a store kept in RAM included, which a restart empties:
+        where it still holds every turn, the window is left out (:meth:`replays_itself`)."""
         if runtime.continued:
             return Window.NONE  # the continued session holds the turns
         store = self.adapter.thread_store(self.target, runtime.framework_options)
@@ -1574,6 +1574,29 @@ class Agent:
         if store is None and self.adapter.replays_history:
             return Window.MESSAGES
         return Window.RENDERED
+
+    async def asked_window(self, runtime: Runtime) -> Window:
+        """The window this run's context is asked with: :meth:`window`, left out where the
+        framework's own store, kept in RAM, replays every turn (:meth:`replays_itself`)."""
+        window = self.window(runtime)
+        if window is Window.RENDERED and await self.replays_itself(runtime):
+            return Window.NONE  # never given twice
+        return window
+
+    async def replays_itself(self, runtime: Runtime) -> bool:
+        """Whether the framework's own thread store, kept in RAM, holds every turn of the
+        conversation the run store lists (``Adapter.held_runs``, ``conversation.held``): it
+        replays them, so memory's rendered window would say them twice. A store that lacks
+        one (a restarted worker's, one another replica's turn went past) leaves memory's
+        window on; so does a store or run store that cannot be read (a warning)."""
+        if self.adapter.thread_store(self.target, runtime.framework_options) is None:
+            return False
+        try:
+            runs = await self.adapter.held_runs(self.target, runtime)
+            return await conversation.held(runtime, runs)
+        except Exception as exc:
+            runtime.events.warning("earlier_turns", f"the turns the framework holds: {exc}")
+            return False
 
     def owner(self, runtime: Runtime, store: Any = ...) -> history.Owner:
         """Who owns the run's conversation (``history.owner``) — of ``store`` when it was read."""
