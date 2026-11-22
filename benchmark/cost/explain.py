@@ -413,7 +413,7 @@ def figures(meter: runner.Meter, seconds: float) -> dict[str, Any]:
 
 
 def build(h: Harness, setup: Setup, seen: Seen, run_seconds: float | None) -> Any:
-    give_code(setup.model)  # the harness's default sandbox: the bench's image, or a fake
+    give_code(setup.model)  # the scripted model's shell is a fake: no command is run
     target, options = VARIANTS["main"].build(setup)
     return h.wrap(target, id="bench-explain", hooks=[seen], run_timeout=run_seconds, **options)
 

@@ -16,10 +16,11 @@ say more), the others read (``ReAct`` declares them; ``middleware.OUTSIDE_STATE`
 
 The harness runs graphs asynchronously: the synchronous operations raise.
 
-:class:`CodeBackend` is ``ReAct``'s backend when it is given none and a sandbox can be made
-(``sandbox.default_files``): its files the graph's state (``JournalBackend``'s), and ``execute``
-a command in the sandbox the harness gives the run's agent by itself (``sandbox.code_for``),
-described in a few words and left out of a run without code (:class:`CodeCard`).
+:class:`CodeBackend` is ``ReAct``'s backend when it is given none (``sandbox.default_files``):
+its files the graph's state (``JournalBackend``'s), and ``execute`` a command in the working
+folder the harness gives the run's agent by itself (``sandbox.code_for``: on this machine, with
+no isolation), described in a few words and left out where the deployment switched commands
+off (:class:`CodeCard`).
 """
 
 from __future__ import annotations
@@ -53,8 +54,8 @@ from trellis.harness.tools.results import EXECUTE
 WRITE_FILE: Final = "write_file"
 #: Said by a synchronous operation (a graph run with ``invoke``): the harness runs ``ainvoke``.
 ASYNC_ONLY: Final = "the sandbox backend runs in a harness run's graph, asynchronously (ainvoke)"
-#: What a command on :class:`CodeBackend` answers in a run without code (never offered there).
-NO_CODE: Final = "Error: this run has no code execution (without=['code'], or switched off)."
+#: What a command on :class:`CodeBackend` answers in a run with no shell (never offered there).
+NO_CODE: Final = "Error: this run has no shell (without=['code'], or switched off)."
 
 
 class SandboxBackend(BaseSandbox):
@@ -157,13 +158,13 @@ class SandboxBackend(BaseSandbox):
 
 
 class CodeBackend(JournalBackend, SandboxBackendProtocol):
-    """``ReAct``'s backend when it is given none and a sandbox can be made
-    (``sandbox.default_files``): its files the graph's state, as ``JournalBackend``'s (the lean
-    graph and its long-task files unchanged), and Deep Agents' ``execute`` a command in the
-    run's sandbox — the one the harness gives the run's agent by itself (``Agent.code``,
-    ``sandbox.code_of``), made at its first command and told what the user gets of the files
-    it wrote. A run without code is not offered ``execute`` (:class:`CodeCard`); a call there
-    all the same answers :data:`NO_CODE`."""
+    """``ReAct``'s backend when it is given none (``sandbox.default_files``): its files the
+    graph's state, as ``JournalBackend``'s (the lean graph and its long-task files unchanged),
+    and Deep Agents' ``execute`` a command in the run's working folder — the one the harness
+    gives the run's agent by itself (``Agent.code``, ``sandbox.code_of``), made at its first
+    command and told what the user gets of the files it wrote. Where the deployment switched
+    commands off, ``execute`` is not offered (:class:`CodeCard`); a call there all the same
+    answers :data:`NO_CODE`."""
 
     #: what ``LangGraphAdapter.code`` reads (``adapters.base.DEFAULT_CODE``), with no import
     trellis_default_code = True
@@ -208,7 +209,7 @@ async def _told(
 
 class CodeCard(AgentMiddleware):
     """``ReAct`` on :class:`CodeBackend`: Deep Agents' ``execute`` described in a few words
-    (``sandbox.CODE``, in place of its own) in a run with code, and left out of a run without
+    (``sandbox.CODE``, in place of its own), and left out where the run has none
     (``without=["code"]``, a deployment that says ``deny``: ``sandbox.code_of``) — in the
     graph and in each of its helpers."""
 

@@ -290,7 +290,7 @@ async def run_cell(
             continue
         tools = catalog.catalogue(taskset.tools, size)
         built = Setup(system=taskset.system, **setup, tools=tuple(tools))
-        give_code(built.model)  # the harness's default sandbox: the bench's image, or a fake
+        give_code(built.model)  # the scripted model's shell is a fake: no command is run
         target, options = VARIANTS[variant].build(built)
         called = Called()
         changes = {t.spec.name for t in taskset.tools if t.spec.side_effects != "read"}

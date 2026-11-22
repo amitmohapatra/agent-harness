@@ -694,13 +694,14 @@ class Harness:
         built (``HarnessTools`` gives a ``create_agent`` graph the same per model call). They
         are the MCP tools the virtual key allows (each as a tool of its own: no Code Mode),
         the memory tools (:meth:`memory_tools`), the schedule tools (:meth:`schedule_tools`),
-        ``ask_user`` (``tools/ask.py``) and the code tool (``sandbox_exec``, in a sandbox of
-        the run's own: ``sandbox.given_code``) where an isolated one can be made. Each call is
-        the harness's own tool, run as the run making it: governed, journaled and recorded;
-        ``ask_user`` pauses the run and its answer is the call's result; a part the run is
-        without (``without=["mcp"]``, ``["memory"]``, ``["schedules"]``, ``["ask"]``,
-        ``["code"]``) answers that it is off in this run, and a schedule tool answers so in a
-        run a schedule fired. Outside a run a call is refused (``ToolError``). ``tenant`` as
+        ``ask_user`` (``tools/ask.py``) and the shell the harness gives an agent by itself
+        (``sandbox_exec``, in a working folder of the run's own: ``sandbox.given_code``; none
+        where the deployment says ``deny``). Each call is the harness's own tool, run as the
+        run making it: governed, journaled and recorded; ``ask_user`` pauses the run and its
+        answer is the call's result; a part the run is without (``without=["mcp"]``,
+        ``["memory"]``, ``["schedules"]``, ``["ask"]``, ``["code"]``) answers that it is off in
+        this run, and a schedule tool answers so in a run a schedule fired. Outside a run a
+        call is refused (``ToolError``). ``tenant`` as
         :meth:`memory_tools`'s."""
         box = self._toolbox([], tenant=await self._tenant(tenant))
         tools = [*await box.tools(code_mode=False), *await self._pulled(tenant)]

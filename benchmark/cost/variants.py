@@ -11,12 +11,11 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: with no Deep Agents
   capability asked for, LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep
   Agents' ``PatchToolCallsMiddleware``) — planning on a long task, older results cleared past
-  half the window, the request fitted to the window (``FitWindow``) — and code in the run's
-  sandbox, as the harness gives every agent by default (Deep Agents' ``execute`` on its
-  ``CodeBackend``; every other adapter ``sandbox_exec``): the sandbox :func:`give_code` makes
-  the default — Docker, the image ``TRELLIS_BENCH_SANDBOX_IMAGE`` names; a fake one under the
-  scripted model, which needs no daemon.
-* ``deep`` — ``ReAct`` on Deep Agents (a backend given: the journal's), ``create_deep_agent``
+  half the window, the request fitted to the window (``FitWindow``) — and a shell in the run's
+  working folder on this machine, as the harness gives every agent by default (Deep Agents'
+  ``execute`` on its ``CodeBackend``; every other adapter ``sandbox_exec``); a fake one under
+  the scripted model (:func:`give_code`), which runs no command.
+* ``deep`` — ``ReAct`` on Deep Agents (a backend given: its default one), ``create_deep_agent``
   with the harness's middleware: result paging (``FilesystemMiddleware``: a large result saved,
   a preview sent), summarization near the window's end, the scratch files and the ``task``
   helper on a long task.
@@ -33,8 +32,8 @@ same instructions and model. A new cost feature lands as one more entry of :data
 
 * ``sandbox`` — ``main`` (an alias kept for earlier commands): code runs by default.
 * ``subagents``, ``memory-files``, ``permissions`` — ``ReAct`` given one Deep Agents capability
-  (:data:`CAPABILITIES`): a sub-agent of its own (code in its sandbox, as ``main``), a memory
-  file on a disk backend, and permissions on one (a backend given: no code). Every case of the
+  (:data:`CAPABILITIES`): a sub-agent of its own, a memory file on a disk backend, and
+  permissions on one (a backend given that runs no command: ``sandbox_exec``). Every case of the
   suite runs on each, at any ``--window``: what a capability must not change is the answer.
 
 :func:`codes` says which runs have code (``complex``: a ``cannot`` turn there is scored on
@@ -47,7 +46,6 @@ from __future__ import annotations
 
 import atexit
 import functools
-import os
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -113,8 +111,9 @@ def main(
     window: int | None = None,
     deep: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
-    """``ReAct`` as it is built — ``deep``: on Deep Agents (a backend given: the journal's)."""
-    from trellis.harness.automatic import JournalBackend
+    """``ReAct`` as it is built — ``deep``: on Deep Agents (a backend given: the one ``ReAct``
+    has by default, :func:`trellis.harness.sandbox.default_files`)."""
+    from trellis.harness.sandbox import default_files
 
     named = PIECES | AUTOMATIC
     with defaults_off(*(named[name] for name in off)):
@@ -124,7 +123,7 @@ def main(
             max_steps=setup.max_steps,
             context_window=window or setup.window,
             tools=setup.tools,
-            backend=JournalBackend() if deep else None,
+            backend=default_files() if deep else None,
             skills=setup.skills,
         )
     return target, {}
@@ -191,26 +190,24 @@ def capable(setup: Setup, **given: Any) -> tuple[Any, dict[str, Any]]:
 
 
 def give_code(model: Any) -> None:
-    """The sandbox the harness gives every agent by itself (``sandbox.use_default``), for the
-    runs that follow: on a model on an endpoint, Docker of the image
-    ``TRELLIS_BENCH_SANDBOX_IMAGE`` names (else the harness's own choice: Docker's default
-    image, else this machine's isolation layer); for the scripted model a fake one (no daemon,
-    no interpreter: files and the listing only)."""
+    """For the scripted model, a fake sandbox in place of the harness's default shell (no
+    command is run: files and the listing only); a model on an endpoint runs its commands as
+    the harness gives them by default — in a working folder of the run's own on this machine,
+    as Claude Code's and Kimi Code's shells run here."""
+    if isinstance(model, str):
+        return
+    from tests.support.sandbox import FakeSandboxes
+
     from trellis import sandbox
-    from trellis.harness.sandbox import use_default
+    from trellis.harness import sandbox as given
 
-    if not isinstance(model, str):
-        from tests.support.sandbox import FakeSandboxes
-
-        use_default(sandbox(FakeSandboxes()))
-    elif os.environ.get(SANDBOX_IMAGE):
-        use_default(sandbox(image=os.environ[SANDBOX_IMAGE]))
+    given._DEFAULT["default"] = sandbox(FakeSandboxes())
 
 
 def codes(adapter: str, variant: str) -> bool:
-    """Whether a run of ``adapter`` built as ``variant`` has code: the harness's default
-    (:data:`CODED`), unless the variant turns it off or gives a backend of its own
-    (:data:`NO_CODE`). Claude Code's and Kimi's own shells are scored as before."""
+    """Whether a run of ``adapter`` built as ``variant`` has the harness's default shell
+    (:data:`CODED`), unless the variant turns it off (:data:`NO_CODE`). Claude Code's and
+    Kimi's own shells are scored as before."""
     return adapter in CODED and variant not in NO_CODE
 
 
@@ -239,8 +236,6 @@ def with_permissions(setup: Setup) -> tuple[Any, dict[str, Any]]:
     return capable(setup, backend=_disk({"reference/README.md": MEMORY_FILE}), permissions=[rule])
 
 
-#: The environment variable naming the ``sandbox`` variant's image (else the provider's own).
-SANDBOX_IMAGE: Final = "TRELLIS_BENCH_SANDBOX_IMAGE"
 #: What the ``memory-files`` variant's memory file says: house style, no fact of the data.
 MEMORY_FILE: Final = "# Notes\n\nAnswer in British English. Amounts are in GBP.\n"
 #: The ``subagents`` variant's helper: no ``tools`` named, so it has the run's.
@@ -265,16 +260,14 @@ CAPABILITIES: Final[dict[str, Variant]] = {
         "permissions", "ReAct(permissions=[...]) on a disk backend", with_permissions
     ),
 }
-#: The adapters the harness gives code by default (``sandbox.code_for``): ``ReAct``'s
+#: The adapters the harness gives a shell by default (``sandbox.code_for``): ``ReAct``'s
 #: ``execute``, ``sandbox_exec`` for the others (a graph built by hand binds it with
 #: ``h.harness_tools()``).
 CODED: Final = frozenset({"react", "langgraph", "deepagents", "graph", "openai"})
-#: The variants with no code: ``baseline`` (everything off), ``main-nocode``, and those given a
-#: backend of their own (``ReAct(backend=...)`` wins over the default).
-NO_CODE: Final = frozenset(
-    {"baseline", "main-nocode", "deep", "deep-files", "memory-files", "permissions"}
-    | {f"deep-{piece}" for piece in ("paging", "context_editing", "summarization")}
-)
+#: The variants with no shell: ``baseline`` (everything off) and ``main-nocode``. A ``ReAct``
+#: given a backend of its own that runs no command (``deep``, ``memory-files``,
+#: ``permissions``) is given ``sandbox_exec``, as every agent with no shell of its own.
+NO_CODE: Final = frozenset({"baseline", "main-nocode"})
 
 
 #: ``deep``'s pieces a ``deep-<piece>`` variant turns off, by the name of their middleware.

@@ -35,10 +35,10 @@ def no_spool_on_this_machine(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_code_sandbox_here(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A test's agents are given no code tool by themselves (``sandbox.default_sandbox``, as on
-    a machine with no Docker daemon and no isolation layer): no test reaches this machine's
-    daemon. A test of the default gives one (``sandbox.use_default(sandbox(FakeSandboxes()))``)
-    or decides it again (``_DEFAULT`` emptied)."""
+    """A test's agents are given no shell by themselves (``sandbox.default_sandbox``): what a
+    scripted model calls is the test's own, and no test runs a command on this machine unasked.
+    A test of the default gives one (``_DEFAULT["default"]``: a fake provider's, or
+    ``LocalFolders`` under its own folder) or has it made again (``_DEFAULT`` emptied)."""
     from trellis.harness import sandbox
 
     monkeypatch.setattr(sandbox, "_DEFAULT", {"default": None})

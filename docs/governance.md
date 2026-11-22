@@ -66,22 +66,25 @@ class OpsReviews(Hooks):
 
 Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What runs where:
 
-* **The harness's own commands on this machine go through its isolation layer.** `sandbox()`
-  with no provider is the tenant's shared Docker container when the daemon answers, else this
-  machine's isolation layer (`HostSandbox`: a per-tenant base, a per-run uid and 0700
-  workspace, limits, an environment with no secret, the network off, clean-up, a reaper,
-  audit — [sandbox.md](sandbox.md#commands-on-the-host-the-same-boundaries)) when it can
-  isolate here, else no shell: each command is refused with the reason, said once in the log.
-  Never a command as the service's own user. A deployment that configured its own layer (a
-  root helper, limits, a network) installs it at start with
-  `trellis.harness.host.install(HostSandbox(...))`, refused at once when it cannot isolate.
-* **Deep Agents' `execute` on a `LocalShellBackend`** (alone, a `CompositeBackend`'s default,
-  a sub-agent's; `ReAct(backend=)` too) has no isolation, and `sandbox()` is the same library's
-  isolated backend: refused at `h.wrap` whatever the setting, naming `sandbox()`.
-* **Claude Code's and Kimi Code's own shells run as they do today:** in their working folder,
-  as the service's own user, **without the harness's isolation** — announced and recorded at
-  each call, never asked of the run's user. A team's own Claude `SandboxSettings` is honoured
-  as given. To isolate them, run them in a sandbox: Claude Code's own
+* **A framework's own shell runs as the framework runs it:** Claude Code's and Kimi Code's,
+  Deep Agents' `execute` on a `LocalShellBackend` (alone, a `CompositeBackend`'s default, a
+  sub-agent's; `ReAct(backend=)` too), LangChain's `ShellToolMiddleware` on the host — on this
+  machine, as the service's own user, **without the harness's isolation**, each call the run's
+  own: governed, announced and recorded, never asked of the run's user.
+* **An agent with no shell of its own is given the harness's**
+  ([sandbox.md](sandbox.md#a-shell-by-default)): the same way — a working folder of the run's
+  own on this machine, as the service's user, with no isolation.
+* **`sandbox()` is the isolated one.** With no provider it is the tenant's shared Docker
+  container when the daemon answers, else this machine's isolation layer (`HostSandbox`: a
+  per-tenant base, a per-run uid and 0700 workspace, limits, an environment with no secret,
+  the network off, clean-up, a reaper, audit —
+  [sandbox.md](sandbox.md#commands-on-the-host-the-same-boundaries)) when it can isolate
+  here, else no shell: each command is refused with the reason, said once in the log. A
+  deployment that configured its own layer (a root helper, limits, a network) installs it at
+  start with `trellis.harness.host.install(HostSandbox(...))`, refused at once when it cannot
+  isolate.
+* **To isolate a framework's own shell, run it in a sandbox.** A team's own Claude
+  `SandboxSettings` is honoured as given. To isolate them, run them in a sandbox: Claude Code's own
   (`ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": False})`, which
   needs bubblewrap and socat on Linux — without them the CLI runs the command unsandboxed,
   warning only on its stderr), `kimi(sandbox=sandbox())`. An OpenAI agent's `LocalShellTool` or
@@ -90,17 +93,18 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
   do, unisolated (a Docker client or policy isolates them).
 * **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
   sandbox off: Claude Code's (`Bash`, `PowerShell`, `REPL`, `Monitor`) and Kimi's `Bash` on the
-  host, an OpenAI local shell tool or Unix-local sandbox, LangChain's host shell — refused at `h.wrap`, and a run whose own
-  `framework_options` would make one, naming the setting — and the isolation layer's own
-  commands, refused at the call. Commands in a sandbox are not affected.
+  host, Deep Agents' `LocalShellBackend`, an OpenAI local shell tool or Unix-local sandbox,
+  LangChain's host shell — refused at `h.wrap`, and a run whose own `framework_options` would
+  make one, naming the setting —, the harness's own shell, not given, and the isolation
+  layer's own commands, refused at the call. Commands in a sandbox are not affected.
 
 `trellis.harness.host` is the one place this is decided.
 
 | The way to a shell | Default (`allow`) | `deny` |
 |---|---|---|
 | `sandbox()` (ReAct, Deep Agents, `sandbox().tools()`), sandboxed Kimi | runs in Docker, else this machine's isolation layer, else refused with the reason | Docker or another provider runs; the isolation layer on this machine is refused |
-| the code tool every agent gets by default (ReAct's `execute`, else `sandbox_exec`) | given where Docker answers or the isolation layer can isolate; else none, said once | none given |
-| Deep Agents `LocalShellBackend` | refused, naming `sandbox()` | refused |
+| the shell an agent with none gets by default (ReAct's `execute`, else `sandbox_exec`) | runs in a working folder of the run's own on this machine, as the service's user, unisolated, announced | none given |
+| Deep Agents `LocalShellBackend` | runs as the library runs it, unisolated, announced | refused |
 | LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | runs as the framework runs it, unisolated (an OpenAI `SandboxAgent`'s shell: unasked, announced) | refused |
 | Claude Code's shell (no sandbox, or one that lets a command out) | runs as the service's user, unisolated, announced | refused |
 | Claude Code's shell in its own sandbox (`allowUnsandboxedCommands: False`, no `excludedCommands`) | runs in it | runs in it |
@@ -247,8 +251,8 @@ tools (a schedule is confirmed when it is made, below), its memory tools (`memor
 the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub-agent's call
 (the sub-agent's own calls are governed), Deep Agents' `execute` in the run's sandbox, Deep
 Agents' `write_file`, `edit_file` and `delete` on the run's own sandbox (`ReAct(backend=sandbox())`,
-`create_deep_agent(**sandbox().deep_agent())`), the code tool the harness gives every agent by
-default ([sandbox.md](sandbox.md#code-by-default)) and an OpenAI `SandboxAgent`'s shell
+`create_deep_agent(**sandbox().deep_agent())`), the shell the harness gives an agent by
+default ([sandbox.md](sandbox.md#a-shell-by-default)) and an OpenAI `SandboxAgent`'s shell
 (`exec_command`, `write_stdin`). What runs in the run's own isolated sandbox changes only what
 the run owns: it is the run's scratch work — governed, journaled and recorded, never a person's
 approval — while what leaves the sandbox keeps its own governance: its network (none by

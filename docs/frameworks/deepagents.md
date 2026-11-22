@@ -127,7 +127,7 @@ A Deep Agent compiled without a `store` gets the memory service as its store, so
 
 | | Where |
 |---|---|
-| Sandbox | by default, with `middleware()` and a backend that runs no command: `sandbox_exec` in the run's own sandbox ([sandbox.md](../sandbox.md#code-by-default)); `create_deep_agent(model, **sandbox().deep_agent())`: its `backend=`, the run's own sandbox (its file writes there the run's scratch, unasked); or a backend of Deep Agents' own (below) |
+| Sandbox | by default, with `middleware()` and a backend that runs no command: `sandbox_exec` in the run's working folder on this machine ([sandbox.md](../sandbox.md#a-shell-by-default)); `create_deep_agent(model, **sandbox().deep_agent())`: its `backend=`, the run's own sandbox (its file writes there the run's scratch, unasked); or a backend of Deep Agents' own (below) |
 | Skills | `create_deep_agent(model, **src.deep_agent())`: its own `SkillsMiddleware`, the skill source's skills a `/skills/` route of its backend; with a sandbox, `**deep_agent(sandbox(), src)` — both in its one `backend=` (a `CompositeBackend`) ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `create_deep_agent(..., middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); its native turn limit is LangGraph's: `framework_options={"recursion_limit": n}` |
@@ -142,9 +142,10 @@ A Deep Agent compiled without a `store` gets the memory service as its store, so
   gated with `interrupt_on`; `**sandbox().deep_agent()` when every command must be governed by
   the catalog and journaled ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
   `LocalShellBackend` is the host's shell, unisolated: a graph whose `execute` reaches one
-  (its own backend, a `CompositeBackend`'s default, a sub-agent's) is refused at `h.wrap`,
-  whatever the setting, naming `sandbox()` — which works in Docker, else this machine's
-  isolation layer ([governance.md](../governance.md#commands-on-the-host)).
+  (its own backend, a `CompositeBackend`'s default, a sub-agent's) runs it as the library does,
+  each command the run's own call (announced and recorded) — as Claude Code's and Kimi Code's
+  shells run; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`, and `sandbox()` is the
+  isolated backend ([governance.md](../governance.md#commands-on-the-host)).
 
 ## Approvals, streaming, durable runs, surfaces, evaluation
 

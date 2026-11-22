@@ -4224,7 +4224,7 @@ async def run_case(
     if case.coding and not coding:
         return found | {"not_applicable": "needs code to run: a variant with code"}, []
     if coding:
-        variants.give_code(model)  # the harness's default sandbox: the bench's image, or a fake
+        variants.give_code(model)  # the scripted model's shell is a fake: no command is run
     if case.scripted and not scripted:
         return found | {
             "not_applicable": "its calls are the scripted model's (malformed, looping)"
@@ -4754,9 +4754,9 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
             *variants.CAPABILITIES,
         ),
         default="main",
-        help="with --adapter react: ReAct as built (main: code in the run's sandbox, as every "
-        "adapter has by default; main-nocode without it), on Deep Agents (deep: a backend, no "
-        "code), or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
+        help="with --adapter react: ReAct as built (main: a shell in the run's working folder, "
+        "as every adapter has by default; main-nocode without it), on Deep Agents (deep: a "
+        "backend), or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
         f"--adapter deepagents: {UNTHREADED}, built with no checkpointer of its own; "
         f"{PLANNED} ({PLANNED_UNTHREADED}), given TodoListMiddleware (and no checkpointer)",
     )

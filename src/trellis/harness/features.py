@@ -12,9 +12,10 @@ else is a setting. Nine names, each one part (:data:`NAMES`):
 * ``schedules`` — the tools a user schedules tasks with in chat (``schedules.py``);
 * ``ask`` — ``ask_user``, the model's question to the person, as a chat front end's run is
   offered it by itself (``tools/ask.py``; a tool the agent declares stays);
-* ``code`` — the code tool the harness gives an agent by itself, in a sandbox of the run's own
-  (``sandbox.code_for``: ``ReAct``'s ``execute``, else ``sandbox_exec``); a sandbox the agent
-  is given stays.
+* ``code`` — the shell the harness gives an agent by itself, in a working folder of the run's
+  own (``sandbox.code_for``: ``ReAct``'s ``execute``, else ``sandbox_exec``) — its per-agent
+  switch, as Claude Code's ``disallowed_tools`` is its own shell's; a shell or sandbox the
+  agent brings stays.
 
 A run's own ``without=`` is kept with its record (``RunStart.metadata``, as the parts it covers),
 so every attempt — a resume, a worker's after a crash — and every child run it starts works

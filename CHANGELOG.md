@@ -22,36 +22,44 @@ when the saver or the run store cannot be read (a warning), and on a thread's fi
 a turn reads the run store's listing of the thread (the run reads are cached per process), and
 nothing more. Other frameworks' in-RAM stores are unchanged.
 
-### Changed: every agent runs code by default, in a sandbox of the run's own
+### Changed: every agent has a shell by default, as Claude Code and Kimi Code have their own
 
-An agent the harness wraps now gets a code tool with nothing to write, wherever an isolated
-sandbox can be made — Docker where its daemon answers, else this machine's isolation layer
-(`host.install`'s, else its default); where neither can, nothing is added and it is said once in
-a warning, never an unconfined shell (`sandbox.default_sandbox`). It is decided at `h.wrap`
-(`sandbox.code_for`, `Agent.code`):
+Claude Code and Kimi Code bring a shell of their own, run on this machine as the service's
+user; the other frameworks' agents had none unless a sandbox was configured, and Deep Agents'
+own host shell (`LocalShellBackend`) was refused at `h.wrap` whatever the setting. Now every
+framework's own shell runs as the framework runs it, and an agent with none is given the
+harness's, with nothing to write:
 
-* `ReAct` with no `backend=` (lean, or on Deep Agents through another capability): Deep Agents'
-  own `execute` runs in the run's sandbox (`sandbox.backend.CodeBackend`: its files stay the
-  graph's state, so the lean graph and its long-task files are unchanged), described in a few
-  words (`sandbox.CODE`, `CodeCard`; in its helpers too);
-* LangGraph `create_agent`/`create_deep_agent` with `middleware()`, OpenAI Agents and function
-  targets: `sandbox_exec` alone (one command), a tool of the run; a graph built by hand finds
-  it among `h.harness_tools()`;
-* Claude Code and Kimi Code keep their own shells.
+* **A framework's own shell is allowed** — Deep Agents' `execute` on a `LocalShellBackend`
+  (alone, a `CompositeBackend`'s default, a sub-agent's, `ReAct(backend=)`) joins Claude Code's,
+  Kimi Code's, LangChain's `ShellToolMiddleware` and the OpenAI SDK's local shell: on this
+  machine, with no isolation, each command the run's own call (governed, announced and
+  recorded, never asked), refused at `h.wrap` only where the deployment says
+  `TRELLIS_HOST_EXECUTION=deny` (`host`: the `unisolated` kind and its refusal are gone).
+* **An agent with none is given one** at `h.wrap` (`sandbox.code_for`, `Agent.code`): `ReAct`
+  with no `backend=` as Deep Agents' own `execute` (`sandbox.backend.CodeBackend`: its files
+  stay the graph's state, so the lean graph and its long-task files are unchanged; described in
+  a few words: `sandbox.CODE`, `CodeCard`; in its helpers too); a `ReAct` given a backend that
+  runs no command, LangGraph `create_agent`/`create_deep_agent` with `middleware()`, OpenAI
+  Agents and function targets as `sandbox_exec` alone (one command), a tool of the run; a
+  graph built by hand finds it among `h.harness_tools()`.
+* **It runs where Claude Code's and Kimi Code's do**: a working folder made for the run on this
+  machine, as the service's own user, with no isolation (`sandbox.local.LocalFolders`, the
+  default's provider: no Docker daemon is asked, no isolation layer needed) — made at the
+  run's first command and removed with the run, its `outputs/` given to the user and the run's
+  kept results files it reads there, as in any sandbox. `sandbox()` given to an agent stays
+  the isolated one (Docker, else this machine's isolation layer).
 
 What it costs a request: 93 tokens for `sandbox_exec` with its schema, 139 for ReAct's
-`execute` (Deep Agents' own description of it is 304; the explicit `sandbox().tools()` with the
-environment card 432). The sandbox is made at the run's first command — a run that never runs
-code makes none, and no environment card is read for the default. None is given
-`without=["code"]` (a new `without=` name, on `h.wrap` or a run), where the deployment says
-`TRELLIS_HOST_EXECUTION=deny`, or to an agent that brings its own (`Adapter.code`: a backend
-given to `ReAct`, a Deep Agents backend that runs commands, LangChain's `shell`, an OpenAI
-`SandboxAgent`, code interpreter or shell tool, a `sandbox()` among its tools; one a function
-adds with `agent.tools.use` replaces the default's tool). A deployment picks the default's image
-or provider with `sandbox.use_default(sandbox(image=...))`, as `host.install` picks the
-isolation layer; `default_provider` now uses the installed layer, as documented. A run with
-code is offered no `query_result(save_as=)` (code writes the user's files in `outputs/`), and a
-scratch file's note now says its commands do not see it.
+`execute` (Deep Agents' own description of it is 304). A run that never runs a command makes
+no folder. None is given `without=["code"]` (a new `without=` name, on `h.wrap` or a run: the
+agent's own switch, as Claude Code's `disallowed_tools` is its shell's), where the deployment
+says `TRELLIS_HOST_EXECUTION=deny`, or to an agent that brings its own (`Adapter.code`: a Deep
+Agents backend that runs commands, LangChain's `shell`, an OpenAI `SandboxAgent`, code
+interpreter or shell tool, a `sandbox()` among its tools; one a function adds with
+`agent.tools.use` replaces the default's tool). As for every run with a tool that runs code
+(Claude Code's `Bash` among them), a run with the shell is offered no
+`query_result(save_as=)`: its code writes the user's files in `outputs/`.
 
 ### Fixed: what a run does in its own sandbox needs no person's approval
 
@@ -66,9 +74,10 @@ that writes outside it keep their governance; a disk or store backend's writes s
 so does a composite's route outside the sandbox.
 
 The benchmark follows the default: `--variant main` runs with code on every adapter the harness
-gives it to (`variants.codes`), in Docker of `TRELLIS_BENCH_SANDBOX_IMAGE` (`variants.give_code`;
-a fake sandbox under `--scripted`); `sandbox` is an alias of `main`, `main-nocode` is `main`
-`without={"code"}`, and `baseline` is without it too. A case that was "can't do it here (no
+gives it to (`variants.codes`: a `ReAct` given a backend that runs no command among them —
+`deep`, `memory-files`, `permissions`), in the run's working folder on this machine (a fake
+sandbox under `--scripted`: `variants.give_code`); `sandbox` is an alias of `main`,
+`main-nocode` is `main` `without={"code"}`, and `baseline` is without it too. A case that was "can't do it here (no
 code execution)" is scored, where the run has code, on doing it right (`complex._done`): by the
 file kept for the user, else the figure the code computes, else unverified — its refusal is
 wrong there, and a wrong file or figure is never accepted; `cannot(..., done=)` is what the

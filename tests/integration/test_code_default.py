@@ -1,12 +1,12 @@
-"""Code by default: an agent the harness wraps gets a code tool in a sandbox of the run's own
-with nothing to write (``sandbox.code_for``) — ``ReAct`` as Deep Agents' ``execute`` on its
-backend (``CodeBackend``), every other agent as ``sandbox_exec`` — wherever an isolated sandbox
-can be made; none where none can (said once), ``without=["code"]``, under ``deny``, or for an
-agent that brings its own. The sandbox is made at the run's first command, never before."""
+"""A shell by default: an agent the harness wraps gets one with nothing to write
+(``sandbox.code_for``), as Claude Code and Kimi Code have their own — ``ReAct`` as Deep Agents'
+``execute`` on its backend (``CodeBackend``), every other agent as ``sandbox_exec`` — in a
+working folder of the run's own on this machine, with no isolation (``LocalFolders``); none
+``without=["code"]``, under ``deny``, or for an agent that brings its own. The folder is made
+at the run's first command, never before."""
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -22,15 +22,24 @@ from trellis.contracts import RunStatus
 from trellis.harness import sandbox as sandbox_module
 from trellis.harness.adapters.acp import kimi
 from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
-from trellis.harness.sandbox import CODE, EXEC, HostSandbox, SandboxSource
+from trellis.harness.sandbox import CODE, EXEC, SandboxSource
 from trellis.harness.sandbox.backend import NO_CODE, CodeBackend
+from trellis.harness.sandbox.local import LocalFolders
 
 
 @pytest.fixture
-def boxes() -> FakeSandboxes:
+def boxes(monkeypatch: pytest.MonkeyPatch) -> FakeSandboxes:
     """The sandbox the harness gives an agent by itself, on a fake provider."""
     provider = FakeSandboxes()
-    sandbox_module.use_default(sandbox(provider))
+    monkeypatch.setitem(sandbox_module._DEFAULT, "default", sandbox(provider))
+    return provider
+
+
+@pytest.fixture
+def folders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> LocalFolders:
+    """The harness's own default, its runs' folders under the test's."""
+    provider = LocalFolders(tmp_path / "runs")
+    monkeypatch.setitem(sandbox_module._DEFAULT, "default", sandbox(provider))
     return provider
 
 
@@ -54,45 +63,51 @@ def results(model: ScriptedChatModel) -> list[str]:
     return [str(m.content) for m in model.seen[-1] if isinstance(m, ToolMessage)]
 
 
-# --------------------------------------------------------------------------- none can be made
-def test_where_no_isolated_sandbox_can_be_made_nothing_is_added_said_once(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.setattr(sandbox_module, "_DEFAULT", {})  # decided again, here
-    monkeypatch.setattr(sandbox_module, "docker_answers", lambda: False)
-    monkeypatch.setattr(HostSandbox, "cannot_isolate", lambda self: "no root for the layer")
-    sandbox_module._said_once.cache_clear()
-
-    async def work(input: str, agent: Runtime) -> str:
-        return "done"
-
-    with caplog.at_level(logging.WARNING, logger="trellis.sandbox"):
-        made = [
-            harness.wrap(graph(ScriptedChatModel(turns=["hi"])), id="graph"),
-            harness.wrap(work, id="function"),
-            harness.wrap(ReAct("s", ScriptedChatModel(turns=["hi"])), id="react"),
-        ]
-    assert [a.code for a in made] == [None, None, None]
-    assert all(a._code_tools == [] for a in made)
-    said = [r.getMessage() for r in caplog.records if "no root for the layer" in r.getMessage()]
-    assert len(said) == 1 and "no code tool" in said[0]
-    assert sandbox_module.default_sandbox() is None  # never an unconfined shell
-
-
-def test_the_default_is_dockers_else_the_hosts_isolation_layer(
+# --------------------------------------------------------------------------- the default
+def test_the_default_is_a_working_folder_on_this_machine_made_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sandbox_module, "_DEFAULT", {})
-    monkeypatch.setattr(sandbox_module, "docker_answers", lambda: True)
+    """No Docker daemon is asked and no isolation layer is needed: the harness's own shell runs
+    where Claude Code's and Kimi Code's do."""
+    monkeypatch.setattr(sandbox_module, "_DEFAULT", {})  # made again, here
+
+    def asked() -> bool:
+        raise AssertionError("the default asks no Docker daemon")
+
+    monkeypatch.setattr(sandbox_module, "docker_answers", asked)
     found = sandbox_module.default_sandbox()
-    assert isinstance(found, SandboxSource)
-    assert isinstance(found.provider, sandbox_module.SharedDockerSandbox)
-    assert sandbox_module.default_sandbox() is found  # decided once
-    monkeypatch.setattr(sandbox_module, "_DEFAULT", {})
-    monkeypatch.setattr(sandbox_module, "docker_answers", lambda: False)
-    monkeypatch.setattr(HostSandbox, "cannot_isolate", lambda self: None)
-    found = sandbox_module.default_sandbox()
-    assert found is not None and isinstance(found.provider, HostSandbox)
+    assert isinstance(found, SandboxSource) and isinstance(found.provider, LocalFolders)
+    assert sandbox_module.default_sandbox() is found  # one per process
+    assert isinstance(sandbox_module.default_files(), CodeBackend)
+
+
+def test_with_no_default_react_keeps_its_files_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sandbox_module._DEFAULT, "default", None)  # the suite's: none
+    assert sandbox_module.default_files().__class__.__name__ == "JournalBackend"
+
+
+async def test_react_runs_a_real_command_in_the_runs_own_folder(
+    harness: Harness, folders: LocalFolders
+) -> None:
+    command = "pwd; echo 6,7 > outputs/pair.csv; python3 -c 'print(6 * 7)'"
+    model = ScriptedChatModel(turns=[("execute", {"command": command}), "42"])
+    agent = harness.wrap(ReAct("You analyse data.", model), id="analyst")
+    assert not folders.root.exists()  # nothing made at wrap
+    done = await agent.run("multiply", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    [result] = results(model)
+    assert "42" in result and str(folders.root) in result  # ran here, in the run's folder
+    assert "pair.csv" in result  # told what the user gets of what it wrote
+    assert not list(folders.root.glob("trellis-*"))  # removed with its run
+
+
+async def test_a_middleware_graph_runs_a_real_command_in_the_runs_own_folder(
+    harness: Harness, folders: LocalFolders
+) -> None:
+    model = ScriptedChatModel(turns=[(EXEC, {"command": "echo $((6 * 7))"}), "42"])
+    done = await harness.wrap(graph(model), id="graph").run("multiply", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert offered(model)[EXEC] == CODE and any("42" in r for r in results(model))
 
 
 # --------------------------------------------------------------------------- each family
@@ -386,13 +401,6 @@ async def test_codes_backend_refuses_synchronously_and_names_itself() -> None:
     assert backend.id == "trellis-code"
     with pytest.raises(ConfigurationError, match="asynchronously"):
         backend.execute("echo hi")
-
-
-def test_use_default_returns_the_one_it_replaces() -> None:
-    given = sandbox(FakeSandboxes())
-    assert sandbox_module.use_default(given) is None  # the suite's: none
-    assert sandbox_module.use_default(None) is given
-    assert sandbox_module.default_files().__class__.__name__ == "JournalBackend"
 
 
 async def test_a_tool_of_the_runs_own_stays_beside_the_default(

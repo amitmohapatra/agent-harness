@@ -142,10 +142,6 @@ HOST_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]], str
     ),
     "acp-unsandboxed": (lambda: ACPAgent(command=("some-agent", "acp")), dict, "sandbox=sandbox()"),
     "kimi-unsandboxed": (kimi, dict, "sandbox=sandbox()"),
-}
-#: The ways to a shell on this machine with no isolation the harness could give: refused
-#: whatever the setting, naming ``sandbox()``.
-UNISOLATED_PATHS: dict[str, tuple[Callable[[], Any], Callable[[], dict[str, Any]], str]] = {
     "deepagents-local-shell": (deep_local, dict, "LocalShellBackend"),
     "deepagents-composite-default": (deep_composite, dict, "LocalShellBackend"),
     "deepagents-subagent": (react_subagent_local, dict, "LocalShellBackend"),

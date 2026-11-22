@@ -30,7 +30,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from tests.support.adapters import CLI
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.sandbox import FakeSandboxes
-from tests.unit.test_host_execution import HOST_PATHS, UNISOLATED_PATHS
+from tests.unit.test_host_execution import HOST_PATHS
 from trellis import Harness, ReAct, Settings, sandbox
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import sandbox as sandbox_module
@@ -74,16 +74,6 @@ def test_deny_switches_each_adapters_shell_off_and_the_default_wraps_it(way: str
     allowed = Harness(config=Settings(), memory=False)
     allowed.wrap(target(), id=way, framework_options=options())
     assert way in allowed.agents
-
-
-@pytest.mark.parametrize("way", sorted(UNISOLATED_PATHS))
-def test_an_unisolated_shell_is_refused_whatever_the_setting(way: str) -> None:
-    target, options, fix = UNISOLATED_PATHS[way]
-    for value in ("allow", "deny"):
-        h = Harness(config=Settings(host_execution=value), memory=False)  # pyright: ignore[reportArgumentType]
-        with pytest.raises(ConfigurationError, match=r"sandbox\(\)") as refused:
-            h.wrap(target(), id=way, framework_options=options())
-        assert fix in str(refused.value)
 
 
 def test_deny_leaves_commands_in_a_sandbox_alone() -> None:

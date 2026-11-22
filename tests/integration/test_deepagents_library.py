@@ -501,19 +501,25 @@ async def test_the_todo_list_stays_in_view_when_the_turns_that_wrote_it_do_not(
     assert "Your todo list" not in model.seen[1][-3].text  # the call shows it: said once
 
 
-def test_a_local_shell_backend_is_refused_under_the_harness_naming_sandbox(
+async def test_a_local_shell_backend_runs_as_the_library_runs_it_governed_at_each_call(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """``LocalShellBackend`` gives ``execute`` a real shell on this machine, with no isolation:
-    under the harness the graph is refused at ``h.wrap`` (whatever ``TRELLIS_HOST_EXECUTION``
-    says), naming ``sandbox()`` — the library's isolated backend, in Docker or this machine's
-    isolation layer."""
+    """``LocalShellBackend`` gives ``execute`` a real shell on this machine: the library's own,
+    run as it is under the harness — as Claude Code's and Kimi Code's shells are —, each
+    command the run's own call (announced and recorded, never asked), and refused at
+    ``h.wrap`` only where the deployment says ``TRELLIS_HOST_EXECUTION=deny``."""
     backend = LocalShellBackend(root_dir=str(tmp_path), virtual_mode=True)
     model = ScriptedChatModel(turns=[("execute", {"command": "echo tides > t.txt"}), "done"])
     graph = create_deep_agent(model=model, backend=backend, checkpointer=InMemorySaver())
-    with pytest.raises(ConfigurationError, match=r"sandbox\(\)"):
-        harness.wrap(graph, id="deep")
-    assert not (tmp_path / "t.txt").exists()
+    agent = harness.wrap(graph, id="deep")
+    events = [e async for e in agent.stream("write it", user="u", thread="t")]
+    assert (tmp_path / "t.txt").read_text() == "tides\n"
+    called = [e.data for e in events if e.data.get("tool") == "execute"]
+    assert called, "the command is a call of the run"
+    assert not [e for e in events if e.type.value == "interrupt"]  # announced, not asked
+    denying = Harness(config=Settings(host_execution="deny"), memory=False)
+    with pytest.raises(ConfigurationError, match="TRELLIS_HOST_EXECUTION=deny"):
+        denying.wrap(graph, id="deep")
 
 
 async def test_execute_without_a_sandbox_backend_is_the_librarys_own_refusal(

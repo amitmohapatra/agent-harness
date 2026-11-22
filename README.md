@@ -141,7 +141,7 @@ harness's configuration
 | a score for a test set | `await h.evaluate(agent, dataset, [exact_match(), called("lookup")])` | [evaluation.md](docs/evaluation.md) |
 | quality on live traffic | `h.wrap(target, id="a", judges=[llm_judge("Polite and correct.")])` | [evaluation.md](docs/evaluation.md) |
 | traces in Langfuse | `export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=...` (`LANGFUSE_BASE_URL=...` unless on Langfuse Cloud) | [observability.md](docs/observability.md) |
-| code run away from the host | on by default for every agent where an isolated sandbox can be made (Docker, else the host's isolation layer; `without=["code"]` turns it off); `ReAct(..., backend=sandbox())` for files there too | [sandbox.md](docs/sandbox.md#code-by-default) |
+| a shell | every agent has one by default, as Claude Code and Kimi Code have their own (on this machine, with no isolation; `without=["code"]` or `TRELLIS_HOST_EXECUTION=deny` turns it off); `ReAct(..., backend=sandbox())` runs it away from the host, in Docker | [sandbox.md](docs/sandbox.md#a-shell-by-default) |
 | only one piece, in my own loop | `from trellis.memory import MemoryClient` (or runs, governance, evals) | [Way 2](#two-ways-to-use-trellis) |
 
 Every line has a runnable example: [examples/](examples/README.md).

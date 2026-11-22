@@ -114,9 +114,9 @@ The names are Deep Agents' where both have one. In four tiers:
   `CompositeBackend` — or the run's sandbox, `sandbox()`, where `execute` runs code
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
   and governed as any tool (the reads read, the others write; the catalog may say more). A
-  `LocalShellBackend` (`execute` in the host's shell, unisolated) is refused at `h.wrap`:
-  give `backend=sandbox()`, which works in Docker, else this machine's isolation layer
-  ([governance.md](../governance.md#commands-on-the-host)).
+  `LocalShellBackend` (`execute` in the host's shell, unisolated) runs as the library runs it,
+  unless the deployment says `TRELLIS_HOST_EXECUTION=deny`; `backend=sandbox()` is the isolated
+  one ([governance.md](../governance.md#commands-on-the-host)).
 * `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
   calls the run makes that may call tools (LangChain's `ModelCallLimitMiddleware` counts them;
   at the limit the model is called once more, told the limit is reached and offered no tool, and
@@ -705,7 +705,7 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
 
 | | Where |
 |---|---|
-| Sandbox | by default, with no `backend=`: Deep Agents' `execute` in the run's own sandbox, its files still the graph's state (`CodeBackend`, [sandbox.md](../sandbox.md#code-by-default); `without=["code"]` turns it off); `ReAct(backend=sandbox())`: its file tools and `execute` all in the run's sandbox ([sandbox.md](../sandbox.md)) |
+| Sandbox | by default, with no `backend=`: Deep Agents' `execute` in the run's working folder on this machine, its files still the graph's state (`CodeBackend`, [sandbox.md](../sandbox.md#a-shell-by-default); `without=["code"]` turns it off); `ReAct(backend=sandbox())`: its file tools and `execute` all in the run's sandbox ([sandbox.md](../sandbox.md)) |
 | Skills | `ReAct(skills=src)`: a skill source (`trellis.skills`), pinned per run, read by Deep Agents' own skills middleware through a `/skills/` route of the backend — with `backend=sandbox()` too; or Deep Agents' own source paths ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `ReAct(middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); the loop's own turn limit is `max_steps`, and LangGraph's `recursion_limit` goes in `framework_options` |

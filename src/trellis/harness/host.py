@@ -1,32 +1,32 @@
-"""Shell commands on this machine: allowed by default, with isolation as the guard
+"""Shell commands on this machine: allowed by default
 (``Settings.host_execution``, ``TRELLIS_HOST_EXECUTION``: ``allow``, or ``deny``, the
 administrator's switch that turns them off).
 
-The person a run is for decides the actions taken in their name; the machine the harness runs
-on is the deployment's, so a command there runs only where it is confined to the run — never
-as the service's own user, never on a run user's approval. What runs a command here
-(:func:`found`), by each framework's own word for it, and what the harness does:
+A framework's own shell runs as the framework runs it — on this machine, as the service's
+user, unless the agent is given a sandbox — and every call of it is the run's: governed,
+announced and recorded as the framework's tools are. What runs a command here (:func:`found`),
+by each framework's own word for it:
 
 * **Claude Code's and Kimi Code's own shell** (Claude's ``Bash``, ``PowerShell``, ``REPL``,
-  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``): run as they do, in their working folder
-  as the service's user — not through the harness's isolation layer, which cannot carry a
-  framework's own process — announced and recorded at each call. A team's own Claude
-  ``SandboxSettings`` is honoured as given; ``kimi(sandbox=sandbox())`` isolates Kimi's.
-* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``** (its executor: code of yours
-  on this machine), **the SDK's ``UnixLocalSandboxClient``**, **LangChain's
-  ``ShellToolMiddleware`` on the host**: a framework's own shell, run as it is, governed at each
-  call as the framework's tools are.
+  ``Monitor``; Kimi's ``Bash`` with no ``sandbox=``), in their working folder. A team's own
+  Claude ``SandboxSettings`` is honoured as given; ``kimi(sandbox=sandbox())`` isolates Kimi's.
 * **Deep Agents' ``execute`` on a ``LocalShellBackend``** (alone, a ``CompositeBackend``'s
-  default, a sub-agent's; ``ReAct(backend=)`` too): no isolation, and ``sandbox()`` is the same
-  library's isolated backend — refused at ``h.wrap`` whatever the setting, naming ``sandbox()``
-  (Docker, else this machine's isolation layer).
+  default, a sub-agent's; ``ReAct(backend=)`` too).
+* **LangChain's ``ShellToolMiddleware`` on the host**.
+* **An OpenAI agent's ``LocalShellTool`` or local ``ShellTool``** (its executor: code of yours
+  on this machine), **the SDK's ``UnixLocalSandboxClient``**.
 
-``deny`` refuses every one at ``h.wrap``, and a run whose own ``framework_options`` would make
-one, naming the setting. Isolated sandboxes are never refused: ``sandbox()``, a Deep Agents
-sandbox backend, a hosted client, LangChain's Docker or Codex policy, Kimi with a sandbox.
-The deployment may install the isolation layer it configured (:func:`install`: a
-``HostSandbox`` with a root helper, limits, network), refused at start when it cannot isolate;
-``sandbox()`` and ``isolated_run`` then use it."""
+An agent with none of these gets the harness's own, with nothing to write
+(``sandbox.code_for``: a working folder of the run's own on this machine, with no isolation —
+``ReAct`` through Deep Agents' ``execute``, any other as ``sandbox_exec``).
+
+``deny`` refuses an agent with a shell of its own at ``h.wrap``, and a run whose own
+``framework_options`` would make one, naming the setting; the harness's own is not given
+there. Isolated sandboxes are never refused: ``sandbox()``, a Deep Agents sandbox backend, a
+hosted client, LangChain's Docker or Codex policy, Kimi with a sandbox. The deployment may
+install the isolation layer it configured (:func:`install`: a ``HostSandbox`` with a root
+helper, limits, network), refused at start when it cannot isolate; ``sandbox()`` and
+``isolated_run`` then use it."""
 
 from __future__ import annotations
 
@@ -48,12 +48,6 @@ REFUSED: Final = (
     f"them off ({HOST_EXECUTION_ENV}=deny), and a run's user cannot approve them. Give it a "
     "sandbox — {fix}"
 )
-#: What an agent with a shell the harness cannot isolate is refused with, whatever the setting.
-UNISOLATED_SHELL: Final = (
-    "agent {agent!r} would run commands on this machine with no isolation: {found}. Under the "
-    "harness a command runs confined to its run: give it sandbox() (Docker, else this "
-    "machine's isolation layer) — {fix}"
-)
 #: What installing an isolation layer that cannot isolate here is refused with.
 UNISOLATED: Final = (
     "commands on this machine cannot be isolated here: {why}. The harness never runs them as "
@@ -66,10 +60,10 @@ DEEP_AGENTS_FIX: Final = (
     "ReAct(backend=sandbox()), or create_deep_agent(**sandbox().deep_agent()), in place of "
     "the LocalShellBackend"
 )
-#: What a way to a shell is: one the harness could isolate and does not (refused whatever the
-#: setting: ``sandbox()`` is the way), or a framework's own process (Claude Code's, Kimi
-#: Code's) or an executor of yours, which run as they do unless the deployment says ``deny``.
-Kind = Literal["unisolated", "framework", "yours"]
+#: What a way to a shell is: a framework's own (Claude Code's, Kimi Code's, Deep Agents',
+#: LangChain's, the OpenAI SDK's), or an executor of yours — each runs as it does unless the
+#: deployment says ``deny``.
+Kind = Literal["framework", "yours"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +73,7 @@ class HostShell:
 
     what: str
     fix: str
-    kind: Kind = "unisolated"
+    kind: Kind = "framework"
 
 
 #: The isolation layer the deployment installed (:func:`install`), if any.
@@ -104,15 +98,10 @@ def install(layer: HostSandbox | None) -> HostSandbox | None:
 
 def refuse(agent: Agent, options: Mapping[str, Any]) -> None:
     """Refuse ``agent`` run with framework ``options`` (its own, or a run's over them) when it
-    would run commands here with no isolation the harness could give (:data:`UNISOLATED_SHELL`),
-    or — where the deployment says ``deny`` — with any shell here (:data:`REFUSED`)."""
+    would run commands here with a shell of its own and the deployment says ``deny``
+    (:data:`REFUSED`)."""
     shells = found(agent.adapter.name, agent.target, options)
-    if not shells:
-        return
-    held = [s for s in shells if s.kind == "unisolated"]
-    if held:
-        raise ConfigurationError(UNISOLATED_SHELL.format(agent=agent.id, **_said(held)))
-    if agent.harness.settings.host_execution == "deny":
+    if shells and agent.harness.settings.host_execution == "deny":
         raise ConfigurationError(REFUSED.format(agent=agent.id, **_said(shells)))
 
 
