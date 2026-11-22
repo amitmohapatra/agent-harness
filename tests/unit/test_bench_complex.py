@@ -1405,6 +1405,43 @@ def test_a_grounded_answer_cites_only_figures_it_was_given() -> None:
     ]
 
 
+def test_an_answer_is_never_among_what_its_own_figures_are_checked_against() -> None:
+    """What a conversation heard before an answer (``cx.heard``): every tool result, context
+    and earlier answer of its thread — never the answer being scored, which the run's end adds
+    last (a CLI's context held it, so none of its figures could be unbacked)."""
+    told = ["How sure are you?", "margin 3721041.72", "An earlier answer: 0.9093 per £."]
+    answer = "Sure: it saves £216,683.34."
+    assert cx.heard([*told, answer], answer) == told
+    assert cx.heard(told, answer) == told  # not there (a run that ended with no answer)
+    assert cx.heard([answer, *told], answer) == [answer, *told]  # an earlier one, said the same
+    assert cx.heard([], answer) == [] and cx.heard([*told, ""], "") == [*told, ""]
+    e = cx.grounded("sure", "rubric", "ref")
+    context = cx.said_in([], cx.heard([*told, answer], answer))
+    assert cx.score(e, answer, [], "", context)["made_up"] == ["216683"]
+    assert cx.score(e, answer, [], "", cx.said_in([], [*told, answer]))["made_up"] == []
+
+
+def test_a_figure_from_a_shell_the_suite_cannot_see_is_unverified_not_made_up() -> None:
+    """A CLI's own shell prints where the suite does not read: a grounded answer's figure
+    nothing else holds is then neither backed nor made up (``unseen``) — unverified, for that
+    turn alone; with no such shell in the turn it is made up, as for every adapter."""
+    e = cx.grounded("cut", "rubric", "ref")
+    answer = "Cut: it saves £216,683.34 on a margin of 3721041.72."
+    context = "margin 3721041.72"
+    seen = cx.score(e, answer, [], "", context)
+    assert seen["correct"] is False and seen["made_up"] == ["216683"]
+    unseen = cx.score(e, answer, [], "", context, unseen=True)
+    assert unseen["correct"] is None and unseen["made_up"] == ["216683"]
+    backed = cx.score(e, "Cut: a margin of 3721041.72, 0.9093 per £.", [], "", context + " 0.9093")
+    assert backed["correct"] is True
+    assert (
+        cx.score(e, "Keep: 3721041.72 and 0.5 of 3721041.72.", [], "", context, unseen=True)[
+            "correct"
+        ]
+        is False
+    )  # what it lacks is lacking whatever ran
+
+
 def test_the_keyed_model_answers_by_the_message_it_answers() -> None:
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 

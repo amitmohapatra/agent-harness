@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed (benchmark): every adapter's figures are checked against the same thing
+
+A `grounded` answer's figures were checked against what the turn's own requests held — and,
+for Claude Code and Kimi Code, whose requests the suite cannot capture, against everything the
+harness gave the thread, *with the answer being scored among it* (the run's end adds it): no
+figure of theirs could be unbacked (0 of 23 such turns flagged on Claude, 8 on ReAct on Deep
+Agents, one hard-set run each). Every adapter's context is now what its conversation heard so
+far — its requests and what the harness gave its runs — never the answer scored
+(`complex.heard`), and a figure a CLI's own shell may have printed, which the suite does not
+read, is unverified, not made up (`score(unseen=)`). What the per-turn rule also measured — a
+follow-up's model is not sent what an earlier turn fetched (ADV-7) — is a harness check of its
+own (`sent`), read where requests are captured and never part of the accuracy. The same four
+runs under one rule: Claude 314 → 311 of 327, ReAct on Deep Agents 316 → 317 of 335, ReAct
+308 → 309 of 327, Deep Agents 316 of 337 unchanged.
+
 ### Fixed: a graph whose in-RAM checkpointer holds the thread is sent the conversation once
 
 A LangGraph graph (`create_agent`, Deep Agents' `create_deep_agent`) compiled with an

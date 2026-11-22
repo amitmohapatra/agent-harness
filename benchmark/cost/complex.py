@@ -3364,9 +3364,13 @@ def score(
     queried: bool = False,
     files: Mapping[str, bytes] | None = None,
     coding: bool = False,
+    unseen: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
-    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
+    for ``tools`` and ``steps``; ``context``: what its conversation heard before it
+    (:func:`said_in`, :func:`heard`), for ``grounded``; ``unseen``: the turn ran a shell whose
+    output the suite does not read (a CLI's own), so a ``grounded`` figure nothing else holds
+    is unverified, not made up;
     ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
     scored on; ``queried``: it computed with the query over a result's rows, which a
     ``cannot`` turn is scored on too; ``searched``: it used a web tool of its own, which an
@@ -3393,7 +3397,9 @@ def score(
             missing.append(f"says {expect.truth}")
         made_up = ungrounded(a, context, question)
         hit = [f for f in expect.forbidden if f and _forbidden_in(a, f)]
-        correct = not missing and not made_up and not hit
+        correct: bool | None = not missing and not made_up and not hit
+        if made_up and unseen and not missing and not hit:
+            correct = None  # the figure may be its shell's, which the suite does not read
         return {
             "kind": k,
             "correct": correct,
@@ -3858,12 +3864,29 @@ def said_by(result: Any) -> str:
 
 
 def said_in(requests: Sequence[dict[str, Any]], told: Sequence[str]) -> str:
-    """What the run was told, as the scorer reads it (``context``): every captured request's
-    messages, and what the harness gave its runs (``Trace.told``) - for Kimi and Claude the
-    captured requests are not the CLI's own, so the tools' results and the memory context are
-    read from the turn itself."""
+    """What a conversation heard, as the scorer reads it (``context``): every captured
+    request's messages, and what the harness gave its runs (``Trace.told``: the tools'
+    results, the pushed contexts, the user's messages and the earlier answers). The same for
+    every adapter: a CLI's own requests (Kimi's, Claude's) are not captured, so what one
+    adapter is checked against must not be more than another's — the conversation so far,
+    never the answer being scored (:func:`heard`)."""
     sent = [_texts(m) for q in requests for m in q.get("messages") or []]
     return "\n".join([*sent, *told])
+
+
+#: The harness check of a ``grounded`` turn whose requests are captured: its reason's figures
+#: are in what that turn's model was sent, not only in what the conversation heard earlier.
+SENT: Final = "sent"
+SENT_WHY: Final = "a reason's figures are in what the turn's own model call was sent"
+
+
+def heard(told: Sequence[str], answer: str) -> list[str]:
+    """``told`` — what a conversation's runs were given and said, in order — before the answer
+    being scored: the run's end adds that answer last (``Trace.on_run_end``), and an answer
+    is no evidence for its own figures."""
+    if answer and told and told[-1] == answer:
+        return list(told[:-1])
+    return list(told)
 
 
 # --------------------------------------------------------------------------- running
@@ -4264,6 +4287,9 @@ async def run_case(
     #: each restart turn's queued run (by the turn's id)
     handles: dict[int, Any] = {}
 
+    #: what each conversation's earlier turns' requests held (:func:`said_in`)
+    sent: dict[str, list[str]] = {}
+
     def conversation(t: Turn) -> str:
         return f"cx-{tag}-{case.id}-{t.thread}"
 
@@ -4444,11 +4470,14 @@ async def run_case(
             }
             if turn.expect is not None:
                 row["expect"] = _expect_row(turn.expect)
-                # the CLIs' own requests are not captured: what the harness gave them is read
-                # instead (where they are, they are what the model saw: a result cleared or cut
-                # there was not seen)
-                told = [] if captured.requests else trace.told.get(conversation(turn), [])
-                said = said_in(captured.requests, told)
+                # what the conversation heard so far, the same for every adapter: its
+                # requests (a CLI's own are not captured) and what the harness gave its runs
+                thread = conversation(turn)
+                earlier = sent.setdefault(thread, [])  # its earlier turns' requests
+                said = said_in(
+                    captured.requests, [*earlier, *heard(trace.told.get(thread, []), answer)]
+                )
+                earlier.append(said_in(captured.requests, []))
                 used = set(row["native"])
                 # a command that ran (a CLI's own shell, the run's sandbox), or a file the run
                 # kept for its user where code runs: what the suite wrote as "cannot" was done
@@ -4459,9 +4488,19 @@ async def run_case(
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
                     # a CLI's query is in no captured request: the run's tools used say it
                     queried=queried(captured.requests) or QUERY_TOOL in used,
+                    # a CLI's own shell prints where the suite does not read
+                    unseen=kind in CLIS and bool(used & approvals.SHELLS),
                     # the scripted model writes no code: the file code makes is not read
                     files=None if coding and scripted else kept, coding=coding,
                 )  # fmt: skip
+                if turn.expect.kind == "grounded" and captured.requests:
+                    # a harness check, apart from the score: what an earlier turn fetched is
+                    # still what a follow-up's model is sent (ADV-7) — read where the
+                    # requests are captured, so never a part of one adapter's accuracy alone
+                    unsent = ungrounded(answer, said_in(captured.requests, []), turn.text)
+                    row["checks"].append(
+                        {"check": SENT, "ok": not unsent, "why": SENT_WHY, "found": unsent}
+                    )
             records.append(row)
             requests += [
                 {"case": case.id, "turn": i + n, "call": c, **q}
