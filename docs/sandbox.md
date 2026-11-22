@@ -46,7 +46,7 @@ have their own:
 | a Deep Agents graph of your own (`create_deep_agent(...)`, with `middleware()` or without), `ReAct(backend=...)` with a backend that runs no command | Deep Agents' own `execute` too: at `h.wrap` its files backend becomes Deep Agents' own `CompositeBackend` — its files where they were, `execute` in the run's working folder. Not with permissions over its files: Deep Agents allows no shell beside them, and none is given |
 | LangGraph `create_agent(..., middleware=middleware())` | `sandbox_exec`, offered per model call (LangChain's own `ShellToolMiddleware` is used when you add it; the harness cannot add it for you: LangChain refuses two) |
 | a graph built by hand | `sandbox_exec` among `h.harness_tools()`, bound when it is built |
-| OpenAI Agents SDK | `sandbox_exec`, a function tool of the run |
+| OpenAI Agents SDK | the SDK's own `ShellTool`, where the run's model takes the SDK's hosted tools (an OpenAI model on the Responses API); `sandbox_exec`, a function tool of the run, on every other model (the SDK refuses its hosted tools for a chat completions model) and on a model that refused the shell |
 | a function target | `agent.tools.call("sandbox_exec", command=...)` |
 
 The harness's shell runs where Claude Code's and Kimi Code's do: **on this machine, as the

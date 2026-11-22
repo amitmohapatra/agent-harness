@@ -15,7 +15,7 @@ from agents import Agent, CodeInterpreterTool
 from langchain_core.messages import ToolMessage
 
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.openai_model import ScriptedModel
+from tests.support.openai_model import Items, ScriptedModel
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, ReAct, Runtime, Settings, middleware, sandbox
 from trellis.contracts import RunStatus
@@ -346,15 +346,117 @@ async def test_a_graph_built_by_hand_binds_it_with_the_harness_tools(
     assert ("delete", boxes.made()[0]) in boxes.calls  # its run's end finds it
 
 
-async def test_an_openai_agent_is_offered_sandbox_exec(
+class NoHostedTools(ScriptedModel):
+    """A model whose API takes function tools only, as the SDK's chat completions model does
+    (it refuses a hosted tool before it asks) and as an OpenAI model without the shell tool
+    does (its request is answered 400)."""
+
+    def __init__(self, turns: list[Any], refusal: Exception) -> None:
+        super().__init__(turns)
+        self.refusal = refusal
+        self.refused = 0
+
+    def _refuse(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        tools = kwargs.get("tools", args[3] if len(args) > 3 else ())
+        if any(type(t).__name__ == "ShellTool" for t in tools):
+            self.refused += 1
+            raise self.refusal
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse(args, kwargs)
+        return await super().get_response(*args, **kwargs)
+
+    async def stream_response(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+        self._refuse(args, kwargs)
+        async for event in super().stream_response(*args, **kwargs):
+            yield event
+
+
+def _refusals() -> list[Exception]:
+    import httpx
+    from agents.exceptions import UserError
+    from openai import BadRequestError
+
+    request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+    answered: Any = httpx.Response(400, request=request, json={"error": {"message": "no shell"}})
+    refused = BadRequestError("Tool 'shell' is not supported.", response=answered, body={})
+    return [UserError("Hosted tools are not supported with the ChatCompletions API."), refused]
+
+
+async def test_an_openai_agent_runs_the_sdks_own_shell(
     harness: Harness, boxes: FakeSandboxes
 ) -> None:
-    model = ScriptedModel([(EXEC, {"command": "echo openai"}), "done"])
-    agent = harness.wrap(Agent(name="analyst", model=model), id="openai")
+    """An OpenAI agent with no shell of its own, on a model that takes the SDK's hosted tools,
+    is given the SDK's own ``ShellTool`` — the library's tool, in the run's working folder —
+    in place of the harness's ``sandbox_exec``: governed and recorded as one it brings."""
+    from tests.integration.test_openai_agents_features import shell_call, shell_said
+    from trellis.harness.sandbox import DELIVERED
+
+    turns = [Items(shell_call("echo openai")), Items(shell_call("echo again", "call_2")), "done"]
+    model = ScriptedModel(turns)
+    agent = harness.wrap(Agent(name="analyst", model=model), id="openai-shell")
     done = await agent.run("go", user="ada")
     assert done.status is RunStatus.SUCCESS, done.error
-    assert EXEC in model.tools[0]
-    assert any("openai" in str(o) for o in model.outputs()) and boxes.made()
+    assert "shell" in model.tools[0] and EXEC not in model.tools[0]
+    assert boxes.commands[-2:] == ["echo openai", "echo again"] and len(boxes.made()) == 1
+    said = shell_said(model)
+    assert len(said) == 2 and said[0].count(DELIVERED) == 1  # where its files go: said once
+    assert DELIVERED not in said[1]
+
+
+@pytest.mark.parametrize("refusal", _refusals(), ids=["sdk", "api"])
+async def test_an_openai_agent_whose_model_refuses_the_shell_gets_sandbox_exec(
+    harness: Harness, boxes: FakeSandboxes, refusal: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that takes no hosted shell (the SDK refuses it for a chat completions model; an
+    OpenAI model without the tool answers 400) refuses the run's first request: nothing has
+    run, so the harness asks again with ``sandbox_exec`` in the shell's place, says so, and
+    remembers it for that model — its next run asks once."""
+    from trellis.harness.adapters import openai_agents
+
+    monkeypatch.setattr(openai_agents, "_SHELL_REFUSED", set())
+    model = NoHostedTools([(EXEC, {"command": "echo openai"}), "done"] * 2, refusal)
+    agent = harness.wrap(Agent(name="analyst", model=model), id="openai-fallback")
+    events = [e async for e in agent.stream("go", user="ada")]
+    assert events[-1].outcome is not None and events[-1].outcome.value == "success", events[-1]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "openai_shell"]
+    assert len(warned) == 1 and EXEC in warned[0]
+    assert model.refused == 1 and EXEC in model.tools[0] and "shell" not in model.tools[0]
+    assert boxes.commands[-1] == "echo openai"
+    again = await agent.run("go", user="ada")  # remembered: the shell is not offered again
+    assert again.status is RunStatus.SUCCESS and model.refused == 1
+
+
+async def test_an_error_that_is_not_the_shells_is_the_runs(
+    harness: Harness, boxes: FakeSandboxes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a refusal the shell's absence cures is one: a model that fails the same way
+    without it fails the run with its own error, and is not remembered as refusing the shell."""
+    from agents.exceptions import UserError
+
+    from trellis.harness.adapters import openai_agents
+
+    class Broken(ScriptedModel):
+        async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+            raise UserError("the model is misconfigured")
+
+    monkeypatch.setattr(openai_agents, "_SHELL_REFUSED", set())
+    agent = harness.wrap(Agent(name="analyst", model=Broken([])), id="openai-broken")
+    done = await agent.run("go", user="ada")
+    assert done.status is RunStatus.ERROR and done.error is not None
+    assert "misconfigured" in done.error.message and set() == openai_agents._SHELL_REFUSED
+
+
+def test_a_chat_completions_model_is_given_sandbox_exec_without_asking(harness: Harness) -> None:
+    """The SDK refuses its hosted tools for its chat completions model — every model that is
+    not OpenAI's own: there the shell is ``sandbox_exec`` from the first request."""
+    from agents import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+
+    from trellis.harness.adapters.openai_agents import keeps_thread
+
+    chat = OpenAIChatCompletionsModel("m", AsyncOpenAI(api_key="k", base_url="http://m.test/v1"))
+    assert not keeps_thread(harness.model_gateway, Agent(name="a", model=chat), {})
 
 
 async def test_a_function_calls_it_by_name(harness: Harness, boxes: FakeSandboxes) -> None:

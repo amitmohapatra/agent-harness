@@ -133,11 +133,15 @@ first; then the memory context, the day and steered messages are added) and, on 
 `model_provider` for the names you leave to the default provider (above). Its hooks are
 `Runner.run`'s `hooks=`, which call yours.
 
-By default the agent is given `sandbox_exec`, a command in a working folder of the run's own
-on this machine (with no isolation, as Claude Code's shell runs), made at
-its first call ([sandbox.md](../sandbox.md#a-shell-by-default)) — not when it brings code of its
-own (a `SandboxAgent`, a run config's sandbox, a code interpreter or shell tool), nor
-`without=["code"]`.
+By default the agent is given a shell: a command in a working folder of the run's own on this
+machine (with no isolation, as Claude Code's shell runs), made at its first call
+([sandbox.md](../sandbox.md#a-shell-by-default)) — not when it brings code of its own (a
+`SandboxAgent`, a run config's sandbox, a code interpreter or shell tool), nor
+`without=["code"]`. Where the run's model takes the SDK's hosted tools (an OpenAI model on the
+Responses API) the shell is the SDK's own `ShellTool`; on every other model it is the harness's
+`sandbox_exec`, since the SDK refuses its hosted tools for a chat completions model. A model
+that refuses the shell tool refuses the run's first request: the harness then asks again with
+`sandbox_exec` (an `openai_shell` warning) and remembers it for that model.
 
 A `SandboxAgent` is wrapped the same way: the SDK runs it only with `RunConfig(sandbox=...)`
 (else `UserError: SandboxAgent execution requires RunConfig(sandbox=...)`), so give its sandbox

@@ -5,6 +5,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: an OpenAI agent's default shell is the SDK's own, where its model takes it
+
+An OpenAI Agents SDK agent with no shell of its own was given the harness's `sandbox_exec`,
+whatever its model. Where the run's model takes the SDK's hosted tools (an OpenAI model on the
+Responses API), it is now given the SDK's own `ShellTool`, running in the same working folder
+of the run and governed as a shell the agent brings. A model that refuses it — the SDK's own
+refusal for a chat completions model, or the API's 4xx for a model without the tool — refuses
+the run's first request, before anything ran: the harness asks again with `sandbox_exec`, says
+so (an `openai_shell` warning) and remembers it for that model in this process. Every other
+model keeps `sandbox_exec` from the first request, and an agent with a shell or a sandbox of
+its own is unchanged. **Not verified against OpenAI's API**: tested with a stand-in model that
+refuses as the SDK and the API do; the exact refusal of a real model is the part to confirm.
+
 ### Changed: Kimi Code 2.7 is in the supported range
 
 `kimi-code` is accepted at `>=2.6.2,<2.8` (was `<2.7`): the Kimi suites pass on 2.7.2 as on

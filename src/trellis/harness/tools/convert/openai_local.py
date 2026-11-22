@@ -29,8 +29,9 @@ import dataclasses
 import functools
 import inspect
 import json
+import weakref
 from collections import deque
-from collections.abc import Callable, Collection, Hashable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Hashable, Sequence
 from typing import Any, Final, cast
 
 from trellis.contracts import ToolError, ToolSpec, is_pause_signal
@@ -262,6 +263,41 @@ def _executor(tool: Any) -> Any:
         )
 
     return execute
+
+
+#: The runs whose model was told where the files of the shell the harness gave it go.
+_TOLD: Final[weakref.WeakSet[Any]] = weakref.WeakSet()
+
+
+def given_shell(command: Callable[[str], Awaitable[dict[str, Any]]], says: str) -> Any:
+    """The SDK's own ``ShellTool`` on the working folder the harness gives a run: each of the
+    model's commands run by ``command`` (``SandboxSource.command``: as ``sandbox_exec`` runs
+    it), its result the SDK's own shape. A hosted tool has no description to say where the
+    user's files go: ``says`` is told with the run's first result, once."""
+    from agents import ShellCallOutcome, ShellCommandOutput, ShellResult, ShellTool
+
+    async def execute(request: Any) -> Any:
+        outputs = []
+        for asked in request.data.action.commands:
+            ran = await command(asked)
+            told = [str(ran[k]) for k in ("hint", "outputs") if ran.get(k)]
+            runtime = current()
+            if runtime is not None and runtime not in _TOLD:
+                _TOLD.add(runtime)
+                told.append(says)
+            stdout = "\n".join(part for part in (str(ran.get("stdout") or ""), *told) if part)
+            outcome = ShellCallOutcome(type="exit", exit_code=ran.get("exit_code"))
+            outputs.append(
+                ShellCommandOutput(
+                    stdout=stdout,
+                    stderr=str(ran.get("stderr") or ""),
+                    outcome=outcome,
+                    command=asked,
+                )
+            )
+        return ShellResult(output=outputs)
+
+    return ShellTool(executor=execute)
 
 
 def _remade(request: Any, args: dict[str, Any]) -> Any:

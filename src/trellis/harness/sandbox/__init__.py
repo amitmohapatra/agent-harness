@@ -442,6 +442,18 @@ class SandboxSource:
         told = {"hint": why, OUTPUTS: kept}
         return result.model_dump() | {k: v for k, v in told.items() if v is not None}
 
+    #: which of the files a command writes the user is given (:data:`DELIVERED`): what a
+    #: framework's own shell the harness turns on is told, where it has no description of
+    #: its own to say it in
+    says = DELIVERED
+
+    async def command(self, command: str) -> dict[str, Any]:
+        """One command of the current run, as ``sandbox_exec`` answers it (its exit code,
+        output, hint and what the user gets of what it wrote): what a framework's own shell
+        the harness turns on runs (the OpenAI Agents SDK's ``ShellTool``:
+        ``tools.convert.openai_local.given_shell``)."""
+        return await self._exec({"command": command})
+
     async def seen(self, runtime: Runtime, box: Sandbox) -> None:
         """Before the model's first command or file of an attempt: the files its working
         directory holds already (the spec's, an earlier attempt's) are not ones it just left

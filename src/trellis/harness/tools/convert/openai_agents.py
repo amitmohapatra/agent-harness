@@ -37,9 +37,26 @@ from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, SideEffects, Tool, arguments_of, not_run
-from trellis.harness.tools.convert.openai_local import Carried, run_here, spec_of, with_fields
+from trellis.harness.tools.convert.openai_local import (
+    Carried,
+    given_shell,
+    run_here,
+    spec_of,
+    with_fields,
+)
+
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
+def sdk_shell(helpers: Helpers | None) -> Any:
+    """The SDK's own ``ShellTool`` on the working folder the harness gives the current run's
+    agent (``Agent.code``, a ``SandboxSource``: ``openai_local.given_shell``), governed as a
+    shell the agent brings is."""
+    runtime = current()
+    source = getattr(runtime.agent, "code", None) if runtime is not None else None
+    assert source is not None  # asked for where the run was given the harness's shell
+    return governed(given_shell(source.command, source.says), helpers)
+
+
 __all__ = [
     "FIX_ARGUMENTS",
     "WaitsInside",

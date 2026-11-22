@@ -262,11 +262,21 @@ class OpenAIAgentsAdapter(Keeps):
         from agents.exceptions import MaxTurnsExceeded
 
         gated, hooks, options = await self._prepared(target, native_input, run)
+        shell = self._own_shell(target, run)
         async with helping(run.runtime, self.name) as helpers:
-            agent = self._agent(target, run, helpers, gated)
+            agent = self._agent(target, run, helpers, gated, shell=shell[1] if shell else None)
             try:
                 given = await self._input(agent, native_input)
-                result = await Runner.run(agent, given, hooks=hooks, **options)
+                try:
+                    result = await Runner.run(agent, given, hooks=hooks, **options)
+                except Exception as refused:
+                    if not _shell_refused(shell, refused, run.runtime):
+                        raise
+                    # the model takes no hosted shell: nothing ran, asked again without it
+                    agent = self._agent(target, run, helpers, gated)
+                    given = await self._input(agent, native_input)
+                    result = await Runner.run(agent, given, hooks=hooks, **options)
+                    _without_shell(run.runtime, shell)
                 resumed = native_input
                 while (state := await _continued(result, resumed, run.runtime)) is not None:
                     resumed = None  # an edited call is approved once
@@ -284,14 +294,27 @@ class OpenAIAgentsAdapter(Keeps):
         from agents.exceptions import MaxTurnsExceeded
 
         gated, hooks, options = await self._prepared(target, native_input, run)
+        shell = self._own_shell(target, run)
         async with helping(run.runtime, self.name) as helpers:
-            agent = self._agent(target, run, helpers, gated)
+            agent = self._agent(target, run, helpers, gated, shell=shell[1] if shell else None)
             given = await self._input(agent, native_input)
             result = Runner.run_streamed(agent, given, hooks=hooks, **options)
             streamed = result
             try:
-                async for delta in _deltas(result):
-                    yield delta
+                try:
+                    async for delta in _deltas(result):
+                        yield delta
+                except Exception as refused:
+                    if not _shell_refused(shell, refused, run.runtime):
+                        raise
+                    # the model takes no hosted shell: nothing ran, asked again without it
+                    await asyncio.wait({streamed.run_loop_task})  # type: ignore[arg-type]
+                    agent = self._agent(target, run, helpers, gated)
+                    given = await self._input(agent, native_input)
+                    result = streamed = Runner.run_streamed(agent, given, hooks=hooks, **options)
+                    async for delta in _deltas(result):
+                        yield delta
+                    _without_shell(run.runtime, shell)
                 resumed = native_input
                 while (state := await _continued(result, resumed, run.runtime)) is not None:
                     resumed = None
@@ -406,12 +429,31 @@ class OpenAIAgentsAdapter(Keeps):
         options = _options(run.runtime, target, native_input)
         return await _gated(run), _hooks(options.pop("hooks", None)), options
 
+    def _own_shell(self, target: Any, run: Invocation) -> tuple[str, str] | None:
+        """The model the run starts with (:func:`_shell_key`) and the name of the harness's
+        shell tool, when the run's shell is the SDK's own ``ShellTool`` in that tool's place:
+        the run is given the harness's shell by itself (``sandbox.code_for``: the agent has
+        none of its own, and no sandbox it was built with), its model takes the SDK's hosted
+        tools (not the SDK's chat completions model, which refuses them: :func:`keeps_thread`'s
+        reading of it) and has not refused the shell before (:data:`_SHELL_REFUSED`).
+        ``None``: the harness's shell tool."""
+        runtime = run.runtime
+        options = runtime.framework_options
+        given = getattr(runtime.agent, "code", None) is not None and runtime.uses("code")
+        named = [t.spec.name for t in run.tools if t.feature == "code"]
+        if not given or not named or not keeps_thread(self.gateway, target, options):
+            return None
+        key = _shell_key(target, options)
+        return None if key in _SHELL_REFUSED else (key, named[0])
+
     @staticmethod
     def _agent(
         target: Any,
         run: Invocation,
         helpers: Helpers,
         gated: Mapping[str, ToolSpec],
+        *,
+        shell: str | None = None,
     ) -> Any:
         # the memory tools (pull, tool_search) go to every agent the run can reach: an agent
         # it hands off to answers from memory as the one it started with
@@ -421,6 +463,7 @@ class OpenAIAgentsAdapter(Keeps):
         return governed_agents(
             target,
             added=list(run.native_tools or ()),
+            shell=shell,
             shared=shared,
             agent_id=runtime.agent_id,
             helpers=helpers,
@@ -449,6 +492,49 @@ class OpenAIAgentsAdapter(Keeps):
         return state
 
 
+#: The models (:func:`_shell_key`) that refused the SDK's own shell, for this process: their
+#: runs are given ``sandbox_exec`` from the first request.
+_SHELL_REFUSED: set[str] = set()
+#: What a run is told when its model refused the SDK's own shell.
+SHELL_REFUSED: Final = (
+    "the model {model} takes no hosted shell tool ({why}): the run uses {tool} instead"
+)
+
+
+def _shell_key(target: Any, options: Mapping[str, Any]) -> str:
+    """The model a run starts with, as the refusals of the SDK's shell are remembered by: its
+    name, or a model object's class and name."""
+    model = _model_of(target, options)
+    if model is None or isinstance(model, str):
+        return str(model or "default")
+    return f"{type(model).__name__}:{getattr(model, 'model', '')}"
+
+
+def _shell_refused(shell: tuple[str, str] | None, error: Exception, runtime: Runtime) -> bool:
+    """Whether ``error`` may be the model refusing the SDK's shell the harness gave the run
+    (``shell``: its model): the SDK's own refusal of a hosted tool (``UserError``), or the
+    API's answer to a request it does not take (a 4xx that is not about the key or the rate)
+    — with no tool call made yet, so asking again without the shell repeats nothing."""
+    from agents.exceptions import UserError
+    from openai import APIStatusError
+
+    if shell is None or runtime.repeating[1] or runtime.failing[1] or runtime.pending is not None:
+        return False
+    if isinstance(error, APIStatusError):
+        return 400 <= error.status_code < 500 and error.status_code not in (401, 403, 429)
+    return isinstance(error, UserError)
+
+
+def _without_shell(runtime: Runtime, shell: tuple[str, str] | None) -> None:
+    """The run went on without the SDK's shell: said once, and remembered for its model."""
+    assert shell is not None
+    model, tool = shell
+    _SHELL_REFUSED.add(model)
+    said = SHELL_REFUSED.format(model=model, why="its request was refused", tool=tool)
+    log.warning("run %s: %s", runtime.run_id, said)
+    runtime.events.warning("openai_shell", said)
+
+
 def governed_agents(
     target: Any,
     *,
@@ -458,6 +544,7 @@ def governed_agents(
     helpers: Helpers | None = None,
     gated: Mapping[str, ToolSpec] | None = None,
     nested: Callable[[Any, Any], Any],
+    shell: str | None = None,
 ) -> Any:
     """``target`` and every agent reachable through its handoffs and its agent tools
     (``Agent.as_tool``), each a copy whose own tools are governed
@@ -480,8 +567,15 @@ def governed_agents(
     wrapped are not changed."""
     from agents import Agent
 
-    from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, governed, held
+    from trellis.harness.tools.convert.openai_agents import (
+        AGENT_OF_TOOL,
+        governed,
+        held,
+        sdk_shell,
+    )
 
+    if shell is not None:  # the SDK's own ``ShellTool``, in the place of the harness's shell
+        added = [sdk_shell(helpers) if t.name == shell else t for t in added]
     gates = gated or {}
 
     def gate(tool: Any) -> Any:
