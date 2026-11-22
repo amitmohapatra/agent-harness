@@ -40,7 +40,7 @@ TESTED: Final[Mapping[str, tuple[str, str]]] = {
 #: protocol surface — its tool names, its permission requests, its usage log — is what the
 #: adapter reads, and nothing pins it but this check.
 BINARIES: Final[Mapping[str, tuple[str, str]]] = {
-    "kimi-code": ("2.6.2", "2.8"),
+    "kimi-code": ("2.6.2", "2.7"),
 }
 INSTALL: Final[Mapping[str, str]] = {
     "kimi-code": "npm install -g @moonshot-ai/kimi-code@2.6.2",

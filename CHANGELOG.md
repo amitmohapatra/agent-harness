@@ -36,13 +36,6 @@ model keeps `sandbox_exec` from the first request, and an agent with a shell or 
 its own is unchanged. **Not verified against OpenAI's API**: tested with a stand-in model that
 refuses as the SDK and the API do; the exact refusal of a real model is the part to confirm.
 
-### Changed: Kimi Code 2.7 is in the supported range
-
-`kimi-code` is accepted at `>=2.6.2,<2.8` (was `<2.7`): the Kimi suites pass on 2.7.2 as on
-2.6.2. Both versions reload a tool call made with no arguments, or cut at the output limit, in
-a form their provider refuses; the harness now drops such a session instead of continuing it
-(above).
-
 ### Changed: a CLI agent that reaches its step limit having said nothing is asked for an answer
 
 Claude Code at its `max_turns` and Kimi Code at its step limit ended the run `PARTIAL` with
