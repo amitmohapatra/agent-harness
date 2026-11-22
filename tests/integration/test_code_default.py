@@ -427,6 +427,25 @@ async def test_an_openai_agent_whose_model_refuses_the_shell_gets_sandbox_exec(
     assert again.status is RunStatus.SUCCESS and model.refused == 1
 
 
+async def test_a_run_that_is_not_streamed_falls_back_the_same_way(
+    harness: Harness, boxes: FakeSandboxes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent.run`` as ``agent.stream``: refused once, asked again with ``sandbox_exec``, and
+    the model remembered by its name — a model named as a string, or the SDK's default, is
+    remembered by that name."""
+    from trellis.harness.adapters import openai_agents
+
+    monkeypatch.setattr(openai_agents, "_SHELL_REFUSED", set())
+    model = NoHostedTools([(EXEC, {"command": "echo openai"}), "done"], _refusals()[0])
+    agent = harness.wrap(Agent(name="analyst", model=model), id="openai-fallback-run")
+    done = await agent.run("go", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert model.refused == 1 and boxes.commands[-1] == "echo openai"
+    assert {"NoHostedTools:"} == openai_agents._SHELL_REFUSED
+    assert openai_agents._shell_key(Agent(name="a", model="gpt-x"), {}) == "gpt-x"
+    assert openai_agents._shell_key(Agent(name="a"), {}) == "default"
+
+
 async def test_an_error_that_is_not_the_shells_is_the_runs(
     harness: Harness, boxes: FakeSandboxes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
