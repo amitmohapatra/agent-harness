@@ -33,7 +33,7 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``sandbox`` — ``main`` (an alias kept for earlier commands): code runs by default.
 * ``subagents``, ``memory-files``, ``permissions`` — ``ReAct`` given one Deep Agents capability
   (:data:`CAPABILITIES`): a sub-agent of its own, a memory file on a disk backend, and
-  permissions on one (a backend given that runs no command: ``sandbox_exec``). Every case of the
+  permissions on one (no shell beside them: Deep Agents' own rule). Every case of the
   suite runs on each, at any ``--window``: what a capability must not change is the answer.
 
 :func:`codes` says which runs have code (``complex``: a ``cannot`` turn there is scored on
@@ -264,10 +264,11 @@ CAPABILITIES: Final[dict[str, Variant]] = {
 #: ``execute``, ``sandbox_exec`` for the others (a graph built by hand binds it with
 #: ``h.harness_tools()``).
 CODED: Final = frozenset({"react", "langgraph", "deepagents", "graph", "openai"})
-#: The variants with no shell: ``baseline`` (everything off) and ``main-nocode``. A ``ReAct``
-#: given a backend of its own that runs no command (``deep``, ``memory-files``,
-#: ``permissions``) is given ``sandbox_exec``, as every agent with no shell of its own.
-NO_CODE: Final = frozenset({"baseline", "main-nocode"})
+#: The variants with no shell: ``baseline`` (everything off), ``main-nocode``, and
+#: ``permissions`` (Deep Agents allows no shell beside permissions over its files: it reads
+#: past them). A ``ReAct`` given a backend of its own that runs no command (``deep``,
+#: ``memory-files``) runs Deep Agents' ``execute`` all the same (``Adapter.give_shell``).
+NO_CODE: Final = frozenset({"baseline", "main-nocode", "permissions"})
 
 
 #: ``deep``'s pieces a ``deep-<piece>`` variant turns off, by the name of their middleware.

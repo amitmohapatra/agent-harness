@@ -54,7 +54,8 @@ async def test_a_folder_made_again_keeps_its_files_and_takes_no_new_ones(
     await box.write("deep/er/b.txt", b"made")
     again = await folders.create(ref(), SandboxSpec(files={"a.txt": "second"}))
     assert await again.read("a.txt") == b"first" and await again.read("deep/er/b.txt") == b"made"
-    assert (await folders.create(ref("trellis-run-2"))).home.is_dir()  # no spec: no files
+    bare = await folders.create(ref("trellis-run-2"))  # no spec: no files but its own two
+    assert sorted(p.name for p in bare.home.iterdir()) == [RESULTS, "outputs"]
 
 
 async def test_a_command_past_its_time_is_killed_with_every_process_of_it(
@@ -63,7 +64,8 @@ async def test_a_command_past_its_time_is_killed_with_every_process_of_it(
     box = await folders.create(ref())
     with pytest.raises(TimeoutError):
         await box.exec("(sleep 30; echo late > late.txt) & sleep 30", timeout=0.3)
-    assert (await box.exec("sleep 0.5; ls")).stdout == ""  # its child wrote nothing: it is gone
+    listed = (await box.exec("sleep 0.5; ls")).stdout
+    assert listed == "outputs\n"  # its child wrote nothing: it is gone
 
 
 async def test_a_kept_result_is_a_file_of_the_folder_named_as_the_model_names_it(

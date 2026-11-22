@@ -8,7 +8,8 @@ switch that turns this one off (``host``).
 :class:`LocalFolders` is the provider (``name`` ``"local"``): each run's folder is made under
 ``root`` (else :func:`default_root`: the system's temporary folder) at its first command, and
 removed with its run as any sandbox is (``sandbox.ended``, the reaper); its labels are kept in
-a file beside it. The run's kept results, which the model names at ``/large_tool_results``,
+a file beside it, and it starts with the folder the user's files are written in
+(``sandbox.OUTPUTS``). The run's kept results, which the model names at ``/large_tool_results``,
 are files of the folder (:data:`RESULTS`): a command or a path naming one there is read as
 that file (:meth:`Folder.placed`), since nothing on a plain host puts a folder at that path.
 """
@@ -147,10 +148,13 @@ class LocalFolders:
         self.root = Path(root) if root is not None else default_root()
 
     async def create(self, ref: SandboxRef, spec: SandboxSpec | None = None) -> Folder:
+        from trellis.harness.sandbox import OUTPUTS  # noqa: PLC0415 - it imports this module
+
         home = self._home(ref)
         made = not home.is_dir()
         home.mkdir(parents=True, exist_ok=True)
         (home / RESULTS).mkdir(exist_ok=True)
+        (home / OUTPUTS).mkdir(exist_ok=True)  # where the model is told the user's files go
         self._labels(ref).parent.mkdir(parents=True, exist_ok=True)
         self._labels(ref).write_text(json.dumps(dict(ref.labels)))
         box = Folder(ref, home)

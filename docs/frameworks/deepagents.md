@@ -127,7 +127,7 @@ A Deep Agent compiled without a `store` gets the memory service as its store, so
 
 | | Where |
 |---|---|
-| Sandbox | by default, with `middleware()` and a backend that runs no command: `sandbox_exec` in the run's working folder on this machine ([sandbox.md](../sandbox.md#a-shell-by-default)); `create_deep_agent(model, **sandbox().deep_agent())`: its `backend=`, the run's own sandbox (its file writes there the run's scratch, unasked); or a backend of Deep Agents' own (below) |
+| Sandbox | by default, with a backend that runs no command (its own default): Deep Agents' own `execute`, in the run's working folder on this machine — the harness gives the graph's files backend Deep Agents' own `CompositeBackend`, its files where they were ([sandbox.md](../sandbox.md#a-shell-by-default); none beside permissions over its files); `create_deep_agent(model, **sandbox().deep_agent())`: its `backend=`, the run's own sandbox (its file writes there the run's scratch, unasked); or a backend of Deep Agents' own (below) |
 | Skills | `create_deep_agent(model, **src.deep_agent())`: its own `SkillsMiddleware`, the skill source's skills a `/skills/` route of its backend; with a sandbox, `**deep_agent(sandbox(), src)` — both in its one `backend=` (a `CompositeBackend`) ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `create_deep_agent(..., middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); its native turn limit is LangGraph's: `framework_options={"recursion_limit": n}` |

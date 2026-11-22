@@ -208,6 +208,9 @@ class Keeps:
     def code(self, target: Any, options: Mapping[str, Any]) -> Code:
         return "own"  # Claude Code's shell, an ACP agent's (Kimi Code's): theirs, as they are
 
+    def give_shell(self, target: Any) -> bool | None:
+        return None  # no shell of the framework's own for the harness to turn on
+
 
 class Adapter(Protocol):
     name: ClassVar[str]
@@ -320,6 +323,15 @@ class Adapter(Protocol):
     def code(self, target: Any, options: Mapping[str, Any]) -> Code:
         """What runs code in ``target`` run with ``options`` (:data:`Code`): the harness gives
         an agent with none its own code tool (``sandbox.code_for``)."""
+        ...
+
+    def give_shell(self, target: Any) -> bool | None:
+        """Turn on, for ``target``, the framework's own shell that it has and that runs
+        nothing as it was built — on the working folder the harness gives the run
+        (``sandbox.code_for``, which then adds no tool of its own): ``True`` when it is on;
+        ``None`` when the framework has none to turn on; ``False`` when ``target`` must have
+        no shell at all (the framework's own rule: a Deep Agent with permissions over its
+        files)."""
         ...
 
 

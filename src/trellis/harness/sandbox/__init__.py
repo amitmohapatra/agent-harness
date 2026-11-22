@@ -585,15 +585,27 @@ def default_sandbox() -> SandboxSource | None:
 
 def code_for(agent: Agent) -> tuple[SandboxSource | None, list[SandboxTools]]:
     """The sandbox the harness gives ``agent`` by itself (``h.wrap``: ``Agent.code``) and the
-    tool source it adds to the agent's tools for it: ``sandbox_exec`` (:meth:`SandboxSource.code`)
-    — none where the agent runs Deep Agents' ``execute`` there itself (``ReAct``'s
-    ``CodeBackend``: ``Adapter.code`` says ``"default"``). Neither ``without=["code"]``, where
-    the deployment says ``deny`` (:func:`_given`), nor for an agent that brings its own
-    (``Adapter.code`` says ``"own"``; a ``sandbox()`` among its tools)."""
+    tool source it adds to the agent's tools for it. The framework's own shell first: where
+    the agent runs Deep Agents' ``execute`` there itself (``ReAct``'s ``CodeBackend``:
+    ``Adapter.code`` says ``"default"``), or has one the harness can turn on
+    (``Adapter.give_shell``: a Deep Agents graph of your own — ``agent.codes`` is then
+    ``"default"`` too), no tool is added; any other agent gets ``sandbox_exec``
+    (:meth:`SandboxSource.code`). Neither ``without=["code"]``, where the deployment says
+    ``deny`` (:func:`_given`), for an agent that brings its own (``Adapter.code`` says
+    ``"own"``; a ``sandbox()`` among its tools), nor for one the framework's own rule gives no
+    shell (``give_shell`` says ``False``)."""
     if "code" in agent.without or agent.codes == "own" or _source(agent) is not None:
         return None, []
     source = _given(agent.harness.settings.host_execution)
-    return source, [source.code()] if source is not None and agent.codes == "none" else []
+    if source is None:
+        return None, []
+    if agent.codes == "none":
+        turned_on = agent.adapter.give_shell(agent.target)
+        if turned_on is False:
+            return None, []
+        if turned_on:
+            agent.codes = "default"
+    return source, [source.code()] if agent.codes == "none" else []
 
 
 def _given(host_execution: str) -> SandboxSource | None:

@@ -2617,6 +2617,7 @@ def test_with_code_what_no_figure_checks_is_unverified() -> None:
         ("react", "deep", True),
         ("react", "deep-paging", True),
         ("react", "memory-files", True),
+        ("react", "permissions", False),
         ("react", "main-nocode", False),
         ("langgraph", "main", True),
         ("deepagents", "main", True),

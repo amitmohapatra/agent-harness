@@ -227,6 +227,25 @@ class LangGraphAdapter(Keeps):
         found = {_code_of(t) for t in graph_tools(target)}
         return "default" if "default" in found else ("own" if "own" in found else "none")
 
+    def give_shell(self, target: Any) -> bool | None:
+        """A Deep Agents graph built with a backend that runs no command (its default: the
+        state's files) lists ``execute`` all the same: each of its ``FilesystemMiddleware``s
+        (its sub-agents' too) is given Deep Agents' own composite backend — its files where
+        they were, ``execute`` on the harness's working folder (``sandbox.backend.shelled``) —
+        so the library's own tool runs. Not where it has permissions over its files (Deep
+        Agents refuses a shell beside them: it reads past them)."""
+        owners = {id(o): o for t in graph_tools(target) if (o := _idle_owner(t)) is not None}
+        if not owners:
+            return None
+        if any(getattr(o, "_permissions", None) for o in owners.values()):
+            return False
+        from trellis.harness.sandbox.backend import shelled
+
+        for owner in owners.values():
+            owner.backend = shelled(owner.backend)
+        self._native = None  # ``execute`` is a tool of the run's now: read again
+        return True
+
     def steers(self, target: Any) -> bool:
         """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
         ``HarnessTools`` takes a steered message before each model call
@@ -1159,15 +1178,25 @@ def idle_execute(tool: Any) -> bool:
 
 
 def _execute_backend(tool: Any) -> Any | None:
-    """The backend of Deep Agents' ``execute`` ``tool``, read from the middleware its function
-    closes over (``self``); ``None`` for any other tool."""
+    """The backend of Deep Agents' ``execute`` ``tool`` (:func:`_execute_owner`'s); ``None``
+    for any other tool."""
+    return getattr(_execute_owner(tool), "backend", None)
+
+
+def _execute_owner(tool: Any) -> Any | None:
+    """The ``FilesystemMiddleware`` that made Deep Agents' ``execute`` ``tool``: the one its
+    function closes over (``self``); ``None`` for any other tool."""
     if getattr(tool, "name", None) != "execute":
         return None
     try:
-        owner = inspect.getclosurevars(tool.coroutine or tool.func).nonlocals.get("self")
+        return inspect.getclosurevars(tool.coroutine or tool.func).nonlocals.get("self")
     except (AttributeError, TypeError, ValueError):  # not Deep Agents' own
         return None
-    return getattr(owner, "backend", None)
+
+
+def _idle_owner(tool: Any) -> Any | None:
+    """:func:`_execute_owner` of an ``execute`` that runs nothing (:func:`idle_execute`)."""
+    return _execute_owner(tool) if idle_execute(tool) else None
 
 
 def _code_of(tool: Any) -> Code:

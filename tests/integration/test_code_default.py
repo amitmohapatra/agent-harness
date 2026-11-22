@@ -97,7 +97,8 @@ async def test_react_runs_a_real_command_in_the_runs_own_folder(
     assert done.status is RunStatus.SUCCESS, done.error
     [result] = results(model)
     assert "42" in result and str(folders.root) in result  # ran here, in the run's folder
-    assert "pair.csv" in result  # told what the user gets of what it wrote
+    assert "Exit code" not in result and "cannot create" not in result
+    assert "for the user: pair.csv" in result  # told what the user gets of what it wrote
     assert not list(folders.root.glob("trellis-*"))  # removed with its run
 
 
@@ -196,19 +197,110 @@ async def test_a_middleware_graph_is_offered_sandbox_exec(
     assert any("graph" in r for r in results(model)) and boxes.made()
 
 
-async def test_a_deep_agent_of_your_own_is_offered_sandbox_exec(
-    harness: Harness, boxes: FakeSandboxes
+async def test_a_deep_agent_of_your_own_runs_its_own_execute(
+    harness: Harness, folders: LocalFolders
 ) -> None:
+    """A graph ``create_deep_agent`` built with a backend that runs no command (its default: the
+    state's files) lists Deep Agents' ``execute`` all the same: the harness turns that one on
+    — the library's own tool, on the library's own composite backend (its files where they
+    were, ``execute`` in the run's folder) — in place of a tool of its own. With the
+    harness's middleware or without it."""
     from deepagents import create_deep_agent
 
-    model = ScriptedChatModel(turns=[(EXEC, {"command": "echo own"}), "done"])
-    built = create_deep_agent(model=model, tools=[], middleware=middleware())
-    agent = harness.wrap(built, id="deep-own")
-    assert agent.codes == "none"  # its execute runs nothing: its state's files
-    done = await agent.run("go", user="ada")
-    assert done.status is RunStatus.SUCCESS, done.error
-    assert offered(model)[EXEC] == CODE and "execute" not in offered(model)
-    assert boxes.made()
+    for name, given in (("with", middleware()), ("alone", [])):
+        command = "echo $((6 * 7)) > outputs/n.txt; cat outputs/n.txt"
+        turns: list[Any] = [
+            ("write_file", {"file_path": "/notes.txt", "content": "tides"}),
+            ("execute", {"command": command}),
+            ("read_file", {"file_path": "/notes.txt"}),
+            "done",
+        ]
+        model = ScriptedChatModel(turns=turns)
+        built = create_deep_agent(model=model, tools=[], middleware=given)
+        agent = harness.wrap(built, id=f"deep-{name}")
+        assert agent.codes == "default" and agent._code_tools == []
+        done = await agent.run("go", user="ada")
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert "execute" in offered(model) and EXEC not in offered(model, 1)
+        said = results(model)
+        assert any("42" in r for r in said)  # the command ran, in the run's folder
+        assert any("tides" in r for r in said)  # its files are where they were: the state
+        assert not list(folders.root.glob("*/notes.txt"))  # never on this machine's disk
+
+
+async def test_a_deep_agents_sub_agents_run_its_own_execute_too(
+    harness: Harness, folders: LocalFolders
+) -> None:
+    from deepagents import create_deep_agent
+    from deepagents.middleware.filesystem import supports_execution
+
+    from trellis.harness.adapters.langgraph import _execute_backend, graph_tools
+
+    model = ScriptedChatModel(turns=["hi"])
+    helper: Any = {"name": "scout", "description": "Looks up.", "system_prompt": "Look it up."}
+    built = create_deep_agent(model=model, tools=[], subagents=[helper])
+    harness.wrap(built, id="deep-helpers")
+    backends = [b for t in graph_tools(built) if (b := _execute_backend(t)) is not None]
+    assert len(backends) > 1 and all(supports_execution(b) for b in backends)
+
+
+async def test_a_deep_agents_own_routes_stay_as_they_were(
+    harness: Harness, folders: LocalFolders, tmp_path: Path
+) -> None:
+    from deepagents import create_deep_agent
+    from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+
+    disk = FilesystemBackend(root_dir=tmp_path / "kept", virtual_mode=True)
+    own = CompositeBackend(default=StateBackend(), routes={"/kept/": disk}, artifacts_root="/a/")
+    model = ScriptedChatModel(turns=["hi"])
+    built = create_deep_agent(model=model, tools=[], backend=own)
+    agent = harness.wrap(built, id="deep-routes")
+    from trellis.harness.adapters.langgraph import _execute_backend, graph_tools
+
+    given = [b for t in graph_tools(built) if (b := _execute_backend(t)) is not None]
+    assert agent.codes == "default" and given  # the graph's, and its helper's
+    for now in given:
+        assert isinstance(now.default, CodeBackend)
+        assert now.routes["/kept/"] is disk and now.routes["/"] is own.default
+        assert now.artifacts_root == "/a/"
+
+
+async def test_a_deep_agent_with_permissions_over_its_files_is_given_no_shell(
+    harness: Harness, folders: LocalFolders, tmp_path: Path
+) -> None:
+    """Deep Agents refuses a backend that runs commands beside permissions not scoped to a
+    route (a shell reads past them): the harness adds none there either — neither the
+    library's ``execute`` nor a tool of its own."""
+    from deepagents import create_deep_agent
+    from deepagents.backends import FilesystemBackend
+    from deepagents.middleware.permissions import FilesystemPermission
+
+    rule = FilesystemPermission(operations=["write"], paths=["/reference/**"], mode="deny")
+    disk = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
+    model = ScriptedChatModel(turns=["hi"])
+    built = create_deep_agent(
+        model=model, tools=[], backend=disk, permissions=[rule], middleware=middleware()
+    )
+    agent = harness.wrap(built, id="deep-rules")
+    assert agent.code is None and agent._code_tools == []
+    assert (await agent.run("go", user="ada")).status is RunStatus.SUCCESS
+    assert "execute" not in offered(model) and EXEC not in offered(model)
+
+
+async def test_deny_and_without_code_leave_a_deep_agents_backend_alone() -> None:
+    from deepagents import create_deep_agent
+    from deepagents.middleware.filesystem import supports_execution
+
+    from trellis.harness.adapters.langgraph import _execute_backend, graph_tools
+
+    def backends(built: Any) -> list[Any]:
+        return [b for t in graph_tools(built) if (b := _execute_backend(t)) is not None]
+
+    built = create_deep_agent(model=ScriptedChatModel(turns=["hi"]), tools=[])
+    deny().wrap(built, id="denied")
+    assert not any(supports_execution(b) for b in backends(built))
+    Harness(config=Settings(), memory=False).wrap(built, id="without", without=["code"])
+    assert not any(supports_execution(b) for b in backends(built))
 
 
 async def test_a_graph_built_by_hand_binds_it_with_the_harness_tools(

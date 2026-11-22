@@ -52,9 +52,17 @@ harness's, with nothing to write:
   `LocalShellBackend` in the run's folder (`sandbox.backend.CodeBackend`: its files stay the
   graph's state, so the lean graph and its long-task files are unchanged; described in a few
   words: `sandbox.CODE`, `CodeCard`; in its helpers too) — the library's shell from end to
-  end, on Deep Agents from the first step or not; a `ReAct` given a backend that
-  runs no command, LangGraph `create_agent`/`create_deep_agent` with `middleware()`, OpenAI
-  Agents and function targets as `sandbox_exec` alone (one command), a tool of the run; a
+  end, on Deep Agents from the first step or not. **A Deep Agents graph of your own**
+  (`create_deep_agent`, with `middleware()` or without; a `ReAct` given a backend that runs no
+  command) runs the library's own `execute` too: the graph lists that tool whatever its
+  backend, and at `h.wrap` each of its `FilesystemMiddleware`s (its sub-agents' as well) is
+  given Deep Agents' own `CompositeBackend` — its files where they were, its routes kept,
+  `execute` on the run's folder (`Adapter.give_shell`, `sandbox.backend.shelled`) — except
+  where it has permissions over its files (Deep Agents refuses a shell beside them: none is
+  given). LangGraph `create_agent` with `middleware()`, OpenAI Agents and function targets
+  have no shell of their library's that the harness can turn on (LangChain refuses a second
+  `ShellToolMiddleware` beside a developer's own; the OpenAI SDK's shell tools exist on the
+  Responses API only): they get `sandbox_exec` alone (one command), a tool of the run; a
   graph built by hand finds it among `h.harness_tools()`.
 * **It runs where Claude Code's and Kimi Code's do**: a working folder made for the run on this
   machine, as the service's own user, with no isolation (`sandbox.local.LocalFolders`, the
