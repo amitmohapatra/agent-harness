@@ -133,6 +133,15 @@ STALLED: Final = (
     "what you need: do not call it again. Do not call tools: answer now with what you have, and "
     "say what went wrong."
 )
+#: What a model whose call failed each time it made it is told at its stall: that tool is held
+#: back for the rest of the run, the others are still offered (:func:`_repeated`;
+#: ``middleware._elsewhere`` in ``ReAct``'s own loop) — another source may give what it could
+#: not (a 503, a scan timing out).
+STALLED_ELSEWHERE: Final = (
+    "You called {tool} with the same arguments {times} times in a row and it failed each time: "
+    "do not call it again. If another tool can give what you need, use it; otherwise answer now "
+    "with what you have, and say what went wrong."
+)
 #: The same, told in a framework's session that the conversation's next turn continues (Kimi
 #: Code over ACP, whose own repeat breaker ended the turn with no answer): as
 #: ``budget.TURN_LIMIT``, for this turn only.
@@ -186,6 +195,11 @@ async def call(
                 runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
             )
     runtime.replay.ended(made)
+    if outcome.error_class != REPEATED:  # a refusal as a loop is no result of the call's
+        failed = outcome.status is ToolStatus.ERROR
+        runtime.failing = (key, runtime.failing[1] + 1 if runtime.failing[0] == key else 1)
+        if not failed:
+            runtime.failing = (key, 0)
     return outcome
 
 
@@ -680,6 +694,9 @@ def _repeated(
     again in the same step of its framework (``Replay.here``: a checkpointed graph's step, whose
     tool node runs each identical call of the model's reply): one step's calls, not a model
     making the call step after step."""
+    if tool.name in runtime.withheld:  # held back at its stall, and called all the same
+        runtime.repeating = (key, MAX_REPEATS, decision, runtime.replay.here())
+        return _stall(tool, STALLED, MAX_REPEATS)
     last, times, made_by, stepped = runtime.repeating
     step = runtime.replay.here()
     again = (decision is not None and decision == made_by) or (
@@ -695,10 +712,19 @@ def _repeated(
         said = f"stopped {tool.name}: the same call {times} times in a row (a stall)"
         log.warning("run %s %s", runtime.run_id, said)
         runtime.events.warning("stalled", said)
+        if runtime.failing == (key, MAX_REPEATS - 1):
+            # it failed each time: that tool is held back, the run goes on with the others
+            runtime.withheld.add(tool.name)
+            runtime.repeating = ("", 0, None, None)
+            return _stall(tool, STALLED_ELSEWHERE, times)
+    return _stall(tool, STALLED, times)
+
+
+def _stall(tool: Tool, told: str, times: int) -> ToolOutcome:
     return ToolOutcome(
         tool=tool.name,
         status=ToolStatus.ERROR,
-        output=STALLED.format(tool=tool.name, times=times),
+        output=told.format(tool=tool.name, times=times),
         error_class=REPEATED,
     )
 

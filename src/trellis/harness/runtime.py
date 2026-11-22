@@ -223,6 +223,13 @@ class Runtime:
     #: not run again), the decision that made it last (:attr:`deciding`) and the framework's
     #: step it was made in (``Replay.here``)
     repeating: tuple[str, int, Hashable | None, str | None] = ("", 0, None, None)
+    #: the latest harness tool call that came back (its key) and how many times in a row it
+    #: has failed — a call that failed each time it was made stalls its own tool, not the run
+    #: (``tools.bridge._repeated``)
+    failing: tuple[str, int] = ("", 0)
+    #: the tools held back for the rest of the run: each stalled on a call that failed each
+    #: time (``bridge.STALLED_ELSEWHERE``); offered no more (:meth:`offers`)
+    withheld: set[str] = field(default_factory=set)
     #: set by an adapter whose framework says which decision a call comes from, the same for
     #: each execution its framework makes of that decision (a LangGraph task, run again by its
     #: ``RetryPolicy``): the call made again by the same decision is no repeat of it
@@ -513,6 +520,8 @@ class Runtime:
         tool of the run's tool set the narrowing left out is not; a memory tool always is, and
         so is a schedule tool, and a tool outside the set (a graph's own state tools,
         ``read_file``)."""
+        if name in self.withheld:
+            return False
         if self.offered is None or name in self.offered or name in self.used:
             return True
         found = self.toolbox.get(name)

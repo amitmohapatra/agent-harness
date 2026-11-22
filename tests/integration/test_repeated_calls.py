@@ -14,8 +14,8 @@ from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.planned import FINAL
 from trellis import Harness, Runtime, tool
-from trellis.contracts import RunEvent, RunEventType
-from trellis.harness.tools.bridge import MAX_REPEATS, STALLED
+from trellis.contracts import RunEvent, RunEventType, ToolError
+from trellis.harness.tools.bridge import MAX_REPEATS, STALLED, STALLED_ELSEWHERE
 
 LOOPS = 8
 #: the adapters whose loop only the bridge stops (``ReAct`` and ``middleware()``: StallGuard)
@@ -94,3 +94,59 @@ async def test_a_different_call_between_two_starts_the_count_again(harness: Harn
     said = (await agent.run("x", user="u")).answer
     assert ran == ["a", "a", "b", "a", "a"]
     assert said[-2:] == [STALLED.format(tool="look", times=n) for n in (3, 4)]
+
+
+def broken(ran: list[str]) -> Any:
+    @tool(side_effects="read")
+    def service(sku: str) -> str:
+        """A SKU's stock, from the inventory service."""
+        ran.append(sku)
+        raise ToolError("503: the inventory service is unavailable", source="tools")
+
+    return service
+
+
+async def test_a_call_that_failed_each_time_holds_back_that_tool_alone(harness: Harness) -> None:
+    """A call that failed each time it was made stalls its own tool, not the run: the model is
+    told to try another tool (``STALLED_ELSEWHERE``, as ``ReAct``'s ``StallGuard`` says it),
+    the others still run, and the held-back tool called once more is the stall that ends in
+    one answer. Before, the bridge told every other adapter "do not call tools" and offered
+    none: an inventory service down three times, and the stock tool beside it never tried
+    (``advdata-09`` on OpenAI Agents and on a graph built by hand)."""
+    failed: list[str] = []
+    ran: list[str] = []
+
+    async def caller(input: str, agent: Runtime) -> list[Any]:
+        said = [await agent.tools.call("service", sku="S1") for _ in range(MAX_REPEATS)]
+        said.append(await agent.tools.call("look", topic="S1"))
+        said.append(agent.offers("service"))
+        said.append(await agent.tools.call("service", sku="S2"))  # another argument: still held
+        return said
+
+    agent = arm(harness.wrap(caller, id="held"), [broken(failed), lookup(ran)])
+    said = (await agent.run("x", user="u")).answer
+    assert failed == ["S1"] * (MAX_REPEATS - 1) and ran == ["S1"]
+    assert said[MAX_REPEATS - 1] == STALLED_ELSEWHERE.format(tool="service", times=MAX_REPEATS)
+    assert said[MAX_REPEATS] == "facts about S1" and said[MAX_REPEATS + 1] is False
+    assert said[-1] == STALLED.format(tool="service", times=MAX_REPEATS)
+
+
+async def test_openai_agents_is_still_offered_the_other_tools_after_a_failing_one_stalls(
+    harness: Harness, tmp_path: Path
+) -> None:
+    failed: list[str] = []
+    ran: list[str] = []
+    seen: list[Any] = []
+    plan = [("service", {"sku": "S1"})] * MAX_REPEATS + [("look", {"topic": "S1"})]
+    target, tools = await BUILDERS["openai_agents"](
+        harness, [broken(failed), lookup(ran)], tmp_path, plan, seen=seen
+    )
+    agent = arm(harness.wrap(target, id="held-oa"), tools)
+    events = [e async for e in agent.stream("stock of S1?", user="u")]
+    finished, model = events[-1], seen[0]
+    assert finished.outcome is not None and finished.outcome.value == "success", finished
+    assert failed == ["S1"] * (MAX_REPEATS - 1) and ran == ["S1"]
+    offered = [sorted(model_tools) for model_tools in model.tools]
+    assert "service" in offered[0] and "look" in offered[MAX_REPEATS]
+    assert "service" not in offered[MAX_REPEATS]  # held back; the other still offered
+    assert _warned(events) == ["stalled"]

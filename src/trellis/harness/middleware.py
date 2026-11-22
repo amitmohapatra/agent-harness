@@ -2642,13 +2642,9 @@ class StallGuard(AgentMiddleware):
         return reply
 
 
-#: What a model whose call failed each time it made it is told at its stall: that tool is held
-#: back, the others are still offered (:func:`_elsewhere`).
-STALLED_ELSEWHERE: Final = (
-    "You called {tool} with the same arguments {times} times in a row and it failed each time: "
-    "do not call it again. If another tool can give what you need, use it; otherwise answer now "
-    "with what you have, and say what went wrong."
-)
+#: What a model whose call failed each time it made it is told at its stall (:func:`_elsewhere`):
+#: the bridge's words, as every other adapter's loop is told them.
+STALLED_ELSEWHERE: Final = bridge.STALLED_ELSEWHERE
 
 
 def _elsewhere(

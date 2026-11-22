@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a tool that failed each time stalls itself, not the run
+
+The tool bridge stops the same call made three times in a row. It then told every adapter but
+ReAct "do not call tools: answer now" and (OpenAI Agents) offered none — also when the call had
+*failed* each time and another tool could answer: an inventory service down three times, the
+stock tool beside it never tried. A call that failed each time now holds back its own tool for
+the rest of the run (`Runtime.withheld`, offered no more) and the model is told to use another
+(`bridge.STALLED_ELSEWHERE`, the words ReAct's stall guard already said); the held-back tool
+called once more is the stall that ends in one answer, as before.
+
 ### Fixed (benchmark): a new chat waits for what memory was still working on
 
 A write to the memory service is answered before its job has run. The suite began a turn of
