@@ -41,6 +41,12 @@ harness's, with nothing to write:
   approval — on a real model too (Haiku: `PAUSED` before its first command). It is now
   declared a write as Deep Agents' `execute` is (`middleware.declare_files`,
   `host.shell_middleware`): announced and recorded, never asked.
+* **Nor is the OpenAI SDK's own.** A `LocalShellTool`'s and a local `ShellTool`'s command
+  declared nothing either and asked a person each time; it is a write that runs announced
+  (`tools.convert.openai_local.through(shell=True)`). So no framework's shell waits for a
+  person by default — a harness serving many users and tenants has nobody to ask —, and an
+  administrator who wants one asked says so in the tool catalog (`irreversible`, or an
+  `approve_when`), as for Claude Code's `Bash`.
 * **An agent with none is given one** at `h.wrap` (`sandbox.code_for`, `Agent.code`): `ReAct`
   with no `backend=` as Deep Agents' own `execute` (`sandbox.backend.CodeBackend`: its files
   stay the graph's state, so the lean graph and its long-task files are unchanged; described in

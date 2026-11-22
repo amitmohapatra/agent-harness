@@ -55,6 +55,48 @@ def recorded(memory_service: FakeMemoryService) -> list[tuple[str, str]]:
 
 
 @pytest.mark.host_execution
+async def test_the_sdks_own_shells_run_announced_never_asked(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A ``LocalShellTool``'s and a local ``ShellTool``'s command is the framework's own
+    shell, run as the framework runs it: the run's own call (a write: recorded), never a
+    person's approval — as Claude Code's ``Bash`` and Deep Agents' ``execute`` are."""
+
+    def execute(request: Any) -> str:
+        done.append(" ".join(request.data.action.command))
+        return "ok"
+
+    async def listed(request: Any) -> str:
+        done.append("ls")
+        return "a.txt"
+
+    call = LocalShellCall(
+        id="ls_1",
+        call_id="call_ls",
+        status="completed",
+        type="local_shell_call",
+        action=LocalShellCallAction(type="exec", command=["rm", "-rf", "build"], env={}),
+    )
+    local = Agent(
+        name="ops",
+        model=ScriptedModel([Items(call), "done"]),
+        tools=[LocalShellTool(executor=execute)],
+    )
+    ran = await memory_harness.wrap(local, id="local").run("clean", user="u")
+    assert ran.status is RunStatus.SUCCESS and ran.interrupt is None
+    shell = Agent(
+        name="ops",
+        model=ScriptedModel([Items(shell_call("ls")), "listed"]),
+        tools=[ShellTool(executor=listed)],
+    )
+    ran = await memory_harness.wrap(shell, id="shell").run("list", user="u")
+    assert ran.status is RunStatus.SUCCESS and ran.interrupt is None
+    assert done == ["rm -rf build", "ls"]
+    await memory_harness.writes.drain()
+    assert recorded(memory_service) == [("local_shell", "ok"), ("shell", "ok")]
+
+
+@pytest.mark.host_execution
 async def test_an_edited_local_shell_command_runs_as_edited(harness: Harness) -> None:
     def execute(request: Any) -> str:
         done.append(" ".join(request.data.action.command))
@@ -68,7 +110,7 @@ async def test_an_edited_local_shell_command_runs_as_edited(harness: Harness) ->
         action=LocalShellCallAction(type="exec", command=["rm", "-rf", "/"], env={}),
     )
     model = ScriptedModel([*twice(call), "done"])
-    agent = harness.wrap(
+    agent = declaring(harness, local_shell="irreversible").wrap(  # the catalog says it asks
         Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)]), id="edit"
     )
     paused = await agent.run("clean", user="u")

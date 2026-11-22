@@ -1368,9 +1368,11 @@ def twice(*items: Any) -> list[Any]:
 async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, streamed: bool
 ) -> None:
-    """A ``ShellTool`` with a local executor declares nothing: each command asks a person, who
-    sees the command; nothing runs before the approval; approved, it runs once — recorded,
-    counted, on the stream — and the model reads its output."""
+    """A ``ShellTool`` with a local executor is the framework's own shell: where the catalog
+    says its commands ask (``irreversible``), each asks a person, who sees the command;
+    nothing runs before the approval; approved, it runs once — recorded, counted, on the
+    stream — and the model reads its output."""
+    memory_service.catalog = {"shell": {"side_effects": "irreversible"}}
     model = ScriptedModel([*twice(shell_call("rm -rf build")), "cleaned"])
     target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
     agent = memory_harness.wrap(target, id=f"shell-{streamed}", without={"schedules"})
@@ -1407,6 +1409,7 @@ async def test_a_decision_on_a_shell_command_reaches_memory_with_its_nested_argu
     as a flat call's is. Memory refused it (custom_metadata's two levels) and it was lost."""
     model = ScriptedModel([*twice(shell_call("rm -rf build")), "cleaned"])
     target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
+    memory_service.catalog = {"shell": {"side_effects": "irreversible"}}
     agent = memory_harness.wrap(target, id=f"shell-feedback-{decision}", without={"schedules"})
     paused = await agent.run("clean up", user="u")
     assert paused.interrupt is not None
@@ -1429,7 +1432,7 @@ async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
     """Rejected, the command does not run and the model reads why; edited, the edited command
     runs instead."""
     model = ScriptedModel([*twice(shell_call("rm -rf /")), "stopped"])
-    agent = harness.wrap(
+    agent = declaring(harness, shell="irreversible").wrap(  # the catalog says it asks
         Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-reject"
     )
     paused = await agent.run("clean up", user="u")
@@ -1512,6 +1515,8 @@ async def test_a_local_shell_call_asks_and_runs_once_recorded(
     def execute(request: Any) -> str:
         ran.append(" ".join(request.data.action.command))
         return "done"
+
+    memory_service.catalog = {"local_shell": {"side_effects": "irreversible"}}  # it asks
 
     call = LocalShellCall(
         id="ls_1",

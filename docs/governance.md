@@ -88,7 +88,8 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
   (`ClaudeAgentOptions(sandbox={"enabled": True, "allowUnsandboxedCommands": False})`, which
   needs bubblewrap and socat on Linux — without them the CLI runs the command unsandboxed,
   warning only on its stderr), `kimi(sandbox=sandbox())`. An OpenAI agent's `LocalShellTool` or
-  local `ShellTool` runs its executor — code of yours — governed as any tool of yours; the
+  local `ShellTool` runs its executor — code of yours — announced and recorded as every
+  framework's shell is, never asked; the
   SDK's `UnixLocalSandboxClient` and LangChain's `ShellToolMiddleware` on the host run as they
   do, unisolated (a Docker client or policy isolates them).
 * **`TRELLIS_HOST_EXECUTION=deny`**, the administrator's switch, turns every shell outside a
@@ -109,7 +110,7 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
 | Claude Code's shell (no sandbox, or one that lets a command out) | runs as the service's user, unisolated, announced | refused |
 | Claude Code's shell in its own sandbox (`allowUnsandboxedCommands: False`, no `excludedCommands`) | runs in it | runs in it |
 | Kimi's `Bash` with no `sandbox=` | runs as the service's user, unisolated, announced | refused |
-| OpenAI `LocalShellTool`, local `ShellTool` (your executor) | governed as your tool | refused |
+| OpenAI `LocalShellTool`, local `ShellTool` (your executor) | runs as the SDK runs it, unisolated, announced (never asked) | refused |
 
 A tool of your own that starts a process is code you wrote and wrapped, not an agent's shell:
 it is governed by what it declares. Way 2 ([blocks/governance.md](blocks/governance.md)) wraps

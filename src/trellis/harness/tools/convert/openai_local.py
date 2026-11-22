@@ -2,8 +2,10 @@
 ``ShellTool`` with a local executor, an ``ApplyPatchTool``'s editor, a ``ComputerTool``'s
 computer, a ``CustomTool`` — each of their calls run as a harness tool call is
 (``tools.bridge.call``): the run's hooks, governance by the tool's risk (as the catalog says;
-a tool that declares nothing asks), a person when it asks — shown the call as the model made
-it —, the journal (a resume does not run a call again), the record, the run's count.
+a tool that declares nothing asks — but a shell, the framework's own, is a write that runs
+announced, never asked, as every framework's shell does), a person when it asks — shown the
+call as the model made it —, the journal (a resume does not run a call again), the record,
+the run's count.
 
 One seam for every kind: where the SDK hands a call to the code that carries it out (the
 tool's executor, its editor's operation, its computer's action), the copy of the tool the run
@@ -161,13 +163,16 @@ async def through(
     call_id: str | None = None,
     decision: Hashable | None = None,
     on_refusal: Callable[[str], Any] = str,
+    shell: bool = False,
 ) -> Any:
     """``run(args)`` — the code that carries out a call of the SDK's tool ``name`` — as the run's
     call: what ``run`` returned (live, as the SDK takes it), the journal's record of it on a
     resume, ``on_refusal`` of what the model reads when the call does not run; what ``run``
     raised is raised again, for the SDK to deal with as it does. Outside a run, ``run(args)``.
     ``decision``: the model decision the call is part of (``bridge.call``: a computer call, for
-    each of its actions).
+    each of its actions). ``shell``: the framework's own shell (:func:`_executor`), run as the
+    framework runs it — a write unless the catalog says more, announced and recorded, never
+    asked (``Tool.confined``), as Claude Code's ``Bash`` and Deep Agents' ``execute`` are.
 
     A call whose outcome the run's ``after_tool`` hooks changed (``bridge.hooked``) is theirs:
     a result is returned as the journal keeps it (what a resume returns), and a failure is
@@ -183,8 +188,12 @@ async def through(
         return _recorded(await carried(given))
 
     spec = spec_of(runtime, name)
+    if shell and spec.side_effects == "unknown":
+        spec = spec.model_copy(update={"side_effects": "write"})
     try:
-        outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id, decision=decision)
+        outcome = await bridge.call(
+            Tool(spec, ran, confined=shell), args, call_id=call_id, decision=decision
+        )
     except Exception as error:
         if is_pause_signal(error):  # the SDK may swallow it: its hooks stop the run
             _local(runtime).paused = error
@@ -248,7 +257,9 @@ def _executor(tool: Any) -> Any:
         def run(given: dict[str, Any]) -> Any:
             return executor(request if given == args else _remade(request, given))
 
-        return await through(tool.name, args, run, call_id=getattr(data, "call_id", None))
+        return await through(
+            tool.name, args, run, call_id=getattr(data, "call_id", None), shell=True
+        )
 
     return execute
 

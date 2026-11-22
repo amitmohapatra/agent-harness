@@ -743,6 +743,7 @@ async def test_a_local_shell_command_is_one_question(
     model = ScriptedModel([Items(call), Items(call), "done"])
     target = Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)])
     watch, asked = Watch(), Asked()
+    memory_service.catalog = {"local_shell": {"side_effects": "irreversible"}}  # it asks
     async with Harness(config=HOST_ALLOWED, memory=memory_service.client()) as h:
         agent = h.wrap(target, id="ops", hooks=[watch], without={"schedules"})
         first = await agent.run("remove x", user="ada", thread=THREAD)
