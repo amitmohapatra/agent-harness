@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from benchmark.cost import breakfix, carry, history, judge, longtasks, prices, run
+from benchmark.cost import adversarial, breakfix, carry, history, judge, longtasks, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
@@ -3275,3 +3275,52 @@ def test_kimi_is_told_the_models_own_limits_as_every_other_adapter_is() -> None:
     assert cx.kimi_limits((1_000_000, 128_000)) == ("1000000", "128000")
     assert cx.kimi_limits((None, None)) == (cx.KIMI_WINDOW, cx.KIMI_OUTPUT)
     assert cx.kimi_limits((400_000, None)) == ("400000", cx.KIMI_OUTPUT)
+
+
+def test_items_listed_as_having_missed_are_not_presented_as_the_result() -> None:
+    """advdata-13 again: "Four missed: S40 Shrewsbury (...), S28 Taunton (...)" names the four
+    as left out, as "The other four missed:" does — it was read as presenting them (ReAct on
+    Deep Agents and OpenAI Agents marked wrong for an answer the other CLI was marked right
+    for, on one word). Said to have beaten it, they are still wrong."""
+    winners = "\n".join(f"| S{n:02d} | beat |" for n in (8, 12, 20, 24, 32, 36))
+    said = (
+        f"Six of the ten west stores beat their target.\n\n{winners}\n\nFour missed: S40 "
+        "Shrewsbury (£155,756 vs £171,300), S28 Taunton (£153,682 vs £169,100), S16 Hereford "
+        "(£150,651 vs £165,700), and S04 Bristol (£139,970 vs £154,000)."
+    )
+    for store in ("S04", "S16", "S28", "S40"):
+        assert not cx._presented(said, store, 6), store
+        assert cx._presented(said.replace("Four missed:", "Four more beat it:"), store, 6)
+    short = "Three fell short: S04, S16 and S28."
+    assert not cx._presented(short, "S16", 6)
+
+
+def test_sure_of_every_stage_is_read_whatever_names_the_stages() -> None:
+    """advpipe-01's "How sure are you?": "a fresh fetch of all five AL-1 stages for ST-42
+    matches" says every stage's record is there, as "I re-read all five stages" does — the
+    run's name between the count and the noun failed it."""
+    said = re.compile(adversarial.EVERY_STAGE, re.IGNORECASE)
+    for answer in (
+        "A fresh fetch of all five AL-1 stages for ST-42 matches what I reported.",
+        "I re-read all five stages.",
+        "All 5 of the run's stages logged a record.",
+        "Each stage has a record, and the deltas add up.",
+    ):
+        assert said.search(answer), answer
+    assert not said.search("I looked at five things and all were fine.")
+
+
+def test_a_plan_named_in_the_questions_own_words_is_that_plan() -> None:
+    """advscen-04: the question calls the plans "equal", "by Q3 2026 units sold per region" and
+    "all to the region with the fewest days of cover". An answer naming its pick in those words
+    ("Plan B, allocate by Q3 2026 units sold … 40.3 days") was marked wrong where the same
+    answer saying "proportional" was right: three of the case's six scored turns turned on it,
+    for every adapter."""
+    t = _turn("advscen-04", 0)
+    said = (
+        "**Recommendation: Plan B, allocate by Q3 2026 units sold.** It gives the highest lowest "
+        "cover (East at 40.3 days), and no plan leaves any region under 14 days."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    other = said.replace("allocate by Q3 2026 units sold", "split equally").replace("40.3", "36.6")
+    assert cx.score(t.expect, other, [], t.text)["correct"] is False

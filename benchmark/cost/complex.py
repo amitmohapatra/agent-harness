@@ -2874,7 +2874,9 @@ _EXCLUDED: Final = re.compile(
     r"(?:inside|within) (?:the )?(?:(?:upper|lower) )?fences?|"
     r"just (?:missed|missing|outside|short)|miss(?:es|ed) (?:out|the cut)|"
     # the rest of the result's candidates, said not to make it ("the other four missed: ...", "would miss: ...")
-    r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short|would miss))\b|n't\b",
+    r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short|would miss)|"
+    # a list introduced as the ones that did not make it ("Four missed: ...", "Three fell short: ...")
+    r"(?:missed|fell short)(?=\s*:))\b|n't\b",
     re.IGNORECASE,
 )
 #: A place said in a clause ("4th place", "the fourth"): past the size of the result, it is

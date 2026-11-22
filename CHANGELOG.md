@@ -5,6 +5,24 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed (benchmark): six expectations that marked right answers wrong, for every adapter
+
+Found by reading every wrong answer of all eight adapters on the hard set (one run each):
+
+- **advdom-05, advdom-07**: "Compare runs …" and "Is today's run unusual?" also required the
+  region that moved most, which neither question asks for; every adapter gave the totals and
+  was marked wrong. The region stays in the reference and the rubric, not in the record.
+- **advdom-09**: "Summarise yesterday's allocation run" names no run where the harness tells
+  the model the real date and the suite's data ends on its own; it now asks for "the run
+  before the latest one".
+- **advscen-04**: a plan named in the question's own words ("by Q3 2026 units sold") was not
+  read as that plan, where "proportional" was: three of the case's six scored turns.
+- **advdata-13**: "Four missed: S40 …, S28 …" lists the stores left out, as "The other four
+  missed:" does; it was read as presenting them.
+- **advpipe-01**: "all five AL-1 stages" says every stage, as "all five stages" does.
+
+Expectations that are defensible, where a model only judged differently, are unchanged.
+
 ### Changed: an OpenAI agent's default shell is the SDK's own, where its model takes it
 
 An OpenAI Agents SDK agent with no shell of its own was given the harness's `sandbox_exec`,

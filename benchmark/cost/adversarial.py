@@ -477,6 +477,9 @@ TOOLS: Final = (
 #: The suite's file store: each person's files by name — ``(text, as_of)`` — so a run finds
 #: only its own person's (the harness has no file store of its own yet: #91). Emptied for
 #: every case (``complex.run_case``).
+#: What says every stage of a run has its record ("all five stages", "all five AL-1 stages for
+#: ST-42", "each stage"): the count and the noun may have the run's name between them.
+EVERY_STAGE: Final = r"every stage|all (?:five|5)\b[^.;\n]{0,30}?\bstages|complete|each stage"
 FILES: Final[dict[str, dict[str, tuple[str, str]]]] = {}
 
 
@@ -1866,13 +1869,12 @@ def domain_cases() -> list[Any]:
                     ),
                 ),
             ),
+            # the totals' change is what "compare" asks; which region moved most is in the
+            # reference, not required: the question does not ask for it (every adapter gave
+            # the total and was marked wrong for the region)
             record(
-                {
-                    "total change": totals[today] - totals[yesterday],
-                    "region": region,
-                    "region change": moved[region],
-                },
-                tol={"total change": 0, "region change": 0},
+                {"total change": totals[today] - totals[yesterday]},
+                tol={"total change": 0},
                 reference=f"{today} allocates {totals[today]} units against {totals[yesterday]} ({totals[today] - totals[yesterday]:+d}); "
                 + "; ".join(f"{g} {v:+d}" for g, v in moved.items())
                 + f": the {region} moved most.",
@@ -1914,8 +1916,10 @@ def domain_cases() -> list[Any]:
                     ),
                 ),
             ),
+            # unusual or not, and by what figure: the region behind it is the rubric's, not
+            # required — "is it unusual?" does not ask why
             record(
-                {"today": totals[today], "region": region},
+                {"today": totals[today]},
                 rubric=f"yes: {totals[today]} units, above every earlier run ({min(totals.values())}-{max(v for k, v in totals.items() if k != today)}), driven by the {region}",
                 reference=f"Yes: {today} allocates {totals[today]} units, more than any earlier run (the highest was "
                 f"{max(v for k, v in totals.items() if k != today)}); the {region} rose {moved[region]:+d}.",
@@ -1938,7 +1942,9 @@ def domain_cases() -> list[Any]:
         ),
         ask(
             "advdom-09",
-            "Summarise yesterday's allocation run.",
+            # "the run before the latest": the suite's data ends on its own date, and the
+            # harness tells the model the real one — "yesterday" then names no run at all
+            "Summarise the allocation run before the latest one.",
             (
                 (
                     (
@@ -2083,7 +2089,7 @@ def pipeline_cases() -> list[Any]:
                     "How sure are you?",
                     (),
                     grounded(
-                        r"every stage|all (five|5) stages|complete|each stage",
+                        EVERY_STAGE,
                         "sure because every stage's record is there and the deltas add up exactly; says so from the records",
                         f"Sure: all five stages logged a record for ST-42 (forecast {rows['forecast']['units_out']} through final "
                         f"{rows['final']['units_out']}), and the deltas add up exactly.",
@@ -2630,9 +2636,21 @@ def scenario_cases() -> list[Any]:
     pick_fewer = min(fewer, key=lambda k: (fewer[k]["under_14"], -fewer[k]["lowest"]))
     names = {
         "equal": ("equal",),
-        # "proportion": ...al, in ... to; "by q3 sales": "split by Q3 sales"
-        "by_sales": ("by sales", "by_sales", "sales share", "proportion", "by q3 sales"),
-        "lowest_cover": ("lowest cover", "lowest_cover"),
+        # "proportion": ...al, in ... to; "by q3 sales": "split by Q3 sales"; and the question's
+        # own words for it, "by Q3 2026 units sold": an answer that named the plan so ("allocate
+        # by Q3 2026 units sold") was marked wrong, one that said "proportional" right
+        "by_sales": (
+            "by sales",
+            "by_sales",
+            "sales share",
+            "proportion",
+            "by q3 sales",
+            "units sold",
+            "by q3 2026 units",
+            "by q3 units",
+        ),
+        # the question's own words too: "all to the region with the fewest days of cover"
+        "lowest_cover": ("lowest cover", "lowest_cover", "fewest days of cover", "fewest cover"),
     }
     out.append(
         Case(
