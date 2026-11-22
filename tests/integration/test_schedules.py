@@ -970,9 +970,10 @@ async def test_failures_before_a_pause_and_days_before_asking_are_settings() -> 
         agent = h.wrap(chat, id="desk")
         await said(agent, chat, "ada", ("schedule_task", {"task": "sync", "when": "0 8 * * *"}))
         sid = only(h).schedule_id
-        for _ in range(2):
-            chat.fired.appendleft("x")
-            last = await fire(h, agent, sid)
+        chat.fired.appendleft("x")
+        await fire(h, agent, sid)
+        chat.fired.appendleft("x")
+        last = await fire(h, agent, sid)
         assert local(h)._schedules[sid].enabled is False
         assert last.error is not None and "failed 2 times in a row" in last.error.message
         await said(agent, chat, "ada", ("update_schedule", {"id": sid, "enabled": True}))
@@ -1216,7 +1217,7 @@ def test_in_minutes_on_a_whole_minute_keeps_it() -> None:
 def test_an_end_is_a_day_or_an_exact_time_and_anything_else_is_said_back() -> None:
     zone = "Asia/Kolkata"
     exact = schedules._ending("2030-12-31T17:00", zone)
-    assert exact == datetime(2030, 12, 31, 11, 30, tzinfo=UTC)
+    assert isinstance(exact, datetime) and exact == datetime(2030, 12, 31, 11, 30, tzinfo=UTC)
     assert schedules._ends_said(exact, zone) == "at Tue 31 Dec 2030, 17:00 (Asia/Kolkata)"
     assert "is not a day" in str(schedules._ending("next spring", zone))
     assert schedules._ending("", zone) is None
