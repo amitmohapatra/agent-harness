@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed (benchmark): a new chat waits for what memory was still working on
+
+A write to the memory service is answered before its job has run. The suite began a turn of
+another conversation as soon as the harness's writes were sent, a fraction of a second later:
+a new chat asked for a quantity approved 0.3 s before, which memory did not hold yet, and
+every fast adapter missed it while the slowest had it. The suite now waits for the jobs those
+writes queued (`complex.Queued`), 30 s at most, for every adapter alike.
+
 ### Fixed: a Deep Agents graph of your own is told where the user's files go
 
 The `execute` the harness turns on in a `create_deep_agent` graph keeps the library's own

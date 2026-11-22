@@ -3224,3 +3224,43 @@ def test_a_plan_said_as_split_by_q3_sales_is_the_plan() -> None:
     scored as naming no plan. Recommending another plan still fails."""
     assert _right("advscen-04", 1, "I recommend **Plan B, split by Q3 sales: north 261.**")
     assert not _right("advscen-04", 1, "I recommend Plan A, the equal split: 300 each.")
+
+
+async def test_another_conversation_waits_for_what_memory_was_still_working_on() -> None:
+    """A write to the memory service is answered before its job has run (202, with the job's
+    id). A turn of another conversation begins once those jobs have ended — a person changes
+    chat in seconds, the suite in a fraction of one: ``bf2-mixed-01`` asked a new chat for
+    the quantity approved 0.3 s before, which memory did not hold yet (every fast adapter
+    missed it; the slowest had it)."""
+
+    class Service:
+        """A memory transport: two writes that queue a job each, one read, the jobs' states."""
+
+        states: dict[str, list[str]] = {  # noqa: RUF012 - one service, read by each call
+            "obx_1": ["PENDING", "RUNNING", "SUCCEEDED"],
+            "obx_2": ["FAILED"],
+        }
+        asked: list[str] = []  # noqa: RUF012
+
+        async def request(self, method: str, path: str, **given: Any) -> Any:
+            if method == "GET" and path.startswith("/v1/jobs/"):
+                self.asked.append(path)
+                return {"status": self.states[path.rsplit("/", 1)[1]].pop(0)}
+            return {"job_ids": [f"obx_{path[-1]}"]} if method == "POST" else ["a row"]
+
+    with cx.Queued(Service) as queued:
+        service = Service()
+        assert await service.request("POST", "/v1/messages/1", scope="s") == {"job_ids": ["obx_1"]}
+        await service.request("POST", "/v1/messages/2")
+        assert await service.request("GET", "/v1/context") == ["a row"]  # no job of its own
+        assert [job for _, _, job in queued.jobs] == ["obx_1", "obx_2"]
+        await queued.settled(pause=0)
+        assert Service.asked == ["/v1/jobs/obx_1", "/v1/jobs/obx_2"] + ["/v1/jobs/obx_1"] * 2
+        assert queued.jobs == []  # a failed job has ended too: nothing more comes of it
+        Service.states["obx_3"] = ["PENDING"] * 50
+        await service.request("POST", "/v1/messages/3")
+        await queued.settled(seconds=0, pause=0)  # past its time: the turn begins all the same
+        assert queued.jobs == []
+    assert Service.request.__name__ == "request"  # the service's own again
+    await Service().request("POST", "/v1/messages/1")
+    assert queued.jobs == []

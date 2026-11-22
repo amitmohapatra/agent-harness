@@ -4203,6 +4203,78 @@ def scripted_model(case: Case, *, keyed: bool = False, coding: bool = False) -> 
     return ScriptedChatModel(turns=case.script(coding=coding), spends=(None, 50))
 
 
+#: A memory job that has not ended (``trellis.memory.models.JobStatus``).
+WORKING: Final = frozenset({"PENDING", "RUNNING", "RETRYING"})
+#: The longest a turn of another conversation waits for memory's jobs, in seconds.
+JOBS_WAIT: Final = 30.0
+
+
+class Queued:
+    """The memory service's jobs a suite's writes queued, while it is entered: a write is
+    answered before its job has run (202, with the job's id), and a turn of another
+    conversation begins once those jobs have ended (:meth:`settled`) — a person changes chat
+    in seconds, the suite in a fraction of one, so what the earlier chat recorded was not in
+    memory yet for the adapters that answer fastest. ``kind`` is the transport watched (the
+    memory client's own unless a test gives one)."""
+
+    def __init__(self, kind: Any = None) -> None:
+        if kind is None:
+            from trellis.memory.transport import Transport
+
+            kind = Transport
+        self.kind = kind
+        self.jobs: list[tuple[Any, Any, str]] = []  # the transport, the scope, the job's id
+        self._own = kind.request
+
+    def __enter__(self) -> Queued:
+        own, jobs = self._own, self.jobs
+
+        async def request(transport: Any, method: str, path: str, **given: Any) -> Any:
+            found = await own(transport, method, path, **given)
+            if isinstance(found, dict):
+                jobs.extend((transport, given.get("scope"), j) for j in found.get("job_ids") or [])
+            return found
+
+        self.kind.request = request
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.kind.request = self._own
+
+    async def settled(self, seconds: float = JOBS_WAIT, pause: float = 0.2) -> None:
+        """Wait until every job queued so far has ended (done or failed: nothing more comes
+        of it), ``seconds`` at most; then they are forgotten."""
+        until = time.monotonic() + seconds
+        while self.jobs and time.monotonic() < until:
+            working = []
+            for transport, scope, job in self.jobs:
+                try:
+                    found = await self._own(transport, "GET", f"/v1/jobs/{job}", scope=scope)
+                except Exception:  # a job the service no longer knows
+                    continue
+                if found.get("status") in WORKING:
+                    working.append((transport, scope, job))
+            self.jobs[:] = working
+            if working:
+                await asyncio.sleep(pause)
+        self.jobs.clear()
+
+
+#: The suite's watch of the memory service's jobs, once a case with memory on has begun
+#: (:func:`watched`): the process's one, as the memory client's transport is.
+_WATCH: dict[str, Queued] = {}
+
+
+def watched(h: Harness) -> Queued | None:
+    """The watch of memory's jobs (:class:`Queued`), begun at the first case of a harness
+    with memory on; ``None`` for one without."""
+    if h.memory is None:
+        return None
+    if "jobs" not in _WATCH:
+        _WATCH["jobs"] = Queued().__enter__()
+    return _WATCH["jobs"]
+
+
 async def run_case(
     h: Harness,
     case: Case,
@@ -4224,6 +4296,7 @@ async def run_case(
     their requests (the model is one), and each keeps its own run's calls."""
     w = r.world()
     w.reset()
+    jobs = watched(h)
     from benchmark.cost import adversarial, longtasks
 
     adversarial.FILES.clear()  # the suite's file store starts empty for each case
@@ -4379,7 +4452,10 @@ async def run_case(
         together = [t] if beside is None or beside.mode is None else [t, beside]
         if i and t.thread != case.turns[i - 1].thread:
             # another conversation, later: what the earlier one recorded has reached memory
+            # — sent (the harness's writes), and worked through there (the service's jobs)
             await h.writes.drain()
+            if jobs is not None:
+                await jobs.settled()
         for _ in range(t.ticks):
             w.tick()
         trace.calls = []
