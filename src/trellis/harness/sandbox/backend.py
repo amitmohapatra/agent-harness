@@ -25,6 +25,9 @@ off (:class:`CodeCard`).
 
 from __future__ import annotations
 
+import asyncio
+import math
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
@@ -46,7 +49,8 @@ from langgraph.types import Command
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.runtime import Runtime, current
-from trellis.harness.sandbox.base import audited, hint
+from trellis.harness.sandbox.base import audited, hint, recorded
+from trellis.harness.sandbox.local import Folder
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 from trellis.harness.tools.results import EXECUTE
 
@@ -162,9 +166,10 @@ class CodeBackend(JournalBackend, SandboxBackendProtocol):
     graph's state, as ``JournalBackend``'s (the lean graph and its long-task files unchanged),
     and Deep Agents' ``execute`` a command in the run's working folder — the one the harness
     gives the run's agent by itself (``Agent.code``, ``sandbox.code_of``), made at its first
-    command and told what the user gets of the files it wrote. Where the deployment switched
-    commands off, ``execute`` is not offered (:class:`CodeCard`); a call there all the same
-    answers :data:`NO_CODE`."""
+    command and told what the user gets of the files it wrote —, run there by Deep Agents' own
+    ``LocalShellBackend`` (:func:`_own_shell`): the library's shell from end to end. Where the
+    deployment switched commands off, ``execute`` is not offered (:class:`CodeCard`); a call
+    there all the same answers :data:`NO_CODE`."""
 
     #: what ``LangGraphAdapter.code`` reads (``adapters.base.DEFAULT_CODE``), with no import
     trellis_default_code = True
@@ -190,10 +195,31 @@ class CodeBackend(JournalBackend, SandboxBackendProtocol):
             return ExecuteResponse(output=NO_CODE, exit_code=126)
         box = await code.opened(runtime, changes=True)
         await code.seen(runtime, box)
-        ran = await SandboxBackend(code, call_timeout=code.call_timeout).aexecute(
-            command, timeout=timeout
-        )
+        if isinstance(box, Folder):  # the harness's own default: the library's own shell
+            await code.with_results(runtime, box)  # the results the run keeps, there too
+            bounds = [s for s in (timeout, code.call_timeout, runtime.remaining()) if s is not None]
+            ran = await _own_shell(box, command, min(bounds))
+        else:  # a sandbox given as the default (a test's, a deployment's later): its own way
+            ran = await SandboxBackend(code, call_timeout=code.call_timeout).aexecute(
+                command, timeout=timeout
+            )
         return await _told(code, runtime, box, command, ran)
+
+
+async def _own_shell(box: Folder, command: str, seconds: float) -> ExecuteResponse:
+    """``command`` run by Deep Agents' own ``LocalShellBackend`` in the run's folder — the
+    library's shell, as the library runs it: on this machine, with the service's environment,
+    its output and time limit the library's —, and audited as every command is
+    (``base.recorded``)."""
+    from deepagents.backends import LocalShellBackend  # noqa: PLC0415 - only where it runs
+
+    shell = LocalShellBackend(root_dir=box.home, virtual_mode=True, inherit_env=True)
+    started = time.monotonic()
+    ran = await asyncio.to_thread(
+        shell.execute, box.placed(command), timeout=max(1, math.ceil(seconds))
+    )
+    recorded(box, command, ran.exit_code, started, None)
+    return ran
 
 
 async def _told(

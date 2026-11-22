@@ -101,6 +101,40 @@ async def test_react_runs_a_real_command_in_the_runs_own_folder(
     assert not list(folders.root.glob("trellis-*"))  # removed with its run
 
 
+async def test_reacts_command_is_run_by_deep_agents_own_local_shell(
+    harness: Harness, folders: LocalFolders, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ReAct``'s shell is the library's own from end to end: Deep Agents' ``execute`` tool,
+    run by Deep Agents' ``LocalShellBackend`` in the folder the harness made for the run —
+    with the service's environment, as Claude Code's shell has it —, a kept result named
+    where it is, and audited as every command is."""
+    from deepagents.backends import LocalShellBackend
+
+    ran: list[tuple[str, str, bool]] = []
+    own = LocalShellBackend.execute
+
+    def execute(self: Any, command: str, *, timeout: int | None = None) -> Any:
+        ran.append((str(self.cwd), command, "PATH" in self._env))
+        return own(self, command, timeout=timeout)
+
+    monkeypatch.setattr(LocalShellBackend, "execute", execute)
+    command = "echo $((6 * 7)); ls /large_tool_results"
+    model = ScriptedChatModel(turns=[("execute", {"command": command}), "42"])
+    agent = harness.wrap(ReAct("You analyse data.", model), id="analyst")
+    audits: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "trellis.harness.sandbox.base.telemetry.command",
+        lambda record, where=None: audits.append(dict(record)),
+    )
+    done = await agent.run("multiply", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    [(cwd, sent, inherited)] = ran
+    assert cwd.startswith(str(folders.root)) and inherited
+    assert sent == command.replace("/large_tool_results", f"{cwd}/.results")
+    assert any("42" in r for r in results(model))
+    assert [(a["command"], a["exit_code"]) for a in audits] == [(command, 0)]
+
+
 async def test_a_middleware_graph_runs_a_real_command_in_the_runs_own_folder(
     harness: Harness, folders: LocalFolders
 ) -> None:

@@ -254,15 +254,16 @@ async def audited(
     try:
         result = await box.exec(command, timeout=timeout)
     except TimeoutError:
-        _recorded(box, command, None, started, "time")
+        recorded(box, command, None, started, "time")
         raise
-    _recorded(box, command, result.exit_code, started, None)
+    recorded(box, command, result.exit_code, started, None)
     return result
 
 
-def _recorded(
+def recorded(
     box: Sandbox, command: str, code: int | None, started: float, limit: str | None
 ) -> None:
+    """A model's command's audit record (:func:`audited`'s), for what runs one itself."""
     record = {
         "sandbox": box.ref.id,
         "command": command[:AUDIT_CHARS],

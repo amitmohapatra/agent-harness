@@ -48,9 +48,11 @@ harness's, with nothing to write:
   administrator who wants one asked says so in the tool catalog (`irreversible`, or an
   `approve_when`), as for Claude Code's `Bash`.
 * **An agent with none is given one** at `h.wrap` (`sandbox.code_for`, `Agent.code`): `ReAct`
-  with no `backend=` as Deep Agents' own `execute` (`sandbox.backend.CodeBackend`: its files
-  stay the graph's state, so the lean graph and its long-task files are unchanged; described in
-  a few words: `sandbox.CODE`, `CodeCard`; in its helpers too); a `ReAct` given a backend that
+  with no `backend=` as Deep Agents' own `execute`, its command run by Deep Agents' own
+  `LocalShellBackend` in the run's folder (`sandbox.backend.CodeBackend`: its files stay the
+  graph's state, so the lean graph and its long-task files are unchanged; described in a few
+  words: `sandbox.CODE`, `CodeCard`; in its helpers too) — the library's shell from end to
+  end, on Deep Agents from the first step or not; a `ReAct` given a backend that
   runs no command, LangGraph `create_agent`/`create_deep_agent` with `middleware()`, OpenAI
   Agents and function targets as `sandbox_exec` alone (one command), a tool of the run; a
   graph built by hand finds it among `h.harness_tools()`.
