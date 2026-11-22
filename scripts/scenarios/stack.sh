@@ -49,6 +49,10 @@ memory() {  # memory [migrate]: the memory API and its job worker (tests/scenari
     MEMORY__DATABASE__CONNECTION_BUDGET="${SCEN_MEM_CONNECTIONS:-56}"
     MEMORY__CACHE__URL="redis://127.0.0.1:$SCEN_REDIS_PORT/0" MEMORY__BLOB__FILESYSTEM_ROOT="$w/blob"
     MEMORY__TASKS__METRICS_PORT=$((SCEN_MEM_PORT+100)) MH_QDRANT_PATH="$w/qdrant")
+  # the certificates this machine trusts (one whose outbound TLS is inspected has its own): the
+  # service's model calls for an agent go to the address the harness registers, and fail
+  # unverified without them — every summary and extraction then falls back, silently
+  [ -n "${SSL_CERT_FILE:-}" ] && env+=(SSL_CERT_FILE="$SSL_CERT_FILE")
   if [ "${1:-}" = migrate ]; then
     (cd "$SCEN_MEM_ROOT" && env -i "${env[@]}" "$SCEN_SVC_PY" -m alembic upgrade head) &&
     (cd "$w" && env -i "${env[@]}" "$SCEN_SVC_PY" -m memory_service.adapters.tasks.procrastinate_schema || true)
