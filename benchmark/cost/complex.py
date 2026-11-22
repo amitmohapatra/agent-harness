@@ -3905,9 +3905,18 @@ KIMI_ROOT: Final = "build/kimi"
 #: Where a ``claude`` run works (``CLAUDE_RUN_ROOT``): its own folder, not this checkout.
 CLAUDE_ROOT: Final = "build/claude"
 #: The most a Kimi model reply may be (Kimi asks for the model's whole window by default, which
-#: a provider refuses), and the window it is told.
+#: a provider refuses), and the window it is told — where the route has no record of the model
+#: (:func:`kimi_limits`).
 KIMI_OUTPUT: Final = "16000"
 KIMI_WINDOW: Final = "200000"
+
+
+def kimi_limits(limits: tuple[int | None, int | None]) -> tuple[str, str]:
+    """The window and the most one reply may be that Kimi Code is told, from the route's own
+    record of the model (``ModelGateway.limits``: what every other adapter's model is built
+    with), each the fixed figure where the route says none."""
+    window, output = limits
+    return str(window or KIMI_WINDOW), str(output or KIMI_OUTPUT)
 
 
 def adapter_of(history: str, adapter: str | None) -> str:
@@ -4114,13 +4123,19 @@ def kimi_target(
     base = model.url if scripted else os.environ.get("LLM_BASE_URL", "")
     anthropic = urlsplit(base).hostname == "api.anthropic.com"
     name = "scripted" if scripted else model
+    if scripted:
+        window, output = kimi_limits((None, None))
+    else:
+        from trellis.harness.gateways import _limits_of  # the route's record, asked once
+
+        window, output = kimi_limits(_limits_of(model))
     env = {
         "KIMI_MODEL_PROVIDER_TYPE": "anthropic" if anthropic else "openai",
         "KIMI_MODEL_BASE_URL": "https://api.anthropic.com" if anthropic else base,
         "KIMI_MODEL_API_KEY": "scripted" if scripted else os.environ.get("LLM_API_KEY") or "none",
         "KIMI_MODEL_NAME": name,
-        "KIMI_MODEL_MAX_CONTEXT_SIZE": KIMI_WINDOW,
-        "KIMI_MODEL_MAX_OUTPUT_SIZE": KIMI_OUTPUT,
+        "KIMI_MODEL_MAX_CONTEXT_SIZE": window,
+        "KIMI_MODEL_MAX_OUTPUT_SIZE": output,
         "KIMI_MODEL_CAPABILITIES": "image_in",
         "KIMI_CODE_HOME": str(root / "home"),
         "KIMI_CODE_NO_AUTO_UPDATE": "1",

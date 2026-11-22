@@ -403,6 +403,45 @@ async def test_the_conversations_session_is_continued_only_where_it_is_kept(
     assert list(agent.sessions) == [key]
 
 
+async def test_a_session_whose_turn_failed_is_not_the_next_turns(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A session its framework can no longer send — its provider refused the session's own
+    request and said a retry will not help — is refused again at every turn that continues it
+    (Kimi Code's, whose reloaded log held a tool call its provider refuses: one such turn,
+    then every later turn of the conversation, 21 of them in one suite). That turn's session
+    is dropped: the next turn starts a new one, and is given the conversation as a worker
+    that kept none is (the run store's turns). A turn that failed any other way keeps it."""
+    from types import SimpleNamespace
+
+    from trellis.harness.pipeline import _kept_session
+
+    seen: list[Any] = []
+    target, tools = await BUILDERS["claude_agent_sdk"](harness, [], tmp_path, [], seen=seen)
+    agent = arm(harness.wrap(target, id="sess-failed"), tools)
+    await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
+    key = conversation_key("default", "ada", THREAD)
+    session, _ = agent.sessions[key]
+    journal = SimpleNamespace(session=session, transcripts={})
+    failed = SimpleNamespace(status=RunStatus.ERROR)
+
+    def turn(refused: bool) -> Any:
+        return SimpleNamespace(
+            parent=None, conversation=key, run_id="run_failed", session_refused=refused
+        )
+
+    _kept_session(agent, turn(False), journal, failed)  # type: ignore[arg-type]
+    assert agent.sessions[key][0] == session  # failed another way (its process died): resumed
+    _kept_session(agent, turn(True), journal, failed)  # type: ignore[arg-type]
+    assert key not in agent.sessions
+    forget(seen)
+    again = await agent.run("What is the locker code?", user="ada", thread=THREAD)
+    assert again.status is RunStatus.SUCCESS, again.error
+    record = json.loads(seen[-1].read_text())
+    assert record["resume"] is None and "4242" in record["context"]
+    assert agent.sessions[key][0] != session  # the new session, kept for the turn after
+
+
 @pytest.mark.parametrize("framework", ["claude_agent_sdk", "kimi"])
 async def test_a_continued_session_with_memory_on_gets_no_memory_window_beside_it(
     memory_harness: Harness, tmp_path: Path, framework: str

@@ -86,6 +86,22 @@ def test_past_results_alone_need_no_file(run: Run, service: FakeMemoryService) -
     assert ask(sql="SELECT count(*) AS n FROM result", results=[ref]).endswith("n\n30")
 
 
+def test_a_past_result_named_as_the_context_names_it_is_that_result(
+    run: Run, service: FakeMemoryService
+) -> None:
+    """The memory context lists an earlier chat's result as ``result msg_...``, and the tool's
+    own schema writes it so: given whole, with the word, it is the same result — it was looked
+    up with the word in its id, not found, and said to be "no longer kept (deleted, or past
+    its retention)", which the model told the user (``hist-long-01`` on a graph built by
+    hand)."""
+    ref = _said(service, "ann", MONDAY)
+    sql = "SELECT sku, units FROM t1 ORDER BY units DESC LIMIT 1 OFFSET 6"
+    for given in (f"result {ref}", f" Result {ref} ", f"`{ref}`"):
+        said = ask(sql=sql, results=[given])
+        assert said.endswith("sku,units\nS6,94"), said
+        assert said.startswith(f"t1 is past result {ref}, said 2026-"), said
+
+
 def test_a_past_result_given_with_a_path_it_never_had_is_still_the_table(
     run: Run, service: FakeMemoryService
 ) -> None:

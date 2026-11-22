@@ -3264,3 +3264,14 @@ async def test_another_conversation_waits_for_what_memory_was_still_working_on()
     assert Service.request.__name__ == "request"  # the service's own again
     await Service().request("POST", "/v1/messages/1")
     assert queued.jobs == []
+
+
+def test_kimi_is_told_the_models_own_limits_as_every_other_adapter_is() -> None:
+    """Kimi Code is told the model's window and the most one reply may be: the route's own
+    record of the model, which every other adapter's model is built with — not a fixed 16,000
+    tokens, at which a reply writing a file's rows was cut mid-call (the other CLI wrote
+    50,000 and more on the same turns) and left a session its provider refused from then on.
+    The fixed figures stay for a route that says none (the scripted model's)."""
+    assert cx.kimi_limits((1_000_000, 128_000)) == ("1000000", "128000")
+    assert cx.kimi_limits((None, None)) == (cx.KIMI_WINDOW, cx.KIMI_OUTPUT)
+    assert cx.kimi_limits((400_000, None)) == ("400000", cx.KIMI_OUTPUT)

@@ -1603,6 +1603,8 @@ class Attempt:
         failed = self.usage.failed if self.usage is not None else None
         if failed is not None:  # answered ``end_turn`` like a finished turn: its log says why
             details = {k: v for k, v in failed.items() if v not in (None, "", {})}
+            # refused for good: the session as it stands is refused again at every turn
+            self.runtime.session_refused = failed.get("retryable") is False
             raise ACPRunError(FAILED_TURN.format(why=json.dumps(details, default=str)))
         # past the agent's own retries: what a run with no answer says
         self.runtime.cut_off = stop == MAX_TOKENS

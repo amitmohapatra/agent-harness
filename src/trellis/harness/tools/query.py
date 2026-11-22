@@ -117,6 +117,17 @@ QUERY_RESULT_SAVING_SCHEMA: Final[dict[str, Any]] = {
 #: an earlier conversation's steps list, ``result msg_...`` (the memory service's format).
 PAST_RESULTS: Final = 8
 _PAST: Final = re.compile(r"\bresult (msg_\w+)")
+#: A past result's reference written as the context writes it, the word and all, or quoted.
+_REF: Final = re.compile(r"^[\s`'\"]*(?:result\s+)?(?P<ref>.*?)[\s`'\"]*$", re.IGNORECASE)
+
+
+def _named(given: str) -> str:
+    """The reference a model gave for a past result, as it is looked up: the id alone, where
+    it wrote it as the context lists it (``result msg_...``) or quoted it."""
+    found = _REF.match(given)
+    return found.group("ref") if found is not None and found.group("ref") else given
+
+
 #: What a failure on a text column used as a number adds (:data:`_TEXT_MISUSED`): money,
 #: separators and percentages are kept as written (``tools.query``'s typing rules).
 TEXT_NUMBERS: Final = (
@@ -461,7 +472,8 @@ async def _past(runtime: Any, refs: Sequence[str]) -> tuple[dict[str, str], list
     named = {**{p.rsplit("/", 1)[-1]: p for p in own}, **{t: p for p, t in own.items()}}
     texts: dict[str, str] = {}
     told: list[str] = []
-    for n, ref in enumerate(refs, start=1):
+    for n, given in enumerate(refs, start=1):
+        ref = _named(given)
         path = named.get(ref) or "/" + ref.lstrip("/")
         if path in kept:  # a result of this run's, named here too: that table
             texts[f"t{n}"] = kept[path]

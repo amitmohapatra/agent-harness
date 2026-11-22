@@ -580,14 +580,22 @@ async def _served_elsewhere(agent: Agent, identity: Identity, mine: str, asked: 
 
 def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
     """The session a conversation's turn ended in, kept for its next turn
-    (:func:`_continued_session`); a paused turn keeps it in its journal until it ends."""
+    (:func:`_continued_session`); a paused turn keeps it in its journal until it ends. A turn
+    whose session its framework can no longer send (``Runtime.session_refused``: its provider
+    refused the session's own request, for good) keeps none, and drops the one kept before it:
+    it is refused again at every turn that continues it — the next turn starts a new session,
+    given the conversation as a worker that kept none is (``Agent.window``). A turn that
+    failed any other way (its process died) leaves a session that is resumed."""
     if (
-        agent.adapter.sessions
-        and journal.session
-        and runtime.parent is None
-        and runtime.conversation != runtime.run_id
-        and result.status is not RunStatus.PAUSED
+        not agent.adapter.sessions
+        or runtime.parent is not None
+        or runtime.conversation == runtime.run_id
+        or result.status is RunStatus.PAUSED
     ):
+        return
+    if runtime.session_refused:
+        agent.sessions.discard(runtime.conversation)
+    elif journal.session:
         agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
 
 

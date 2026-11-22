@@ -5,6 +5,31 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a session its provider refused for good is not the next turn's
+
+A CLI agent's turn (Kimi Code over ACP) can fail because its provider refuses the session's own
+request and says a retry will not help. The harness kept that session for the conversation, so
+every later turn continued it and was refused the same way: one bad record, a dead
+conversation. Such a turn's session is now dropped (`Runtime.session_refused`); the next turn
+starts a new one and is given the conversation from the run store, as a worker that kept no
+session is. A turn that failed any other way (its process died) still leaves a session that is
+resumed.
+
+### Fixed: `query_result` reads a past result named as the context names it
+
+The memory context lists an earlier chat's result as `result msg_...`, and the tool's own schema
+writes it so. Given whole, with the word (or quoted), the reference was looked up as it stood,
+not found, and answered "no longer kept (deleted, or past its retention)" — which the model
+told the user. It is now the result it names.
+
+### Fixed (benchmark): Kimi Code is told the model's own limits
+
+The suite capped Kimi's replies at 16,000 tokens and told it a 200,000-token window, whatever
+the model; every other adapter's model is built with the route's own record of it (128,000 and
+1,000,000 for the suite's model). A reply writing a file's rows was cut mid-call, which left a
+session its provider refused from then on. Kimi is now told the route's figures
+(`complex.kimi_limits`).
+
 ### Fixed: a tool that failed each time stalls itself, not the run
 
 The tool bridge stops the same call made three times in a row. It then told every adapter but
