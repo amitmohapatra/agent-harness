@@ -1454,7 +1454,7 @@ class Attempt:
                     yield item
             prompt, self.followup = self.followup, None
             if self.runtime.pending is not None or self.runtime.budget_spent is not None:
-                return
+                return  # paused, or its budget spent (the answer asked for at its limit: given)
             if not answered and (carried := await self._carried()) is not None:
                 answered = True
                 yield carried
@@ -1486,9 +1486,11 @@ class Attempt:
         more, in the same session, said as a warning: a loop on one call — refused by the
         bridge (``bridge.stalled``, which said so) or ended by Kimi's own repeat breaker
         (:data:`REPEAT_BREAKER`, ``bridge.TURN_STALLED``). ``None``: not asked. At the agent's
-        step limit (:data:`AT_STEP_LIMIT`) nothing is asked (decision D1, as Claude's turn
-        limit): the run ends ``PARTIAL`` with what Kimi said, the limit as the budget it spent
-        (``Runtime.budget_spent``) and a ``step_limit`` warning — no paid last answer."""
+        step limit (:data:`AT_STEP_LIMIT`) the run ends ``PARTIAL``, the limit as the budget it
+        spent (``Runtime.budget_spent``) and a ``step_limit`` warning: with what Kimi said
+        before it, nothing more is asked (no paid last answer); having said nothing, it is
+        asked once to answer without tools (``budget.TURN_LIMIT``, as ``ReAct``'s step limit
+        asks its model) — a run that ends with no answer tells its user nothing of its work."""
         usage, runtime = self.usage, self.runtime
         limit = usage.limited if usage is not None else None
         if limit is not None:
@@ -1497,7 +1499,7 @@ class Attempt:
             log.warning("run %s stopped: %s", runtime.run_id, stopped)
             runtime.events.warning("step_limit", f"stopped: {stopped}")
             runtime.budget_spent = stopped
-            return None
+            return None if answered else budget.TURN_LIMIT.format(limit=limit)
         if answered:
             return None
         if bridge.stalled(runtime):

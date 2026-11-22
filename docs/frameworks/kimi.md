@@ -333,9 +333,10 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
   `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer
   (over ACP a finished turn; its own log says `loop.max_steps_exceeded`), and the run ends
-  `PARTIAL` with what Kimi said before the limit (none: `None`), as Claude's turn limit does —
-  no model call more (decision D1): a `step_limit` warning and the budget's say so, its
-  error `BUDGET_EXCEEDED` naming the limit, so an app can offer "continue".
+  `PARTIAL` with what Kimi said before the limit, as Claude's turn limit does, and no model
+  call more; having said nothing, Kimi is asked once, in the same session, to answer without
+  tools, so the run does not end with no answer. A `step_limit` warning and the budget say
+  so, its error `BUDGET_EXCEEDED` naming the limit, so an app can offer "continue".
   A loop on one call ends the same way: Kimi's own repeat breaker (`KIMI_CODE_REPEAT_BREAKER`,
   on by default: reminders to answer, then the turn ended at the twelfth identical call; its log
   says `repeat_breaker`) and the harness's refusal of a harness call repeated three times

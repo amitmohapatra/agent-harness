@@ -1594,14 +1594,15 @@ async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_k
     assert "sku,units" not in told and told.startswith("<system>ERROR")
 
 
-async def test_at_its_step_limit_kimi_ends_partial_with_what_it_said(
+async def test_at_its_step_limit_with_nothing_said_kimi_is_asked_once_for_an_answer(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
     """Kimi ends a turn at its step limit (``loop_control.max_steps_per_turn``) as a finished
     turn with no answer: ACP's ``end_turn``, the reason only in its own log
-    (``loop.max_steps_exceeded``). As Claude's turn limit does (decision D1), the run ends
-    ``PARTIAL`` with what Kimi said, saying so as a ``step_limit`` warning — no paid last
-    answer: nothing more is asked of the model."""
+    (``loop.max_steps_exceeded``). The run ends ``PARTIAL``, saying so as a ``step_limit``
+    warning; having said nothing, Kimi is asked once more, in the same session, to answer
+    without tools (``budget.TURN_LIMIT``) — a run that read 240 pages and ended with no
+    answer told its user nothing of them."""
     from trellis.harness.budget import TURN_LIMIT
 
     lookups.clear()
@@ -1615,8 +1616,9 @@ async def test_at_its_step_limit_kimi_ends_partial_with_what_it_said(
     assert lookups == ["tea"]
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
     assert warned == ["stopped: the step limit (1) was reached"]
-    assert TURN_LIMIT.format(limit=1) not in endpoint.said()  # no last answer asked for
-    assert len(endpoint.requests) - asked == 1  # the one step, nothing after it
+    assert TURN_LIMIT.format(limit=1) in endpoint.said()  # asked once, in the same session
+    assert len(endpoint.requests) - asked == 2  # the one step, and its answer
+    assert done.data["result"]
 
 
 #: More times than Kimi's own repeat breaker lets one call repeat before it ends the turn (12).

@@ -352,6 +352,24 @@ STEP: Final = "claude_agent_sdk"
 SETTLE_SECONDS: Final = 30.0
 #: The result a query that reached its ``max_turns`` ends with (no answer).
 MAX_TURNS: Final = "error_max_turns"
+
+
+def _limited(target: Any, turns: int | None, kept: bool) -> Any:
+    """``target`` with a query's own turn limit (``turns``), where the query runs in a process
+    of its own; a live session keeps the options it was started with (other ones close it,
+    and the work in it)."""
+    return target if kept or not turns else dataclasses.replace(target, max_turns=turns)
+
+
+def _says(message: Any) -> bool:
+    """Whether ``message`` is a reply of Claude's with text in it: something said, which a
+    run that ends at its turn limit has as its answer."""
+    blocks = getattr(message, "content", None)
+    if type(message).__name__ != "AssistantMessage" or not isinstance(blocks, list):
+        return False
+    return any(str(getattr(b, "text", "") or "").strip() for b in blocks)
+
+
 #: The ``stop_reason`` of a query's result whose last reply reached the model's output limit
 #: (Claude Code first continues such a reply itself).
 MAX_TOKENS: Final = "max_tokens"
@@ -637,17 +655,21 @@ class ClaudeAdapter(Keeps):
     ) -> AsyncGenerator[Any, None]:
         """The query's messages (:meth:`_attempted`). A query that reached its turn limit
         ends with Claude Code's own ``error_max_turns`` result, and Claude Code leaves it
-        there: the run ends ``PARTIAL`` with what Claude said before it (``extract``), its
-        limit as the budget it spent (``Runtime.budget_spent``) and a ``step_limit`` warning
-        — no query more (a paid last answer), and a live session and the background work in
-        it go on."""
+        there: the run ends ``PARTIAL``, its limit as the budget it spent
+        (``Runtime.budget_spent``) and a ``step_limit`` warning; a live session and the
+        background work in it go on. With what Claude said before the limit (``extract``),
+        that is the answer and no query more is made (a paid last answer). Having said
+        nothing, the run would end with no answer at all: its session is asked once more to
+        answer without tools (:meth:`_closing`, ``budget.TURN_LIMIT``), as ``ReAct``'s step
+        limit asks its model."""
         from claude_agent_sdk import ResultError, ResultMessage
 
         runtime = run.runtime
-        limited = False
+        limited = said = False
         try:
             async with contextlib.aclosing(self._attempted(target, native_input, run)) as messages:
                 async for message in messages:
+                    said = said or _says(message)
                     if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
                         limited = True
                         limit = runtime.framework_options.get("max_turns") or target.max_turns
@@ -665,6 +687,33 @@ class ClaudeAdapter(Keeps):
             # the turn limit that is the end the result already said
             if not limited:
                 raise
+        if limited and not said and runtime.pending is None:
+            async with contextlib.aclosing(self._closing(target, native_input, run)) as closing:
+                async for message in closing:
+                    yield message
+
+    async def _closing(
+        self, target: Any, native_input: Any, run: Invocation
+    ) -> AsyncGenerator[Any, None]:
+        """The one query more of a run that reached its turn limit having said nothing: its
+        session told to answer now, without tools (``budget.TURN_LIMIT``), in one turn. What
+        it ends with — the limit again, an error of the CLI's after it — is the end the run
+        already has."""
+        from claude_agent_sdk import ResultError, ResultMessage
+
+        runtime = run.runtime
+        limit = runtime.framework_options.get("max_turns") or target.max_turns
+        asked = dataclasses.replace(native_input, prompt=budget.TURN_LIMIT.format(limit=limit))
+        session = runtime.replay.journal.session
+        query = self._query(target, asked, run, session, turns=1)
+        try:
+            async with contextlib.aclosing(query) as messages:
+                async for message in messages:
+                    if not (isinstance(message, ResultMessage) and message.subtype == MAX_TURNS):
+                        _noticed(runtime, message)
+                    yield message
+        except ResultError:
+            return
 
     async def _attempted(
         self, target: Any, native_input: Any, run: Invocation
@@ -706,9 +755,12 @@ class ClaudeAdapter(Keeps):
         native_input: Any,
         run: Invocation,
         session: str | None,
+        *,
+        turns: int | None = None,
     ) -> AsyncGenerator[Any, None]:
-        """One query (``session``: the one it resumes); the session it runs in kept in the
-        journal as it goes."""
+        """One query (``session``: the one it resumes; ``turns``: the query sends a prompt of
+        its own, with this turn limit where it runs in a process of its own); the session it
+        runs in kept in the journal as it goes."""
         from claude_agent_sdk import AssistantMessage, ResultMessage
 
         runtime = run.runtime
@@ -730,11 +782,11 @@ class ClaudeAdapter(Keeps):
         held = session is not None and await shared.held_elsewhere(runtime, self.live)
         kept = key is not None and not written and not _own_process(target) and not held
         context = _dated(native_input.context, run, kept=kept)
-        options = _options(target, context, run, session, steps, kept=kept)
+        options = _options(_limited(target, turns, kept), context, run, session, steps, kept=kept)
         options = dataclasses.replace(options, fork_session=options.fork_session or held)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
         # the turn's own prompt; a later one, the run's own session after a pause
-        first = session is None or runtime.attempt == 1 or native_input.unsent
+        first = session is None or runtime.attempt == 1 or native_input.unsent or bool(turns)
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         spending = Spending(runtime, options, self.costs, None if held else session)

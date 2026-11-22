@@ -1236,34 +1236,41 @@ async def test_the_harness_tools_are_loaded_from_the_first_step(
 
 
 @pytest.mark.parametrize("said", ["Refunding o1 first.", None])
-async def test_at_its_turn_limit_a_query_ends_partial_with_what_claude_said(
+async def test_at_its_turn_limit_a_query_ends_partial_with_an_answer(
     harness: Harness, tmp_path: Path, said: str | None
 ) -> None:
     """A query that reaches ``max_turns`` ends with Claude Code's own ``error_max_turns``
-    result, and Claude Code leaves it there: the run ends ``PARTIAL`` with what Claude said
-    before the limit (nothing: no answer), its error ``BUDGET_EXCEEDED`` naming the limit and
-    a ``step_limit`` warning. No query more is made (no paid last answer), so the call the
-    limit stopped before never runs."""
-    from trellis.harness.budget import BUDGET_EXCEEDED
+    result, and Claude Code leaves it there: the run ends ``PARTIAL``, its error
+    ``BUDGET_EXCEEDED`` naming the limit and a ``step_limit`` warning; the call the limit
+    stopped before never runs. With what Claude said before the limit, that is the answer and
+    no query more is made (no paid last answer). With nothing said the run would end with no
+    answer at all (240 pages read, and the user told nothing): its session is asked once more
+    to answer without tools (``budget.TURN_LIMIT``)."""
+    from trellis.harness.budget import BUDGET_EXCEEDED, TURN_LIMIT
 
     refunds.clear()
     script = [
         *([{"text": said}] if said else []),
         {"tool": "refund", "args": {"order": "o1"}},
-        {"tool": "refund", "args": {"order": "o2"}},
-        {"text": "never"},
+        {"tool": "refund", "args": {"order": "o2"}},  # the call the limit stops before
     ]
-    target = options(tmp_path, script, max_turns=len(script) - 2)
+    limit = len(script) - 1
+    # the stand-in runs a script a turn: the second is the turn asked once more
+    closing = [{"text": "o1 is refunded; o2 is left"}]
+    target = options(tmp_path, script, max_turns=limit)
+    target.env["FAKE_CLAUDE_TURNS"] = json.dumps([script, closing])
     agent = arm(harness.wrap(target, id="limited"), [tool(refund.fn, side_effects="write")])
     events = [e async for e in agent.stream("refund o1 and o2", user="u1")]
     done = events[-1]
     assert done.type is RunEventType.RUN_FINISHED and done.outcome is RunOutcome.PARTIAL
-    assert done.data["result"] == said and refunds == ["o1"]
+    assert refunds == ["o1"]
+    assert done.data["result"] == (said or "o1 is refunded; o2 is left"), done.data
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
-    limit = len(script) - 2
     assert warned == [f"stopped: the turn limit ({limit}) was reached"]
     started = (tmp_path / "cli.json.turns").read_text().splitlines()
-    assert len(started) == 1  # the one query: no last answer asked
+    assert len(started) == (1 if said else 2), started  # asked once more only with nothing said
+    if not said:
+        assert TURN_LIMIT.format(limit=limit) in started[-1]
     result = await agent.run("refund o1 and o2", user="u1")
     assert result.status is RunStatus.PARTIAL and result.error is not None
     assert result.error.code == BUDGET_EXCEEDED and f"turn limit ({limit})" in result.error.message
@@ -1320,7 +1327,8 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     process that resumed it included (the bundled CLI, driven against a scripted model).
     A query that paused is charged its turn's result: the attempt that resumes it, what the
     session cost since. The
-    query that reached its turn limit is charged its steps, and no more."""
+    query that reached its turn limit is charged its steps, and — having said nothing — the
+    one answer it is asked for after it."""
     from trellis.harness import budget
 
     costs: list[float | None] = []
@@ -1344,7 +1352,7 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     limited.env["FAKE_CLAUDE_COST"] = "0.5"
     result = await harness.wrap(limited, id="limited").run("read them", user="u1")
     assert result.status is RunStatus.PARTIAL
-    assert costs == [1.0]  # two steps: no last answer charged
+    assert costs == [1.0, 0.5]  # two steps, then the one answer asked for at the limit
 
 
 async def test_a_query_stopped_by_its_own_budget_keeps_its_error(

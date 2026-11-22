@@ -994,17 +994,22 @@ async def test_at_its_turn_limit_a_conversations_turn_ends_partial_and_its_work_
     harness: Harness, tmp_path: Path
 ) -> None:
     """A conversation's turn that reaches ``max_turns`` ends with Claude Code's own
-    ``error_max_turns`` result, ``PARTIAL``, and no turn more is asked of its live session:
-    the session and the background work the turn started there go on, and the conversation's
-    next turn is served by the same process, with its tools."""
+    ``error_max_turns`` result, ``PARTIAL``. Having said nothing, its live session is asked
+    once to answer without tools — as it was started, so the session and the background work
+    the turn started there go on, and the conversation's next turn is served by the same
+    process, with its tools."""
     reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
-    scripts = [[BACKGROUND, *reads, {"text": "never"}], [{"text": "next turn"}]]
+    scripts = [
+        [BACKGROUND, *reads, {"text": "never"}],
+        [{"text": "read two"}],
+        [{"text": "next turn"}],
+    ]
     target = options(tmp_path, scripts, max_turns=3)
     agent = harness.wrap(target, id="limited")
     result = await agent.run("research, then read", user="u1", thread="t1")
-    assert result.status is RunStatus.PARTIAL, result.error
-    (one,) = served(tmp_path)  # no last answer asked
-    assert alive(one["pid"])
+    assert result.status is RunStatus.PARTIAL and result.answer == "read two", result.error
+    one, asked = served(tmp_path)  # the turn, and the one answer asked for at its limit
+    assert alive(one["pid"]) and asked["pid"] == one["pid"]
     assert [c["tool"] for c in built_ins(tmp_path)] == ["Read", "Read"]
     child = await child_of(harness, result.run_id)
     live = live_of(agent)
@@ -1012,7 +1017,7 @@ async def test_at_its_turn_limit_a_conversations_turn_ends_partial_and_its_work_
     assert live is not None and not live.closed and list(live.working) == ["t1"]
     second = await agent.run("and now?", user="u1", thread="t1")
     assert second.status is RunStatus.SUCCESS and second.answer == "next turn"
-    _, two = served(tmp_path)
+    *_, two = served(tmp_path)
     assert two["pid"] == one["pid"] and open_sessions(agent) == 1
 
 

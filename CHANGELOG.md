@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a CLI agent that reaches its step limit having said nothing is asked for an answer
+
+Claude Code at its `max_turns` and Kimi Code at its step limit ended the run `PARTIAL` with
+what the agent had said before the limit — and with no answer at all when it had said nothing
+(240 pages read, and its user told nothing). In that case the agent is now asked once, in the
+same session, to answer without tools (`budget.TURN_LIMIT`), as ReAct's step limit asks its
+model: one more model call, on those runs only. With something already said, nothing changes:
+that is the answer and no call more is paid for. A live Claude session is asked as it was
+started, so the session and the background work in it go on.
+
 ### Fixed: a session its provider refused for good is not the next turn's
 
 A CLI agent's turn (Kimi Code over ACP) can fail because its provider refuses the session's own

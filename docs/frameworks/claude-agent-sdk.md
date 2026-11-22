@@ -260,7 +260,7 @@ The run's user decides only the actions taken in their name; the rest is the dep
 | Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, allowUnsandboxedCommands=False))`, honoured as given ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)): on Linux it needs bubblewrap and socat — without them the CLI runs commands unsandboxed, warning only on its stderr. Without one — or with a command let out of it (`allowUnsandboxedCommands`, which Claude Code takes as true unless set false; `excludedCommands`) — Claude Code's shell (`Bash`, `PowerShell`, `REPL`, `Monitor`) runs on this machine as the service's user, not through the harness's isolation layer; `TRELLIS_HOST_EXECUTION=deny` refuses such options at `h.wrap`, and a run whose `framework_options` turn the sandbox off ([governance.md](../governance.md#commands-on-the-host)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
-| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far, no query more (a `step_limit` warning) |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far and no query more; having said nothing, its session is asked once to answer without tools (a `step_limit` warning) |
 
 ## Native or ours: skills, prompts, sandbox
 
@@ -513,8 +513,9 @@ turn the session runs by itself (a finished task's notification) is never a user
 * A turn that reaches its turn limit (`max_turns`) ends with Claude Code's own
   `error_max_turns` result, and the harness leaves it there, as Claude Code does: the run
   ends `PARTIAL` with what Claude said before the limit (its error `BUDGET_EXCEEDED` names
-  the limit, a `step_limit` warning says so), no query more is made, and the session and
-  its background work go on — the conversation's next turn has its tools.
+  the limit, a `step_limit` warning says so) and no query more is made; having said nothing,
+  the session is asked once, as it was started, to answer without tools. The session and its
+  background work go on — the conversation's next turn has its tools.
 * Not kept: a run with no `thread`, a sub-agent's run, and options with a `ClaudeSkills` plugin, an in-process MCP server of your own
   (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn)
   or a budget of their own (`max_budget_usd`: Claude Code counts it for a process — in one

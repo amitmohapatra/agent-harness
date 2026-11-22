@@ -1491,20 +1491,21 @@ async def test_a_process_already_gone_when_a_failed_attempt_stops_it_keeps_the_f
 
 
 @pytest.mark.parametrize("said", ["Half of it so far.", None])
-async def test_a_turn_ended_at_the_step_limit_ends_partial_with_what_the_agent_said(
+async def test_a_turn_ended_at_the_step_limit_ends_partial_with_an_answer(
     harness: Harness, tmp_path: Path, said: str | None
 ) -> None:
-    """Kimi ends a turn at its step limit with no answer, the reason only in its log. As
-    Claude's turn limit does (decision D1), the run ends ``PARTIAL`` with what the agent said
-    before the limit (nothing: no answer), its error ``BUDGET_EXCEEDED`` naming the limit and
-    a ``step_limit`` warning on the stream — and nothing more is asked of the agent: no paid
-    last answer, so the step its script holds after the limit is never reached."""
-    from trellis.harness.budget import BUDGET_EXCEEDED
+    """Kimi ends a turn at its step limit with no answer, the reason only in its log. The run
+    ends ``PARTIAL``, its error ``BUDGET_EXCEEDED`` naming the limit and a ``step_limit``
+    warning on the stream. With what the agent said before the limit, that is its answer and
+    nothing more is asked (no paid last answer). With nothing said, the run would end with no
+    answer at all: the agent is asked once more, in the same session, to answer without tools
+    (``budget.TURN_LIMIT``) — as ``ReAct``'s step limit asks its model."""
+    from trellis.harness.budget import BUDGET_EXCEEDED, TURN_LIMIT
 
     script = [
         *([{"text": said}] if said else []),
         {"step_limit": 1},
-        {"text": "an answer it is never asked for"},
+        {"text": "what I found so far"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="limited")
     events = [e async for e in agent.stream("work", user="u1")]
@@ -1512,10 +1513,14 @@ async def test_a_turn_ended_at_the_step_limit_ends_partial_with_what_the_agent_s
     assert warned == ["stopped: the step limit (1) was reached"]
     done = events[-1]
     assert done.type is RunEventType.RUN_FINISHED and done.outcome is RunOutcome.PARTIAL
-    assert done.data["result"] == said
-    assert len(recorded(tmp_path)["prompts"]) == 1  # the one turn: no last answer asked
+    answer = said or "what I found so far"
+    assert done.data["result"] == answer
+    prompts = recorded(tmp_path)["prompts"]
+    assert len(prompts) == (1 if said else 2)  # asked once more only when nothing was said
+    if not said:
+        assert TURN_LIMIT.format(limit=1) in str(prompts[-1])
     result = await agent.run("work", user="u1")
-    assert result.status is RunStatus.PARTIAL and result.answer == said
+    assert result.status is RunStatus.PARTIAL and result.answer == answer
     assert result.error is not None and result.error.code == BUDGET_EXCEEDED
     assert "step limit (1)" in result.error.message
 
