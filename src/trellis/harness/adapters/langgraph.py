@@ -227,21 +227,26 @@ class LangGraphAdapter(Keeps):
         found = {_code_of(t) for t in graph_tools(target)}
         return "default" if "default" in found else ("own" if "own" in found else "none")
 
-    def give_shell(self, target: Any, shell: Callable[[], Any]) -> bool | None:
+    def give_shell(self, target: Any, shell: Callable[[], Any], says: str) -> bool | None:
         """A Deep Agents graph built with a backend that runs no command (its default: the
         state's files) lists ``execute`` all the same: each of its ``FilesystemMiddleware``s
         (its sub-agents' too) is given Deep Agents' own composite backend — its files where
         they were, ``execute`` on the harness's working folder (:func:`shelled`, on the
         backend ``shell`` makes: ``sandbox.backend.CodeBackend``) — so the library's own tool
         runs. Not where it has permissions over its files (Deep Agents refuses a shell beside
-        them: it reads past them)."""
-        owners = {id(o): o for t in graph_tools(target) if (o := _idle_owner(t)) is not None}
+        them: it reads past them). Each ``execute`` keeps the library's description, with
+        ``says`` after it, once: where the files it writes for the user go is the harness's
+        to say."""
+        shells = [(t, o) for t in graph_tools(target) if (o := _idle_owner(t)) is not None]
+        owners = {id(o): o for _, o in shells}
         if not owners:
             return None
         if any(getattr(o, "_permissions", None) for o in owners.values()):
             return False
         for owner in owners.values():
             owner.backend = shelled(owner.backend, shell())
+        for tool, _ in shells:
+            tool.description = f"{tool.description.rstrip()}\n\n{says}"
         self._native = None  # ``execute`` is a tool of the run's now: read again
         return True
 

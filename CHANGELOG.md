@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a Deep Agents graph of your own is told where the user's files go
+
+The `execute` the harness turns on in a `create_deep_agent` graph keeps the library's own
+description and now says after it, once, the one thing only the harness knows: only files
+written directly in `outputs/` are given to the user (the words ReAct's shell says). Told
+nothing, a model wrote the chart it was asked for under `/tmp` and answered that it could not
+hand it over.
+
 ### Fixed: a converted harness tool keeps what it declares
 
 **A write's earlier result is no longer marked "out of date" in a graph built by hand.** A

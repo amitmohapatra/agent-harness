@@ -228,6 +228,34 @@ async def test_a_deep_agent_of_your_own_runs_its_own_execute(
         assert not list(folders.root.glob("*/notes.txt"))  # never on this machine's disk
 
 
+async def test_a_deep_agent_of_your_own_is_told_where_the_users_files_go(
+    harness: Harness, folders: LocalFolders
+) -> None:
+    """The library's ``execute`` keeps its own description, and says after it the one thing
+    only the harness knows: which files the user is given (``sandbox.DELIVERED``) — said
+    once, in the graph and in its helpers. Told nothing, a model wrote the chart it was asked
+    for in ``/tmp`` and answered that it could not hand it over (``bf1-mixed-05`` on Deep
+    Agents)."""
+    from deepagents import create_deep_agent
+    from deepagents.middleware.filesystem import EXECUTE_TOOL_DESCRIPTION
+
+    from trellis.harness.adapters.langgraph import graph_tools
+
+    model = ScriptedChatModel(turns=["hi"])
+    helper: Any = {"name": "scout", "description": "Looks up.", "system_prompt": "Look it up."}
+    built = create_deep_agent(model=model, tools=[], subagents=[helper])
+    agent = harness.wrap(built, id="deep-told")
+    harness.wrap(built, id="deep-told-again")  # wrapped again: said once all the same
+    await agent.run("go", user="ada")
+    said = offered(model)["execute"]
+    assert said.startswith(EXECUTE_TOOL_DESCRIPTION[:60])  # the library's own words, kept
+    assert said.count(sandbox_module.DELIVERED) == 1 and said.endswith(sandbox_module.DELIVERED)
+    assert sandbox_module.DELIVERED in sandbox_module.CODE  # the words ReAct's shell says
+    shells = [t for t in graph_tools(built) if getattr(t, "name", None) == "execute"]
+    assert len(shells) > 1  # the helpers' too
+    assert all(t.description.count(sandbox_module.DELIVERED) == 1 for t in shells)
+
+
 async def test_a_deep_agents_sub_agents_run_its_own_execute_too(
     harness: Harness, folders: LocalFolders
 ) -> None:

@@ -220,13 +220,17 @@ DELIVERS_HERE: Final = (
 )
 
 
+#: Which of the files a command writes the user is given: the one thing a shell the harness
+#: turns on must say that its own description cannot (a library's ``execute``, its words kept:
+#: ``Adapter.give_shell``).
+DELIVERED: Final = f"Only files you write directly in {OUTPUTS}/ are given to the user."
 #: What the shell the harness gives an agent by itself says (:func:`code_for`:
 #: ``sandbox_exec``, ``ReAct``'s ``execute``): what the model needs, in as few words as the
 #: other tools take — a kept result's note names its file there (``tools.results.CODE``), and a
 #: failed command's result says what went wrong (``base.hint``).
 CODE: Final = (
     "Run a shell command in your working folder (sh -c; python3 too): its exit code and output. "
-    f"Only files you write directly in {OUTPUTS}/ are given to the user."
+    f"{DELIVERED}"
 )
 #: The sandbox the harness gives an agent by itself, once made (:func:`default_sandbox`;
 #: ``None``: none, as the test suite's agents have it).
@@ -600,7 +604,7 @@ def code_for(agent: Agent) -> tuple[SandboxSource | None, list[SandboxTools]]:
     if source is None:
         return None, []
     if agent.codes == "none":
-        turned_on = agent.adapter.give_shell(agent.target, default_files)
+        turned_on = agent.adapter.give_shell(agent.target, default_files, DELIVERED)
         if turned_on is False:
             return None, []
         if turned_on:
