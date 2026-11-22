@@ -38,7 +38,7 @@ Unlicense-licensed. Its PyPI wheel (`ripgrep`) is built for few platforms (Linux
 glibc 2.39, macOS arm64), so the system package is the one to install.
 
 The `kimi` program is checked when a run starts: a version outside the tested range
-(`>=2.6.2,<2.7`, [versioning.md](../versioning.md)) fails the run, saying which version answered
+(`>=2.6.2,<2.8`, [versioning.md](../versioning.md)) fails the run, saying which version answered
 and how to install the tested one. Kimi's protocol surface (its tool names, its permission
 requests, its usage log) is what the adapter reads, and nothing else pins it.
 

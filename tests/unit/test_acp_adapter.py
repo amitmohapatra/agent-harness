@@ -142,7 +142,8 @@ async def test_a_form_of_no_choice_is_filled_by_its_fields_and_left_by_words() -
 def test_a_version_outside_the_range_is_refused_saying_how_to_install() -> None:
     compat.require_binary("kimi-code", "2.6.2", command="kimi")
     compat.require_binary("kimi-code", "2.6.9", command="kimi")
-    for outside in ("2.1.1", "2.6.1", "2.7.0"):  # below the tested range, and past it
+    compat.require_binary("kimi-code", "2.7.2", command="kimi")
+    for outside in ("2.1.1", "2.6.1", "2.8.0"):  # below the tested range, and past it
         with pytest.raises(ConfigurationError, match=f"kimi-code {outside} answers at 'kimi'"):
             compat.require_binary("kimi-code", outside, command="kimi")
     with pytest.raises(ConfigurationError, match="reports no version"):

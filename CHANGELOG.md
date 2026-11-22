@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: Kimi Code 2.7 is in the supported range
+
+`kimi-code` is accepted at `>=2.6.2,<2.8` (was `<2.7`): the Kimi suites pass on 2.7.2 as on
+2.6.2. Both versions reload a tool call made with no arguments, or cut at the output limit, in
+a form their provider refuses; the harness now drops such a session instead of continuing it
+(above).
+
 ### Changed: a CLI agent that reaches its step limit having said nothing is asked for an answer
 
 Claude Code at its `max_turns` and Kimi Code at its step limit ended the run `PARTIAL` with

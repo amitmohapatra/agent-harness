@@ -48,7 +48,7 @@ kept, empty, for installs that name it:
 
 | Program | Driven by | Tested range | Tested | |
 |---|---|---|---|---|
-| `kimi` (`@moonshot-ai/kimi-code`, npm) | `kimi()`, over ACP (`adapters.acp`) | `>=2.6.2,<2.7` | 2.6.2 | refused outside the range (below); Node 22.19 or later |
+| `kimi` (`@moonshot-ai/kimi-code`, npm) | `kimi()`, over ACP (`adapters.acp`) | `>=2.6.2,<2.8` | 2.6.2, 2.7.2 | refused outside the range (below); Node 22.19 or later |
 
 | Sibling | Pinned | Tested | Service |
 |---|---|---|---|
@@ -73,7 +73,7 @@ kept, empty, for installs that name it:
 
 | Program | Driven by | Tested range | Tested | |
 |---|---|---|---|---|
-| `kimi` (`@moonshot-ai/kimi-code`, npm) | `kimi()`, over ACP (`adapters.acp`) | `>=2.6.2,<2.7` | 2.6.2 | refused outside the range (below); Node 22.19 or later |
+| `kimi` (`@moonshot-ai/kimi-code`, npm) | `kimi()`, over ACP (`adapters.acp`) | `>=2.6.2,<2.8` | 2.6.2, 2.7.2 | refused outside the range (below); Node 22.19 or later |
 
 | Sibling | Pinned | Tested | Service |
 |---|---|---|---|
@@ -135,7 +135,7 @@ says the same and `tests/unit/test_compat.py` fails when they disagree.
 Kimi Code is not a Python distribution: the harness drives the `kimi` program over the Agent
 Client Protocol, and what it reads — Kimi's tool names, its permission requests, its sub-agents'
 results, its usage log — is the program's own surface, which no install pins. Its tested range
-is `compat.BINARIES` (`kimi-code`: `>=2.6.2,<2.7`), checked when a run starts, from the version
+is `compat.BINARIES` (`kimi-code`: `>=2.6.2,<2.8`), checked when a run starts, from the version
 Kimi reports in ACP's `initialize`; outside it the run fails, naming the version that answered
 and the install command (`npm install -g @moonshot-ai/kimi-code@2.6.2`). The Python Kimi CLI
 (`kimi-cli`) and the Python `kimi-agent-sdk` are archived upstream: their final releases run
