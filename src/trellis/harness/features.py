@@ -1,7 +1,7 @@
 """What a wrapped agent does around every run, and the one switch that turns parts of it off:
 ``without=`` — on ``h.wrap`` for every run of the agent, on ``agent.run``/``stream``/``start``
 for one run (added to the agent's). Everything configured is on unless named here; nothing
-else is a setting. Eight names, each one part (:data:`NAMES`):
+else is a setting. Nine names, each one part (:data:`NAMES`):
 
 * ``memory`` — the memory context pushed, the memory tools, the records, the tool narrowing;
 * ``tool_search`` — the tool narrowing and the memory service's ``tool_search`` tool;
@@ -11,7 +11,10 @@ else is a setting. Eight names, each one part (:data:`NAMES`):
 * ``judges`` — the online judges;
 * ``schedules`` — the tools a user schedules tasks with in chat (``schedules.py``);
 * ``ask`` — ``ask_user``, the model's question to the person, as a chat front end's run is
-  offered it by itself (``tools/ask.py``; a tool the agent declares stays).
+  offered it by itself (``tools/ask.py``; a tool the agent declares stays);
+* ``code`` — the code tool the harness gives an agent by itself, in a sandbox of the run's own
+  (``sandbox.code_for``: ``ReAct``'s ``execute``, else ``sandbox_exec``); a sandbox the agent
+  is given stays.
 
 A run's own ``without=`` is kept with its record (``RunStart.metadata``, as the parts it covers),
 so every attempt — a resume, a worker's after a crash — and every child run it starts works
@@ -27,7 +30,7 @@ from trellis.contracts import ConfigurationError, RunRecord
 
 #: What ``without=`` names.
 Name = Literal[
-    "memory", "tool_search", "mcp", "code_mode", "grounding", "judges", "schedules", "ask"
+    "memory", "tool_search", "mcp", "code_mode", "grounding", "judges", "schedules", "ask", "code"
 ]
 #: The parts of the harness's work a run asks about (``Runtime.uses``): what the names cover.
 Feature = Literal[
@@ -42,6 +45,7 @@ Feature = Literal[
     "judges",
     "schedules",
     "ask",
+    "code",
 ]
 #: The names, in the order they are said.
 NAMES: Final[tuple[str, ...]] = get_args(Name)
@@ -55,6 +59,7 @@ COVERS: Final[dict[str, tuple[Feature, ...]]] = {
     "judges": ("judges",),
     "schedules": ("schedules",),
     "ask": ("ask",),
+    "code": ("code",),
 }
 #: The parts of the memory service's agent tools (``Harness.pull_tools``): its pull tools and
 #: ``tool_search``.

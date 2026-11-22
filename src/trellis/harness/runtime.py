@@ -1188,7 +1188,7 @@ class Tools:
                 self.runtime.added.append(source)
                 resolved = list(await source.resolve())
                 for found in resolved:
-                    self.runtime.toolbox.setdefault(found.spec.name, found)
+                    _joined(self.runtime.toolbox, found)
                 known = self.runtime.joined[id(given)] = (given, [t.spec.name for t in resolved])
             names.extend(known[1])
         return names
@@ -1204,7 +1204,16 @@ class Tools:
         return hints  # type: ignore[no-any-return]
 
 
+def _joined(toolbox: dict[str, Tool], found: Tool) -> None:
+    """``found`` in the run's ``toolbox`` (:meth:`Tools.use`): a tool of the same name stays,
+    but the code tool the harness gave by itself (``feature`` ``code``) gives way to the
+    sandbox the run's code adds (``sandbox().tools()``)."""
+    held = toolbox.get(found.spec.name)
+    if held is None or held.feature == "code":
+        toolbox[found.spec.name] = found
+
+
 def _built_in(tool: Tool) -> bool:
     """A tool the harness gives a run by itself: the memory service's pull tools, the schedule
-    tools, ``ask_user`` — never a hint's candidate, never narrowed away."""
-    return tool.spec.source == "memory" or tool.feature in ("schedules", "ask")
+    tools, ``ask_user``, the code tool — never a hint's candidate, never narrowed away."""
+    return tool.spec.source == "memory" or tool.feature in ("schedules", "ask", "code")

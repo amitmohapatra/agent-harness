@@ -197,8 +197,8 @@ class Probe:
       every tool) that ended ``ok`` was made twice with the same arguments;
     * ``file`` — the run kept a file for its user whose name matches ``pattern`` (a regular
       expression) and whose text (a workbook's cells as CSV lines) holds every one of ``holds``
-      and at least ``limit`` lines; ``coding``: checked only where the variant runs code (a
-      sandbox), which the file needs — a chart, a script;
+      and at least ``limit`` lines; ``coding``: checked only where the run has code
+      (``variants.codes``: the harness's default), which the file needs — a chart, a script;
     * ``asks`` — the turn's run paused for a person's approval (``Turn.approve``);
     * ``restarts`` — its worker died mid-run and another finished the run (``Turn.restart``).
 
@@ -277,8 +277,8 @@ class Case:
     #: it: :func:`applies`), and why not the others
     adapters: tuple[str, ...] = ()
     only_because: str = ""
-    #: whether it needs code to run (a ``react`` variant of ``variants.CODING``): elsewhere it
-    #: does not apply
+    #: whether it needs code to run (a run with code: ``variants.codes``): elsewhere it does not
+    #: apply
     coding: bool = False
     #: whether its probes need the scripted model's own calls (a malformed call, a loop): a
     #: live model that calls well has nothing for them to see, and it does not apply
@@ -292,17 +292,27 @@ class Case:
     #: words it, with its rounds (the answer last)
     helpers: tuple[tuple[str, tuple[Any, ...]], ...] = ()
 
-    def script(self) -> list[Any]:
+    def script(self, *, coding: bool = False) -> list[Any]:
         """What the scripted model answers, call by call: each turn's gold rounds, then its
-        reference answer — none for a turn the next one interrupts or steers (its run is
-        cancelled, or the steered message's answer is its answer)."""
+        reference answer (:func:`said`: in a run with code, what a ``cannot`` turn says done)
+        — none for a turn the next one interrupts or steers (its run is cancelled, or the
+        steered message's answer is its answer)."""
         out: list[Any] = []
         for n, t in enumerate(self.turns):
             out.extend(list(rnd) for rnd in t.calls)
             later = self.turns[n + 1] if n + 1 < len(self.turns) else None
             if later is None or later.mode not in ("interrupt", "steer"):
-                out.append((t.expect.reference if t.expect else t.reply) or "Done.")
+                out.append(said(t, coding=coding))
         return out
+
+
+def said(turn: Turn, *, coding: bool = False) -> str:
+    """A turn's reference answer: its expectation's, else its reply, else "Done." — and in a
+    run with code (``coding``), a ``cannot`` turn's ``done``: what it says having done it."""
+    expect = turn.expect
+    if coding and expect is not None and expect.kind == "cannot":
+        return str(expect.value.get("done") or DONE)
+    return (expect.reference if expect else turn.reply) or "Done."
 
 
 def fmt(v: float, places: int = 2) -> str:
@@ -378,6 +388,7 @@ def cannot(
     *,
     computed: Expect | None = None,
     made: tuple[str, tuple[str, ...], int] | None = None,
+    done: str | None = None,
     **kw: Any,
 ) -> Expect:
     """The request needs what this deployment has not (code execution, files, images): correct
@@ -388,13 +399,25 @@ def cannot(
     stated it is unverified, counted neither way (a score may not rise on an answer nothing
     checked). ``made``: the file a run that does it all the same keeps for its user — its
     name's pattern, the texts it holds and its fewest lines (``Probe("file")``) — scored by
-    that file, not the answer's words; a file kept with no ``made`` is unverified."""
+    that file, not the answer's words; a file kept with no ``made`` is unverified.
+
+    In a run with code (``score(coding=True)``: the harness gives every agent a sandbox by
+    default) the request is no longer one it cannot meet: it is scored on doing it right
+    (:func:`_done`) — by the ``made`` file, else the ``computed`` figure, else unverified; a
+    refusal there is wrong. ``done``: what the scripted model says having done it (else
+    :data:`DONE`)."""
     value: dict[str, Any] = {"fake": fake, "offer": offer}
+    if done is not None:
+        value["done"] = done
     if computed is not None:
         value["computed"] = {"value": computed.value, "tol": computed.tol}
     if made is not None:
         value["made"] = {"pattern": made[0], "holds": list(made[1]), "lines": made[2]}
     return Expect("cannot", value, reference=reference, **kw)
+
+
+#: What the scripted model says of a ``cannot`` turn done in a run with code (``done`` unset).
+DONE: Final = "Done: the file is in outputs/ for you."
 
 
 def grounded(says: str, rubric: str, reference: str, cites: int = 2, **kw: Any) -> Expect:
@@ -2652,8 +2675,10 @@ def cases() -> tuple[Case, ...]:
             ("eight figures",),
         )
     )
-    # the requests this deployment cannot meet: no sandbox, no Code Mode, no file or image
-    # output (the default deployment) — the right answer says so, why, and what it can do
+    # the requests a deployment with no code cannot meet: no sandbox, no Code Mode, no file or
+    # image output — the right answer says so, why, and what it can do; where the run has code
+    # (the harness's default: ``variants.codes``) each is done, scored by the file or the
+    # figure (``_done``)
     q3cat = {
         "group_by": "category",
         "metric": "revenue",
@@ -2709,9 +2734,15 @@ def cases() -> tuple[Case, ...]:
         "cantdo-01": (r"\.(?:svg|png|jpe?g|pdf)$", categories, 1),
         "cantdo-03": (r"\.xlsx$", top20, len(top20) + 1),
     }
+    # what a run with code says having done it (the scripted model's: ``said``)
+    done = {
+        "cantdo-01": "I drew it and saved revenue_by_category.svg in outputs/ for you.",
+        "cantdo-03": "I saved top20_skus_sep2026.xlsx in outputs/ for you.",
+    }
     for case_id, text, fake, offer, ref, calls, edges, *computed in cant:
         truth = computed[0] if computed else None
-        expect = cannot(fake, offer, ref, computed=truth, made=made.get(case_id))
+        told = f"It prints {truth.reference or truth.value}." if truth else done.get(case_id)
+        expect = cannot(fake, offer, ref, computed=truth, made=made.get(case_id), done=told)
         add(Case(case_id, "cantdo", 1, (Turn(text, calls, expect),), ("can't do here", *edges)))
     from benchmark.cost import adversarial
 
@@ -3288,6 +3319,24 @@ def _file_made(expect: Expect, named: Mapping[str, bytes]) -> tuple[list[str], b
     return ([] if ok else [f"the file asked for: {found}"]), False
 
 
+def _done(expect: Expect, answer: str, files: Mapping[str, bytes] | None) -> tuple[list[str], bool]:
+    """What a ``cannot`` turn lacks in a run with code, where what was asked can be done, and
+    whether it is unverified: by the file it asked for (``made``: kept for the user, its name,
+    texts and lines — every file kept is looked at, named in the answer or not; ``files``
+    ``None``, not read, is unverified), else by the figure the code computes (``computed``),
+    else — nothing states what is right — unverified unless it refused, which is wrong here.
+    A wrong file or figure is never accepted."""
+    if expect.value.get("made") is not None:
+        return _file_made(expect, files) if files is not None else ([], True)
+    truth = expect.value.get("computed")
+    if truth is not None:
+        right = _has_number(answer, truth["value"], truth["tol"])
+        return ([] if right else [f"the computed figure {truth['value']}"]), False
+    if not answer.strip() or _CANNOT.search(answer):
+        return ["does what was asked (code runs here)"], False
+    return [], True
+
+
 def queried(requests: Sequence[dict[str, Any]]) -> bool:
     """Whether a turn computed with the query over a result's rows: the harness answers it in
     the graph, so it is read from the turn's last captured request — a ``query_result`` result
@@ -3314,6 +3363,7 @@ def score(
     searched: bool = False,
     queried: bool = False,
     files: Mapping[str, bytes] | None = None,
+    coding: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
     for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
@@ -3321,7 +3371,8 @@ def score(
     scored on; ``queried``: it computed with the query over a result's rows, which a
     ``cannot`` turn is scored on too; ``searched``: it used a web tool of its own, which an
     ``abstain`` turn that allows the web is scored on; ``files``: what the run kept for its
-    user, by name — a ``cannot`` turn whose answer names one is scored by it, :func:`_file_made`).
+    user, by name — a ``cannot`` turn whose answer names one is scored by it, :func:`_file_made`;
+    ``coding``: the run has code, so a ``cannot`` turn is scored on doing it, :func:`_done`).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -3389,6 +3440,8 @@ def score(
         calls = len(held.get("calls", []))
         if k == "steps" and not _has_number(a, calls, 0):
             missing.append(f"count {calls}")
+    elif k == "cannot" and coding:
+        missing, unverified = _done(expect, a, files)
     elif k == "cannot" and (named := {n: d for n, d in (files or {}).items() if n in a}):
         missing, unverified = _file_made(expect, named)  # done after all: by the file kept
     elif k == "cannot" and files is None and any(name in a for name in _SAVED.findall(context)):
@@ -4093,13 +4146,14 @@ async def scripted_detached() -> None:
     await detached()
 
 
-def scripted_model(case: Case, *, keyed: bool = False) -> Any:
+def scripted_model(case: Case, *, keyed: bool = False, coding: bool = False) -> Any:
     """The existing scripted chat model (``tests.support.chat_model``), replaying the case's
     gold calls and reference answers: proves the pipeline, not a model. A ``keyed`` case's
     (or any, ``keyed``) answers each call by the message it answers (``KeyedChatModel``): a CLI
     resumed after a pause is asked again (told to repeat the paused call), which a script in
     order would answer with the next call's turn. Each reply reports the request it was sent
-    as its input tokens, counted as the harness counts one, and 50 out."""
+    as its input tokens, counted as the harness counts one, and 50 out. ``coding``: the run
+    has code, so a ``cannot`` turn answers done (:func:`said`)."""
     from tests.support.chat_model import KeyedChatModel, ScriptedChatModel
 
     if case.keyed or keyed:
@@ -4108,7 +4162,7 @@ def scripted_model(case: Case, *, keyed: bool = False) -> Any:
                 t.text,
                 [
                     *(list(rnd) for rnd in t.calls),
-                    (t.expect.reference if t.expect else t.reply) or "Done.",
+                    said(t, coding=coding),
                 ],
             )
             for t in case.turns
@@ -4123,7 +4177,7 @@ def scripted_model(case: Case, *, keyed: bool = False) -> Any:
             for task, rounds in case.helpers
         ]
         return KeyedChatModel(turns=[], script=script, spends=(None, 50))
-    return ScriptedChatModel(turns=case.script(), spends=(None, 50))
+    return ScriptedChatModel(turns=case.script(coding=coding), spends=(None, 50))
 
 
 async def run_case(
@@ -4165,10 +4219,12 @@ async def run_case(
     }
     if not applies(case, kind, variant):
         return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
-    coding = kind == "react" and variant in variants.CODING
+    coding = variants.codes(kind, variant)
     scripted = not isinstance(model, str)
     if case.coding and not coding:
-        return found | {"not_applicable": "needs code to run: a sandbox variant"}, []
+        return found | {"not_applicable": "needs code to run: a variant with code"}, []
+    if coding:
+        variants.give_code(model)  # the harness's default sandbox: the bench's image, or a fake
     if case.scripted and not scripted:
         return found | {
             "not_applicable": "its calls are the scripted model's (malformed, looping)"
@@ -4402,7 +4458,9 @@ async def run_case(
                     turn.expect, answer, records, turn.text, said,
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
                     # a CLI's query is in no captured request: the run's tools used say it
-                    queried=queried(captured.requests) or QUERY_TOOL in used, files=kept,
+                    queried=queried(captured.requests) or QUERY_TOOL in used,
+                    # the scripted model writes no code: the file code makes is not read
+                    files=None if coding and scripted else kept, coding=coding,
                 )  # fmt: skip
             records.append(row)
             requests += [
@@ -4609,8 +4667,11 @@ async def bench(
                 stopped = f"spend cap ${spend.cap} reached before {case.id}"
                 break
             before = spend.usd
+            coding = variants.codes(adapter_of(args.history, args.adapter), args.variant)
             model = (
-                scripted_model(case, keyed=args.adapter in CLIS) if args.scripted else args.model
+                scripted_model(case, keyed=args.adapter in CLIS, coding=coding)
+                if args.scripted
+                else args.model
             )
             found, requests = await run_case(
                 h, case, model=model, history=args.history, window=args.window, max_steps=args.max_steps,
@@ -4683,10 +4744,19 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--variant",
-        choices=("main", "deep", UNTHREADED, PLANNED, PLANNED_UNTHREADED, *variants.CAPABILITIES),
+        choices=(
+            "main",
+            "main-nocode",
+            "deep",
+            UNTHREADED,
+            PLANNED,
+            PLANNED_UNTHREADED,
+            *variants.CAPABILITIES,
+        ),
         default="main",
-        help="with --adapter react: ReAct as built (main), on Deep Agents (deep: a backend), "
-        "or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
+        help="with --adapter react: ReAct as built (main: code in the run's sandbox, as every "
+        "adapter has by default; main-nocode without it), on Deep Agents (deep: a backend, no "
+        "code), or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
         f"--adapter deepagents: {UNTHREADED}, built with no checkpointer of its own; "
         f"{PLANNED} ({PLANNED_UNTHREADED}), given TodoListMiddleware (and no checkpointer)",
     )

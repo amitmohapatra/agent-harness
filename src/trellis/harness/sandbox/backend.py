@@ -15,6 +15,11 @@ tools are governed: ``execute`` and the file tools that change files write (the 
 say more), the others read (``ReAct`` declares them; ``middleware.OUTSIDE_STATE``).
 
 The harness runs graphs asynchronously: the synchronous operations raise.
+
+:class:`CodeBackend` is ``ReAct``'s backend when it is given none and a sandbox can be made
+(``sandbox.default_files``): its files the graph's state (``JournalBackend``'s), and ``execute``
+a command in the sandbox the harness gives the run's agent by itself (``sandbox.code_for``),
+described in a few words and left out of a run without code (:class:`CodeCard`).
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from deepagents.backends.protocol import (
     FileDownloadResponse,
     FileOperationError,
     FileUploadResponse,
+    SandboxBackendProtocol,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -37,6 +43,7 @@ from langchain_core.tools import BaseTool
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ToolError
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import audited, hint
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
@@ -46,11 +53,17 @@ from trellis.harness.tools.results import EXECUTE
 WRITE_FILE: Final = "write_file"
 #: Said by a synchronous operation (a graph run with ``invoke``): the harness runs ``ainvoke``.
 ASYNC_ONLY: Final = "the sandbox backend runs in a harness run's graph, asynchronously (ainvoke)"
+#: What a command on :class:`CodeBackend` answers in a run without code (never offered there).
+NO_CODE: Final = "Error: this run has no code execution (without=['code'], or switched off)."
 
 
 class SandboxBackend(BaseSandbox):
     """Deep Agents' ``BaseSandbox`` on the run's sandbox (``source``: ``SandboxSource``, its
     provider and spec), each command at most ``call_timeout`` seconds."""
+
+    #: the run's own sandbox: a file written here is its scratch work, announced rather than
+    #: asked (``middleware.in_sandbox``), as its commands are
+    trellis_sandbox = True
 
     def __init__(self, source: Any, *, call_timeout: float = REMOTE_TIMEOUT_SECONDS) -> None:
         if call_timeout <= 0:
@@ -103,9 +116,7 @@ class SandboxBackend(BaseSandbox):
             max_capture_bytes=max_capture_bytes,
             timeout=timeout,
         )
-        said = await self.source.outputs_said(runtime, box, command)
-        if said:
-            ran.response.output = "\n".join(part for part in (ran.response.output, said) if part)
+        await _told(self.source, runtime, box, command, ran.response)
         return ran
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
@@ -143,6 +154,86 @@ class SandboxBackend(BaseSandbox):
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         raise ConfigurationError(ASYNC_ONLY)
+
+
+class CodeBackend(JournalBackend, SandboxBackendProtocol):
+    """``ReAct``'s backend when it is given none and a sandbox can be made
+    (``sandbox.default_files``): its files the graph's state, as ``JournalBackend``'s (the lean
+    graph and its long-task files unchanged), and Deep Agents' ``execute`` a command in the
+    run's sandbox — the one the harness gives the run's agent by itself (``Agent.code``,
+    ``sandbox.code_of``), made at its first command and told what the user gets of the files
+    it wrote. A run without code is not offered ``execute`` (:class:`CodeCard`); a call there
+    all the same answers :data:`NO_CODE`."""
+
+    #: what ``LangGraphAdapter.code`` reads (``adapters.base.DEFAULT_CODE``), with no import
+    trellis_default_code = True
+
+    @property
+    def id(self) -> str:
+        return "trellis-code"
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        raise ConfigurationError(ASYNC_ONLY)
+
+    async def aexecute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,  # noqa: ASYNC109 - the command's, killed past it
+    ) -> ExecuteResponse:
+        from trellis.harness.sandbox import code_of  # noqa: PLC0415 - it imports this
+
+        runtime = current()
+        code = code_of(runtime)
+        if runtime is None or code is None:
+            return ExecuteResponse(output=NO_CODE, exit_code=126)
+        box = await code.opened(runtime, changes=True)
+        await code.seen(runtime, box)
+        ran = await SandboxBackend(code, call_timeout=code.call_timeout).aexecute(
+            command, timeout=timeout
+        )
+        return await _told(code, runtime, box, command, ran)
+
+
+async def _told(
+    source: Any, runtime: Runtime, box: Any, command: str, response: ExecuteResponse
+) -> ExecuteResponse:
+    """``response`` to the model's own ``command`` told what the user gets of what it wrote
+    (``SandboxSource.outputs_said``), after its output."""
+    said = await source.outputs_said(runtime, box, command)
+    if said:
+        response.output = "\n".join(part for part in (response.output, said) if part)
+    return response
+
+
+class CodeCard(AgentMiddleware):
+    """``ReAct`` on :class:`CodeBackend`: Deep Agents' ``execute`` described in a few words
+    (``sandbox.CODE``, in place of its own) in a run with code, and left out of a run without
+    (``without=["code"]``, a deployment that says ``deny``: ``sandbox.code_of``) — in the
+    graph and in each of its helpers."""
+
+    #: given to the graph's helpers too (``react._carded``)
+    helpers = True
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        from trellis.harness.sandbox import CODE, code_of  # noqa: PLC0415 - it imports this
+
+        coded = code_of(current()) is not None
+        tools = [_described(t, CODE) for t in request.tools if coded or not _executes(t)]
+        return await handler(request.override(tools=tools))
+
+
+def _executes(tool: Any) -> bool:
+    return isinstance(tool, BaseTool) and tool.name == EXECUTE
+
+
+def _described(tool: Any, description: str) -> Any:
+    """``tool`` described so, when it is ``execute``; any other as it is."""
+    return tool.model_copy(update={"description": description}) if _executes(tool) else tool
 
 
 class SandboxCard(AgentMiddleware):
@@ -221,4 +312,4 @@ def _error_of(exc: ToolError) -> FileOperationError:
     return "invalid_path"
 
 
-__all__ = ["SandboxBackend", "SandboxCard"]
+__all__ = ["CodeBackend", "CodeCard", "JournalBackend", "SandboxBackend", "SandboxCard"]

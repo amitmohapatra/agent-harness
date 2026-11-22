@@ -241,7 +241,9 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
     assert said[0].startswith("What was the top SKU")
     # the latest question, then the line naming the tools whose earlier results are out of date
     assert said[-1].startswith("And what's their lead time?\n\nThe values sales_summary")
-    assert len(last["tools"]) == len(r.TOOLS) + len(SCHEDULE_TOOLS)  # and the built-in ones
+    # and the built-in ones: the schedule tools, and the code tool every run has by default
+    assert len(last["tools"]) == len(r.TOOLS) + len(SCHEDULE_TOOLS) + 1
+    assert {"execute", "sandbox_exec"} & set(last["tools"])
     # cross-chat: the other thread's request holds nothing of the first
     other = next(q for q in asked if q["case"] == "explain-07" and q["turn"] == 1)
     assert [m["role"] for m in other["messages"]] == ["system", "user"]
@@ -2399,11 +2401,13 @@ def test_a_figure_said_in_millions_or_thousands_reads_as_its_value() -> None:
 async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox(
     tmp_path: Path, offline: None, window: int | None
 ) -> None:
-    """Parity, replayed: every ``cando`` data case run both ways (``main``, and ``sandbox``:
-    ``ReAct(backend=sandbox())``), at the model's own window and at a small one — each scored
-    figure right on both, and the file a query saves the user's with the right rows."""
+    """Parity, replayed: every ``cando`` data case run both ways (``main``, with code by
+    default: Deep Agents' ``execute`` in the run's sandbox; and ``main-nocode``, the same with
+    ``without={"code"}``), at the model's own window and at a small one — each scored figure right
+    on both, and, without code, the file a query saves the user's with the right rows (with
+    code the scripted model writes none: what only code makes is proven on a real model)."""
     rows: dict[str, dict[str, Any]] = {}
-    for variant in ("main", "sandbox"):
+    for variant in ("main", "main-nocode"):
         out = tmp_path / f"cando-{variant}"
         await cx.bench(
             _args(out, cases="cando", adapter="react", variant=variant, window=window),
@@ -2411,7 +2415,7 @@ async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox
         )
         found = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
         rows[variant] = {x["case"]: x for x in found}
-    assert set(rows["main"]) == set(rows["sandbox"]) == {f"cando-0{n}" for n in range(1, 7)}
+    assert set(rows["main"]) == set(rows["main-nocode"]) == {f"cando-0{n}" for n in range(1, 7)}
     # the clustering runs both ways too: its figures judge it, with or without code
     assert not any("not_applicable" in rows[v]["cando-04"] for v in rows)
     for variant, cases in rows.items():
@@ -2419,11 +2423,13 @@ async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox
         assert all(t["status"] == "SUCCESS" for t in turns), variant
         assert all(t["score"]["correct"] for t in turns if "score" in t), variant
         assert all(k["ok"] for t in turns for k in t["checks"]), variant
-    kept = [k for c in rows["main"].values() for t in c["turns"] for k in t["checks"]]
+    kept = [k for c in rows["main-nocode"].values() for t in c["turns"] for k in t["checks"]]
     assert [k["found"] for k in kept if k["check"] == "file"] == [
         "top20_skus_sep2026.xlsx (21 lines)",
         "S14_sales_2026.csv (1078 lines)",
     ]
+    coded = [k for c in rows["main"].values() for t in c["turns"] for k in t["checks"]]
+    assert not [k for k in coded if k["check"] == "file"]  # not read: no code written
 
 
 def test_a_kept_file_is_checked_by_its_name_its_rows_and_what_it_holds() -> None:
@@ -2515,15 +2521,126 @@ def test_a_chart_the_run_kept_for_its_user_is_no_made_up_file() -> None:
 
 
 def test_a_file_kept_where_no_check_reads_it_is_unverified_not_made_up() -> None:
-    """bfh-mixed-02 (a chart made with the run's own shell): a file the run kept that the case
-    has no check for is counted neither way — it exists, so it is not made up. (bf2-mixed-04,
-    the example before, now checks its CSV: ``made``.)"""
+    """A chart made with the run's own shell: a file the run kept that the case has no check
+    for is counted neither way — it exists, so it is not made up. (bfh-mixed-02, the example
+    before, now checks its chart by its name: ``made``.)"""
     t = _turn("bfh-mixed-02", 2)
-    assert t.expect is not None and "made" not in t.expect.value
+    unchecked = cx.cannot(r"here is the chart", r"figures", "I can't make a chart here.")
     answer = "I drew the chart and saved it as `outputs/weekly_units.svg`."
     kept = {"weekly_units.svg": b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"}
-    scored = cx.score(t.expect, answer, [], t.text, files=kept)
+    scored = cx.score(unchecked, answer, [], t.text, files=kept)
     assert scored["correct"] is None and scored["unverified"] and not scored["made_up"], scored
+    assert cx.score(t.expect, answer, [], t.text, files=kept)["correct"] is True  # its name
+
+
+# --------------------------------------------------------------------------- code by default
+#: The cases that were "can't do it here (no code execution)" and are done where code runs.
+CODED_CANNOT = (
+    ("cantdo-01", 0),
+    ("cantdo-02", 0),
+    ("cantdo-03", 0),
+    ("bf1-mixed-05", 2),
+    ("bf1-cantdo-01", 0),
+    ("bf2-mixed-04", 0),
+    ("bf3-cantdo-01", 0),
+    ("bfh-mixed-02", 2),
+    ("advexp-04", 0),
+    ("advfile-01", 0),
+)
+
+
+@pytest.mark.parametrize(("case", "n"), CODED_CANNOT)
+def test_with_code_a_refusal_of_what_code_does_is_wrong(case: str, n: int) -> None:
+    """Every agent the harness wraps has code by default: a request that was "can't do it here
+    (no code execution)" is one it can meet, so its honest refusal is no longer right."""
+    t = _turn(case, n)
+    assert t.expect.kind == "cannot"
+    scored = cx.score(t.expect, t.expect.reference, [], t.text, files={}, coding=True)
+    assert scored["correct"] is False, scored
+    assert cx.score(t.expect, t.expect.reference, [], t.text)["correct"] is True  # no code
+
+
+@pytest.mark.parametrize(("case", "n"), CODED_CANNOT)
+def test_with_code_each_says_what_it_did_for_the_scripted_model(case: str, n: int) -> None:
+    t = _turn(case, n)
+    done = cx.said(t, coding=True)
+    assert done != t.expect.reference and not cx._CANNOT.search(done)
+    assert cx.said(t) == t.expect.reference
+
+
+def test_with_code_a_computed_figure_is_scored_and_a_wrong_one_is_wrong() -> None:
+    """cantdo-02 ("run this Python and give me what it prints"), where code runs: right only
+    with what the code prints; a wrong figure, or none, is wrong."""
+    t = _turn("cantdo-02", 0)
+    truth = t.expect.value["computed"]["value"]
+    right = f"I ran it in the sandbox: it prints {truth:.3f}."
+    assert cx.score(t.expect, right, [], t.text, coding=True)["correct"] is True
+    wrong = f"I ran it in the sandbox: it prints {truth + 0.05:.3f}."
+    assert cx.score(t.expect, wrong, [], t.text, coding=True)["correct"] is False
+    assert cx.score(t.expect, "I ran it.", [], t.text, coding=True)["correct"] is False
+    assert truth == pytest.approx(float(cx.said(t, coding=True).split()[-1].rstrip(".")), abs=1e-3)
+
+
+def test_with_code_a_file_is_scored_by_what_it_holds_named_or_not() -> None:
+    """cantdo-01 (a bar chart): the chart kept for the user, every category labelled, is right
+    whether the answer names it or not; one missing a category, or none kept, is wrong; with
+    the files not read (the scripted model writes no code) it is unverified, never right."""
+    t = _turn("cantdo-01", 0)
+    labels = "".join(f"<text>{c}</text>" for c in t.expect.value["made"]["holds"])
+    whole = {"chart.svg": f"<svg>{labels}</svg>".encode()}
+    said = "Here is the bar chart; Footwear is the largest."
+    assert cx.score(t.expect, said, [], t.text, files=whole, coding=True)["correct"] is True
+    short = {"chart.svg": b"<svg><text>Footwear</text></svg>"}
+    assert cx.score(t.expect, said, [], t.text, files=short, coding=True)["correct"] is False
+    assert cx.score(t.expect, said, [], t.text, files={}, coding=True)["correct"] is False
+    unread = cx.score(t.expect, said, [], t.text, files=None, coding=True)
+    assert unread["correct"] is None and unread["unverified"], unread
+
+
+def test_with_code_what_no_figure_checks_is_unverified() -> None:
+    """bf3-cantdo-01 (an ARIMA forecast): no one figure is right, so a forecast made is counted
+    neither way; a refusal is wrong."""
+    t = _turn("bf3-cantdo-01", 0)
+    made = "I fitted an ARIMA(1,1,1) in the sandbox: Q4 2026 revenue about £3.1m."
+    scored = cx.score(t.expect, made, [], t.text, coding=True)
+    assert scored["correct"] is None and scored["unverified"], scored
+
+
+@pytest.mark.parametrize(
+    ("adapter", "variant", "coded"),
+    [
+        ("react", "main", True),
+        ("react", "sandbox", True),
+        ("react", "subagents", True),
+        ("react", "main@8k", True),
+        ("react", "baseline", False),
+        ("react", "deep", False),
+        ("react", "deep-paging", False),
+        ("react", "memory-files", False),
+        ("react", "main-nocode", False),
+        ("langgraph", "main", True),
+        ("deepagents", "main", True),
+        ("graph", "main", True),
+        ("openai", "main", True),
+        ("claude", "main", False),
+        ("kimi", "main", False),
+    ],
+)
+def test_which_runs_have_code(adapter: str, variant: str, coded: bool) -> None:
+    from benchmark.cost import variants
+
+    assert variants.codes(adapter, variant) is coded
+
+
+def test_the_sandbox_variant_is_main_and_baseline_has_no_code() -> None:
+    from benchmark.cost import variants
+
+    assert variants.VARIANTS["sandbox"].build is variants.VARIANTS["main"].build
+    from tests.support.chat_model import ScriptedChatModel
+
+    model = ScriptedChatModel(turns=["x"])
+    setup = variants.Setup(system="s", model=model, window=None, max_steps=4)
+    assert "code" in variants.baseline(setup)[1]["without"]
 
 
 def test_a_cannot_turn_a_cli_computed_with_the_query_is_scored_on_its_figure() -> None:

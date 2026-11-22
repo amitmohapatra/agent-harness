@@ -99,6 +99,7 @@ Shell commands are allowed by default (`TRELLIS_HOST_EXECUTION=allow`). What run
 | The way to a shell | Default (`allow`) | `deny` |
 |---|---|---|
 | `sandbox()` (ReAct, Deep Agents, `sandbox().tools()`), sandboxed Kimi | runs in Docker, else this machine's isolation layer, else refused with the reason | Docker or another provider runs; the isolation layer on this machine is refused |
+| the code tool every agent gets by default (ReAct's `execute`, else `sandbox_exec`) | given where Docker answers or the isolation layer can isolate; else none, said once | none given |
 | Deep Agents `LocalShellBackend` | refused, naming `sandbox()` | refused |
 | LangChain host `ShellToolMiddleware`, OpenAI `UnixLocalSandboxClient` | runs as the framework runs it, unisolated (an OpenAI `SandboxAgent`'s shell: unasked, announced) | refused |
 | Claude Code's shell (no sandbox, or one that lets a command out) | runs as the service's user, unisolated, announced | refused |
@@ -244,15 +245,21 @@ and `approve_when` stay the administrator's.
 A write the run keeps to itself is announced as before, not asked: the harness's own schedule
 tools (a schedule is confirmed when it is made, below), its memory tools (`memory_forget` of
 the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub-agent's call
-(the sub-agent's own calls are governed), Deep Agents' `execute` in the run's sandbox and an
-OpenAI `SandboxAgent`'s shell (`exec_command`, `write_stdin`). The catalog's word on any of
-them wins: a risk an administrator declared there other than the tool's own (`irreversible`:
-every call; the tool's own `write`, which the harness publishes there itself, announces it) or
-an `approve_when` asks as it says. Deep
-Agents' file tools on the graph's own state are its scratch, not a call of the run; on a disk, a
-store or a sandbox (a backend, or a route of a `CompositeBackend`) they change real files, so
-`write_file`, `edit_file` and `delete` ask as any write — allow once, for this conversation,
-always — and `ls`, `read_file`, `glob`, `grep` run as reads. A
+(the sub-agent's own calls are governed), Deep Agents' `execute` in the run's sandbox, Deep
+Agents' `write_file`, `edit_file` and `delete` on the run's own sandbox (`ReAct(backend=sandbox())`,
+`create_deep_agent(**sandbox().deep_agent())`), the code tool the harness gives every agent by
+default ([sandbox.md](sandbox.md#code-by-default)) and an OpenAI `SandboxAgent`'s shell
+(`exec_command`, `write_stdin`). What runs in the run's own isolated sandbox changes only what
+the run owns: it is the run's scratch work — governed, journaled and recorded, never a person's
+approval — while what leaves the sandbox keeps its own governance: its network (none by
+default), the files it hands the user (`outputs/`, kept when the run succeeds), and every tool
+that writes outside it. The catalog's word on any of them wins: a risk an administrator declared
+there other than the tool's own (`irreversible`: every call; the tool's own `write`, which the
+harness publishes there itself, announces it) or an `approve_when` asks as it says. Deep
+Agents' file tools on the graph's own state are its scratch, not a call of the run; on a disk or
+a store (a backend, or a route of a `CompositeBackend`, a sandbox's beside another route too)
+they change real files, so `write_file`, `edit_file` and `delete` ask as any write — allow once,
+for this conversation, always — and `ls`, `read_file`, `glob`, `grep` run as reads. A
 framework's own tools under its own permission flow — Claude Code's and Kimi's built-ins, an
 OpenAI agent's hosted tools — keep their own way: a `write` there is announced, and Claude
 Code or Kimi asks its own way, the person picking from the rule's choices — their shell and

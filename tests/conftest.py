@@ -34,6 +34,17 @@ def no_spool_on_this_machine(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_code_sandbox_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test's agents are given no code tool by themselves (``sandbox.default_sandbox``, as on
+    a machine with no Docker daemon and no isolation layer): no test reaches this machine's
+    daemon. A test of the default gives one (``sandbox.use_default(sandbox(FakeSandboxes()))``)
+    or decides it again (``_DEFAULT`` emptied)."""
+    from trellis.harness import sandbox
+
+    monkeypatch.setattr(sandbox, "_DEFAULT", {"default": None})
+
+
+@pytest.fixture(autouse=True)
 def no_ratio_learned_before() -> Iterator[None]:
     """A test's model calls start from no learned tokens-per-counted-token ratio
     (``middleware._RATIOS``, learned in the process from every reply): another test's scripted

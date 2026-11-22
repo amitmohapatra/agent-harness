@@ -85,7 +85,9 @@ from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
+    DEFAULT_CODE,
     PROVIDER_TOOLS,
+    Code,
     Extracted,
     HistoryIn,
     Invocation,
@@ -217,6 +219,13 @@ class LangGraphAdapter(Keeps):
         from trellis.harness.middleware import STATE_TOOLS
 
         return any(getattr(t, "name", None) not in STATE_TOOLS for t in bound_tools(target))
+
+    def code(self, target: Any, options: Mapping[str, Any]) -> Code:
+        """A graph's: Deep Agents' ``execute`` on the sandbox the harness gives the agent
+        (``default``: ``ReAct``'s ``CodeBackend``), or on a backend of its own that runs
+        commands, or LangChain's shell (``own``); else ``none``."""
+        found = {_code_of(t) for t in graph_tools(target)}
+        return "default" if "default" in found else ("own" if "own" in found else "none")
 
     def steers(self, target: Any) -> bool:
         """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
@@ -1142,18 +1151,34 @@ def idle_execute(tool: Any) -> bool:
     """Whether ``tool`` is Deep Agents' ``execute`` on a backend that runs no command (its
     default ``StateBackend``): ``create_deep_agent`` lists it whatever the backend, and its
     ``FilesystemMiddleware`` takes it off each model call there — no tool of the run's that
-    runs code (``tools.export.runs_code``). Its backend is read from the middleware its
-    function closes over (``self``)."""
-    if getattr(tool, "name", None) != "execute":
-        return False
+    runs code (``tools.export.runs_code``)."""
     from deepagents.middleware.filesystem import supports_execution
 
+    backend = _execute_backend(tool)
+    return backend is not None and not supports_execution(backend)
+
+
+def _execute_backend(tool: Any) -> Any | None:
+    """The backend of Deep Agents' ``execute`` ``tool``, read from the middleware its function
+    closes over (``self``); ``None`` for any other tool."""
+    if getattr(tool, "name", None) != "execute":
+        return None
     try:
         owner = inspect.getclosurevars(tool.coroutine or tool.func).nonlocals.get("self")
     except (AttributeError, TypeError, ValueError):  # not Deep Agents' own
-        return False
-    backend = getattr(owner, "backend", None)
-    return backend is not None and not supports_execution(backend)
+        return None
+    return getattr(owner, "backend", None)
+
+
+def _code_of(tool: Any) -> Code:
+    """What ``tool`` runs code with (``LangGraphAdapter.code``): Deep Agents' ``execute`` on the
+    harness's default code (``default``) or on a backend that runs commands (``own``),
+    LangChain's ``shell`` (``own``); else ``none``."""
+    backend = _execute_backend(tool)
+    if getattr(getattr(backend, "default", backend), DEFAULT_CODE, False):
+        return "default"  # a ``CodeBackend``, or a composite on one (the skills' route)
+    shell = getattr(tool, "name", None) == "shell" or not (backend is None or idle_execute(tool))
+    return "own" if shell else "none"
 
 
 def graph_tools(target: Any, depth: int = SUBAGENT_DEPTH) -> list[Any]:

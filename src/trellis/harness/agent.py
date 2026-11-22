@@ -414,6 +414,11 @@ class Agent:
         #: (``ReAct(tools=, subagents=)``); besides them every run has the MCP tools the
         #: virtual key allows and the memory tools (``tools_for``)
         self.sources: list[Source] = [as_source(t) for t in declared_tools(target)]
+        #: what runs code in the agent (``Adapter.code``), and the sandbox the harness gives it
+        #: by itself (``sandbox.code_for``; ``None``: none) with the tool source added to its
+        #: tools for it (``sandbox_exec``; none where its own ``execute`` runs there: ReAct's)
+        self.codes = self.adapter.code(self.target, self.framework_options)
+        self.code, self._code_tools = sandbox.code_for(self)
         #: the toolbox per tenant, kept fresh
         self._toolboxes: LRU[str, Toolbox] = LRU()
         #: the framework's own tools last published to each tenant's catalog, by name
@@ -1238,7 +1243,7 @@ class Agent:
         per tenant — those that declare no side effects named then, in one warning. One that
         cannot be read is a warning: the run goes on with its harness tools."""
         try:
-            specs = await self.adapter.native(self.target)
+            specs = sandbox.offered(runtime, await self.adapter.native(self.target))
         except Exception as exc:
             runtime.events.warning("native_tools", f"the framework's own tools: {exc}")
             return {}
@@ -1255,7 +1260,10 @@ class Agent:
         box = self._toolboxes.get(tenant)
         if box is None:
             box = self._toolboxes[tenant] = self.harness._toolbox(
-                self.sources, tenant=tenant, without=self.without, agent_id=self.id
+                [*self.sources, *self._code_tools],
+                tenant=tenant,
+                without=self.without,
+                agent_id=self.id,
             )
         return box
 

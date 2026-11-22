@@ -48,7 +48,7 @@ from langchain_core.messages import convert_to_openai_messages
 
 from benchmark.cost import run as runner
 from benchmark.cost import stats
-from benchmark.cost.variants import VARIANTS, Setup
+from benchmark.cost.variants import VARIANTS, Setup, give_code
 from trellis import Citation, Harness, Hooks, tool
 from trellis.contracts import InterruptDecision, ToolCall, ToolOutcome
 from trellis.harness.tools.base import SOURCES
@@ -413,6 +413,7 @@ def figures(meter: runner.Meter, seconds: float) -> dict[str, Any]:
 
 
 def build(h: Harness, setup: Setup, seen: Seen, run_seconds: float | None) -> Any:
+    give_code(setup.model)  # the harness's default sandbox: the bench's image, or a fake
     target, options = VARIANTS["main"].build(setup)
     return h.wrap(target, id="bench-explain", hooks=[seen], run_timeout=run_seconds, **options)
 

@@ -133,6 +133,11 @@ first; then the memory context, the day and steered messages are added) and, on 
 `model_provider` for the names you leave to the default provider (above). Its hooks are
 `Runner.run`'s `hooks=`, which call yours.
 
+By default the agent is given `sandbox_exec`, a command in a sandbox of the run's own, made at
+its first call ([sandbox.md](../sandbox.md#code-by-default)) — not when it brings code of its
+own (a `SandboxAgent`, a run config's sandbox, a code interpreter or shell tool), nor
+`without=["code"]`.
+
 A `SandboxAgent` is wrapped the same way: the SDK runs it only with `RunConfig(sandbox=...)`
 (else `UserError: SandboxAgent execution requires RunConfig(sandbox=...)`), so give its sandbox
 client there. Its capabilities' tools (`exec_command`, `write_stdin`, `view_image`,

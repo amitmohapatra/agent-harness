@@ -324,7 +324,7 @@ a2a(url)(message)`, as the run inside one.
 
 | | Where |
 |---|---|
-| Sandbox | `sandbox().tools()`, from a node through the run: `await trellis.current().tools.use(box.tools())`, then `tools.call("sandbox_exec", command=...)` ([sandbox.md](../sandbox.md)); a `ReAct` or Deep Agent of yours takes it as its backend |
+| Sandbox | by default (an isolated sandbox can be made here): `sandbox_exec`, offered per call to a `middleware()` graph and among `h.harness_tools()` for one built by hand ([sandbox.md](../sandbox.md#code-by-default); `without=["code"]` turns it off); a sandbox of yours: `sandbox().tools()`, from a node through the run: `await trellis.current().tools.use(box.tools())`, then `tools.call("sandbox_exec", command=...)` ([sandbox.md](../sandbox.md)); a `ReAct` or Deep Agent of yours takes it as its backend |
 | Skills | none of its own: `src.tools()` (`list_skills`, `load_skill`) from a node through the run, as the sandbox's tools; a `create_agent` graph may take Deep Agents' `SkillsMiddleware` on `src.deep_agent()`'s backend ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `create_agent(..., middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); its native turn limit is `framework_options={"recursion_limit": n}` |

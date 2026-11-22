@@ -32,7 +32,7 @@ from langchain_core.tracers.context import register_configure_hook
 
 from benchmark import procstat
 from benchmark.cost import catalog, prices, stats
-from benchmark.cost.variants import VARIANTS, Setup
+from benchmark.cost.variants import VARIANTS, Setup, give_code
 from trellis import Harness, Hooks, Settings
 from trellis.contracts import ToolCall, ToolOutcome
 from trellis.harness.middleware import FITTED
@@ -290,6 +290,7 @@ async def run_cell(
             continue
         tools = catalog.catalogue(taskset.tools, size)
         built = Setup(system=taskset.system, **setup, tools=tuple(tools))
+        give_code(built.model)  # the harness's default sandbox: the bench's image, or a fake
         target, options = VARIANTS[variant].build(built)
         called = Called()
         changes = {t.spec.name for t in taskset.tools if t.spec.side_effects != "read"}

@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 
 from trellis.contracts import InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
+    Code,
     Extracted,
     HistoryIn,
     Invocation,
@@ -54,6 +55,9 @@ class FunctionAdapter(Keeps):
 
     def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
         return not sources  # its code calls what it calls (``agent.tools.call``)
+
+    def code(self, target: Any, options: Mapping[str, Any]) -> Code:
+        return "none"  # ``agent.tools.call("sandbox_exec", ...)``: the harness's, by default
 
     def steers(self, target: Any) -> bool:
         return False  # a function has no step the harness sees between its calls

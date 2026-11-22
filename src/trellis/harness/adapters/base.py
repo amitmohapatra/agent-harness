@@ -112,6 +112,13 @@ def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
 ToolFormat = Literal["langchain", "openai_agents", "claude", "mcp", "none"]
 Narrowing = Literal["turn", "run", "none"]
 HistoryIn = Literal["messages", "context"]
+#: What runs code in an agent (``Adapter.code``): a shell or sandbox of its own (``own``),
+#: Deep Agents' ``execute`` on the sandbox the harness gives it (``default``: ``ReAct``'s
+#: ``sandbox.backend.CodeBackend``), or nothing (``none``: the harness gives it ``sandbox_exec``).
+Code = Literal["own", "default", "none"]
+#: The attribute marking a backend whose ``execute`` is the harness's default code
+#: (``sandbox.backend.CodeBackend``), read with no import of it.
+DEFAULT_CODE: Final = "trellis_default_code"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +204,9 @@ class Keeps:
 
     async def held_runs(self, target: Any, runtime: Any) -> frozenset[str]:
         return frozenset()
+
+    def code(self, target: Any, options: Mapping[str, Any]) -> Code:
+        return "own"  # Claude Code's shell, an ACP agent's (Kimi Code's): theirs, as they are
 
 
 class Adapter(Protocol):
@@ -305,6 +315,11 @@ class Adapter(Protocol):
         """The folder on this machine the framework works and writes in (``options``: the run's
         framework options), whose ``outputs/`` is the user's (``sandbox.delivered``); ``None``
         for a framework with no such folder."""
+        ...
+
+    def code(self, target: Any, options: Mapping[str, Any]) -> Code:
+        """What runs code in ``target`` run with ``options`` (:data:`Code`): the harness gives
+        an agent with none its own code tool (``sandbox.code_for``)."""
         ...
 
 

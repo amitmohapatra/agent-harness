@@ -36,6 +36,16 @@ The sandbox lives as long as its run, with nothing to call:
 
 The provider is the one given (``sandbox(provider)``), else Docker (:class:`DockerSandbox`, of
 ``sandbox(image=)``): the daemon ``DOCKER_HOST`` names.
+
+**Code by default**: an agent the harness wraps gets a code tool in a sandbox of the run's own
+with nothing to write (:func:`code_for`, at ``h.wrap``) — ``ReAct`` as Deep Agents' ``execute``
+on its backend (``backend.CodeBackend``), every other agent as ``sandbox_exec`` (:data:`CODE`:
+one tool, a few words) — wherever an isolated sandbox can be made (:func:`default_sandbox`:
+Docker, else this machine's isolation layer; else none, said once, never an unconfined shell).
+The sandbox is made at the run's first command, as any. None is given ``without=["code"]``,
+where the deployment says ``TRELLIS_HOST_EXECUTION=deny``, or to an agent that brings its own
+(``Adapter.code``: Claude Code's and Kimi Code's shells, a sandbox backend, an OpenAI sandbox,
+``sandbox()`` among its tools, ``ReAct(backend=...)``).
 """
 
 from __future__ import annotations
@@ -77,6 +87,7 @@ from trellis.harness.sandbox.docker import DockerSandbox, docker_host
 from trellis.harness.sandbox.isolation import (
     HostSandbox,
     Limits,
+    host_layer,
     isolated_end,
     isolated_run,
     layer_of,
@@ -208,6 +219,23 @@ DELIVERS_HERE: Final = (
 )
 
 
+#: What the code tool the harness gives an agent by itself says (:func:`code_for`:
+#: ``sandbox_exec``, ``ReAct``'s ``execute``): what the model needs, in as few words as the
+#: other tools take — a kept result's note names its file there (``tools.results.CODE``), and a
+#: failed command's result says what went wrong (``base.hint``).
+CODE: Final = (
+    "Run a shell command in your sandbox (sh -c; python3 too): its exit code and output. "
+    f"Only files you write directly in {OUTPUTS}/ are given to the user."
+)
+#: What is said, once, where no isolated sandbox can be made: no code tool by default.
+NO_DEFAULT: Final = (
+    "no code tool for the agents wrapped here: no Docker daemon answers, and commands cannot "
+    "be isolated on this machine: {why}. Give an agent sandbox() with a provider for one"
+)
+#: The sandbox the harness gives an agent by itself, once decided (:func:`default_sandbox`).
+_DEFAULT: dict[str, SandboxSource | None] = {}
+
+
 class SandboxSource:
     """A sandbox of the run's own (what :func:`sandbox` returns), given where each engine takes
     it: ``ReAct(backend=...)`` as it is, :meth:`deep_agent` for a ``create_deep_agent`` of your
@@ -252,6 +280,16 @@ class SandboxSource:
             ),
         ]
         self._as_tools = SandboxTools(self)
+        #: the code tool the harness gives an agent by itself (:func:`code_for`): the command
+        #: alone, in a few words, off in a run ``without=["code"]``
+        self._code = Tool(
+            _spec(EXEC, CODE, {"command": "the command"}, side_effects="write"),
+            self._exec,
+            feature="code",
+            timeout=timeout,
+            confined=True,
+        )
+        self._as_code = SandboxTools(self, default=True)
         #: when this process last reaped each tenant's sandboxes (``time.monotonic``)
         self._reaped: LRU[str, float] = LRU()
         #: the kept results each attempt has written into its sandbox (:meth:`with_results`)
@@ -301,6 +339,11 @@ class SandboxSource:
         tool source: ``agent.tools.use(sandbox().tools())``, for an engine with no sandbox of
         its own. The same object every time."""
         return self._as_tools
+
+    def code(self) -> SandboxTools:
+        """The code tool the harness gives an agent by itself, a tool source: ``sandbox_exec``
+        (:data:`CODE`), with no environment card — nothing is made until a run calls it."""
+        return self._as_code
 
     def deep_agent(self) -> dict[str, Any]:
         """``create_deep_agent``'s arguments for this sandbox: its ``backend`` (Deep Agents'
@@ -479,14 +522,18 @@ class SandboxSource:
 
 
 class SandboxTools:
-    """A sandbox's three tools, as a tool source (:meth:`SandboxSource.tools`)."""
+    """A sandbox's three tools, as a tool source (:meth:`SandboxSource.tools`); ``default``:
+    the code tool alone (:meth:`SandboxSource.code`)."""
 
-    def __init__(self, source: SandboxSource) -> None:
+    def __init__(self, source: SandboxSource, *, default: bool = False) -> None:
         self.source = source
+        self.default = default
 
     async def resolve(self) -> list[Tool]:
         """The three tools, ``sandbox_exec`` described with the environment card
-        (:meth:`SandboxSource.card`)."""
+        (:meth:`SandboxSource.card`); the default's one tool as it is."""
+        if self.default:
+            return [self.source._code]
         run, *rest = self.source._tools
         card = await self.source.card()
         if not card:
@@ -521,11 +568,90 @@ def default_provider(image: str | None = None) -> SandboxProvider:
     through the isolation layer (:class:`~trellis.harness.sandbox.isolation.HostSandbox`), when
     it can isolate here; else :class:`NoShell`, its reason said once. The model sees the same
     command tool either way."""
+    found = _isolating(image)
+    return NoShell(found) if isinstance(found, str) else found
+
+
+def _isolating(image: str | None = None) -> SandboxProvider | str:
+    """Where commands are isolated here: the tenant's shared container where the Docker daemon
+    answers, else this machine's isolation layer (``host.install``'s, else its default) where
+    it can isolate; else why neither can."""
     if docker_answers():
         return SharedDockerSandbox(image)
-    layer = HostSandbox()
+    layer = host_layer()
     why = layer.cannot_isolate()
-    return layer if why is None else NoShell(why)
+    return layer if why is None else why
+
+
+def default_sandbox() -> SandboxSource | None:
+    """The sandbox the harness gives an agent by itself (:func:`code_for`), decided once per
+    process: ``sandbox()`` on the provider that isolates here (:func:`_isolating`: Docker, else
+    this machine's isolation layer), else ``None`` — said once in a warning
+    (:data:`NO_DEFAULT`), never an unconfined shell. :func:`use_default` gives another."""
+    if "default" not in _DEFAULT:
+        found = _isolating()
+        if isinstance(found, str):
+            _said_once(NO_DEFAULT.format(why=found))
+        _DEFAULT["default"] = None if isinstance(found, str) else sandbox(found)
+    return _DEFAULT["default"]
+
+
+def use_default(source: SandboxSource | None) -> SandboxSource | None:
+    """Make ``source`` the sandbox the harness gives an agent by itself — the deployment's image
+    or provider (``use_default(sandbox(image=...))``), ``None`` for none — for the agents
+    wrapped and the ``ReAct`` graphs built from then on (``host.install``'s way, for the
+    sandbox); the one it replaces is returned (``None`` when none was decided)."""
+    replaced = _DEFAULT.get("default")
+    _DEFAULT["default"] = source
+    return replaced
+
+
+def code_for(agent: Agent) -> tuple[SandboxSource | None, list[SandboxTools]]:
+    """The sandbox the harness gives ``agent`` by itself (``h.wrap``: ``Agent.code``) and the
+    tool source it adds to the agent's tools for it: ``sandbox_exec`` (:meth:`SandboxSource.code`)
+    — none where the agent runs Deep Agents' ``execute`` there itself (``ReAct``'s
+    ``CodeBackend``: ``Adapter.code`` says ``"default"``). Neither ``without=["code"]``, where
+    the deployment says ``deny``, for an agent that brings its own (``Adapter.code`` says
+    ``"own"``; a ``sandbox()`` among its tools), or where none can be made
+    (:func:`default_sandbox`)."""
+    if "code" in agent.without or agent.harness.settings.host_execution == "deny":
+        return None, []
+    if agent.codes == "own" or _source(agent) is not None:
+        return None, []
+    source = default_sandbox()
+    return source, [source.code()] if source is not None and agent.codes == "none" else []
+
+
+def offered(runtime: Runtime, specs: list[ToolSpec]) -> list[ToolSpec]:
+    """``specs`` — the framework's own tools — less Deep Agents' ``execute`` on the harness's
+    code (``Agent.codes`` ``"default"``: ``ReAct``'s) in a run without it (:func:`code_of`)."""
+    if runtime.agent.codes != "default" or code_of(runtime) is not None:
+        return specs
+    return [s for s in specs if s.name != "execute"]
+
+
+def given_code(host_execution: str) -> list[Tool]:
+    """The code tool for a graph built by hand (``Harness.harness_tools``): the one
+    :func:`default_sandbox` gives, unless the deployment says ``deny``."""
+    source = default_sandbox() if host_execution != "deny" else None
+    return [source._code] if source is not None else []
+
+
+def code_of(runtime: Runtime | None) -> SandboxSource | None:
+    """The sandbox the harness gave ``runtime``'s agent by itself (:func:`code_for`), unless the
+    run is ``without=["code"]``."""
+    if runtime is None or not runtime.uses("code"):
+        return None
+    return getattr(runtime.agent, "code", None)
+
+
+def default_files() -> Any:
+    """``ReAct``'s files backend when it is given none: ``backend.CodeBackend`` (its files the
+    graph's state, its ``execute`` in the run's sandbox) where :func:`default_sandbox` makes
+    one, else ``automatic.JournalBackend``."""
+    from trellis.harness.sandbox.backend import CodeBackend, JournalBackend  # noqa: PLC0415
+
+    return CodeBackend() if default_sandbox() is not None else JournalBackend()
 
 
 #: What a command in this machine's isolation layer is refused with where the deployment
@@ -773,8 +899,11 @@ def _spec(
 
 def _source(agent: Agent, added: Sequence[Any] = ()) -> SandboxSource | None:
     """The agent's sandbox, else one the run's code (or its backend) added (one at most: two
-    would give it two tools of one name)."""
-    given = (s.source if isinstance(s, SandboxTools) else s for s in [*agent.sources, *added])
+    would give it two tools of one name), else the one the harness gave it (:func:`code_for`)."""
+    code = [getattr(agent, "code", None)]  # the one the harness gave the agent: last
+    given = (
+        s.source if isinstance(s, SandboxTools) else s for s in [*agent.sources, *added, *code]
+    )
     return next((s for s in given if isinstance(s, SandboxSource)), None)
 
 
@@ -805,9 +934,15 @@ __all__ = [
     "SupportsPause",
     "SupportsSnapshot",
     "card_of",
+    "code_for",
+    "code_of",
+    "default_sandbox",
     "delivered",
+    "given_code",
     "isolated_end",
     "isolated_run",
+    "offered",
     "reap",
     "sandbox",
+    "use_default",
 ]

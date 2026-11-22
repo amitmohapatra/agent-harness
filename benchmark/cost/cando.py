@@ -1,17 +1,18 @@
 """The ``complex`` suite's exact-answer cases for what a deployment *can* do (category
-``cando``): the same data question must give the same figure whatever the agent was given — a
-sandbox or none, a small window or the model's own — and a file asked for must be the user's,
+``cando``): the same data question must give the same figure whatever the agent was given —
+code or none, a small window or the model's own — and a file asked for must be the user's,
 with the right content.
 
 Each case asks for a figure every variant can compute (the query over the kept result), so it
-runs without a sandbox too; what needs code (a chart, a script) is checked only where code runs
-(``Probe.coding``); a case that is nothing without code (:attr:`Case.coding`) would apply only
-there, and none is: a clustering from fixed starting points (the catalogue's, the stores') has
-one right answer, which the query's own statements reach without a sandbox. No case sets its
-window: ``--window`` runs each at any size, on any variant (``--variant sandbox``, ``main``,
-...), which is how the two are compared (:mod:`benchmark.cost.parity`).
+runs without code too; what needs code (a chart, a script) is checked where code runs
+(``Probe.coding``: a run with code, ``variants.codes`` — every adapter the harness gives code by
+default, ``main`` among them); a case that is nothing without code (:attr:`Case.coding`) would
+apply only there, and none is: a clustering from fixed starting points (the catalogue's, the
+stores') has one right answer, which the query's own statements reach without a sandbox. No case
+sets its window: ``--window`` runs each at any size, on any variant (``--variant main``, with
+code; ``main-nocode``, ...), which is how the two are compared (:mod:`benchmark.cost.parity`).
 
-The scripted model replays the gold calls: the fetch, the query, and — without a sandbox — the
+The scripted model replays the gold calls: the fetch, the query, and — without code — the
 query saving its result as a file (``save_as``). It cannot write the code a sandbox runs (a fake
 sandbox has no interpreter), so the files only code makes are proven on a real model.
 """

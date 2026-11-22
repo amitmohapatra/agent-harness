@@ -68,6 +68,7 @@ from trellis.contracts import (
 )
 from trellis.harness import snapshots
 from trellis.harness.adapters.base import (
+    Code,
     Extracted,
     HistoryIn,
     Invocation,
@@ -230,6 +231,12 @@ class OpenAIAgentsAdapter(Keeps):
 
     def own_tools(self, target: Any, sources: Sequence[Any]) -> bool:
         return bool(target.tools or target.handoffs)
+
+    def code(self, target: Any, options: Mapping[str, Any]) -> Code:
+        """An agent's own: a sandbox in its run config, or an agent it reaches with a sandbox
+        (a ``SandboxAgent``'s capabilities), a hosted code interpreter or a shell tool."""
+        boxed = _sandbox_of(options.get("run_config")) is not None
+        return "own" if boxed or any(map(_codes, reachable(target))) else "none"
 
     def steers(self, target: Any) -> bool:
         """Every agent: a steered message joins the input of its next model call
@@ -893,6 +900,24 @@ def _handed(handoff: Any, copied: Callable[[Any], Any], agent_id: str) -> Any:
     if governed_target is not None:
         setattr(made, HANDOFF_AGENT, weakref.ref(governed_target))
     return made
+
+
+def _sandbox_of(config: Any) -> Any:
+    """The sandbox a run config names, given as an object or as the dict ``Runner.run`` takes."""
+    return (
+        config.get("sandbox") if isinstance(config, Mapping) else getattr(config, "sandbox", None)
+    )
+
+
+def _codes(agent: Any) -> bool:
+    """Whether an OpenAI ``agent`` runs code of its own: a ``SandboxAgent``'s capabilities, a
+    hosted code interpreter, a shell tool (hosted or local)."""
+    from agents import CodeInterpreterTool, LocalShellTool, ShellTool
+
+    shells = (CodeInterpreterTool, LocalShellTool, ShellTool)
+    return getattr(agent, "capabilities", None) is not None or any(
+        isinstance(t, shells) for t in agent.tools
+    )
 
 
 def reachable(target: Any) -> list[Any]:

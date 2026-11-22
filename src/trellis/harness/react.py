@@ -342,7 +342,7 @@ def ReAct(
         context_window=context_window,
         system_prompt=None,
     )
-    backend = _backend(backend)
+    backend, files_backend = _backend(backend)
     sourced = skill_set(skills)
     if effort is not None and not isinstance(model, str):
         raise ConfigurationError("effort is for a model name: set it on your own chat model")
@@ -350,11 +350,7 @@ def ReAct(
     # the model call's bound is ``ModelHooks``' (with the run's time left): applied once, not
     # again by the model's own client
     chat = routed_chat_model(model, effort=effort) if isinstance(model, str) else model
-    window, source = window_of(chat, context_window)
-    if window is None:
-        _unknown(named or type(chat).__name__)
-    else:
-        log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
+    window = _window(chat, context_window, named)
     own, run = _split(tools)
     provided = _provided(own)
     strategies = _strategies(subagents)
@@ -378,8 +374,7 @@ def ReAct(
         memory_files=memory_files,
         permissions=permissions,
     )
-    files_backend = backend if backend is not None else automatic.JournalBackend()
-    graph_backend = files_backend
+    graph_backend, card = files_backend, _card(files_backend)
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
         fed = sourced.deep_agent(files_backend)
         graph_backend, skills = fed["backend"], fed["skills"]
@@ -393,6 +388,7 @@ def ReAct(
         max_repeats=max_repeats,
         provided=provided,
     )
+    _carded([general, *native], card)  # ``execute`` on the harness's code, in each helper
     # a Deep Agents capability asked for: Deep Agents' tools from the first step (files
     # outside the graph's state — a disk, a store, a sandbox — governed) and its summarization
     # of the older turns, unless the window is known to have no room for them
@@ -425,7 +421,7 @@ def ReAct(
             if first
             else None
         ),
-        card=_card(files_backend),
+        card=card,
         scoped=True,
     )
     graph = create_deep_agent(
@@ -558,18 +554,42 @@ def _deep(
 
 def _card(backend: Any) -> Any:
     """The middleware that describes ``execute`` with the run's sandbox's environment card,
-    for a backend that is one (``sandbox.backend.SandboxCard``)."""
-    from trellis.harness.sandbox.backend import SandboxBackend, SandboxCard
+    for a backend that is one (``sandbox.backend.SandboxCard``); on the harness's own code
+    (``CodeBackend``), in a few words, and off in a run without code (``CodeCard``)."""
+    from trellis.harness.sandbox.backend import CodeBackend, CodeCard, SandboxBackend, SandboxCard
 
+    if isinstance(backend, CodeBackend):
+        return CodeCard()
     return SandboxCard(backend.source) if isinstance(backend, SandboxBackend) else None
 
 
-def _backend(given: Any) -> Any:
-    """``backend=`` as Deep Agents takes it: ``sandbox()`` is the run's sandbox as its backend
-    (``sandbox().deep_agent()``'s), any other as it is."""
-    from trellis.harness.sandbox import SandboxSource
+def _carded(helpers: Sequence[dict[str, Any]], card: Any) -> None:
+    """Each declarative helper of the graph (its own ``middleware``) given ``card`` too, when it
+    is the harness's code's (``CodeCard.helpers``): their ``execute`` is the same backend's."""
+    for spec in (h for h in helpers if "middleware" in h and getattr(card, "helpers", False)):
+        spec["middleware"] = [*spec["middleware"], card]
 
-    return given.deep_agent()["backend"] if isinstance(given, SandboxSource) else given
+
+def _backend(given: Any) -> tuple[Any, Any]:
+    """``backend=`` as Deep Agents takes it — ``sandbox()`` is the run's sandbox as its backend
+    (``sandbox().deep_agent()``'s), any other as it is — and the graph's files backend: the
+    one given, else the harness's (``sandbox.default_files``: its ``execute`` in the sandbox
+    the harness gives the run's agent, where one can be made)."""
+    from trellis.harness.sandbox import SandboxSource, default_files
+
+    given = given.deep_agent()["backend"] if isinstance(given, SandboxSource) else given
+    return given, given if given is not None else default_files()
+
+
+def _window(chat: Any, given: int | None, named: str | None) -> int | None:
+    """The model's context window (:func:`window_of`), said in the log — or, unknown, said once
+    with what it turns off (:func:`_unknown`)."""
+    window, source = window_of(chat, given)
+    if window is None:
+        _unknown(named or type(chat).__name__)
+    else:
+        log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
+    return window
 
 
 def _described(
