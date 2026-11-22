@@ -474,6 +474,54 @@ async def test_a_graph_that_binds_the_harnesss_tools_itself_is_told_they_are_out
     assert sent.count(str(snapshots.note(["get_stock"]))) == 1, sent
 
 
+async def test_a_graph_that_binds_the_harnesss_tools_keeps_what_each_declares(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A harness tool a graph built by hand binds itself (converted) keeps what it declares —
+    its risk, how long its values stay current — so the earlier result of a write, or of
+    reference data, is never marked "call it again": doing a write again is not reading its
+    value (``advfile-02`` on the ``graph`` adapter: told to call its export again, the model
+    did, and the run paused for an approval nobody asked for)."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from trellis.harness.adapters import convert
+
+    @tool(side_effects="write")
+    def export_report(sku: str) -> str:
+        """Export a report of a SKU as a file. Returns the file's name."""
+        return "report-1.csv"
+
+    @tool(side_effects="read", freshness="static")
+    def sizes(sku: str) -> str:
+        """The sizes a SKU is made in."""
+        return "S, M, L"
+
+    bound = convert("langchain", [export_report.tool, sizes.tool, stock_tool().tool])
+    assert [spec_of(t).side_effects for t in bound] == ["write", "read", "read"]
+    assert [max_age(spec_of(t)) for t in bound] == [None, None, 0.0]
+    script = [
+        ("export_report", {"sku": "SKU-00123"}),
+        ("sizes", {"sku": "SKU-00123"}),
+        ("get_stock", {"sku": "SKU-00123"}),
+        "Exported.",
+        "It holds one row.",
+    ]
+    model = ScriptedChat(script)
+    graph = create_agent(model, tools=bound, checkpointer=InMemorySaver(), name="bound")
+    agent = harness.wrap(graph, id="bound-declared")
+    first = await agent.run("export SKU-00123", user="u1", thread=THREAD)
+    assert first.interrupt is not None  # the write asks
+    done = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="ada")
+    assert done.status is RunStatus.SUCCESS
+    await agent.run("What is in that file?", user="u1", thread=THREAD)
+    [later] = [r for r in model.script.requests if "that file" in str(r["messages"][-1])][:1]
+    sent = str(later["messages"])
+    assert snapshots.EARLIER.format(tool="get_stock") in sent, sent
+    for name in ("export_report", "sizes"):
+        assert snapshots.EARLIER.format(tool=name) not in sent, sent
+
+
 @pytest.mark.parametrize("framework", ["openai_agents", "graph", "claude_agent_sdk", "kimi"])
 async def test_a_run_with_memory_on_whose_model_calls_the_harness_cannot_see_is_told_too(
     memory_harness: Harness, framework: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch

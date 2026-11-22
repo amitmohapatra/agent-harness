@@ -1082,6 +1082,13 @@ chat's own on its thread stream when it is idle; its questions asked through the
 
 ### Fixed: what the feature matrix found
 
+- **A write's earlier result is no longer marked "out of date" in a graph built by hand.** A
+  harness tool converted for a graph that binds it itself (`convert("langchain", ...)`,
+  `h.harness_tools()`) now keeps what it declares — its risk, how long its values stay
+  current, paging — in the LangChain tool's metadata. Before, the converted tool said nothing,
+  so the harness read a write as a live read and told the model to "call it again for the
+  current value": on a follow-up about an exported file the model exported it again and the
+  run paused for an approval.
 - A conversation's turn keeps the graph state it carries to its next turn (in the file store,
   for any server) before its end is said, not after: the `carried_files_dropped` warning (files
   left out past the 256 KiB bound) is one of the run's events before its `RUN_FINISHED` — it

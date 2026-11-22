@@ -10,7 +10,14 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from trellis.contracts import ConfigurationError
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool, ToolStatus, node_retries
+from trellis.harness.tools.base import (
+    FRESHNESS,
+    MAX_AGE,
+    PAGED,
+    Tool,
+    ToolStatus,
+    node_retries,
+)
 from trellis.harness.tools.convert import text_of
 
 #: The metadata key a tool's feature is kept under (``Tool.feature``: ``without=`` turns it
@@ -59,5 +66,17 @@ def _one(tool: Tool) -> BaseTool:
         name=tool.name,
         description=tool.spec.description or tool.name,
         args_schema=tool.spec.input_schema or {"type": "object", "properties": {}},
-        metadata={MADE: True} | ({} if tool.feature is None else {FEATURE: tool.feature}),
+        metadata={MADE: True}
+        | ({} if tool.feature is None else {FEATURE: tool.feature})
+        | _declared(tool),
     )
+
+
+def _declared(tool: Tool) -> dict[str, Any]:
+    """What ``tool`` declares of itself, as a LangChain tool's ``metadata`` says it (and
+    ``middleware.spec_of`` reads it back): its risk, and how its data ages or is paged — so a
+    graph that binds the converted tool itself has a write's result, or reference data's,
+    known for what it is (never "out of date: call it again")."""
+    extra = tool.spec.model_extra or {}
+    kept = {k: extra[k] for k in (MAX_AGE, FRESHNESS, PAGED) if extra.get(k) is not None}
+    return {"side_effects": tool.spec.side_effects, **kept}
