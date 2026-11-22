@@ -129,7 +129,7 @@ def _graph(target: Any, options: Mapping[str, Any]) -> list[HostShell]:
     for tool in graph_tools(target):
         if tool.name == "execute" and _local_shell(files_backend(tool)):
             shells.append(HostShell("Deep Agents' execute on a LocalShellBackend", DEEP_AGENTS_FIX))
-        middleware = _shell_middleware(tool)
+        middleware = shell_middleware(tool)
         if middleware is not None and not _isolated(middleware):
             shells.append(
                 HostShell(
@@ -151,7 +151,7 @@ def _local_shell(backend: Any) -> bool:
     return isinstance(backend, LocalShellBackend)
 
 
-def _shell_middleware(tool: Any) -> Any | None:
+def shell_middleware(tool: Any) -> Any | None:
     """The ``ShellToolMiddleware`` whose shell ``tool`` is (its code closes over it)."""
     from langchain.agents.middleware import ShellToolMiddleware
 

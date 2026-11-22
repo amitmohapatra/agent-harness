@@ -829,26 +829,26 @@ async def test_file_search_middlewares_tool_asks_then_searches_the_folder(
 
 
 @pytest.mark.host_execution
-async def test_shell_tool_middlewares_shell_asks_then_runs_in_the_librarys_session(
+async def test_shell_tool_middlewares_shell_runs_in_the_librarys_session_announced_not_asked(
     harness: Harness, tmp_path: Path
 ) -> None:
     """``ShellToolMiddleware`` starts a shell before the agent and gives it as the ``shell``
-    tool: a call asks a person first (the tool declares no side effects), then runs in the
-    library's own session — started again by the library for the run that resumes."""
+    tool — the library's own shell, run as the library runs it: a call is the run's own (a
+    write: announced and recorded), never asked of a person, as Claude Code's ``Bash`` and
+    Deep Agents' ``execute`` are. A tool of that name the middleware did not make says what it
+    does itself."""
     shell = ShellToolMiddleware(
-        workspace_root=str(tmp_path), execution_policy=HostExecutionPolicy()
+        workspace_root=str(tmp_path), execution_policy=HostExecutionPolicy(), tool_name="terminal"
     )
     command = "echo tides > t.txt && cat t.txt"
-    model = ScriptedChatModel(turns=[("shell", {"command": command}), "ok"])
+    model = ScriptedChatModel(turns=[("terminal", {"command": command}), "ok"])
     graph = create_agent(model, tools=[], middleware=[shell], checkpointer=InMemorySaver())
     agent = harness.wrap(graph, id="shell")
-    paused = await agent.run("write tides", user="u", thread="t")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "shell"
-    assert paused.interrupt.tool_call.args == {"command": command}
-    assert not (tmp_path / "t.txt").exists()
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
-    assert done.status is RunStatus.SUCCESS and done.answer == "ok"
+    [spec] = [s for s in await agent.adapter.native(graph) if s.name == "terminal"]
+    assert spec.side_effects == "write"
+    events = [e async for e in agent.stream("write tides", user="u", thread="t")]
+    assert results(events) == [("terminal", "ok")]
+    assert events[-1].data["result"] == "ok"
     assert "tides" in str(model.seen[-1][-1].content)
     assert (tmp_path / "t.txt").read_text().strip() == "tides"
 

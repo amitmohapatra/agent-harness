@@ -439,7 +439,10 @@ def declare_files(graph: Any) -> None:
     :func:`_file_marks`), so those calls are governed as any tool's — as ``ReAct(backend=)``
     marks its own. A tool whose files are all the graph's state is left as it is: its calls
     only change the state, which the checkpoint keeps. Deep Agents'
-    :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
+    :data:`EXECUTE` and LangChain's shell (``ShellToolMiddleware``'s tool, whatever it is
+    named) are declared writes — a framework's own shell, run as the framework runs it:
+    announced and recorded, never asked (:func:`confined`), as Claude Code's ``Bash`` is —,
+    and its async sub-agents' task tools what each does
     and what its result is (``task_tools``), its :data:`COMPACT` a read — a tool that says so
     itself keeps its word. Only the framework's own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
@@ -447,6 +450,7 @@ def declare_files(graph: Any) -> None:
         bound_tools,
         subagent_graphs,
     )
+    from trellis.harness.host import shell_middleware  # noqa: PLC0415 - it imports this
 
     pending = [graph]
     seen: set[int] = set()  # a sub-agent that forks its parent's conversation runs its graphs too
@@ -464,7 +468,7 @@ def declare_files(graph: Any) -> None:
                 continue
             elif name in FILE_TOOLS and not said.get(OUTSIDE_STATE):
                 tool.metadata = {**said, **_file_marks(tool, name)}
-            elif name == EXECUTE and "side_effects" not in said:
+            elif (name == EXECUTE or shell_middleware(tool)) and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
             elif (risk := task_tools.TOOLS.get(str(name))) and "side_effects" not in said:
                 given = {} if data_of(said, strict=False) else task_tools.result_of(str(name))

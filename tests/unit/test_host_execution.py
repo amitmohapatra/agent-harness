@@ -31,7 +31,7 @@ from trellis import Harness, ReAct, sandbox
 from trellis.contracts import ConfigurationError
 from trellis.harness import host
 from trellis.harness.adapters.acp import ACPAgent, kimi
-from trellis.harness.host import _shell_middleware
+from trellis.harness.host import shell_middleware
 from trellis.harness.settings import Settings
 
 #: What every refusal names: the one setting an administrator turns.
@@ -293,7 +293,7 @@ def test_a_tool_whose_code_holds_an_empty_cell_is_no_shell() -> None:
         return code
 
     empty = types.FunctionType(holding().__code__, {}, "code", None, (types.CellType(),))
-    assert _shell_middleware(SimpleNamespace(func=empty)) is None
+    assert shell_middleware(SimpleNamespace(func=empty)) is None
 
 
 class Layer:

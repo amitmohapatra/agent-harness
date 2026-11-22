@@ -36,6 +36,11 @@ harness's, with nothing to write:
   machine, with no isolation, each command the run's own call (governed, announced and
   recorded, never asked), refused at `h.wrap` only where the deployment says
   `TRELLIS_HOST_EXECUTION=deny` (`host`: the `unisolated` kind and its refusal are gone).
+* **LangChain's own shell is no longer asked of a person.** `ShellToolMiddleware`'s tool
+  (whatever it is named) declared no side effects, so every command paused the run for an
+  approval — on a real model too (Haiku: `PAUSED` before its first command). It is now
+  declared a write as Deep Agents' `execute` is (`middleware.declare_files`,
+  `host.shell_middleware`): announced and recorded, never asked.
 * **An agent with none is given one** at `h.wrap` (`sandbox.code_for`, `Agent.code`): `ReAct`
   with no `backend=` as Deep Agents' own `execute` (`sandbox.backend.CodeBackend`: its files
   stay the graph's state, so the lean graph and its long-task files are unchanged; described in
