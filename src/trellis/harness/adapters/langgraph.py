@@ -227,22 +227,21 @@ class LangGraphAdapter(Keeps):
         found = {_code_of(t) for t in graph_tools(target)}
         return "default" if "default" in found else ("own" if "own" in found else "none")
 
-    def give_shell(self, target: Any) -> bool | None:
+    def give_shell(self, target: Any, shell: Callable[[], Any]) -> bool | None:
         """A Deep Agents graph built with a backend that runs no command (its default: the
         state's files) lists ``execute`` all the same: each of its ``FilesystemMiddleware``s
         (its sub-agents' too) is given Deep Agents' own composite backend — its files where
-        they were, ``execute`` on the harness's working folder (``sandbox.backend.shelled``) —
-        so the library's own tool runs. Not where it has permissions over its files (Deep
-        Agents refuses a shell beside them: it reads past them)."""
+        they were, ``execute`` on the harness's working folder (:func:`shelled`, on the
+        backend ``shell`` makes: ``sandbox.backend.CodeBackend``) — so the library's own tool
+        runs. Not where it has permissions over its files (Deep Agents refuses a shell beside
+        them: it reads past them)."""
         owners = {id(o): o for t in graph_tools(target) if (o := _idle_owner(t)) is not None}
         if not owners:
             return None
         if any(getattr(o, "_permissions", None) for o in owners.values()):
             return False
-        from trellis.harness.sandbox.backend import shelled
-
         for owner in owners.values():
-            owner.backend = shelled(owner.backend)
+            owner.backend = shelled(owner.backend, shell())
         self._native = None  # ``execute`` is a tool of the run's now: read again
         return True
 
@@ -1192,6 +1191,20 @@ def _execute_owner(tool: Any) -> Any | None:
         return inspect.getclosurevars(tool.coroutine or tool.func).nonlocals.get("self")
     except (AttributeError, TypeError, ValueError):  # not Deep Agents' own
         return None
+
+
+def shelled(backend: Any, shell: Any) -> Any:
+    """``backend`` — a Deep Agents backend that runs no command — as Deep Agents' own
+    composite with a shell: its files where they were (its routes kept, every other path its
+    own default's, its artifacts' root), and ``execute`` on ``shell``
+    (``LangGraphAdapter.give_shell``)."""
+    from deepagents.backends import CompositeBackend
+
+    composite = isinstance(backend, CompositeBackend)
+    routes = dict(backend.routes) if composite else {}
+    files = backend.default if composite else backend
+    root = backend.artifacts_root if composite else "/"
+    return CompositeBackend(shell, {**routes, "/": files}, artifacts_root=root)
 
 
 def _idle_owner(tool: Any) -> Any | None:

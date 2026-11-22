@@ -57,7 +57,7 @@ harness's, with nothing to write:
   command) runs the library's own `execute` too: the graph lists that tool whatever its
   backend, and at `h.wrap` each of its `FilesystemMiddleware`s (its sub-agents' as well) is
   given Deep Agents' own `CompositeBackend` — its files where they were, its routes kept,
-  `execute` on the run's folder (`Adapter.give_shell`, `sandbox.backend.shelled`) — except
+  `execute` on the run's folder (`Adapter.give_shell`, `adapters.langgraph.shelled`) — except
   where it has permissions over its files (Deep Agents refuses a shell beside them: none is
   given). LangGraph `create_agent` with `middleware()`, OpenAI Agents and function targets
   have no shell of their library's that the harness can turn on (LangChain refuses a second

@@ -31,7 +31,6 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
-from deepagents.backends import CompositeBackend
 from deepagents.backends.protocol import (
     ExecuteOffloadResult,
     ExecuteResponse,
@@ -207,18 +206,6 @@ class CodeBackend(JournalBackend, SandboxBackendProtocol):
         return await _told(code, runtime, box, command, ran)
 
 
-def shelled(backend: Any) -> CompositeBackend:
-    """``backend`` — a Deep Agents backend that runs no command — as Deep Agents' own
-    composite with a shell: its files where they were (its routes kept, every other path its
-    own default's, its artifacts' root), and ``execute`` on :class:`CodeBackend`, in the
-    working folder the harness gives the run (``LangGraphAdapter.give_shell``)."""
-    composite = isinstance(backend, CompositeBackend)
-    routes = dict(backend.routes) if composite else {}
-    files = backend.default if composite else backend
-    root = backend.artifacts_root if composite else "/"
-    return CompositeBackend(CodeBackend(), {**routes, "/": files}, artifacts_root=root)
-
-
 async def _own_shell(box: Folder, command: str, seconds: float) -> ExecuteResponse:
     """``command`` run by Deep Agents' own ``LocalShellBackend`` in the run's folder — the
     library's shell, as the library runs it: on this machine, with the service's environment,
@@ -358,5 +345,4 @@ __all__ = [
     "JournalBackend",
     "SandboxBackend",
     "SandboxCard",
-    "shelled",
 ]

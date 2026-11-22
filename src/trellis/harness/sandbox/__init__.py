@@ -600,7 +600,7 @@ def code_for(agent: Agent) -> tuple[SandboxSource | None, list[SandboxTools]]:
     if source is None:
         return None, []
     if agent.codes == "none":
-        turned_on = agent.adapter.give_shell(agent.target)
+        turned_on = agent.adapter.give_shell(agent.target, default_files)
         if turned_on is False:
             return None, []
         if turned_on:

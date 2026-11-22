@@ -36,7 +36,7 @@ tools in its own code (a hand-written LangGraph graph) or has no model (a functi
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol
@@ -208,7 +208,7 @@ class Keeps:
     def code(self, target: Any, options: Mapping[str, Any]) -> Code:
         return "own"  # Claude Code's shell, an ACP agent's (Kimi Code's): theirs, as they are
 
-    def give_shell(self, target: Any) -> bool | None:
+    def give_shell(self, target: Any, shell: Callable[[], Any]) -> bool | None:
         return None  # no shell of the framework's own for the harness to turn on
 
 
@@ -325,10 +325,11 @@ class Adapter(Protocol):
         an agent with none its own code tool (``sandbox.code_for``)."""
         ...
 
-    def give_shell(self, target: Any) -> bool | None:
+    def give_shell(self, target: Any, shell: Callable[[], Any]) -> bool | None:
         """Turn on, for ``target``, the framework's own shell that it has and that runs
         nothing as it was built — on the working folder the harness gives the run
-        (``sandbox.code_for``, which then adds no tool of its own): ``True`` when it is on;
+        (``sandbox.code_for``, which then adds no tool of its own; ``shell`` makes what runs
+        a command there, as the framework takes it): ``True`` when it is on;
         ``None`` when the framework has none to turn on; ``False`` when ``target`` must have
         no shell at all (the framework's own rule: a Deep Agent with permissions over its
         files)."""

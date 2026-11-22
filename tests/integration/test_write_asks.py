@@ -184,6 +184,51 @@ async def test_a_new_message_to_a_thread_whose_run_waits_on_approval_is_told_so(
     assert WAITS not in json.dumps(model.requests[count])
 
 
+async def test_the_waiting_line_is_said_once_and_a_store_that_cannot_say_says_nothing(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The line is the context's once, however often it is asked for; a paused run that
+    awaits nobody is not named; and a run store that cannot say what waits says nothing —
+    the turn runs as it did before the line existed."""
+    contexts: list[tuple[str, str]] = []
+
+    async def work(input: str, agent: Runtime) -> str:
+        if input == "pay":
+            return str(await agent.tools.call("pay", amount=5))
+        before = str(agent.context)
+        await agent.agent.waiting_noted(agent)  # asked again: said already
+        contexts.append((before, str(agent.context)))
+        return "ok"
+
+    agent = arm(harness.wrap(work, id="once"), [pay])
+    first = await agent.run("pay", user="ada", thread=THREAD)
+    assert first.status is RunStatus.PAUSED, first
+    await agent.run("is it done?", user="ada", thread=THREAD)
+    before, after = contexts[-1]
+    assert before.count(WAITS) == 1 and after == before
+
+    async def cannot(runtime: Runtime) -> str | None:
+        raise OSError("the run store is away")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(conversation, "waiting", cannot)
+        done_ = await agent.run("is it done?", user="ada", thread=THREAD)
+        assert done_.status is RunStatus.SUCCESS and WAITS not in contexts[-1][1]
+
+    listed = harness.runs.iterate
+
+    def awaiting_nobody(**named: Any) -> Any:
+        async def each() -> Any:
+            async for summary in listed(**named):
+                yield summary.model_copy(update={"awaiting": None})
+
+        return each()
+
+    monkeypatch.setattr(harness.runs, "iterate", awaiting_nobody)
+    await agent.run("is it done?", user="ada", thread=THREAD)
+    assert WAITS not in contexts[-1][1]
+
+
 @pytest.mark.parametrize("memory", ["on", "off"])
 @pytest.mark.parametrize("framework", sorted(set(BUILDERS) - {"function"}))
 async def test_every_adapter_tells_a_new_message_what_its_thread_waits_on(
@@ -694,7 +739,8 @@ async def test_a_fired_run_waits_a_day_for_its_user_then_ends_saying_why() -> No
         runs = h.runs
         assert isinstance(runs, LocalRuns)
         runs._expire_interrupts(due - timedelta(minutes=1))
-        assert (await runs.get(run.run_id)).status is RunStatus.PAUSED  # not yet
+        waiting = await runs.get(run.run_id)
+        assert waiting is not None and waiting.status is RunStatus.PAUSED  # not yet
         runs._expire_interrupts(due + timedelta(minutes=1))
         ended = await runs.get(run.run_id)
         assert ended is not None and ended.status is RunStatus.TIMEOUT

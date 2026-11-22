@@ -154,6 +154,7 @@ from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
+from trellis.harness.host import shell_middleware
 from trellis.harness.journal import call_key, content_key
 from trellis.harness.outbound import TargetRefused
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
@@ -450,7 +451,6 @@ def declare_files(graph: Any) -> None:
         bound_tools,
         subagent_graphs,
     )
-    from trellis.harness.host import shell_middleware  # noqa: PLC0415 - it imports this
 
     pending = [graph]
     seen: set[int] = set()  # a sub-agent that forks its parent's conversation runs its graphs too

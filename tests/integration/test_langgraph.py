@@ -571,6 +571,36 @@ async def test_an_in_ram_checkpointer_missing_a_turn_answered_elsewhere_keeps_me
     assert memory_service.named("context")[-1].body.get("window") is not False
 
 
+async def test_a_checkpointer_that_cannot_be_read_keeps_memorys_window_and_says_so(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the saver holds could not be read: memory's window stays on (the model reads the
+    conversation, at worst twice), and the run says why in a warning."""
+    from trellis.harness.adapters.langgraph import LangGraphAdapter
+
+    model = ScriptedChatModel(turns=["Ada's locker is 4242.", "Still 4242."])
+    graph = create_agent(model, middleware=middleware(), checkpointer=InMemorySaver())
+    agent = memory_harness.wrap(graph, id="unread")
+    await agent.run("Ada's locker?", user="u1", thread="unread")
+    await memory_harness.writes.drain()
+
+    async def broken(self: Any, target: Any, runtime: Any) -> frozenset[str]:
+        raise OSError("the saver is closed")
+
+    monkeypatch.setattr(LangGraphAdapter, "held_runs", broken)
+    events = [e async for e in agent.stream("And now?", user="u1", thread="unread")]
+    assert memory_service.named("context")[-1].body.get("window") is not False
+    warned = [e.data["message"] for e in events if e.data.get("code") == "earlier_turns"]
+    assert warned and "the saver is closed" in warned[0]
+
+
+async def test_a_graph_with_no_checkpointer_of_its_own_holds_no_run() -> None:
+    from trellis.harness.adapters.langgraph import LangGraphAdapter
+
+    graph = create_agent(ScriptedChatModel(turns=["hi"]), middleware=middleware())
+    assert await LangGraphAdapter(graph).held_runs(graph, None) == frozenset()
+
+
 async def test_leaving_out_the_window_a_checkpointer_replays_makes_the_request_smaller(
     memory_harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
