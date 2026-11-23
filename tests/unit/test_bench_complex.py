@@ -3337,3 +3337,32 @@ def test_a_figure_shown_in_thousands_is_the_figure_it_rounds() -> None:
     assert cx.ungrounded("About £157.7k, or £0.16 million.", held) == []
     assert cx.ungrounded("That is about £161k at 7 days.", held) == ["161"]
     assert cx.ungrounded("That is about £158.9k at 7 days.", held) == ["158.9"]
+
+
+def test_the_figure_asked_for_said_first_and_the_other_named_after_is_right() -> None:
+    """advconv-10's "What lead time did we agree to use for SUP-03?" (49, the portal's; never
+    the master's 42): an answer that opens with the agreed figure and then says what the other
+    source lists is right — "The lead time agreed is 49 days. … The supplier master lists 42
+    days" was marked wrong for naming 42 at all (Claude Code and ReAct, each on about half
+    their runs). An answer that opens with no agreed figure and lists both is still wrong."""
+    t = _turn("advconv-10", 2)
+    right = (
+        "The lead time agreed for SUP-03 (Oslo Apparel) is **49 days**. That is the figure from "
+        "the supplier portal, the source you said to use.\n\nThe supplier master lists 42 days, "
+        "last updated 2026-03-02, so the master record may need updating."
+    )
+    assert cx.score(t.expect, right, [], t.text)["correct"] is True
+    unsure = (
+        "I don't have a record of an agreed lead time for SUP-03. The sources disagree:\n\n"
+        "- **Supplier master:** 42 days.\n- **Supplier portal:** 49 days.\n\nI haven't picked one."
+    )
+    assert cx.score(t.expect, unsure, [], t.text)["correct"] is False
+    wrong = "The lead time agreed for SUP-03 is **42 days**; the portal says 49."
+    assert cx.score(t.expect, wrong, [], t.text)["correct"] is False
+
+
+def test_the_ones_that_missed_are_named_as_left_out_however_it_is_said() -> None:
+    """advdata-13 once more: "The four that missed are S40 Shrewsbury (...), S28 Taunton …"."""
+    said = "Six beat it: S08, S12, S20, S24, S32, S36.\n\nThe four that missed are S40 Shrewsbury (£15,544.45 short), S28 Taunton and S16 Hereford, with S04 Bristol."
+    for store in ("S40", "S28"):
+        assert not cx._presented(said, store, 6), store

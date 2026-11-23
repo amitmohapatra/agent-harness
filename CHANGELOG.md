@@ -14,6 +14,14 @@ own, given the conversation's turns as a worker that kept none is (a `session` w
 A turn that used a tool before the refusal, a paused one, and a refusal a retry may cure are
 the run's error as before.
 
+### Fixed (benchmark): the figure asked for said first, and "the four that missed"
+
+- **advconv-10**: an answer that opens with the agreed figure ("The lead time agreed is 49
+  days") and then says what the other source lists ("the supplier master lists 42 days") was
+  marked wrong for naming 42 at all. A `record` whose first statement holds what was asked and
+  no forbidden figure is right; one that opens with no agreed figure and lists both is not.
+- **advdata-13**: "The four that missed are S40 …" names the stores left out.
+
 ### Fixed (benchmark): a figure shown in thousands is the figure it rounds
 
 "about £158k" from a result reading 157,733.89 was flagged as a figure nothing backs: a

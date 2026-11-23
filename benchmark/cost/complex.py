@@ -2876,7 +2876,7 @@ _EXCLUDED: Final = re.compile(
     # the rest of the result's candidates, said not to make it ("the other four missed: ...", "would miss: ...")
     r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short|would miss)|"
     # a list introduced as the ones that did not make it ("Four missed: ...", "Three fell short: ...")
-    r"(?:missed|fell short)(?=\s*:))\b|n't\b",
+    r"(?:missed|fell short)(?=\s*:)|(?:that|which|who) (?:missed|fell short))\b|n't\b",
     re.IGNORECASE,
 )
 #: A place said in a clause ("4th place", "the fourth"): past the size of the result, it is
@@ -3170,6 +3170,15 @@ def _has_date(answer: str, option: str) -> bool:
         rf"(?:{num}\s+{name}\b|\b{name}\s+{num})(?:,?\s+(?P<year>\d{{4}}))?", re.IGNORECASE
     )
     return any(m["year"] in (None, str(year)) for m in said.finditer(answer))
+
+
+def _led_with(expect: Expect, answer: str) -> bool:
+    """Whether a ``record``'s answer opens with what was asked: its first statement holds every
+    field and no forbidden figure. What it names after — the other source's figure, said to be
+    the other's — is then context, not its answer."""
+    lead = re.split(r"(?<=[.!?])\s+|\n", _EMPHASIS.sub("", answer).strip(), maxsplit=1)[0]
+    held = not _record_missing(expect.value, lead)
+    return held and not any(_forbidden_in(lead, f) for f in expect.forbidden if f)
 
 
 def _forbidden_in(answer: str, item: str) -> bool:
@@ -3493,6 +3502,8 @@ def score(
         hit = [f for f in expect.forbidden if f and _presented(said, f, len(expect.value))]
     else:
         hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
+        if hit and k == "record" and not missing and _led_with(expect, said):
+            hit = []  # the figure asked for said first: the other, named after, is context
     if k in ("abstain", "clarify"):
         # what the question or the model's own input holds (an error's code), and a date's
         # day, are not made up
