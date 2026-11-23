@@ -3324,3 +3324,16 @@ def test_a_plan_named_in_the_questions_own_words_is_that_plan() -> None:
     assert cx.score(t.expect, said, [], t.text)["correct"] is True
     other = said.replace("allocate by Q3 2026 units sold", "split equally").replace("40.3", "36.6")
     assert cx.score(t.expect, other, [], t.text)["correct"] is False
+
+
+def test_a_figure_shown_in_thousands_is_the_figure_it_rounds() -> None:
+    """advscen-02's "about £158k at 7 days, £224k at 14 days and £374k at 28 days", from a
+    result reading 157733.89, 224494.69 and 374096.82: each is its figure in thousands, rounded
+    to the place shown — they were flagged as made up (a thousands form was accepted only
+    within 0.006 of the exact one). A figure no rounding gives is still flagged."""
+    held = "order value 157733.89 at 7 days, 224494.69 at 14 days, 374096.82 at 28 days"
+    said = "That is about £158k at 7 days, £224k at 14 days and £374k at 28 days."
+    assert cx.ungrounded(said, held) == []
+    assert cx.ungrounded("About £157.7k, or £0.16 million.", held) == []
+    assert cx.ungrounded("That is about £161k at 7 days.", held) == ["161"]
+    assert cx.ungrounded("That is about £158.9k at 7 days.", held) == ["158.9"]

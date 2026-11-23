@@ -3191,10 +3191,14 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
     held = numbers(context) + numbers(context.replace(",", " ")) + numbers(question)
 
     def near(n: float) -> bool:
+        # shown in thousands or millions, a figure is the one it rounds to the place it shows:
+        # "£158k" is 157,733.89 (half a unit of its last place), "£157.7k" the same
+        places = len(f"{n:g}".partition(".")[2])
+        step = 0.5 * 10.0**-places + 1e-9
         return any(
             abs(n - c) <= max(0.005 * abs(c), 0.006)
-            or abs(n - c / 1e3) <= 0.006
-            or abs(n - c / 1e6) <= 0.006
+            or abs(n - c / 1e3) <= step
+            or abs(n - c / 1e6) <= step
             or abs(n - 100 * c) <= 0.06
             for c in held
         )

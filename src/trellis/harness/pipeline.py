@@ -480,15 +480,21 @@ async def _attempt(
             if decision is not None:
                 decided(span, decision)
             async with clock:
-                extracted, pushed = await _worked(
+                extracted, pushed = await _in_a_session(
                     agent,
                     runtime,
-                    input,
-                    pending=pending,
-                    resolution=resolution,
-                    unresumable=unresumable,
-                    observe=observe,
-                    streaming=listener is not None,
+                    journal,
+                    functools.partial(
+                        _worked,
+                        agent,
+                        runtime,
+                        input,
+                        pending=pending,
+                        resolution=resolution,
+                        unresumable=unresumable,
+                        observe=observe,
+                        streaming=listener is not None,
+                    ),
                 )
             output(span, jsonable(extracted.answer))
         except RunCancelled as exc:
@@ -576,6 +582,50 @@ async def _served_elsewhere(agent: Agent, identity: Identity, mine: str, asked: 
         ):
             return True
     return False
+
+
+#: What a run is told when the session its conversation kept was refused for good.
+SESSION_LEFT: Final = (
+    "the session this conversation kept was refused by its provider for good: the turn runs "
+    "again in a new one, given the conversation's turns"
+)
+
+
+async def _in_a_session(
+    agent: Agent,
+    runtime: Runtime,
+    journal: Journal,
+    work: Callable[[], Awaitable[tuple[Extracted, PromptContext | None]]],
+) -> tuple[Extracted, PromptContext | None]:
+    """The attempt's ``work`` — made again, once, in a session of its own when the session it
+    continued was refused for good before anything ran (:func:`_left_session`)."""
+    used = set(runtime.used)
+    try:
+        return await work()
+    except Exception:
+        if not _left_session(agent, runtime, journal, used):
+            raise
+    return await work()
+
+
+def _left_session(agent: Agent, runtime: Runtime, journal: Journal, used: set[str]) -> bool:
+    """Whether the attempt, which failed, is run again in a session of its own: it continued
+    the session its framework kept for the conversation (``Runtime.continued``), that session's
+    own request was refused and a retry will not help (``Runtime.session_refused``), and
+    nothing of the turn ran (no tool ``used`` since it began; no pause) — so running it again
+    repeats nothing. The session is left (the conversation's kept one dropped, the journal's
+    forgotten) and the attempt is one that continues none: its context is given the
+    conversation's turns, as on a worker that kept no session. Said once on the run."""
+    if not (runtime.continued and runtime.session_refused) or runtime.pending is not None:
+        return False
+    if runtime.used != used:
+        return False
+    agent.sessions.discard(runtime.conversation)
+    journal.session, journal.transcripts = None, {}
+    runtime.continued = runtime.session_refused = False
+    log.warning("run %s: %s", runtime.run_id, SESSION_LEFT)
+    runtime.events.warning("session", SESSION_LEFT)
+    return True
 
 
 def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:

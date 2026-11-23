@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a turn whose kept session is refused for good runs again in a new one
+
+The harness dropped a session its provider refused for good, so the conversation's next turn
+started fresh; the turn that met the refusal still failed. That turn has run nothing — the
+refusal is of the session's first request — so it is now run again at once in a session of its
+own, given the conversation's turns as a worker that kept none is (a `session` warning, once).
+A turn that used a tool before the refusal, a paused one, and a refusal a retry may cure are
+the run's error as before.
+
+### Fixed (benchmark): a figure shown in thousands is the figure it rounds
+
+"about £158k" from a result reading 157,733.89 was flagged as a figure nothing backs: a
+thousands or millions form was accepted only within 0.006 of the exact one. It is now accepted
+to the place it shows; a figure no rounding gives is still flagged.
+
 ### Fixed (benchmark): six expectations that marked right answers wrong, for every adapter
 
 Found by reading every wrong answer of all eight adapters on the hard set (one run each):

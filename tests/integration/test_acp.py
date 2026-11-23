@@ -1544,6 +1544,39 @@ async def test_a_turn_the_agent_could_not_finish_fails_the_run_with_the_agents_r
         assert "provider.api_error" in done.error.message and "500" in done.error.message
 
 
+async def test_a_kept_session_its_provider_refuses_for_good_is_left_and_the_turn_runs_again(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A conversation's turn continues the session its agent kept. When that session's own
+    request is refused and a retry will not help (Kimi Code reloads a tool call in a form its
+    provider refuses: every turn of the session fails from then on), nothing of the turn has
+    run: the harness leaves the session and runs the turn again in a new one, given the
+    conversation as a worker that kept no session is — said as a warning, once. A refusal a
+    retry may cure is the run's error, as before."""
+    refused = {"code": "provider.api_error", "details": {"statusCode": 400}, "retryable": False}
+    script = [{"text": "noted"}, {"stop": "end_turn"}, {"turn_fails": refused}]
+    agent = harness.wrap(fake(tmp_path, script), id="refused")
+    first = await agent.run("The locker code is 4242.", user="u1", thread="t1")
+    assert first.status is RunStatus.SUCCESS and first.answer == "noted"
+    events = [e async for e in agent.stream("What is the code?", user="u1", thread="t1")]
+    done = events[-1]
+    assert done.outcome is RunOutcome.SUCCESS and done.data["result"] == "noted", done
+    kept = recorded(tmp_path)
+    assert [s["how"] for s in kept["sessions"]] == ["new", "resume", "new"]
+    assert "4242" in str(kept["prompts"][-1])  # the conversation, given to the new session
+    warned = [e.data["message"] for e in events if e.data.get("code") == "session"]
+    assert len(warned) == 1 and "new" in warned[0]
+
+    (tmp_path / "may-pass").mkdir()
+    passing = {"code": "provider.api_error", "details": {"statusCode": 500}, "retryable": True}
+    script = [{"text": "noted"}, {"stop": "end_turn"}, {"turn_fails": passing}]
+    other = harness.wrap(fake(tmp_path / "may-pass", script), id="may-pass")
+    await other.run("The locker code is 4242.", user="u1", thread="t2")
+    failed = await other.run("What is the code?", user="u1", thread="t2")
+    assert failed.status is RunStatus.ERROR
+    assert [s["how"] for s in recorded(tmp_path / "may-pass")["sessions"]] == ["new", "resume"]
+
+
 async def test_the_agents_plan_is_an_event_of_the_run(harness: Harness, tmp_path: Path) -> None:
     """Kimi's todo list reaches an ACP client as a plan (``session/update`` ``plan``): its
     entries are the run's ``plan`` event, for a surface that shows what the agent is at."""
