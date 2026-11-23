@@ -3366,3 +3366,26 @@ def test_the_ones_that_missed_are_named_as_left_out_however_it_is_said() -> None
     said = "Six beat it: S08, S12, S20, S24, S32, S36.\n\nThe four that missed are S40 Shrewsbury (£15,544.45 short), S28 Taunton and S16 Hereford, with S04 Bristol."
     for store in ("S40", "S28"):
         assert not cx._presented(said, store, 6), store
+
+
+def test_a_draft_the_harness_sent_back_backs_none_of_its_own_figures() -> None:
+    """An answer the harness sent back for its figures (``middleware.FIGURES``) is in the
+    turn's next request, before the harness's word on it. The scorer read it as something the
+    model was sent, so no figure of such an answer could be unbacked: the draft is left out."""
+    from trellis.harness.middleware import FIGURES
+
+    assert FIGURES.startswith(cx.SENT_BACK)
+    told = FIGURES.format(figures="188000", verb="is", them="it", tools="execute")
+    request = {
+        "messages": [
+            {"role": "user", "content": "What would east need?"},
+            {"role": "tool", "content": "east 157733.89 west 216700"},
+            {"role": "assistant", "content": "East would need about £188,000."},
+            {"role": "user", "content": told},
+        ]
+    }
+    said = cx.said_in([request], [])
+    assert "157733.89" in said and "£188,000" not in said
+    assert cx.ungrounded("East would need about £188,000.", said) == ["188000"]
+    earlier = {"messages": [*request["messages"][:3], {"role": "user", "content": "And west?"}]}
+    assert "£188,000" in cx.said_in([earlier], [])  # an earlier turn's answer was heard

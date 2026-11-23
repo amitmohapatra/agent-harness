@@ -48,10 +48,23 @@ class ScriptedChatModel(BaseChatModel):
     spends: tuple[int | None, int] | None = None
     #: how long every call takes before it answers (a stalled provider: longer than its bound)
     stall: float = 0.0
+    #: an answer sent back for its figures (``middleware.FIGURES``) is given again as it was,
+    #: taking no turn of the script: a script replaying reference answers computes nothing
+    repeats: bool = False
 
     @property
     def _llm_type(self) -> str:
         return "scripted"
+
+    @staticmethod
+    def _again(messages: list[BaseMessage]) -> str | None:
+        """The answer the model just gave, when it was sent back for its figures."""
+        from trellis.harness.middleware import FIGURES
+
+        if len(messages) < 2 or not isinstance(messages[-1], HumanMessage):
+            return None
+        told = _said(messages[-1].content).startswith(FIGURES.partition("{")[0])
+        return _said(messages[-2].content) if told and isinstance(messages[-2], AIMessage) else None
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Runnable[Any, Any]:  # type: ignore[override]
         functions = [convert_to_openai_tool(t)["function"] for t in tools]
@@ -79,7 +92,9 @@ class ScriptedChatModel(BaseChatModel):
         offered = kwargs.pop(OFFERED, None)  # counted, not recorded: requests stay as bound
         self.seen.append(list(messages))
         self.requests.append(kwargs)
-        turn = self.turns.pop(0)
+        turn = self._again(messages) if self.repeats else None
+        if turn is None:
+            turn = self.turns.pop(0)
         if isinstance(turn, AIMessage):
             message = turn.model_copy()
         elif isinstance(turn, str):

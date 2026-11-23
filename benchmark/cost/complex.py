@@ -3658,7 +3658,8 @@ def checked(
             hits = [
                 m.group(0)
                 for q in seen
-                for msg in q.get("messages") or []
+                # not the answer's own draft, sent back for its figures, nor the word on it
+                for msg in _not_drafts(q.get("messages") or [])
                 if p.role is None or _role(msg) == p.role
                 for m in [pattern.search(_EMPHASIS.sub("", _texts(msg)))]
                 if m
@@ -3696,7 +3697,14 @@ def checked(
             )
             ok, found = n >= (p.limit or 0), n
         elif p.kind == "calls":
-            ok, found = model_calls <= (p.limit or 0), model_calls
+            # the call that answers again after its figures were sent back is the harness's
+            # doing, not a round more of the model's own
+            again = sum(
+                _texts(q["messages"][-1]).lstrip().startswith(SENT_BACK)
+                for q in seen or ()
+                if q.get("messages")
+            )
+            ok, found = model_calls - again <= (p.limit or 0), model_calls - again
         elif p.kind == "called":
             n = sum(c["tool"] == p.pattern and c["status"] == "ok" for c in calls)
             ok, found = n >= (p.limit or 0), n
@@ -3887,8 +3895,27 @@ def said_in(requests: Sequence[dict[str, Any]], told: Sequence[str]) -> str:
     every adapter: a CLI's own requests (Kimi's, Claude's) are not captured, so what one
     adapter is checked against must not be more than another's — the conversation so far,
     never the answer being scored (:func:`heard`)."""
-    sent = [_texts(m) for q in requests for m in q.get("messages") or []]
+    sent = [_texts(m) for q in requests for m in _not_drafts(q.get("messages") or [])]
     return "\n".join([*sent, *told])
+
+
+#: How the harness's word to a model whose answer it sent back for its figures begins
+#: (``middleware.FIGURES``): the message before it is that answer's draft.
+SENT_BACK: Final = "Before this answer is sent:"
+
+
+def _not_drafts(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``messages`` without the drafts of the answer being scored: an answer the harness sent
+    back for its figures is in the next request, before the harness's word on it, which names
+    those figures — and a figure is backed neither by the draft that first stated it nor by
+    the word that named it."""
+    notes = {
+        n
+        for n, m in enumerate(messages)
+        if m.get("role") == "user" and _texts(m).lstrip().startswith(SENT_BACK)
+    }
+    drafts = {n - 1 for n in notes if n and messages[n - 1].get("role") == "assistant"}
+    return [m for n, m in enumerate(messages) if n not in notes | drafts]
 
 
 #: The harness check of a ``grounded`` turn whose requests are captured: its reason's figures
@@ -4231,8 +4258,9 @@ def scripted_model(case: Case, *, keyed: bool = False, coding: bool = False) -> 
             )
             for task, rounds in case.helpers
         ]
-        return KeyedChatModel(turns=[], script=script, spends=(None, 50))
-    return ScriptedChatModel(turns=case.script(coding=coding), spends=(None, 50))
+        return KeyedChatModel(turns=[], script=script, spends=(None, 50), repeats=True)
+    # an answer sent back for its figures is given again: the script computes nothing
+    return ScriptedChatModel(turns=case.script(coding=coding), spends=(None, 50), repeats=True)
 
 
 #: A memory job that has not ended (``trellis.memory.models.JobStatus``).

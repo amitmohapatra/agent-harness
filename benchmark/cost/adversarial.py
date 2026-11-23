@@ -2099,9 +2099,12 @@ def pipeline_cases() -> list[Any]:
                 Turn(
                     "Why do northern stores get more? Look across runs AL-1 and AL-2.",
                     ((*all_final, ("allocation_rules", {})),),
+                    # "why" asks for the stage that makes the gap; the averages pooled over both
+                    # runs are in the reference, not required: the question does not ask for
+                    # them, and an answer giving each run's own averages was marked wrong
+                    # (every adapter, every run)
                     record(
-                        {"north average": north, "south average": south, "stage": driver},
-                        tol={"north average": 0.5, "south average": 0.5},
+                        {"stage": driver},
                         rubric=f"the {driver} stage (R3: {RULES['R3']}) adds most to the north over the south, in both runs",
                         reference=f"In both runs the north's stores average {north:.1f} units against the south's {south:.1f}; "
                         f"the gap comes from the {driver} (R3: {RULES['R3']}).",

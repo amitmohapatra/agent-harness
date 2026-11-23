@@ -14,6 +14,16 @@ own, given the conversation's turns as a worker that kept none is (a `session` w
 A turn that used a tool before the refusal, a paused one, and a refusal a retry may cure are
 the run's error as before.
 
+### Fixed (benchmark): a sent-back draft backs none of its own figures
+
+With the figure check on, the answer the harness sent back is in the turn's next request,
+before the harness's word naming its figures. The scorer read both as something the model was
+sent, so no figure of such an answer could be flagged as unbacked, and two request checks
+(the figure "still in the context", the number of model calls) read them too. The draft and
+the word on it are now left out everywhere. Also **advpipe-01**: "Why do northern stores get
+more?" required the averages pooled over both runs, which the question does not ask for; the
+stage that makes the gap is what is required.
+
 ### Added: an answer's figures that nothing backs are sent back once to be computed
 
 A model asked a follow-up ("why that one?", "how confident are you?") often answers with a
