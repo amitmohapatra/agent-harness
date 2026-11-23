@@ -1772,6 +1772,14 @@ def test_a_drop_of_an_amount_reads_as_a_negative_change() -> None:
     assert not _right("explain-06", 1, said.replace("drop of 10", "rise of 10"))
     assert not _right("explain-06", 1, said.replace("drop of 10", "drop of 9"))
     assert not _right("explain-06", 1, "Now **4 units**, 14 before; read at 10:00 UTC.")
+    # the same move said the other way round: where it is now, then "down from" where it was
+    turned = (
+        "Yes, the figure has changed. A fresh check shows **4 units** of Merino Crew Sweater "
+        "Navy (SKU-00001), down from 14 in my earlier answer."
+    )
+    assert _right("explain-06", 1, turned)
+    assert not _right("explain-06", 1, turned.replace("down from 14", "down from 13"))
+    assert not _right("explain-06", 1, turned.replace("down from 14", "and 14 before"))
 
 
 def test_a_step_count_written_as_a_word_reads_as_the_count() -> None:

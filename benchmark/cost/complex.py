@@ -3247,12 +3247,16 @@ QUERY_TOOL: Final = "query_result"
 
 #: A move from one figure to another, said with an arrow ("110 → 135", "96 -> 110") or after a
 #: word of change ("the drop from 14 to 4", "rose from 96 to 110"): its change is the second
-#: less the first. A hedge between them ("to about 65") is no move.
+#: less the first; or where it is now and then where it was ("4 units, down from 14"). A hedge
+#: between them ("to about 65") is no move.
 _MOVE: Final = re.compile(
     r"(?<![\w.])(-?\d[\d,]*(?:\.\d+)?)\s*(?:→|->|⟶)\s*(-?\d[\d,]*(?:\.\d+)?)(?![\d.]\d)|"
     r"\b(?:drop|dropped|fall|fell|fallen|decline|declined|decrease|decreased|rise|rose|risen|"
     r"increase|increased|went|moved|changed?|down|up)\s+from\s+[£$€]?(\d[\d,]*(?:\.\d+)?)"
-    r"(?:\s+units?)?\s+to\s+[£$€]?(\d[\d,]*(?:\.\d+)?)(?![\d.]\d)",
+    r"(?:\s+units?)?\s+to\s+[£$€]?(\d[\d,]*(?:\.\d+)?)(?![\d.]\d)|"
+    # the other way round: where it is now, then where it was ("4 units, down from 14")
+    r"(?<![\w.])[£$€]?(\d[\d,]*(?:\.\d+)?)(?![\d.]\d)[^.\d\n]{0,80}?\b(?:down|up)\s+from\s+"
+    r"[£$€]?(\d[\d,]*(?:\.\d+)?)(?![\d.]\d)(?!\s+(?:units?\s+)?to\b)",
     re.IGNORECASE,
 )
 
@@ -3260,10 +3264,29 @@ _MOVE: Final = re.compile(
 def _moves(answer: str) -> list[float]:
     """The changes an answer states as moves (:data:`_MOVE`), emphasis read through."""
     out = []
-    for m in _MOVE.finditer(_EMPHASIS.sub("", answer)):
-        first, second = (m[1], m[2]) if m[1] is not None else (m[3], m[4])
+    for m in _MOVE.finditer(_ID.sub(" ", _EMPHASIS.sub("", answer))):  # an id's digits: none
+        if m[5] is not None:
+            first, second = m[6], m[5]
+        else:
+            first, second = (m[1], m[2]) if m[1] is not None else (m[3], m[4])
         out.append(float(second.replace(",", "")) - float(first.replace(",", "")))
     return out
+
+
+#: A change's amount said with its direction ("the drop of 10 units", "a rise of 3").
+_AMOUNT: Final = re.compile(
+    r"\b(drop|decline|decrease|fall|loss|rise|increase|gain)\s+of\s+[£$€]?(\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_RISES: Final = frozenset({"rise", "increase", "gain"})
+
+
+def _amounts(answer: str) -> list[float]:
+    """The changes an answer states as an amount with its direction (:data:`_AMOUNT`), signed."""
+    return [
+        (1 if m[1].lower() in _RISES else -1) * float(m[2].replace(",", ""))
+        for m in _AMOUNT.finditer(_EMPHASIS.sub("", answer))
+    ]
 
 
 #: An id written with a prefix ("SKU-00012", "S04", "AL-13"): its digits are no figure.
@@ -3309,7 +3332,10 @@ def _record_missing(fields: Mapping[str, Any], answer: str) -> list[str]:
         if not ok and name == DIFFERENCE and _num(v):
             ok = _has_number(answer, -float(v), spec["tol"])
         if not ok and _num(v) and name.split()[-1] == "change":
-            ok = any(abs(m - float(v)) <= spec["tol"] + 1e-9 for m in _moves(answer))
+            # a move's two ends are its change, unless the answer then says another amount
+            ok = any(abs(m - float(v)) <= spec["tol"] + 1e-9 for m in _moves(answer)) and all(
+                abs(n - float(v)) <= spec["tol"] + 1e-9 for n in _amounts(answer)
+            )
         if not ok:
             missing.append(name)
     return missing
