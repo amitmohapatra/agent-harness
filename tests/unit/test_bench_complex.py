@@ -3133,6 +3133,25 @@ def test_no_tool_of_a_kind_called_says_no_tool_got_it() -> None:
     assert cx.score(t.expect, wrong, [], t.text)["correct"] is False
 
 
+def test_no_data_source_queried_says_no_tool_got_it() -> None:
+    """advexp-03 t2 (ReAct, two of three runs): "a `memory_remember` call that saved the
+    target ... I didn't query any sales, finance, planning or other data source, so the
+    figure has not been checked against any system" says no tool got the figure, scored as
+    not saying so. A source said to have been queried still fails."""
+    t = _turn("advexp-03", 2)
+    said = (
+        "I made one tool call, a `memory_remember` call that saved the £1.2m north Q4 target "
+        "to your user memory. I didn't query any sales, finance, planning or other data "
+        "source, so the figure has not been checked against any system."
+    )
+    assert cx.score(t.expect, said, [], t.text)["correct"] is True
+    assert cx.score(t.expect, said.replace("didn't query", "did not consult"), [], t.text)[
+        "correct"
+    ]
+    wrong = "I queried the planning system, which gave the £1.2m target."
+    assert cx.score(t.expect, wrong, [], t.text)["correct"] is False
+
+
 def test_a_change_said_as_units_removed_is_the_negative_change() -> None:
     """Deep Agents (advpipe-01 t0): a waterfall whose postprocess row says "Capped at the
     store's shelf space for the SKU, removing 15" (and "cut the amount down from 135") was
