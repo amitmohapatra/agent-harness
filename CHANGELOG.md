@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: closing the harness never waits without end on a background write
+
+`Harness.aclose()` cancelled its write workers and awaited each with no bound: a write that
+swallowed the cancellation, or waited on what never came, held the close — a benchmark process
+sat there for fifteen minutes with every case done. A cancelled worker has the drain bound to
+finish what it holds, as before; one that has not ended a bound later is left behind: an
+error in the log names the write and where it waits, and the write is kept in the spool when
+it can be, else counted lost.
+
 ### Changed: `ReAct`'s follow-ups are sent the earlier turns' tool results (memory service)
 
 `ReAct` keeps no thread of its own: its earlier turns come from the memory service's window,

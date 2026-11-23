@@ -747,3 +747,60 @@ async def test_a_failed_write_of_no_run_is_still_counted_and_logged(
     assert writes.failed == 1
     assert any(r.levelno == logging.ERROR for r in caplog.records)
     assert spans.get_finished_spans() == ()  # no run to trace it in
+
+
+async def test_a_write_that_swallows_its_cancellation_does_not_hold_the_close(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A benchmark process sat at ``Harness.aclose`` for fifteen minutes, every case done:
+    the close awaited its cancelled workers with no bound, and one never ended. A write whose
+    code swallows the cancellation (or waits on what never comes) is given the drain bound
+    once more, then left behind: said in the log with where it waits, and counted lost."""
+    monkeypatch.setattr(module, "DRAIN_SECONDS", 0.05)
+    writes, entered = Writes(), asyncio.Event()
+
+    over = False
+
+    async def deaf() -> None:
+        entered.set()
+        while not over:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                continue  # the cancellation is swallowed: the write goes on waiting
+
+    await writes.submit("memory.deaf", deaf)
+    await entered.wait()
+    left = list(writes._workers)
+    with caplog.at_level(logging.ERROR, logger="trellis.writes"):
+        async with asyncio.timeout(2):
+            await writes.aclose()
+    over = True  # the test's own: the loop's shutdown ends the write
+    while not all(worker.done() for worker in left):
+        for worker in left:
+            worker.cancel()
+        await asyncio.sleep(0.01)
+    assert writes.failed == 1 and writes._queue is None and not writes._workers
+    assert any(
+        "memory.deaf" in r.getMessage() and "did not stop" in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_a_worker_that_failed_fails_the_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker ended by an error of the queue's own code (never a write's: those are given
+    up) is not passed over in silence: the close raises it."""
+    writes = Writes()
+
+    async def broken(item: Any) -> None:
+        raise RuntimeError("the worker's own")
+
+    monkeypatch.setattr(writes, "_attempt", broken)
+
+    async def done() -> None:
+        return None
+
+    await writes.submit("memory.transcript", done)
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="the worker's own"):
+        await writes.aclose()
+    assert writes._queue is None and not writes._workers

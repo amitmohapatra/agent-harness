@@ -47,7 +47,6 @@ does the same explicitly.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -118,6 +117,8 @@ class Writes:
         self._queue: asyncio.Queue[_Item] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._workers: list[asyncio.Task[None]] = []
+        #: the write each worker has in hand (what a worker that will not stop is holding)
+        self._held: dict[asyncio.Task[None], _Item] = {}
         self._spool = Path(spool) if spool is not None else None
         self._replay = replay
         self._hurry = False
@@ -164,9 +165,11 @@ class Writes:
 
     async def aclose(self) -> None:
         """Drain (at most :data:`DRAIN_SECONDS`), then stop the workers: what is still queued
-        is spooled or counted lost. Closed from a loop other than the workers' (a harness
-        served from another thread: uvicorn's), that is done on theirs while it runs; a loop
-        that has stopped stopped its workers already (and they finished the queue)."""
+        is spooled or counted lost, and a worker whose write will not stop is left behind
+        (:meth:`_left_behind`) rather than waited for without end. Closed from a loop other
+        than the workers' (a harness served from another thread: uvicorn's), that is done on
+        theirs while it runs; a loop that has stopped stopped its workers already (and they
+        finished the queue)."""
         owner = self._loop
         if owner is not None and owner is not asyncio.get_running_loop():
             if owner.is_running():
@@ -193,12 +196,35 @@ class Writes:
             self._hurry = True  # the bound is spent: the workers give the rest up at once
         for worker in self._workers:
             worker.cancel()
-        for worker in self._workers:
-            with contextlib.suppress(asyncio.CancelledError):
-                await worker
+        # a cancelled worker finishes what it holds within the drain bound (:meth:`_finish`);
+        # one that has not ended a bound later holds a write that swallowed its cancellation
+        # or waits on what never comes: it is left behind, said, never waited for without end
+        stopped, deaf = (
+            await asyncio.wait(self._workers, timeout=2 * DRAIN_SECONDS)
+            if self._workers
+            else (set(), set())
+        )
+        for worker in deaf:
+            self._left_behind(worker)
         self._workers.clear()
         self._queue = None
         self._hurry = False
+        for worker in stopped:
+            if not worker.cancelled() and (failed := worker.exception()) is not None:
+                raise failed
+
+    def _left_behind(self, worker: asyncio.Task[None]) -> None:
+        """A worker that did not stop when cancelled: its write is given up (kept in the spool
+        when it can be), with where it waits in the log."""
+        item = self._held.pop(worker)  # a worker is cancelled at once unless it holds one
+        waiting: Any = worker.get_coro()  # down the awaits to the one that does not return
+        names: list[str] = []
+        while getattr(waiting, "cr_frame", None) is not None:
+            names.append(waiting.cr_frame.f_code.co_name)
+            waiting = waiting.cr_await
+        at = " > ".join(names[-4:])
+        log.error("trellis write: %s did not stop when the harness closed (at %s)", item.label, at)
+        self._give_up(item, "did not stop when the harness closed")
 
     # ------------------------------------------------------------------ internals
     def _ensure(self) -> asyncio.Queue[_Item]:
@@ -219,12 +245,16 @@ class Writes:
 
     async def _work(self, queue: asyncio.Queue[_Item]) -> None:
         item: _Item | None = None
+        me = asyncio.current_task()
+        assert me is not None
         try:
             while True:
                 item = await queue.get()
+                self._held[me] = item
                 await self._attempt(item)
                 queue.task_done()
                 item = None
+                self._held.pop(me, None)
         except asyncio.CancelledError:
             # The loop is going away: finish what was promised (the write that was cut off
             # included, writes are idempotent), within bounds; keep or count the rest.
@@ -238,6 +268,8 @@ class Writes:
             async with asyncio.timeout(0 if self._hurry else DRAIN_SECONDS):
                 while pending or not queue.empty():
                     current = pending.pop() if pending else queue.get_nowait()
+                    if (me := asyncio.current_task()) is not None:
+                        self._held[me] = current
                     try:
                         await self._attempt(current)
                     finally:
