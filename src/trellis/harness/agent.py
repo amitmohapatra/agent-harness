@@ -1678,6 +1678,10 @@ class Agent:
             self.results.said(runtime.conversation, runtime.run_id, messages)
         if memory is None or not runtime.uses("records"):
             return
+        if self.model is None and self.called is not None and self.harness.memory is not None:
+            # the model this run's replies named, told before its turn is written: the
+            # service's work on the turn goes where the agent's does (``Harness._registered``)
+            await self.harness._registered(self.harness.memory, runtime.identity, self.called)
         run_id, attempt = runtime.run_id, runtime.attempt
         conversation_key = runtime.conversation
         on_its_way = self.unwritten.get(conversation_key) or {}

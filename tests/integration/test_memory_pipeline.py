@@ -924,11 +924,14 @@ async def test_an_agent_whose_runs_name_its_model_tells_the_endpoint_again_with_
     Agents SDK, Claude Code and Kimi call theirs themselves, and their endpoint was told with
     no model — which an endpoint that lists no models (Anthropic's) is refused for, so the
     memory service did its own model work for ``ReAct`` agents alone. The model a run's first
-    reply is accounted with is the agent's: its next run tells the endpoint again, with it,
-    once."""
+    reply is accounted with is the agent's: the endpoint is told again, with it, once, as
+    that run ends (before its turn is written)."""
     async with harness_with(memory_service, llm_base_url=ENDPOINT, llm_api_key="sk") as h:
         agent = h.wrap(called, id="own")
-        for said in ("a", "b", "c"):
+        await agent.run("a", user="u")
+        await h.writes.drain()
+        assert len(memory_service.named("model_key")) == 2
+        for said in ("b", "c"):
             await agent.run(said, user="u")
             await h.writes.drain()
         assert agent.model is None and agent.called == "claude-test-1"
@@ -943,24 +946,30 @@ async def test_an_endpoint_refused_before_its_model_is_known_is_told_again_with_
 ) -> None:
     """Refused with no model named, the endpoint is not given up for the process: the model
     its runs call may be what the service needs to check it. Refused with one, it is."""
+    replies = False
+
+    async def later(input: str, agent: Runtime) -> str:
+        if replies:
+            budget.account(agent, model="claude-test-1", input_tokens=3, output_tokens=1)
+        return "ok"
+
     memory_service.failures["model_key"] = 422
     async with harness_with(memory_service, llm_base_url=ENDPOINT, llm_api_key="sk") as h:
-        agent = h.wrap(called, id="own")
+        agent = h.wrap(later, id="own")
         with caplog.at_level("WARNING", logger="trellis.harness"):
-            await agent.run("a", user="u")
+            await agent.run("a", user="u")  # no reply of its model yet: told with none
             await h.writes.drain()
-            assert not h._endpoints_off
+            assert not h._endpoints_off and memory_service.named("model_key") == []
             del memory_service.failures["model_key"]
+            replies = True
             await agent.run("b", user="u")
             await h.writes.drain()
             assert [c.body["endpoint"]["model"] for c in memory_service.named("model_key")] == [
                 "claude-test-1"
             ]
             memory_service.failures["model_key"] = 422
-            other = h.wrap(ReAct(system_prompt="s", model="openai/o3"), id="named")
-            assert h.memory is not None
-            whose = Identity(tenant="acme", user="u", agent_id="named", run_id="r1")
-            await h._registered(h.memory, whose, other.model)
+            other = h.wrap(called, id="own2")
+            await other.run("c", user="u")  # refused with none, then with its model: given up
             await h.writes.drain()
             assert h._endpoints_off
     assert caplog.text.count("refused") == 1
