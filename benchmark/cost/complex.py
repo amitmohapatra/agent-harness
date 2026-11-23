@@ -72,6 +72,7 @@ from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
 from trellis.contracts import RunStatus, ToolCall, ToolOutcome
+from trellis.harness import figures
 
 Call = tuple[str, dict[str, Any]]
 
@@ -3212,9 +3213,25 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
             for c in held
         )
 
-    return [
-        f"{n:g}" for n in numbers(answer) if not (n == int(n) and abs(n) <= 100) and not near(n)
-    ]
+    said = numbers(answer)
+    known = [n for n in said if (n == int(n) and abs(n) <= 100) or near(n)]
+    out = [n for n in said if n not in known]
+    # plain arithmetic on figures the answer has a source for (a difference, a share, a
+    # total) is checked by doing the sum, as the harness's own check does: right, it is the
+    # data's, and what it gives may be worked from in turn
+    for _ in range(figures.PASSES):
+        worked = [
+            n
+            for n in out
+            if figures.worked(
+                n, 0.5 * 10.0 ** -len(f"{n:g}".partition(".")[2]) + 1e-9, known[: figures.POOL]
+            )
+        ]
+        if not worked:
+            break
+        known += worked
+        out = [n for n in out if n not in worked]
+    return [f"{n:g}" for n in out]
 
 
 #: A record's field that is a magnitude (the cases' ``abs(...)``): said as a signed change

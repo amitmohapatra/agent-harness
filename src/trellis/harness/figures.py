@@ -62,19 +62,20 @@ def _near(value: float, other: float, step: float) -> bool:
     return abs(value - other) <= max(TOLERANCE * abs(other), step)
 
 
-def _worked(value: float, step: float, known: list[float]) -> bool:
+def worked(value: float, step: float, known: list[float]) -> bool:
     """Whether ``value`` is plain arithmetic on figures the answer already has a source for
     (``known``): the sum, the difference, the product or the ratio of two of them, one as a
-    percentage of or a percentage change on another, their mean, or the sum or the mean of a
+    percentage of or a percentage change on another (said with its sign or as how far
+    under or over), their mean, or the sum or the mean of a
     run of them as the answer lists them (a table's total). Such a figure is checked here, by
     doing the sum: right, it needs no tool; wrong, it matches nothing and is named."""
     for i, a in enumerate(known):
         for b in known[i:]:
             made = [a + b, a - b, b - a, a * b, (a + b) / 2]
             if b:
-                made += [a / b, 100 * a / b, 100 * (a - b) / b]
+                made += [a / b, 100 * a / b, 100 * (a - b) / b, 100 * (b - a) / b]
             if a:
-                made += [b / a, 100 * b / a, 100 * (b - a) / a]
+                made += [b / a, 100 * b / a, 100 * (b - a) / a, 100 * (a - b) / a]
             if any(_near(value, m, step) for m in made):
                 return True
     for start in range(len(known)):
@@ -91,7 +92,7 @@ def unbacked(answer: str, given: str) -> list[str]:
     hold: each as the answer wrote it, once, in the answer's order. A figure is held when one
     of ``given``'s numbers is it within :data:`TOLERANCE`, or rounds to it at the places the
     answer shows, in the scale given or another (:data:`_SCALES`) — or when it is plain
-    arithmetic on figures of the answer that are held (:func:`_worked`: a difference, a share,
+    arithmetic on figures of the answer that are held (:func:`worked`: a difference, a share,
     a total; and on what that gives in turn, :data:`PASSES` deep)."""
     held = numbers(given)
     stated = _read(answer)
@@ -109,7 +110,7 @@ def unbacked(answer: str, given: str) -> list[str]:
         still = []
         for value, places in open_:
             step = 0.5 * 10.0**-places + 1e-9
-            if _worked(value, step, known[:POOL]):
+            if worked(value, step, known[:POOL]):
                 known.append(value)
             else:
                 still.append((value, places))
@@ -124,4 +125,4 @@ def unbacked(answer: str, given: str) -> list[str]:
     return out
 
 
-__all__ = ["COUNTED", "TOLERANCE", "numbers", "unbacked"]
+__all__ = ["COUNTED", "PASSES", "TOLERANCE", "numbers", "unbacked", "worked"]

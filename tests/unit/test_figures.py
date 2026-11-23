@@ -74,3 +74,10 @@ def test_arithmetic_on_arithmetic_is_followed_so_far_and_no_further() -> None:
         "and again each step."
     )
     assert unbacked(answer, given) == ["18835.32"]
+
+
+def test_a_change_said_as_how_far_under_is_the_change() -> None:
+    """ "4.7% under forecast": the change's size, its direction in words."""
+    given = "forecast 6535, allocated 6230"
+    assert unbacked("Allocated 6,230 against 6,535, about 4.7% under forecast.", given) == []
+    assert unbacked("Allocated 6,230 against 6,535, about 5.7% under forecast.", given) == ["5.7"]

@@ -3352,6 +3352,17 @@ def test_a_figure_shown_in_thousands_is_the_figure_it_rounds() -> None:
     assert cx.ungrounded("That is about £158.9k at 7 days.", held) == ["158.9"]
 
 
+def test_a_figure_worked_out_right_from_held_ones_is_not_made_up() -> None:
+    """A difference, a share or a total of figures the model was sent is checked by doing the
+    sum, as the harness's own check does (``trellis.harness.figures``): right, it is the
+    data's; wrong, it is named."""
+    held = "forecast 6535, allocated 6230; AL-13 total 10605, AL-14 total 10903"
+    said = "Forecast 6,535 against 6,230 allocated, about 305 below. AL-14 is 10,903, 298 more than 10,605."
+    assert cx.ungrounded(said, held) == []
+    assert cx.ungrounded(said.replace("305", "350"), held) == ["350"]
+    assert cx.ungrounded("That is about 4.7% under forecast (6,535 against 6,230).", held) == []
+
+
 def test_the_figure_asked_for_said_first_and_the_other_named_after_is_right() -> None:
     """advconv-10's "What lead time did we agree to use for SUP-03?" (49, the portal's; never
     the master's 42): an answer that opens with the agreed figure and then says what the other
