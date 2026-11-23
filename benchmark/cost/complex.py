@@ -4269,6 +4269,18 @@ WORKING: Final = frozenset({"PENDING", "RUNNING", "RETRYING"})
 JOBS_WAIT: Final = 30.0
 
 
+def _job_ids(answer: Any) -> list[str]:
+    """The jobs a write's answer names, wherever it names them: its own ``job_ids``, and each
+    acknowledgement's of a batch (``POST /v1/messages`` answers ``{"messages": [{...,
+    "job_ids": [...]}]}`` — read at the top alone, no job of a turn's messages was waited for)."""
+    if isinstance(answer, list):
+        return [j for part in answer for j in _job_ids(part)]
+    if not isinstance(answer, dict):
+        return []
+    own = [j for j in answer.get("job_ids") or [] if isinstance(j, str)]
+    return own + [j for k, v in answer.items() if k != "job_ids" for j in _job_ids(v)]
+
+
 class Queued:
     """The memory service's jobs a suite's writes queued, while it is entered: a write is
     answered before its job has run (202, with the job's id), and a turn of another
@@ -4291,8 +4303,7 @@ class Queued:
 
         async def request(transport: Any, method: str, path: str, **given: Any) -> Any:
             found = await own(transport, method, path, **given)
-            if isinstance(found, dict):
-                jobs.extend((transport, given.get("scope"), j) for j in found.get("job_ids") or [])
+            jobs.extend((transport, given.get("scope"), j) for j in _job_ids(found))
             return found
 
         self.kind.request = request

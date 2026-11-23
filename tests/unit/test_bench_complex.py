@@ -3246,7 +3246,12 @@ async def test_another_conversation_waits_for_what_memory_was_still_working_on()
             if method == "GET" and path.startswith("/v1/jobs/"):
                 self.asked.append(path)
                 return {"status": self.states[path.rsplit("/", 1)[1]].pop(0)}
-            return {"job_ids": [f"obx_{path[-1]}"]} if method == "POST" else ["a row"]
+            if method != "POST":
+                return ["a row"]
+            job = f"obx_{path[-1]}"
+            # a write's own jobs, or — a batch of messages — each acknowledgement's
+            nested = {"messages": [{"message_id": "m", "job_ids": [job]}]}
+            return {"job_ids": [job]} if job == "obx_1" else nested
 
     with cx.Queued(Service) as queued:
         service = Service()

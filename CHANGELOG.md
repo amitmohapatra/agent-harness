@@ -14,6 +14,15 @@ own, given the conversation's turns as a worker that kept none is (a `session` w
 A turn that used a tool before the refusal, a paused one, and a refusal a retry may cure are
 the run's error as before.
 
+### Fixed (benchmark): the wait for memory's jobs read no job
+
+The suite's wait before a new chat (`complex.Queued`) read a write's jobs at the top of its
+answer; `POST /v1/messages` names them on each acknowledgement of the batch, so no job of a
+turn's messages was ever waited for. A new chat still began before memory held the turn
+before it — a note such as "'our flagship' means store S22" was missing from the next chat's
+context on some runs of the fast adapters and never on the slowest. Jobs are now read wherever
+the answer names them.
+
 ### Fixed (benchmark): a sent-back draft backs none of its own figures
 
 With the figure check on, the answer the harness sent back is in the turn's next request,
