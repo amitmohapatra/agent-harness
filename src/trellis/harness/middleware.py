@@ -132,9 +132,10 @@ from trellis.contracts import (
     is_pause_signal,
 )
 from trellis.harness import (
-    accounting,  # every model call accounted, and a reply cut at the output limit noted
+    accounting,  # every model call accounted, and a reply cut at the output limit noted,
     budget,
     compat,
+    figures,
     snapshots,
     task_tools,
 )
@@ -2639,7 +2640,77 @@ class StallGuard(AgentMiddleware):
                         return await _answer_elsewhere(others, handler, told, stopped, call["name"])
                     told = bridge.STALLED.format(tool=call["name"], times=streak)
                     return await _answer_now(request, handler, told, stopped)
+        return await figures_checked(request, handler, reply)
+
+
+#: The tools a figure is computed with: the harness's exact query over kept rows, and a shell.
+COMPUTES: Final = frozenset({query.QUERY_RESULT, EXECUTE, "sandbox_exec"})
+#: What a model whose answer states figures nothing it was given holds is told, once a run.
+FIGURES: Final = (
+    "Before this answer is sent: {figures} in it {verb} in no tool result and no earlier "
+    "message of this conversation. A figure worked out by hand is often wrong. Compute "
+    "{them} with a tool ({tools}) and give the whole answer again with what the tool "
+    "returns, or give the answer without a figure you cannot compute."
+)
+
+
+async def figures_checked(
+    request: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    reply: ModelResponse[Any],
+) -> ModelResponse[Any]:
+    """``reply`` — or, when it is an answer stating figures that no message of its request
+    holds (``figures.unbacked``: worked out in the model's head, the commonest wrong figure of
+    a follow-up), the model's reply to being told which (:data:`FIGURES`), with its tools: it
+    computes them (the run goes on with its calls) or answers again. Once a run
+    (``Runtime.figures_checked``), where a tool that computes is offered (:data:`COMPUTES`) and
+    the run checks its answers (``without=["grounding"]`` turns it off); a reply with neither
+    an answer nor a call leaves the first answer the run's."""
+    runtime = current()
+    message = _ai(reply)
+    if runtime is None or message is None or message.tool_calls or not message.text:
         return reply
+    if runtime.figures_checked or request.response_format is not None:
+        return reply
+    tools = sorted(name for t in request.tools if (name := _named(t)) in COMPUTES)
+    if not _shelled(runtime):  # the harness's own shell, listed and off in this run
+        tools = [name for name in tools if name == query.QUERY_RESULT]
+    if not tools or not runtime.uses("grounding"):
+        return reply
+    sent = [request.system_message, *request.messages]
+    given = "\n".join(_as_text(m.content) for m in sent if m is not None)
+    found = figures.unbacked(str(message.text), given)
+    if not found:
+        return reply
+    runtime.figures_checked = True
+    told = FIGURES.format(
+        figures=", ".join(found),
+        verb="is" if len(found) == 1 else "are",
+        them="it" if len(found) == 1 else "them",
+        tools=", ".join(tools),
+    )
+    asked = request.override(messages=[*request.messages, message, HumanMessage(content=told)])
+    again = await handler(asked)
+    answer = _ai(again)
+    if answer is None or not (answer.tool_calls or answer.text):
+        return reply
+    _warned("figures", f"asked again: {len(found)} figure(s) of the answer had no source")
+    return again
+
+
+def _shelled(runtime: Runtime) -> bool:
+    """Whether the shell the run's model is listed is one it can call: its agent's own, or the
+    harness's default where the run has it (``without=["code"]`` and a deployment that says
+    ``deny`` leave it listed to this middleware and take it out after: ``sandbox.code_of``)."""
+    agent = runtime.agent
+    if getattr(agent, "codes", None) != "default":
+        return True
+    return runtime.uses("code") and getattr(agent, "code", None) is not None
+
+
+def _as_text(content: Any) -> str:
+    """A message's content as text: its string, or its blocks as JSON (their text and data)."""
+    return content if isinstance(content, str) else json.dumps(content, default=str)
 
 
 #: What a model whose call failed each time it made it is told at its stall (:func:`_elsewhere`):

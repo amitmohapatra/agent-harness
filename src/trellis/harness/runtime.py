@@ -223,6 +223,9 @@ class Runtime:
     #: not run again), the decision that made it last (:attr:`deciding`) and the framework's
     #: step it was made in (``Replay.here``)
     repeating: tuple[str, int, Hashable | None, str | None] = ("", 0, None, None)
+    #: the run's answer was sent back once for figures nothing it was given holds
+    #: (``middleware.figures_checked``): once a run, whatever its next answer says
+    figures_checked: bool = False
     #: the framework's own session cannot be continued: its provider refused the session's
     #: request and said a retry will not help (an ACP agent's failed turn) — not kept for the
     #: conversation's next turn (``pipeline._kept_session``)
