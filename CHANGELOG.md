@@ -5,6 +5,29 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: `ReAct`'s follow-ups are sent the earlier turns' tool results (memory service)
+
+`ReAct` keeps no thread of its own: its earlier turns come from the memory service's window,
+which replayed only the newest turn's calls and results and nothing the thread's summary
+covered. Its third question was sent no earlier result and its fifth a digest, where
+`create_agent` with a checkpointer is sent the conversation. The service's window now replays
+turns whole from the newest back while the budget holds them (its changelog has the detail);
+the harness asks as before, in a budget sized for the model's window, and still marks a
+replayed live result past its tool's age as out of date.
+
+Measured on the hard set (the questions every run was scored on, three runs each, one model):
+`ReAct` on Deep Agents 96.6% before and 97.2% after (310, 312, 311 of 320), for the same
+spend ($0.54 a run).
+
+### Fixed (benchmark): a figure worked out right from held ones is not made up
+
+The scorer's check on an answer's figures named a difference or a share the model had worked
+out correctly from figures it was sent ("6,535 forecast against 6,230 allocated, about 305
+below"), for every adapter; one question failed on every run of every setup for it. The scorer
+now does the sum, as the harness's own check does (`figures.worked`): right, the figure is
+the data's; wrong, it is named. A change said as how far under or over ("4.7% under") is the
+change, in the harness's check too.
+
 ### Fixed: a turn whose kept session is refused for good runs again in a new one
 
 The harness dropped a session its provider refused for good, so the conversation's next turn
