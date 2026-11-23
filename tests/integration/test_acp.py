@@ -1576,6 +1576,18 @@ async def test_a_kept_session_its_provider_refuses_for_good_is_left_and_the_turn
     assert failed.status is RunStatus.ERROR
     assert [s["how"] for s in recorded(tmp_path / "may-pass")["sessions"]] == ["new", "resume"]
 
+    # a turn that ran a tool before its session was refused is not run again: that would
+    # repeat the call
+    (tmp_path / "ran").mkdir()
+    script = [{"text": "noted"}, {"stop": "end_turn"}]
+    script += [{"tool": "lookup", "args": {"topic": "tea"}}, {"turn_fails": refused}]
+    worked = harness.wrap(fake(tmp_path / "ran", script), id="ran", without={"schedules"})
+    worked = arm(worked, [lookup])
+    await worked.run("The locker code is 4242.", user="u1", thread="t3")
+    cut = await worked.run("Look up tea, then the code.", user="u1", thread="t3")
+    assert cut.status is RunStatus.ERROR
+    assert [s["how"] for s in recorded(tmp_path / "ran")["sessions"]] == ["new", "resume"]
+
 
 async def test_the_agents_plan_is_an_event_of_the_run(harness: Harness, tmp_path: Path) -> None:
     """Kimi's todo list reaches an ACP client as a plan (``session/update`` ``plan``): its

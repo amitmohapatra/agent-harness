@@ -410,7 +410,7 @@ class Agent:
         #: the name of the agent's model when its builder says it (``ReAct``): what the
         #: memory service is told with the endpoint, with its profile
         self.model = model_name(target)
-        #: the model the first reply of its runs was accounted with (``budget.account``): the
+        #: the model the first reply of its runs was accounted with (``Runtime.called``): the
         #: agent's model where its framework calls it itself and no builder names it (a graph
         #: of the team's own, the OpenAI Agents SDK, Claude Code, Kimi)
         self.called: str | None = None
@@ -1678,6 +1678,7 @@ class Agent:
             self.results.said(runtime.conversation, runtime.run_id, messages)
         if memory is None or not runtime.uses("records"):
             return
+        self.called = self.called or runtime.called
         if self.model is None and self.called is not None and self.harness.memory is not None:
             # the model this run's replies named, told before its turn is written: the
             # service's work on the turn goes where the agent's does (``Harness._registered``)

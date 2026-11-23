@@ -757,6 +757,7 @@ def test_the_budget_stops_a_run_at_its_limit_across_a_reset() -> None:
 
     journal = Journal()
     runtime = SimpleNamespace(
+        called=None,
         replay=SimpleNamespace(journal=journal),
         budget=budget.Budget(max_cost=1.0),
         parent=None,

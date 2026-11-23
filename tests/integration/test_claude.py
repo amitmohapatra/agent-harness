@@ -394,7 +394,12 @@ def test_a_results_cache_writes_are_counted_apart_from_its_other_input() -> None
     from trellis.harness.journal import Journal, Replay
 
     runtime: Any = SimpleNamespace(
-        replay=Replay(Journal()), parent=None, budget=None, spent_more=lambda: None, running_in=None
+        called=None,
+        replay=Replay(Journal()),
+        parent=None,
+        budget=None,
+        spent_more=lambda: None,
+        running_in=None,
     )
     spending = claude_adapter.Spending(runtime, SimpleNamespace(model="m"), LRU(), None)
     used = {"input_tokens": 10, "output_tokens": 5}

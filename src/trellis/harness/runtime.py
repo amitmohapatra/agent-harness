@@ -230,6 +230,9 @@ class Runtime:
     #: request and said a retry will not help (an ACP agent's failed turn) — not kept for the
     #: conversation's next turn (``pipeline._kept_session``)
     session_refused: bool = False
+    #: the model the run's first reply was accounted with (``budget.account``): its agent's
+    #: model where no builder named one (``Agent.called``)
+    called: str | None = None
     #: the latest harness tool call that came back (its key) and how many times in a row it
     #: has failed — a call that failed each time it was made stalls its own tool, not the run
     #: (``tools.bridge._repeated``)

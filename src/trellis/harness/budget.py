@@ -186,8 +186,8 @@ def _account(
     cost: float | None,
     calls: int,
 ) -> None:
-    if model and calls and runtime.agent.called is None:
-        runtime.agent.called = model  # the model its framework calls, when no builder said
+    if model and calls and runtime.called is None:
+        runtime.called = model  # the model its framework calls, when no builder said
     capped = any(r.budget is not None and r.budget.max_cost for r in _runs(runtime))
     if cost is None and capped:
         _no_cost(model or "a model")

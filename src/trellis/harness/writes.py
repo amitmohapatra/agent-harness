@@ -264,12 +264,13 @@ class Writes:
     async def _finish(self, queue: asyncio.Queue[_Item], cut: _Item | None) -> None:
         pending = [cut] if cut is not None else []
         current: _Item | None = None
+        me = asyncio.current_task()
+        assert me is not None
         try:
             async with asyncio.timeout(0 if self._hurry else DRAIN_SECONDS):
                 while pending or not queue.empty():
                     current = pending.pop() if pending else queue.get_nowait()
-                    if (me := asyncio.current_task()) is not None:
-                        self._held[me] = current
+                    self._held[me] = current
                     try:
                         await self._attempt(current)
                     finally:
