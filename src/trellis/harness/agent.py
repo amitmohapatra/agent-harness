@@ -410,6 +410,10 @@ class Agent:
         #: the name of the agent's model when its builder says it (``ReAct``): what the
         #: memory service is told with the endpoint, with its profile
         self.model = model_name(target)
+        #: the model the first reply of its runs was accounted with (``budget.account``): the
+        #: agent's model where its framework calls it itself and no builder names it (a graph
+        #: of the team's own, the OpenAI Agents SDK, Claude Code, Kimi)
+        self.called: str | None = None
         #: the tools the harness runs for the agent: what its builder declares
         #: (``ReAct(tools=, subagents=)``); besides them every run has the MCP tools the
         #: virtual key allows and the memory tools (``tools_for``)
@@ -1198,7 +1202,7 @@ class Agent:
         memory = self.harness.memory
         if memory is None or without | self.without >= MEMORY:
             return None
-        await self.harness._registered(memory, identity, self.model)
+        await self.harness._registered(memory, identity, self.model or self.called)
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:

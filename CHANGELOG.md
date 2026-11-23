@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: the memory service is told the model of an agent whose framework calls it itself
+
+The harness tells the memory service each agent's model endpoint so that the service's own
+model work for the agent (summaries, extraction) goes where the agent's does. Only `ReAct`
+names its model as it is built; for a graph of your own, the OpenAI Agents SDK, Claude Code
+and Kimi the endpoint was told with no model — and an endpoint that lists no models
+(Anthropic's) is refused without one, so on such an endpoint the service did its model work
+for `ReAct` agents alone. The model a run's first reply is accounted with is now the agent's
+(`Agent.called`): its next run tells the endpoint again, with it, once. An endpoint refused
+before its model was known is no longer given up for the process.
+
 ### Fixed: closing the harness never waits without end on a background write
 
 `Harness.aclose()` cancelled its write workers and awaited each with no bound: a write that

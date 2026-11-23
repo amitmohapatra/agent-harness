@@ -219,10 +219,14 @@ class Harness:
             retry=KEY_RETRY_SECONDS,
             fatal=(ConfigurationError,),
         )
-        #: the agents (tenant, agent) whose model endpoint the memory service was told
-        self._endpoints_told: set[tuple[str, str]] = set()
-        #: the memory service takes no model endpoints, or refused this one: none is told again
+        #: the agents (tenant, agent) whose model endpoint the memory service was told, with
+        #: the model it was told with (``None``: not known then)
+        self._endpoints_told: dict[tuple[str, str], str | None] = {}
+        #: the memory service takes no model endpoints, or refused this one with its model
+        #: named: none is told again
         self._endpoints_off = False
+        #: a refusal was said (once per process)
+        self._endpoints_said = False
         #: agent-runs refused a heartbeat that carried events (a release before it took them):
         #: progress is saved without them from then on, the events appended as before
         self._saves_without_events = False
@@ -725,15 +729,19 @@ class Harness:
         (:meth:`~trellis.harness.gateways.ModelGateway.endpoint`: ``LLM_BASE_URL``, the route,
         the auth, the bearer key when it is one, the agent's ``model`` and its profile) — so its
         own model work for the agent goes where the agent's does: once per process and agent
-        (idempotent in the service). A route with none to tell (the providers' own SDKs) tells
+        (idempotent in the service), and once more with the model its runs call when none was
+        known the first time (``Agent.called``: a framework that calls its model itself). A
+        route with none to tell (the providers' own SDKs) tells
         nothing. A memory service that takes no model endpoints (its credential encryption is
         not configured), or refuses this one (it cannot reach it: a ``localhost`` only this
-        machine reaches), is said so once per process, in the log, and not asked again: its
-        own settings serve then."""
+        machine reaches), is said so once per process, in the log, and not asked again (a
+        refusal with no model named, only for that agent until its model is known): its own
+        settings serve then."""
         scope = (identity.tenant, identity.agent_id)
-        if self._endpoints_off or scope in self._endpoints_told:
-            return
-        self._endpoints_told.add(scope)
+        told = self._endpoints_told.get(scope, "")
+        if self._endpoints_off or told or (told is None and model is None):
+            return  # told with its model, or with none and still none to add
+        self._endpoints_told[scope] = model
         endpoint = self.model_gateway.endpoint(model)
         if endpoint is None:
             return
@@ -747,14 +755,20 @@ class Harness:
                     raise
                 self._endpoints_unused("takes no model endpoints", exc, logging.INFO)
             except ValidationError as exc:
-                self._endpoints_unused(f"refused {endpoint.base_url}", exc, logging.WARNING)
+                # refused with no model named, it is asked again once the agent's runs name
+                # one: the model may be what the service needs to check the endpoint with
+                self._endpoints_unused(
+                    f"refused {endpoint.base_url}", exc, logging.WARNING, off=model is not None
+                )
 
         await self.writes.submit("memory.model_key", register)
 
-    def _endpoints_unused(self, why: str, exc: Exception, level: int) -> None:
-        """The memory service does not use the agents' endpoint: said once per process."""
-        if not self._endpoints_off:
-            self._endpoints_off = True
+    def _endpoints_unused(self, why: str, exc: Exception, level: int, *, off: bool = True) -> None:
+        """The memory service does not use the agents' endpoint: said once per process, and
+        (``off``) no agent's is told again."""
+        self._endpoints_off = self._endpoints_off or off
+        if not self._endpoints_said:
+            self._endpoints_said = True
             log.log(
                 level,
                 "the memory service %s (%s): its LLM work for these agents runs on its own "

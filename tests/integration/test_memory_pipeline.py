@@ -30,7 +30,7 @@ from tests.unit.test_toolbox import Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import snapshots, telemetry
+from trellis.harness import budget, snapshots, telemetry
 from trellis.harness.agent import (
     ANSWERING,
     ASKING,
@@ -905,9 +905,65 @@ async def test_an_endpoint_the_service_refuses_is_said_once(
             await h.writes.drain()
             await h.wrap(ok, id="b").run("x", user="u")
             await h.writes.drain()
-        assert h.writes.failed == 0 and h._endpoints_off
+        assert h.writes.failed == 0
     assert caplog.text.count("refused http://localhost:11434/v1") == 1
     assert "(the fake memory service)" in caplog.text  # the service's reason, as it said it
+
+
+async def called(input: str, agent: Runtime) -> str:
+    """An agent whose framework calls its model itself: the harness learns the model's name
+    from the reply it accounts."""
+    budget.account(agent, model="claude-test-1", input_tokens=3, output_tokens=1)
+    return "ok"
+
+
+async def test_an_agent_whose_runs_name_its_model_tells_the_endpoint_again_with_it(
+    memory_service: FakeMemoryService,
+) -> None:
+    """Only ``ReAct`` says its model as it is built; a graph of the team's own, the OpenAI
+    Agents SDK, Claude Code and Kimi call theirs themselves, and their endpoint was told with
+    no model — which an endpoint that lists no models (Anthropic's) is refused for, so the
+    memory service did its own model work for ``ReAct`` agents alone. The model a run's first
+    reply is accounted with is the agent's: its next run tells the endpoint again, with it,
+    once."""
+    async with harness_with(memory_service, llm_base_url=ENDPOINT, llm_api_key="sk") as h:
+        agent = h.wrap(called, id="own")
+        for said in ("a", "b", "c"):
+            await agent.run(said, user="u")
+            await h.writes.drain()
+        assert agent.model is None and agent.called == "claude-test-1"
+    assert [c.body["endpoint"]["model"] for c in memory_service.named("model_key")] == [
+        None,
+        "claude-test-1",
+    ]
+
+
+async def test_an_endpoint_refused_before_its_model_is_known_is_told_again_with_it(
+    memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refused with no model named, the endpoint is not given up for the process: the model
+    its runs call may be what the service needs to check it. Refused with one, it is."""
+    memory_service.failures["model_key"] = 422
+    async with harness_with(memory_service, llm_base_url=ENDPOINT, llm_api_key="sk") as h:
+        agent = h.wrap(called, id="own")
+        with caplog.at_level("WARNING", logger="trellis.harness"):
+            await agent.run("a", user="u")
+            await h.writes.drain()
+            assert not h._endpoints_off
+            del memory_service.failures["model_key"]
+            await agent.run("b", user="u")
+            await h.writes.drain()
+            assert [c.body["endpoint"]["model"] for c in memory_service.named("model_key")] == [
+                "claude-test-1"
+            ]
+            memory_service.failures["model_key"] = 422
+            other = h.wrap(ReAct(system_prompt="s", model="openai/o3"), id="named")
+            assert h.memory is not None
+            whose = Identity(tenant="acme", user="u", agent_id="named", run_id="r1")
+            await h._registered(h.memory, whose, other.model)
+            await h.writes.drain()
+            assert h._endpoints_off
+    assert caplog.text.count("refused") == 1
 
 
 async def test_a_registration_that_fails_otherwise_is_a_failed_write(
