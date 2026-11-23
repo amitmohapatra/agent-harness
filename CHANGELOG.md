@@ -14,6 +14,24 @@ own, given the conversation's turns as a worker that kept none is (a `session` w
 A turn that used a tool before the refusal, a paused one, and a refusal a retry may cure are
 the run's error as before.
 
+### Added: an answer's figures that nothing backs are sent back once to be computed
+
+A model asked a follow-up ("why that one?", "how confident are you?") often answers with a
+figure it worked out in its head, and such a figure is the commonest wrong one: seven to twelve
+of each adapter's misses on the hard set. `ReAct` (and a graph with `middleware()`) now checks
+an answer before it goes out (`trellis.harness.figures`): a figure that no message of the
+request holds within its rounding, and that is not plain arithmetic on figures it does hold —
+a difference, a share, a growth rate, a table's total, checked by doing the sum —, is named to
+the model, once a run, with the tools that compute (`query_result`, the shell). It computes
+them and the run goes on, or it answers without them. Only where a tool that computes is
+offered; `without=["grounding"]` turns it off; a `figures` warning says when it happened.
+
+Measured on the hard set (322 questions every run was scored on, three runs each, one model):
+ReAct on Deep Agents 94.2% without it and 95.7% with it; Claude Code 95.4%. About a tenth more
+spent a run. Two things tried first and dropped after the same kind of measurement, for making
+answers worse: a line in the prompt against arithmetic by hand, and a softer wording of the
+"out of date" mark on earlier results.
+
 ### Fixed (benchmark): the figure asked for said first, and "the four that missed"
 
 - **advconv-10**: an answer that opens with the agreed figure ("The lead time agreed is 49
