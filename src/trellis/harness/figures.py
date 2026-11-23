@@ -48,11 +48,7 @@ def _read(text: str) -> list[tuple[float, int]]:
     found = []
     for m in _NUMBER.finditer(_NOT_FIGURES.sub(" ", text)):
         said = m.group(0).replace(",", "")
-        try:
-            value = float(said)
-        except ValueError:
-            continue
-        found.append((value, len(said.partition(".")[2])))
+        found.append((float(said), len(said.partition(".")[2])))
     return found
 
 

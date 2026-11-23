@@ -58,3 +58,19 @@ def test_numbers_are_read_through_thousands_commas_and_csv_cells() -> None:
     assert 1141.0 in numbers("SKU-00012,1141,39.50") and 39.5 in numbers("SKU-00012,1141,39.50")
     assert 157733.89 in numbers("£157,733.89") and -12.0 in numbers("a change of -12 units")
     assert numbers("on 2026-10-30 at 09:00, SKU-00012") == []
+
+
+def test_a_zero_among_the_held_figures_divides_nothing() -> None:
+    given = "north 0.00 south 412.50"
+    assert unbacked("North made £0.00 and south £412.50; twice south is £825.00.", given) == []
+
+
+def test_arithmetic_on_arithmetic_is_followed_so_far_and_no_further() -> None:
+    """A figure worked from one that was itself worked out is checked too, a few steps deep
+    (``PASSES``): past that it is named, and a tool computes it."""
+    given = "start 100.5 factor 3.7"
+    answer = (
+        "It reaches 18,835.32, after 5,090.63 and 1,375.85, from 371.85: 100.5 times 3.7, "
+        "and again each step."
+    )
+    assert unbacked(answer, given) == ["18835.32"]
