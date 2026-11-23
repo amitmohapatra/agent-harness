@@ -1505,7 +1505,12 @@ def cases() -> tuple[Any, ...]:
                             made=(r"\.(?:svg|png|jpe?g|pdf)$", (), 1),
                             done="I drew it: q3_by_region.svg is in outputs/.")),
                 Turn("Why can't you, and what would you need for it?", (),
-                     flags(r"code execution|sandbox|image|render|plot|chart tool",
+                     # with a shell the chart of the turn before was drawn: "why can't you?" has
+                     # no premise then, and saying so (it was drawn, nothing failed) is the answer
+                     flags(r"code execution|sandbox|image|render|plot|chart tool|"
+                           r"\b(?:did|have|already) (?:draw|drawn|drew|made?|creat\w+)|\bI drew\b|"
+                           r"\bwas (?:drawn|made|created)|nothing (?:in [\w ]+ )?(?:failed|went wrong)|"
+                           r"outputs/|\.(?:svg|png)\b",
                            "I have no code execution or image rendering here; with a sandbox (or a chart tool) I could draw it.")),
             ),
             ("explain a can't-do answer",),

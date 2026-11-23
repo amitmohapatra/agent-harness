@@ -3394,3 +3394,18 @@ def test_a_draft_the_harness_sent_back_backs_none_of_its_own_figures() -> None:
     assert cx.ungrounded("East would need about £188,000.", said) == ["188000"]
     earlier = {"messages": [*request["messages"][:3], {"role": "user", "content": "And west?"}]}
     assert "£188,000" in cx.said_in([earlier], [])  # an earlier turn's answer was heard
+
+
+def test_asked_why_it_cannot_after_it_did_the_answer_that_it_did_is_right() -> None:
+    """advexp-04: "Draw me a pie chart", then "Why can't you, and what would you need for it?".
+    Where the run has a shell the chart was drawn, and the follow-up has no premise: "I did
+    draw it — nothing in our conversation failed" is the right answer, and was marked wrong for
+    lacking a reason it could not (an answer happening to say "image" passed)."""
+    t = _turn("advexp-04", 1)
+    for did in (
+        "I did draw it: the pie chart is saved as q3_by_region.png. Nothing in our conversation failed.",
+        "The chart was drawn in my last reply, so there is nothing I couldn't do here.",
+        "I have no code execution or image rendering here; with a sandbox I could draw it.",
+    ):
+        assert cx.score(t.expect, did, [], t.text)["correct"] is True, did
+    assert cx.score(t.expect, "Because I am only a text assistant.", [], t.text)["correct"] is False
