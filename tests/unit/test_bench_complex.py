@@ -3241,11 +3241,14 @@ async def test_another_conversation_waits_for_what_memory_was_still_working_on()
             "obx_2": ["FAILED"],
         }
         asked: list[str] = []  # noqa: RUF012
+        tasks: dict[str, str] = {}  # noqa: RUF012
 
         async def request(self, method: str, path: str, **given: Any) -> Any:
             if method == "GET" and path.startswith("/v1/jobs/"):
                 self.asked.append(path)
-                return {"status": self.states[path.rsplit("/", 1)[1]].pop(0)}
+                job = path.rsplit("/", 1)[1]
+                task = self.tasks.get(job, "memory.process_observation")
+                return {"status": self.states[job].pop(0), "task_name": task}
             if method != "POST":
                 return ["a row"]
             job = f"obx_{path[-1]}"
@@ -3262,6 +3265,11 @@ async def test_another_conversation_waits_for_what_memory_was_still_working_on()
         await queued.settled(pause=0)
         assert Service.asked == ["/v1/jobs/obx_1", "/v1/jobs/obx_2"] + ["/v1/jobs/obx_1"] * 2
         assert queued.jobs == []  # a failed job has ended too: nothing more comes of it
+        Service.states["obx_4"] = ["PENDING"] * 50  # the archive's: read by no chat
+        Service.tasks["obx_4"] = "archive.stage_message"
+        await service.request("POST", "/v1/messages/4")
+        await queued.settled(pause=0)
+        assert queued.jobs == [] and Service.asked.count("/v1/jobs/obx_4") == 1
         Service.states["obx_3"] = ["PENDING"] * 50
         await service.request("POST", "/v1/messages/3")
         await queued.settled(seconds=0, pause=0)  # past its time: the turn begins all the same

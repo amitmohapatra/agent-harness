@@ -4265,6 +4265,9 @@ def scripted_model(case: Case, *, keyed: bool = False, coding: bool = False) -> 
 
 #: A memory job that has not ended (``trellis.memory.models.JobStatus``).
 WORKING: Final = frozenset({"PENDING", "RUNNING", "RETRYING"})
+#: The jobs a context does not wait for: what they make is read by no chat (the archive stages
+#: each message some time after it was said: waited for, every new chat began 30 s late).
+NOT_READ: Final = "archive."
 #: The longest a turn of another conversation waits for memory's jobs, in seconds.
 JOBS_WAIT: Final = 30.0
 
@@ -4323,7 +4326,9 @@ class Queued:
                     found = await self._own(transport, "GET", f"/v1/jobs/{job}", scope=scope)
                 except Exception:  # a job the service no longer knows
                     continue
-                if found.get("status") in WORKING:
+                # the archive's copy of a message is no part of any context, and is made later
+                archived = str(found.get("task_name") or "").startswith(NOT_READ)
+                if found.get("status") in WORKING and not archived:
                     working.append((transport, scope, job))
             self.jobs[:] = working
             if working:
