@@ -35,6 +35,12 @@ _SCALES: Final = (1.0, 1e-3, 1e-6, 100.0)
 #: How far a figure may be from the one it restates and still be that figure: half a percent
 #: (a rounding to three significant figures), or half a unit of its last place shown.
 TOLERANCE: Final = 0.005
+#: How many times over a figure worked out from held ones may itself be worked from (a
+#: difference, then its share of a total), the most figures of an answer looked at, and the
+#: longest run of them summed as a table's total.
+PASSES: Final = 3
+POOL: Final = 120
+RUN: Final = 40
 
 
 def _read(text: str) -> list[tuple[float, int]]:
@@ -56,24 +62,68 @@ def numbers(text: str) -> list[float]:
     return [n for n, _ in (*_read(text), *_read(text.replace(",", " ")))]
 
 
+def _near(value: float, other: float, step: float) -> bool:
+    return abs(value - other) <= max(TOLERANCE * abs(other), step)
+
+
+def _worked(value: float, step: float, known: list[float]) -> bool:
+    """Whether ``value`` is plain arithmetic on figures the answer already has a source for
+    (``known``): the sum, the difference, the product or the ratio of two of them, one as a
+    percentage of or a percentage change on another, their mean, or the sum or the mean of a
+    run of them as the answer lists them (a table's total). Such a figure is checked here, by
+    doing the sum: right, it needs no tool; wrong, it matches nothing and is named."""
+    for i, a in enumerate(known):
+        for b in known[i:]:
+            made = [a + b, a - b, b - a, a * b, (a + b) / 2]
+            if b:
+                made += [a / b, 100 * a / b, 100 * (a - b) / b]
+            if a:
+                made += [b / a, 100 * b / a, 100 * (b - a) / a]
+            if any(_near(value, m, step) for m in made):
+                return True
+    for start in range(len(known)):
+        total = known[start]
+        for end in range(start + 1, min(len(known), start + RUN)):
+            total += known[end]
+            if _near(value, total, step) or _near(value, total / (end - start + 1), step):
+                return True
+    return False
+
+
 def unbacked(answer: str, given: str) -> list[str]:
     """The figures ``answer`` states that ``given`` — everything its model was sent — does not
     hold: each as the answer wrote it, once, in the answer's order. A figure is held when one
     of ``given``'s numbers is it within :data:`TOLERANCE`, or rounds to it at the places the
-    answer shows, in the scale given or another (:data:`_SCALES`)."""
+    answer shows, in the scale given or another (:data:`_SCALES`) — or when it is plain
+    arithmetic on figures of the answer that are held (:func:`_worked`: a difference, a share,
+    a total; and on what that gives in turn, :data:`PASSES` deep)."""
     held = numbers(given)
-    out: list[str] = []
-    for value, places in _read(answer):
-        if value == int(value) and abs(value) <= COUNTED:
-            continue
+    stated = _read(answer)
+    known: list[float] = []
+    open_: list[tuple[float, int]] = []
+    for value, places in stated:
         step = 0.5 * 10.0**-places + 1e-9
-        backed = any(
-            abs(value - c * scale) <= max(TOLERANCE * abs(c * scale), step)
-            for c in held
-            for scale in _SCALES
-        )
+        if (value == int(value) and abs(value) <= COUNTED) or any(
+            _near(value, c * scale, step) for c in held for scale in _SCALES
+        ):
+            known.append(value)
+        else:
+            open_.append((value, places))
+    for _ in range(PASSES):
+        still = []
+        for value, places in open_:
+            step = 0.5 * 10.0**-places + 1e-9
+            if _worked(value, step, known[:POOL]):
+                known.append(value)
+            else:
+                still.append((value, places))
+        if len(still) == len(open_):
+            break
+        open_ = still
+    out: list[str] = []
+    for value, places in open_:
         said = f"{value:.{places}f}" if places else f"{value:g}"
-        if not backed and said not in out:
+        if said not in out:
             out.append(said)
     return out
 

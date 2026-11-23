@@ -35,6 +35,21 @@ def test_a_figure_worked_out_by_hand_is_named_once_as_the_answer_wrote_it() -> N
         "and 373,000 in total."
     )
     assert unbacked(answer, GIVEN) == ["1.09", "0.95", "1.0355", "188", "373000"]
+
+
+def test_plain_arithmetic_on_held_figures_is_checked_here_not_sent_back() -> None:
+    """A difference, a share, a growth rate and a table's total of figures the answer has a
+    source for are done here: right, they need no tool (four answers in ten state one); wrong,
+    they match nothing and are named."""
+    given = "east 653411.68 west 484723.88 north 1523104.74 south 1947395.24"
+    right = (
+        "East made £653,411.68 against west's £484,723.88: higher by £168,687.80, about "
+        "34.8% more. With north's £1,523,104.74 and south's £1,947,395.24 the four total "
+        "£4,608,635.54, an average of £1,152,158.89."
+    )
+    assert unbacked(right, given) == []
+    wrong = right.replace("168,687.80", "186,687.80").replace("34.8%", "38.5%")
+    assert unbacked(wrong, given) == ["186687.80", "38.5"]
     assert unbacked("An average of 4.7 a month.", "rows: 3, 5, 6") == ["4.7"]
     assert unbacked("An average of 4.7 a month.", "avg: 4.6667") == []  # the same, rounded
 
