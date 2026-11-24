@@ -78,6 +78,20 @@ def test_a_time_the_words_leave_open_is_settled_and_said_or_asked() -> None:
     assert nine(chat(made("0 21 * * *"), answer="Set for 21:00; AM instead?")) != []
 
 
+def test_the_harness_confirmation_of_a_new_schedule_is_a_question_asked() -> None:
+    """ "Remind me at 7 every day": the harness asks "Set up this schedule? ..., 07:00" (the
+    time shown, and changeable) where a model's own question would say "am or pm" — it is the
+    question all the same, and the one the suite's user confirms when the turns are over."""
+    from trellis.contracts import Interrupt, InterruptReason
+
+    seven = b.or_asks(b.says_any(b.scheduled("0 7 * * *"), "am", "07:00"), "am", "pm")
+    asked = "Set up this schedule? Check the stock., next Wed 25 Nov, 07:00 (Asia/Kolkata)."
+    assert seven(chat(answer=asked)) == []
+    waits = Interrupt(interrupt_id="i", tenant_id="t", run_id="r", question=asked,
+                      reason=InterruptReason.QUESTION)  # fmt: skip
+    assert b.confirms(waits) and not b.confirms(waits.model_copy(update={"question": "Which?"}))
+
+
 def test_a_question_is_matched_however_its_words_are_hyphenated() -> None:
     """A question naming what the words left open counts whatever joins them: "every-other-week"
     is "every other week" (the answers the every-other-week case was scored down on)."""

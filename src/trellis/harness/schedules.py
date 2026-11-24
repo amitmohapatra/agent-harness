@@ -550,8 +550,12 @@ SPECS: Final = (
             "inferred": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(INFERRED)},
-                "description": "What you assumed rather than the user said: the user confirms "
-                "it in one question, with everything else still open.",
+                "description": "Only what the user's message leaves out and you filled in: "
+                "the user confirms it in one question, with everything else still open. What "
+                "they said is never listed: a time they gave ('at 9am', '17:00') is not an "
+                "assumed time, days they gave ('weekdays', 'every day', 'on Mondays') are not "
+                "assumed days, and their own time zone, when you pass no timezone, is not an "
+                "assumed zone. Leave it out when they said when in full.",
             },
             "alike": {
                 "type": "string",
@@ -711,13 +715,17 @@ async def _settled(
     judged alike, the writes its runs make. ``metadata`` takes what the user allowed. With an
     answer beside it, that is the tool's: nothing made, or the alike schedule updated."""
     when, zone = at
+    assumed = _assumed(runtime, args, when)
     open_ = {
-        "time": _assumed_time(when, args.get("inferred")),
+        "time": _assumed_time(when, assumed),
         "twin": next((m for m in mine if m.schedule_id == str(args.get("alike") or "")), None),
         "writes": await _asking(runtime, args.get("tools") or []),
     }
-    if not any(open_.values()) and not set(args.get("inferred") or ()) & set(INFERRED):
-        return when, None  # said in full: made with no question
+    if not any(open_.values()) and "zone" not in assumed:
+        # made with no question: said in full, or assumed only where the harness cannot tell
+        # (days, a condition, an end: a model marks these on requests that state them, in
+        # any language, and the schedule's own reply says what was made)
+        return when, None
     confirmed = await _confirmed(runtime, _said(about, when, zone), open_)
     if isinstance(confirmed, str):
         return when, confirmed
@@ -1007,6 +1015,42 @@ def _at(when: str, time_: str | None) -> str:
         return when
     hour, minute = time_.split(":")
     return " ".join([str(int(minute)), str(int(hour)), *when.split()[2:]])
+
+
+#: A clock time as a user writes it: with am or pm ("9am", "7:30 pm", "6 p.m."), on the
+#: 24-hour clock ("17:00"), or by name.
+_CLOCK_12: Final = re.compile(r"\b(\d{1,2})(?::([0-5]\d))?\s*([ap])\.?m\b\.?", re.IGNORECASE)
+_CLOCK_24: Final = re.compile(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])(?!\s*[ap]\.?m)")
+_NAMED_TIMES: Final = {"noon": (12, 0), "midday": (12, 0), "midnight": (0, 0)}
+
+
+def _times_said(text: str) -> set[tuple[int, int]]:
+    """The clock times ``text`` states, as (hour, minute) on the 24-hour clock. "At 9" is
+    none: morning or evening is not said."""
+    said = {(int(h), int(m)) for h, m in _CLOCK_24.findall(text)}
+    for hour, minute, half in _CLOCK_12.findall(text):
+        said.add((int(hour) % 12 + (12 if half.lower() == "p" else 0), int(minute or 0)))
+    lowered = text.lower()
+    return said | {at for name, at in _NAMED_TIMES.items() if re.search(rf"\b{name}\b", lowered)}
+
+
+def _assumed(runtime: Runtime, args: dict[str, Any], when: str) -> set[str]:
+    """What the model says it assumed (``inferred``) that the user did not in fact give: a
+    model marks a time the user said ("every day at 9am") and the zone their own app gave as
+    its own assumptions, and the user was then asked to confirm what they had said in full.
+    The time is theirs when their message states it; the zone when no ``timezone`` was passed
+    and their app says one (``snapshots.zone``)."""
+    assumed: set[str] = {str(said) for said in args.get("inferred") or ()} & set(INFERRED)
+    minute, hour, *_ = [*when.split(), "", ""]
+    if (
+        minute.isdigit()
+        and hour.isdigit()
+        and (int(hour), int(minute)) in _times_said(runtime.task or "")
+    ):
+        assumed.discard("time")
+    if not str(args.get("timezone") or "").strip() and snapshots.zone(runtime):
+        assumed.discard("zone")
+    return assumed
 
 
 def _assumed_time(when: str, inferred: Any) -> str | None:

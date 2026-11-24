@@ -179,7 +179,7 @@
                 "type": "number"
               },
               "inferred": {
-                "description": "What you assumed rather than the user said: the user confirms it in one question, with everything else still open.",
+                "description": "Only what the user's message leaves out and you filled in: the user confirms it in one question, with everything else still open. What they said is never listed: a time they gave ('at 9am', '17:00') is not an assumed time, days they gave ('weekdays', 'every day', 'on Mondays') are not assumed days, and their own time zone, when you pass no timezone, is not an assumed zone. Leave it out when they said when in full.",
                 "items": {
                   "enum": [
                     "time",
@@ -510,7 +510,7 @@
                 "type": "number"
               },
               "inferred": {
-                "description": "What you assumed rather than the user said: the user confirms it in one question, with everything else still open.",
+                "description": "Only what the user's message leaves out and you filled in: the user confirms it in one question, with everything else still open. What they said is never listed: a time they gave ('at 9am', '17:00') is not an assumed time, days they gave ('weekdays', 'every day', 'on Mondays') are not assumed days, and their own time zone, when you pass no timezone, is not an assumed zone. Leave it out when they said when in full.",
                 "items": {
                   "enum": [
                     "time",

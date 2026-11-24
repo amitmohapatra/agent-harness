@@ -20,8 +20,9 @@ from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import AgentError, ErrorCategory, RunRecord, RunStatus, ScheduleSpec
-from trellis.harness import schedules, snapshots
+from trellis.harness import pipeline, schedules, snapshots
 from trellis.harness.budget import BUDGET, Budget
+from trellis.harness.frontend import Frontend
 from trellis.harness.notifications import CHAT, ChatChannel, Kind, Notification
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import (
@@ -1313,6 +1314,57 @@ async def test_everything_open_is_asked_in_one_question_never_two() -> None:
         assert schedule.schedule_id == had and schedule.cadence == "0 9 * * 1"
         assert schedule.metadata[ALLOWED] == ["send_report"]
         assert schedule.metadata[UNAPPROVED] == "skip"
+
+
+async def in_app(agent: Any, text: str, zone: str = "Asia/Kolkata") -> Any:
+    """A turn as a front end sends it: with the user's app, which says their zone."""
+    record = await agent._opened(
+        text, user="ada", thread=None, tenant=None, app=Frontend(timezone=zone)
+    )
+    return await pipeline.attempt(agent, record, text)
+
+
+@pytest.mark.parametrize(
+    ("asked_for", "when"),
+    [
+        ("Every day at 9am send me yesterday's sales summary.", "0 9 * * *"),
+        ("Check the stock every morning at 7:30 and tell me.", "30 7 * * *"),
+        ("On weekdays at 6 pm give me the day's revenue.", "0 18 * * 1-5"),
+        ("Weekly on Friday at 17:00, send me the top SKUs.", "0 17 * * 5"),
+        ("At noon every day, the sales summary.", "0 12 * * *"),
+    ],
+)
+async def test_a_time_the_user_said_is_not_one_the_model_assumed(asked_for: str, when: str) -> None:
+    """A model marks the time as assumed when the user said it ("every day at 9am", marked
+    ``inferred: ["time"]``), and the zone when it is the user's own app's: the schedule then
+    waited for a confirmation of what was said in full — fifty of the schedule benchmark's
+    hundred and forty chats, on every adapter. The claim is read against the user's own words
+    and their app's zone: said, it is not asked again."""
+    async with Harness(config=Settings()) as h:
+        args = {"task": "the report", "when": when, "inferred": ["time", "zone"]}
+        agent = await planned(h, ("schedule_task", args))
+        result = await in_app(agent, asked_for)
+        assert result.status is RunStatus.SUCCESS, result.interrupt
+        assert only(h).cadence == when and only(h).timezone == "Asia/Kolkata"
+
+
+async def test_a_time_or_zone_the_user_did_not_say_is_still_confirmed() -> None:
+    """Another time than the one said, a time with no morning or evening to it, and a zone no
+    app gives are still the model's own."""
+    for asked_for, when in (
+        ("Every day at 9am send me the summary.", "0 21 * * *"),  # not the time said
+        ("Every day at 9 send me the summary.", "0 9 * * *"),  # 9 in the morning, or at night
+    ):
+        async with Harness(config=Settings()) as h:
+            args = {"task": "the report", "when": when, "inferred": ["time"]}
+            agent = await planned(h, ("schedule_task", args))
+            done = await in_app(agent, asked_for)
+            assert done.status is RunStatus.PAUSED, asked_for
+    async with Harness(config=Settings()) as h:
+        args = {"task": "the report", "when": "0 9 * * *", "inferred": ["zone"]}
+        agent = await planned(h, ("schedule_task", args))
+        done = await agent.run("Every day at 9am send me the summary.", user="ada")
+        assert done.status is RunStatus.PAUSED  # no app says the user's zone
 
 
 async def test_a_schedule_said_in_full_is_made_with_no_question() -> None:

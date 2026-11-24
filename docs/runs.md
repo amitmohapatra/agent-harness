@@ -521,9 +521,13 @@ with its tools bound takes them when it is built, with the harness's other tools
 - **One question for a new schedule.** A schedule with anything open is confirmed in one
   question (`Runtime.ask`: Confirm, recommended, or Cancel, and a form the app renders), every
   open detail in it at once, never asked one after another:
-  - what the model assumed rather than the user said (`schedule_task(inferred=)`: time,
-    days, zone, condition, end): with no time said the model uses
-    `TRELLIS_SCHEDULE_DEFAULT_TIME` and lists `time`, and the form offers it as a time picker;
+  - a time or a zone the model assumed rather than the user gave (`schedule_task(inferred=)`):
+    with no time said the model uses `TRELLIS_SCHEDULE_DEFAULT_TIME` and lists `time`, and the
+    form offers it as a time picker. The claim is read against what the user gave: a time
+    their message states ("at 9am", "17:00", "noon") is not asked again, nor a zone their app
+    says when the model passes none. Days, a condition or an end the model marks as assumed
+    are shown in the question when one is asked, and ask none by themselves: a model marks
+    them on requests that state them, and the schedule's reply says what was made;
   - a schedule the model judged like one the user has (`alike=`, the id it read in
     `list_schedules`; no word-overlap rule of code decides, handoff 2.5): update it (the
     default) or keep both;

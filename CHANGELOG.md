@@ -5,6 +5,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a schedule the user asked for in full is made, not confirmed again
+
+Since a new schedule's open details are confirmed in one question, a schedule waited for that
+question whenever the model listed something as assumed — and a model lists the time when the
+user said it ("every day at 9am"), the zone when it is their own app's, the days when they
+said "weekdays". On the schedule benchmark about fifty of a hundred and forty chats, on every
+adapter, ended with "Set up this schedule?" and nothing made, where the user had said when in
+full. The claim is now read against what the user gave: a time their message states and their
+app's zone are not asked again; days, a condition or an end marked as assumed are shown when a
+question is asked and ask none by themselves; the tool's description says what is not an
+assumption. The benchmark's user confirms a confirmation left waiting when a chat's turns are
+over, and counts it (`confirmed`). `ReAct`: 74 of 140 before; 92 of the first 104 after.
+
 ### Fixed: a turn that lands in memory while the next one reads it is not lost between the two
 
 A turn whose transcript is queued (memory slow to take it) is said to the conversation's next

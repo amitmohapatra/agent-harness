@@ -157,6 +157,8 @@ class Chat:
     after: list[Schedule] = field(default_factory=list)
     fired: list[str] = field(default_factory=list)
     fired_calls: list[str] = field(default_factory=list)
+    #: the harness's confirmation waited when the turns were over, and was confirmed
+    confirmed: bool = False
     #: the shortest repeat the run's tools allow, in seconds (the deployment's, or the user's)
     min_interval: float | None = None
     #: how many schedules the user may have (the deployment's, or the user's)
@@ -405,6 +407,15 @@ def says_any(check: Check, *alternatives: str) -> Check:
     return both
 
 
+#: How the harness's confirmation of a new schedule begins (``schedules._confirmed``).
+CONFIRMS: Final = "set up this schedule?"
+
+
+def confirms(waits: Interrupt) -> bool:
+    """Whether the question a run waits on is the harness's confirmation of a new schedule."""
+    return CONFIRMS in str(waits.question or "").lower()
+
+
 def or_asks(check: Check, *about: str) -> Check:
     """``check``, or nothing written and the user asked (options, or a question naming one of
     ``about``): the model may settle what the words leave open itself, or ask."""
@@ -414,7 +425,11 @@ def or_asks(check: Check, *about: str) -> Check:
         options = (chat.asked[-1] if chat.asked else None) or []
         # "every-other-week" names "every other": words compared however they are joined
         text = (chat.answers[-1] + " " + " ".join(options)).lower().replace("-", " ")
-        asked = asked_in(chat) and any(a.lower().replace("-", " ") in text for a in about)
+        # the harness's own confirmation of a new schedule asks every open detail at once
+        # (the time it would run at, shown and changeable): it is the question, whatever
+        # words a model's own would have used
+        named = any(a.lower().replace("-", " ") in text for a in about) or CONFIRMS in text
+        asked = asked_in(chat) and named
         return [] if problems and asked and not chat.made() else problems
 
     return either
@@ -1827,6 +1842,14 @@ async def run_case(
                 answer = waits.question if waits is not None else result.answer or result.error
                 chat.answers.append(str(answer or result.status))
                 chat.calls.append(trace.calls)
+            if waits is not None and confirms(waits):
+                # the chat's turns are over and the harness's own confirmation waits: its
+                # user confirms it (counted: ``confirmed``), and what is made is scored
+                result = await agent.resume(
+                    waits.interrupt_id, "answer", answer=harness_schedules.CONFIRM, reviewer=user
+                )
+                chat.confirmed = True
+                chat.answers[-1] += "\n" + str(result.answer or result.error or result.status)
             for _ in range(case.fire):
                 trace.calls = []
                 fired = await h.runs.schedules.fire(chat.seeded[0].schedule_id)
@@ -1855,6 +1878,7 @@ async def run_case(
         "calls": [[(n, a) for n, a, _ in turn] for turn in chat.calls],
         "fired": [f[:300] for f in chat.fired],
         "fired_calls": chat.fired_calls,
+        "confirmed": chat.confirmed,
         "made": [(s.cadence, s.timezone, s.metadata[TASK]) for s in chat.made()],
         "model_calls": meter.calls,
         "input_tokens": meter.input_tokens,
@@ -1875,6 +1899,7 @@ def summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {
         "passed": sum(x["passed"] for x in scored),
         "cases": len(scored),
+        "confirmed": sum(bool(x.get("confirmed")) for x in scored),
         "by_category": {c: f"{sum(x['passed'] for x in v)}/{len(v)}" for c, v in by.items() if v},
         "pending": {
             x["case"]: {"feature": PENDING[x["case"]], "passed": x["passed"]} for x in pending
