@@ -493,3 +493,47 @@ async def test_a_slow_write_does_not_hold_the_run(monkeypatch: pytest.MonkeyPatc
         assert result.status is RunStatus.SUCCESS
         await h.writes.drain()
         assert [m["content"] for m in service.threads[KEPT]] == ["hi", "ok"]
+
+
+async def test_a_turn_that_lands_while_the_next_reads_memory_is_still_said(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hundred chats on three servers: a turn whose transcript was queued landed in memory
+    just after the next turn's context was read and just before the harness looked at what
+    was still on its way — in neither, so the next turn answered without it. What is on its
+    way is taken before memory is asked; the window says the ones that landed in time."""
+    from trellis.harness import agent as agent_module
+    from trellis.harness.clients.memory import RunMemory
+
+    service = FakeMemoryService()
+    record, context = RunMemory.record_messages, RunMemory.context
+    landed, asked = asyncio.Event(), False
+
+    async def slow_first(self: RunMemory, messages: Any, run_id: str, attempt: int) -> None:
+        if messages[0].content == "the code is 4242" and not landed.is_set():
+            await asyncio.sleep(0.3)  # past the run's wait: queued, and still on its way
+            await record(self, messages, run_id, attempt)
+            landed.set()
+            return
+        await record(self, messages, run_id, attempt)
+
+    async def read_then_landed(self: RunMemory, *args: Any, **kwargs: Any) -> Any:
+        pushed = await context(self, *args, **kwargs)  # read before the first turn landed
+        if asked and not landed.is_set():
+            await landed.wait()
+            await asyncio.sleep(0.05)  # the queue is told: the turn is on its way no more
+        return pushed
+
+    async def seen(input: Any, agent: Runtime) -> str:
+        return "seen: " + str(agent.context)
+
+    monkeypatch.setattr(RunMemory, "record_messages", slow_first)
+    monkeypatch.setattr(RunMemory, "context", read_then_landed)
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.05)
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        agent = h.wrap(seen, id="landing")
+        await agent.run("the code is 4242", user="u1", thread=THREAD)
+        asked = True
+        second = await agent.run("what is the code?", user="u1", thread=THREAD)
+        assert landed.is_set() and "the code is 4242" in str(second.answer)
+        await h.writes.drain()

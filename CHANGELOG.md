@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a turn that lands in memory while the next one reads it is not lost between the two
+
+A turn whose transcript is queued (memory slow to take it) is said to the conversation's next
+turn from this process until memory holds it. The next turn asked memory for its context
+first and looked at what was still queued afterwards: a turn that landed in between was in
+neither, and the next turn answered without it — seen with a hundred chats on three servers.
+What is on its way is now taken before memory is asked; the window says the ones that landed.
+
 ### Fixed: the memory service is told the model of an agent whose framework calls it itself
 
 The harness tells the memory service each agent's model endpoint so that the service's own

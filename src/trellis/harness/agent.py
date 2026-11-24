@@ -1415,6 +1415,9 @@ class Agent:
             await box.indexed()
         window = await self.asked_window(runtime)
         replayed = self.conversation_budget(runtime) if window is Window.MESSAGES else None
+        # taken before memory is asked: a turn that lands while it answers is in its window
+        # or in these, never in neither
+        on_its_way = self.on_its_way(runtime, window)
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
@@ -1474,7 +1477,7 @@ class Agent:
             note = f"{note}\n{EARLIER_CHATS}"
         parts = (
             pushed.rendered,
-            self.unwritten_said(runtime, pushed.rendered) if window is Window.RENDERED else "",
+            self.unwritten_said(runtime, pushed.rendered, on_its_way),
             note,
             snapshots.note(stale),
             answering_note(pushed.rendered),
@@ -1512,12 +1515,25 @@ class Agent:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return window
 
-    def unwritten_said(self, runtime: Runtime, rendered: str) -> str:
+    def on_its_way(self, runtime: Runtime, window: Window) -> dict[str, list[Said]]:
+        """The conversation's turns still on their way to memory, as they stand now, for a
+        rendered ``window`` to say after it (:meth:`unwritten_said`; none for another: a
+        messages window reads them from the run store, :meth:`caught_up`)."""
+        if window is not Window.RENDERED:
+            return {}
+        return dict(self.unwritten.get(runtime.conversation) or {})
+
+    def unwritten_said(
+        self, runtime: Runtime, rendered: str, on_its_way: Mapping[str, list[Said]] | None = None
+    ) -> str:
         """The conversation's turns this process wrote whose transcript is still on its way to
-        memory (:attr:`unwritten`) — those memory's ``rendered`` window does not say already —
-        as text after it: a rendered window names no message ids, so the run store's turns
-        cannot be matched to it (:meth:`caught_up` is the messages window's)."""
-        on_its_way = self.unwritten.get(runtime.conversation) or {}
+        memory (:attr:`unwritten`; ``on_its_way``: as they stood before ``rendered`` was read,
+        so that one landing meanwhile is not lost between the two) — those memory's
+        ``rendered`` window does not say already — as text after it: a rendered window names
+        no message ids, so the run store's turns cannot be matched to it (:meth:`caught_up` is
+        the messages window's)."""
+        if on_its_way is None:
+            on_its_way = self.unwritten.get(runtime.conversation) or {}
         turns = [
             said
             for run_id, said in on_its_way.items()
