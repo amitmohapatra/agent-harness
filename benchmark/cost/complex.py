@@ -2928,9 +2928,7 @@ _LIST_ITEM: Final = re.compile(r"[ \t]*(?:[-*\u2022]|\d{1,3}[.)])[ \t]+\S.*")
 
 #: A range of ids, each end quoted: the scheme the data names its things by ("the store list
 #: uses "S01" to "S40"", "`S04` to `S40`"), no member of a result.
-_QUOTED_RANGE: Final = re.compile(
-    r'(["`])([A-Za-z]+-?)\d+\1\s*(?:to|through|-|\u2013)\s*\1\2\d+\1'
-)
+_QUOTED_RANGE: Final = re.compile(r'(["`])([A-Za-z]+-?)\d+\1\s*(?:to|through|-|\u2013)\s*\1\2\d+\1')
 #: An id said as its counterpart in another scheme, the same number ("store-04 to S04",
 #: "store-04 = S04", "store-08 is S08"): how two systems' ids were matched, no member.
 _ID_MAPPED: Final = re.compile(

@@ -3464,8 +3464,10 @@ def test_a_table_that_marks_its_rows_apart_presents_only_the_rows_marked_as_memb
     whose rows differ by anything else (a category) sets nothing apart."""
     beat = _turn("advdata-13", 0)
     rows = [(s, "Beat (+£1,000)") for s in ("S20", "S08", "S32", "S24", "S12", "S36")]
-    rows += [(s, "Missed (−£14,030)") for s in ("S40", "S28", "S16", "S04")]
-    head = "Six of the ten West stores beat their Q3 2026 target.\n\n| Store | Result |\n|---|---|\n"
+    rows += [(s, "Missed (\u2212£14,030)") for s in ("S40", "S28", "S16", "S04")]
+    head = (
+        "Six of the ten West stores beat their Q3 2026 target.\n\n| Store | Result |\n|---|---|\n"
+    )
     said = head + "\n".join(f"| {s} | {r} |" for s, r in rows)
     assert cx.score(beat.expect, said, [], beat.text)["correct"] is True
     below = said.replace("Beat (", "Beats (").replace("Missed (", "Below (")

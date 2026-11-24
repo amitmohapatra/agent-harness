@@ -653,7 +653,7 @@ async def test_list_schedules_says_the_last_run_and_its_failures() -> None:
 
 
 async def test_list_schedules_says_a_schedule_has_not_run_yet_and_whose_it_is() -> None:
-    """"When did my sales summary last run?" of one that never has: the listing said nothing
+    """ "When did my sales summary last run?" of one that never has: the listing said nothing
     of a last run, so every model answered that it could not see one. It says "not yet"; and
     the tool says a user's schedules are theirs ("Who else can see my schedules?")."""
     chat = Chat()
