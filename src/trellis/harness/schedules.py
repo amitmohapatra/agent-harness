@@ -97,6 +97,8 @@ TOUCHED: Final = "trellis_touched"
 ZONE: Final = "trellis_zone"
 #: The schedule metadata key of how a condition reports (:data:`REPORTS`), when not the default.
 REPORT: Final = "trellis_report"
+#: A schedule's last run, said of one that has not run (``list_schedules``).
+NOT_RUN: Final = "not yet"
 #: How a condition reports: until it clears (once while it holds, again after it stopped: the
 #: default), every run it holds, or once and then the schedule ends.
 REPORTS: Final = ("until_clears", "every_time", "once")
@@ -594,7 +596,8 @@ SPECS: Final = (
         "list_schedules",
         "The user's scheduled tasks: read them when the user refers to one ('the stock one', "
         "'my reports'). A reference that fits one is that one; one that fits several: pass "
-        "all their ids to update_schedule or cancel_schedule, and the user picks.",
+        "all their ids to update_schedule or cancel_schedule, and the user picks. Each user's "
+        "scheduled tasks are their own: no other user sees or changes them.",
         {},
         [],
     ),
@@ -1417,15 +1420,17 @@ def _shown(schedule: Schedule) -> dict[str, Any]:
 
 
 def _history(schedule: Schedule) -> dict[str, Any]:
-    """What the schedule keeps of its runs, said where there is something: the last run (in its
-    zone), its failed runs in a row, why its last fire failed, and for a condition how it
-    reports and whether it was reported (why a watch went quiet)."""
+    """What the schedule keeps of its runs: the last run (in its zone, or :data:`NOT_RUN`) and,
+    where there is something, its failed runs in a row, why its last fire failed, and for a
+    condition how it reports and whether it was reported (why a watch went quiet)."""
     said: dict[str, Any] = {}
     if (ends := getattr(schedule, "end_at", None)) is not None:
         said["ends"] = _ends_said(ends, schedule.timezone)
     if (at := schedule.last_fired_at) is not None:
         local = at.astimezone(ZoneInfo(zone_of(schedule.timezone) or "UTC"))
         said["last_run"] = f"{local:%a} {local.day} {local:%b}, {local:%H:%M} ({schedule.timezone})"
+    else:  # said, not left out: "when did it last run?" of one that never has is "not yet"
+        said["last_run"] = NOT_RUN
     if failures := int(schedule.metadata.get(FAILURES) or 0):
         said["failed_runs_in_a_row"] = failures
     if schedule.consecutive_failures and schedule.last_error is not None:

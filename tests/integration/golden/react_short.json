@@ -41,7 +41,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks. Each user's scheduled tasks are their own: no other user sees or changes them.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -372,7 +372,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks. Each user's scheduled tasks are their own: no other user sees or changes them.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},

@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a schedule that has not run yet says so, and whose schedules are is said
+
+"When did my sales summary last run?" of a schedule that never had: `list_schedules` said
+nothing of a last run, so every model answered that it could not see one. It now says
+`"last_run": "not yet"`. "Who else can see my schedules?" was answered "I can't tell" by
+every model: the tool now says each user's scheduled tasks are their own, as they are (the
+harness lists and changes only the asking user's, with this agent).
+
 ### Fixed (benchmark): three schedule checks every adapter failed
 
 `remove-end` seeded its schedule's end both where the harness keeps it (`end_at`) and in the

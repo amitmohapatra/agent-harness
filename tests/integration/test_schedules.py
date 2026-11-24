@@ -652,6 +652,21 @@ async def test_list_schedules_says_the_last_run_and_its_failures() -> None:
         assert '"reported": false' in listed
 
 
+async def test_list_schedules_says_a_schedule_has_not_run_yet_and_whose_it_is() -> None:
+    """"When did my sales summary last run?" of one that never has: the listing said nothing
+    of a last run, so every model answered that it could not see one. It says "not yet"; and
+    the tool says a user's schedules are theirs ("Who else can see my schedules?")."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        args = {"task": "sales summary", "when": "0 8 * * 1"}
+        await said(agent, chat, "ada", ("schedule_task", args))
+        listed = await said(agent, chat, "ada", ("list_schedules", {}))
+        assert '"last_run": "not yet"' in listed, listed
+    described = next(t for t in schedule_tools() if t.name == "list_schedules").spec.description
+    assert "no other user" in described
+
+
 async def test_a_failed_one_time_run_is_paused_and_said_not_deleted() -> None:
     """A one-time schedule whose run fails stays, paused, and the error says so: "remind me
     tomorrow at 9" is not lost to one tool's failure. A run that succeeds still ends it."""
