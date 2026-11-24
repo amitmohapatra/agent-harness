@@ -3396,6 +3396,17 @@ def test_a_figure_shown_in_thousands_is_the_figure_it_rounds() -> None:
     assert cx.ungrounded("That is about £158.9k at 7 days.", held) == ["158.9"]
 
 
+def test_a_change_said_as_its_size_is_the_signed_figure_it_was_given() -> None:
+    """advscen-03's "Cut 5%: gross margin falls by about £4,880", from a result reading
+    -4880.38613: a fall said in words is its size. The figure was scored made up for its sign,
+    and the break-evens worked from it with it. A size no figure rounds to is still made up."""
+    held = "cut5_delta,raise5_delta\n-4880.38613,-4710.12493"
+    said = "A 5% cut: margin falls by about £4,880. A 5% raise: it still falls, by £4,710."
+    assert cx.ungrounded(said, held) == []
+    assert cx.ungrounded(said.replace("4,880", "4,980"), held) == ["4980"]
+    assert cx.ungrounded("Down by £4.9k.", held) == []  # its size, shown in thousands
+
+
 def test_a_figure_worked_out_right_from_held_ones_is_not_made_up() -> None:
     """A difference, a share or a total of figures the model was sent is checked by doing the
     sum, as the harness's own check does (``trellis.harness.figures``): right, it is the

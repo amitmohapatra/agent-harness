@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed (benchmark, and the harness's figure check): a change said as its size is its figure
+
+"Gross margin falls by about £4,880", from a result reading -4880.39, was scored made up for
+its sign, and so were the figures worked out from it; the harness's own check sent such an
+answer back for a figure the model had been given. A figure is now held when its size is, in
+both. On the stored hard-set runs it changes six answers of Claude Code's five runs and one
+each of Deep Agents', LangGraph's, the hand-built graph's, OpenAI's and `ReAct`'s, every one
+right; the harness check makes 13 fewer of its 297 send-backs there, each on an answer
+scored right.
+
 ### Added (benchmark): the schedules suite runs any `ReAct` variant
 
 `--variant deep` runs the schedules suite's chats on `ReAct` on Deep Agents, as the asking and

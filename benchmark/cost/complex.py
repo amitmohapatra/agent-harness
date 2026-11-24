@@ -3195,21 +3195,23 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
     """The figures of an answer that nothing the model was given holds (``context``: every
     message of the turn's requests): a figure counts as held when it is one of the context's
     (or the question's) within its rounding — 0.5%, or shown in thousands, millions or as a
-    percentage of a share. Whole numbers up to 100 (counts, percentages the question names,
+    percentage of a share — its sign aside (a change said as its size). Whole numbers up to 100 (counts, percentages the question names,
     list numbering) are not checked."""
     # a CSV's commas are separators, not thousands: its figures read both ways
     held = numbers(context) + numbers(context.replace(",", " ")) + numbers(question)
 
     def near(n: float) -> bool:
         # shown in thousands or millions, a figure is the one it rounds to the place it shows:
-        # "£158k" is 157,733.89 (half a unit of its last place), "£157.7k" the same
+        # "£158k" is 157,733.89 (half a unit of its last place), "£157.7k" the same; a change
+        # said as its size ("falls by £4,880") is the signed figure it was given (-4880.39)
         places = len(f"{n:g}".partition(".")[2])
         step = 0.5 * 10.0**-places + 1e-9
+        size = abs(n)
         return any(
-            abs(n - c) <= max(0.005 * abs(c), 0.006)
-            or abs(n - c / 1e3) <= step
-            or abs(n - c / 1e6) <= step
-            or abs(n - 100 * c) <= 0.06
+            abs(size - abs(c)) <= max(0.005 * abs(c), 0.006)
+            or abs(size - abs(c) / 1e3) <= step
+            or abs(size - abs(c) / 1e6) <= step
+            or abs(size - 100 * abs(c)) <= 0.06
             for c in held
         )
 

@@ -91,7 +91,8 @@ def unbacked(answer: str, given: str) -> list[str]:
     """The figures ``answer`` states that ``given`` — everything its model was sent — does not
     hold: each as the answer wrote it, once, in the answer's order. A figure is held when one
     of ``given``'s numbers is it within :data:`TOLERANCE`, or rounds to it at the places the
-    answer shows, in the scale given or another (:data:`_SCALES`) — or when it is plain
+    answer shows, in the scale given or another (:data:`_SCALES`), its sign aside (a change
+    said as its size, "falls by £4,880", is the -4880.39 it was given) — or when it is plain
     arithmetic on figures of the answer that are held (:func:`worked`: a difference, a share,
     a total; and on what that gives in turn, :data:`PASSES` deep)."""
     held = numbers(given)
@@ -100,8 +101,9 @@ def unbacked(answer: str, given: str) -> list[str]:
     open_: list[tuple[float, int]] = []
     for value, places in stated:
         step = 0.5 * 10.0**-places + 1e-9
+        # a change said as its size ("falls by £4,880") is the signed figure it was given
         if (value == int(value) and abs(value) <= COUNTED) or any(
-            _near(value, c * scale, step) for c in held for scale in _SCALES
+            _near(abs(value), abs(c) * scale, step) for c in held for scale in _SCALES
         ):
             known.append(value)
         else:

@@ -81,3 +81,15 @@ def test_a_change_said_as_how_far_under_is_the_change() -> None:
     given = "forecast 6535, allocated 6230"
     assert unbacked("Allocated 6,230 against 6,535, about 4.7% under forecast.", given) == []
     assert unbacked("Allocated 6,230 against 6,535, about 5.7% under forecast.", given) == ["5.7"]
+
+
+def test_a_change_said_as_its_size_is_the_signed_figure_it_was_given() -> None:
+    """ "Margin falls by about £4,880" from a result reading -4880.38613: a fall said in words
+    is its size, so the figure is held (advscen-03's answers were sent back, and scored made
+    up, for restating a tool's negative change as a fall). A size no figure rounds to is still
+    named."""
+    given = "cut5_delta,raise5_delta\n-4880.38613,-4710.12493"
+    said = "A 5% cut: margin falls by about £4,880. A 5% raise: it still falls, by £4,710."
+    assert unbacked(said, given) == []
+    assert unbacked(said.replace("4,880", "4,980"), given) == ["4980"]
+    assert unbacked("A rise of 12.5 points.", "change: -12.5") == []
