@@ -3,7 +3,8 @@ time, and do the runs a schedule fires report what they should, once?
 
 Each case is one chat (one or more turns) with the retail tools (``retail.py``) and the
 built-in schedule tools (``trellis.harness.schedules``), ``ReAct`` on the in-process run store,
-memory off (``--adapter``: any framework the ``complex`` suite wraps). Categories:
+memory off (``--adapter``: any framework the ``complex`` suite wraps; ``--variant``: a ``ReAct``
+variant, ``deep`` on Deep Agents). Categories:
 
 * ``schedule`` — a request to schedule (daily, weekdays, weekly, monthly, once, relative,
   with and without a condition, Hindi/English, a skill that asks for one, the user's zone
@@ -1797,7 +1798,13 @@ def _refusing(h: Any, error: ConflictError) -> None:
 
 
 async def run_case(
-    case: Case, model: str, tag: str, max_steps: int = 12, *, adapter: str = "react"
+    case: Case,
+    model: str,
+    tag: str,
+    max_steps: int = 12,
+    *,
+    adapter: str = "react",
+    variant: str = "main",
 ) -> dict[str, Any]:
 
     h = runner.harness(memory=case.memory)
@@ -1811,7 +1818,8 @@ async def run_case(
     async with h:
         assert isinstance(h.runs, LocalRuns)
         bound = await bound_of(h, adapter)
-        target, options = target_of(model, "thread", None, max_steps, adapter=adapter, bound=bound)
+        target, options = target_of(model, "thread", None, max_steps, adapter=adapter, bound=bound,
+                                    variant=variant)  # fmt: skip
         trace, outage = Calls(), Outage()
         agent = h.wrap(target, id=f"sched-{case.id}", hooks=[trace, outage], run_timeout=300,
                        **options)  # fmt: skip
@@ -1929,7 +1937,9 @@ async def bench(args: argparse.Namespace) -> dict[str, Any]:
         for case in chosen:
             if args.max_usd is not None and spent >= args.max_usd:
                 break
-            row = await run_case(case, args.model, f"{tag}{repeat}", adapter=args.adapter)
+            row = await run_case(
+                case, args.model, f"{tag}{repeat}", adapter=args.adapter, variant=args.variant
+            )
             row["repeat"] = repeat
             spent += row["usd"]
             rows.append(row)
@@ -1953,6 +1963,7 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)  # fmt: skip
     p.add_argument("--model", default=env("TRELLIS_BENCH_MODEL") or env("TRELLIS_LIVE_MODEL"))
     p.add_argument("--adapter", choices=ADAPTERS, default="react", help="the framework wrapped")
+    p.add_argument("--variant", default="main", help="the ReAct variant (deep: on Deep Agents)")
     p.add_argument("--cases", default="",
                    help="case ids or categories (or 'pending'), comma-separated")  # fmt: skip
     p.add_argument("--repeats", type=int, default=1)

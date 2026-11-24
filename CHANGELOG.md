@@ -5,6 +5,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added (benchmark): the schedules suite runs any `ReAct` variant
+
+`--variant deep` runs the schedules suite's chats on `ReAct` on Deep Agents, as the asking and
+skills suites and the complex suite already could; it ran only `ReAct`'s own loop, so the
+setup was never measured on schedules.
+
 ### Fixed: a schedule the user asked for in full is made, not confirmed again
 
 Since a new schedule's open details are confirmed in one question, a schedule waited for that

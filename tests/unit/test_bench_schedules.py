@@ -200,6 +200,24 @@ def test_the_scheduling_and_asking_sets_measure_any_adapter_the_complex_suite_wr
     for bench in (b, asking):
         assert bench.arguments(["--model", "m"]).adapter == "react"
         assert bench.arguments(["--model", "m", "--adapter", "claude"]).adapter == "claude"
+        # and any ReAct variant: on Deep Agents too, as the complex suite runs it
+        assert bench.arguments(["--model", "m"]).variant == "main"
+        assert bench.arguments(["--model", "m", "--variant", "deep"]).variant == "deep"
+
+
+async def test_a_schedules_case_runs_the_react_variant_asked_for(monkeypatch: Any) -> None:
+    """``--variant deep``: the case's agent is ReAct on Deep Agents (``target_of``'s variant)."""
+    seen: list[str] = []
+
+    def target_of(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("variant", "main"))
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(b, "target_of", target_of)
+    case = b.cases()[0]
+    with pytest.raises(RuntimeError, match="stop here"):
+        await b.run_case(case, "scripted", "t", variant="deep")
+    assert seen == ["deep"]
 
 
 # --------------------------------------------------------------------------- the groups added
