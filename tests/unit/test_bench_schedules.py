@@ -262,6 +262,9 @@ def test_a_count_of_failures_is_the_one_recorded() -> None:
     # the rule it pauses by, and a failure to come, are no count of those that happened
     assert two(seeded(answers=["2 failures so far; it pauses after 3 failures in a row."])) == []
     assert two(seeded(answers=["It failed 2 times: one more failure and it pauses."])) == []
+    # why-paused-failed's "its last three runs failed in a row": every adapter said it so
+    assert b.counted(3)(seeded(answers=["Its last three runs failed in a row."])) == []
+    assert two(seeded(answers=["The last 3 runs have all failed."])) == ["counts 3, not 2"]
 
 
 def test_the_last_run_is_said_at_its_own_time() -> None:
@@ -429,6 +432,50 @@ def test_a_date_that_does_not_exist() -> None:
         "first run 2028-02-29, not one of 2027-02-28, 2027-03-01"
     ]
     assert no_29(chat(answer="Done.")) == ["neither scheduled near it nor said the date is not"]
+
+
+async def test_a_seeded_end_is_kept_where_the_harness_keeps_it_alone() -> None:
+    """remove-end: a seed's end was kept in ``end_at`` and in its task's ``until``, which the
+    harness no longer writes; ``update_schedule(end_at="")`` cleared ``end_at`` and the
+    ``until`` left behind still read as an end, so every adapter failed. A seed keeps its end
+    where the harness keeps it."""
+    made: list[ScheduleSpec] = []
+
+    class Schedules:
+        async def create(self, spec: ScheduleSpec) -> ScheduleSpec:
+            made.append(spec)
+            return spec
+
+    class Runs:
+        schedules = Schedules()
+
+    class H:
+        runs = Runs()
+
+        async def _tenant(self, _: Any) -> str:
+            return "t"
+
+    class Agent:
+        id = "a"
+
+        def _metadata(self, *_: Any) -> dict[str, Any]:
+            return {}
+
+    seed = b.Seed("send me the stock of SKU-00012", "0 9 * * *", until="2099-12-31")
+    await b._seed(H(), Agent(), "u", "th", seed, zone="Asia/Kolkata")
+    assert made[0].end_at is not None and "until" not in made[0].metadata[TASK]
+
+
+def test_the_shortest_repeat_said_in_words_is_said() -> None:
+    """every-minute: "at most once an hour", "hourly" say the one-hour floor as plainly as
+    "1 hour" — every adapter was failed for saying it so. Another floor is still wrong."""
+    floor = b.shortest_said()
+    for said in ("No, scheduled tasks run at most once an hour.", "No: hourly is the most often.",
+                 "No. The shortest is one hour."):  # fmt: skip
+        hour = b.Chat(now=NOW, answers=[said], calls=[[]], min_interval=3600)
+        assert floor(hour) == [], said
+    two = b.Chat(now=NOW, answers=["No, at most once an hour."], calls=[[]], min_interval=7200)
+    assert floor(two) == ["answer lacks '2 hours'"]
 
 
 def test_the_shortest_repeat_is_the_deployments() -> None:

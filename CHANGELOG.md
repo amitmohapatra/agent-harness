@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed (benchmark): three schedule checks every adapter failed
+
+`remove-end` seeded its schedule's end both where the harness keeps it (`end_at`) and in the
+task's `until`, which the harness no longer writes: `update_schedule` cleared the end and the
+left-over `until` still read as one, so no agent could pass. A seed keeps its end where the
+harness does. `every-minute` wanted the floor said as "1 hour", and "at most once an hour" or
+"hourly" failed; `why-paused-failed` read no count in "its last three runs failed". On the
+stored runs every adapter's answer to those two now passes, as it says the right thing.
+
 ### Fixed (benchmark): a list answer is not wrong for naming a non-member it sets apart
 
 A list answer was scored wrong for naming a non-member anywhere in it unless the sentence used

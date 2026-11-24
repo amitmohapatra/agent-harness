@@ -816,6 +816,8 @@ _COUNTS: Final = (
     r"(?:\w+\s+){0,2}?(?:times?|failures?|failed runs?|attempts?|errors?)\b",
     rf"\bfailed\s+{_NUM}\b",
     r"\bfailed\s+(once|twice|thrice)\b",
+    # "its last three runs failed", "the last 3 runs have all failed"
+    rf"(?<!after )\b{_NUM}\s+(?:\w+\s+){{0,1}}?runs?\s+(?:(?:have|had)\s+)?(?:all\s+)?failed\b",
 )
 
 
@@ -880,6 +882,18 @@ def from_record(*says: str, tools: Sequence[str] = ("stock_level",)) -> Check:
     return check
 
 
+def _every_said(answer: str, seconds: float) -> list[str]:
+    """Whether ``answer`` says the shortest repeat: as the harness words it ("1 hour"), or a
+    single unit as people say it ("one hour", "once an hour", "hourly")."""
+    words = _every(seconds)
+    count, _, unit = words.partition(" ")
+    if count == "1" and unit in ("hour", "minute"):
+        ly = "hourly" if unit == "hour" else "every minute"
+        said = rf"\b(?:1|one|an?) {unit}\b|\b{ly}\b"
+        return [] if re.search(said, _flat(answer)) else [f"answer lacks {words!r}"]
+    return said_all(answer, (words,))
+
+
 def shortest_said() -> Check:
     """Nothing written; the last answer says no, and the shortest repeat allowed in words (the
     deployment's ``schedule_min_interval``, as the tool's description says it)."""
@@ -887,7 +901,7 @@ def shortest_said() -> Check:
     def check(chat: Chat) -> list[str]:
         assert chat.min_interval is not None
         problems = [f"wrote {w}" for w in chat.written()]
-        problems += said_all(chat.answers[-1], (_every(chat.min_interval),))
+        problems += _every_said(chat.answers[-1], chat.min_interval)
         if not re.search(NO, _flat(chat.answers[-1])):
             problems.append("answer does not say no")
         return problems
@@ -1732,16 +1746,16 @@ async def _past(h: Any, agent: Any, outage: Outage, chat: Chat, past: Past) -> N
 
 async def _seed(h: Any, agent: Any, user: str, thread: str, seed: Seed, *, zone: str) -> Schedule:
     """``seed`` made as ``schedule_task`` makes it, in its zone or ``zone``; its end, where it
-    has one, where the harness will keep it (``end_at``, when the contracts have it) and in its
-    task (``until``)."""
+    has one, where the harness keeps it (``end_at``) — in its task (``until``) only where that
+    cannot hold it: an end kept in both outlived ``update_schedule``'s removing it."""
     about: dict[str, Any] = {"task": seed.task, "condition": seed.condition, "once": False}
-    if seed.until is not None:
-        about["until"] = seed.until
     ends: dict[str, Any] = {}
     if seed.until:  # as schedule_task keeps the user's last day: the instant it ends there
         ending = _ending(seed.until, seed.timezone or zone)
         if isinstance(ending, datetime):
             ends["end_at"] = ending
+    if seed.until is not None and not ends:  # an end the harness cannot keep, in the task
+        about["until"] = seed.until
 
     spec = ScheduleSpec(
         tenant_id=await h._tenant(None),
