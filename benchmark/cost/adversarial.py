@@ -1488,7 +1488,7 @@ def cases() -> tuple[Any, ...]:
                 Turn("Which tools did you call to get it?", (),
                      flags(r"\bno tools?\b|didn't (call|use)|did not (call|use)|\bnone\b|\bcalled no\b[^.\n]{0,40}\btools?\b|"
                            r"(didn't|did not) (read|get|fetch|take) (it|the figure|that figure)\b[^.\n]{0,20}\bfrom any (source|tool)|"
-                           r"(didn't|did not) (query|consult|check|look up) any\b[^.\n]{0,60}\b(source|system|tool|database)s?\b",
+                           r"(didn't|did not|never) (query|consult|check|look ?up|read|fetch|call)(ed)?\b[^.\n]{0,80}\b(source|system|tool|database)s?\b",
                            "None: it came from what you told me.")),
             ),
             ("explain an answer from the conversation only",),

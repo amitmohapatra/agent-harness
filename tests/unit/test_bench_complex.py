@@ -3153,8 +3153,20 @@ def test_no_data_source_queried_says_no_tool_got_it() -> None:
     assert cx.score(t.expect, said.replace("didn't query", "did not consult"), [], t.text)[
         "correct"
     ]
+    # the same said without "any": every recorded wording of it
+    for also in (
+        "I made one tool call: `memory_remember`, to save the £1.2m North Q4 target as a task "
+        "note. I didn't query sales, finance, or any other data source, so the figure is only "
+        "what you told me.",
+        "I called one tool: `memory_remember`, to save the target to memory. I did not look up "
+        "the figure in any other tool. It came from your message.",
+        "I made one tool call: `memory_remember`, which saved the target. I didn't query sales "
+        "data, the catalogue, or any other tool.",
+    ):
+        assert cx.score(t.expect, also, [], t.text)["correct"] is True, also
     wrong = "I queried the planning system, which gave the £1.2m target."
     assert cx.score(t.expect, wrong, [], t.text)["correct"] is False
+    assert cx.score(t.expect, "I called sales_summary to read it.", [], t.text)["correct"] is False
 
 
 def test_a_change_said_as_units_removed_is_the_negative_change() -> None:
