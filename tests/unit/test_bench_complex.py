@@ -3440,6 +3440,76 @@ def test_the_figure_asked_for_said_first_and_the_other_named_after_is_right() ->
     assert cx.score(t.expect, wrong, [], t.text)["correct"] is False
 
 
+def test_a_non_member_listed_under_a_heading_that_says_it_missed_is_left_out() -> None:
+    """advdata-13's "The other four fell short:" or "Four West stores missed:" over a bulleted
+    list: its items are left out of the result, as a table's rows under such a heading are —
+    the list was scored as presenting the four (graph, ReAct). The same items listed under
+    the heading of the result are still members."""
+    beat = _turn("advdata-13", 0)
+    table = "\n".join(f"| {s} | +£1,000 |" for s in ("S20", "S08", "S32", "S24", "S12", "S36"))
+    lead = f"Six of the ten West stores beat their Q3 2026 target:\n\n| Store | Over |\n|---|---|\n{table}\n\n"
+    for heading in ("The other four fell short:", "Four West stores missed:", "Four miss:"):
+        said = lead + heading + "\n- S40 Shrewsbury: short by £15,544\n- S04 Bristol: £139,970.22"
+        assert cx.score(beat.expect, said, [], beat.text)["correct"] is True, heading
+    also = lead + "These also beat it:\n- S40 Shrewsbury\n- S04 Bristol"
+    assert cx.score(beat.expect, also, [], beat.text)["correct"] is False
+
+
+def test_a_table_that_marks_its_rows_apart_presents_only_the_rows_marked_as_members() -> None:
+    """advdata-13's answers that list all ten west stores with a result column, "Beat" for the
+    six and "Missed" (or "Below") for the four: the four were scored as presented (ReAct on
+    Deep Agents, Deep Agents). A row is set apart when its verdict word is in no member's row
+    and the members' rows share one it lacks — the members' own rows say which way the column
+    reads, so "Below" marks the members where the question asks who was under a line. A table
+    whose rows differ by anything else (a category) sets nothing apart."""
+    beat = _turn("advdata-13", 0)
+    rows = [(s, "Beat (+£1,000)") for s in ("S20", "S08", "S32", "S24", "S12", "S36")]
+    rows += [(s, "Missed (−£14,030)") for s in ("S40", "S28", "S16", "S04")]
+    head = "Six of the ten West stores beat their Q3 2026 target.\n\n| Store | Result |\n|---|---|\n"
+    said = head + "\n".join(f"| {s} | {r} |" for s, r in rows)
+    assert cx.score(beat.expect, said, [], beat.text)["correct"] is True
+    below = said.replace("Beat (", "Beats (").replace("Missed (", "Below (")
+    assert cx.score(beat.expect, below, [], beat.text)["correct"] is True
+    same = said.replace("Missed (", "Beat (")  # all ten marked as beating it
+    assert cx.score(beat.expect, same, [], beat.text)["correct"] is False
+    plain = head + "\n".join(f"| {s} | knitwear |" for s, _ in rows[:6])
+    plain += "\n" + "\n".join(f"| {s} | denim |" for s, _ in rows[6:])
+    assert cx.score(beat.expect, plain, [], beat.text)["correct"] is False
+
+
+def test_an_id_named_as_its_counterpart_in_another_scheme_is_no_member() -> None:
+    """How two systems' ids were matched ("I matched store-04 to S04", "store-04 = S04",
+    "the west stores use `S04` to `S40`") names no member: advdata-13's answers were scored
+    wrong for it (LangGraph, ReAct). An id the answer counts in is still one."""
+    beat = _turn("advdata-13", 0)
+    six = "Six of the ten West stores beat their Q3 2026 target: S20, S08, S32, S24, S12 and S36."
+    for said in (
+        "The planning tool names stores differently, so I matched store-04 to S04, store-08 to S08.",
+        "This assumes its numbers match ours (store-04 = S04, and so on).",
+        "The targets use `store-01` to `store-40`, and the west stores use `S04` to `S40`.",
+    ):
+        assert cx.score(beat.expect, f"{six} {said}", [], beat.text)["correct"] is True, said
+    wrong = f"{six} S04 beat it too, matched from store-04."
+    assert cx.score(beat.expect, wrong, [], beat.text)["correct"] is False
+
+
+def test_a_member_of_the_earlier_or_wider_result_set_against_this_one_is_no_member() -> None:
+    """conversation-03's "Only for the west region.": "Activewear takes third place in the
+    West, where Dresses was third across all regions" names Dresses as the earlier, all-region
+    answer's — scored wrong for naming it at all (ReAct, Deep Agents, LangGraph). Dresses
+    said to be in this result is still wrong."""
+    west = _turn("conversation-03", 1)
+    top = "The West's top three are Footwear, Knitwear and Activewear."
+    for said in (
+        "Activewear takes third place in the West, where Dresses was third across all regions.",
+        "Activewear is third here, while dresses was third across all regions.",
+        "They differ from the company-wide list in my last answer: there dresses was third.",
+    ):
+        assert cx.score(west.expect, f"{top} {said}", [], west.text)["correct"] is True, said
+    wrong = f"{top} Dresses is third across all regions and in the West too."
+    assert cx.score(west.expect, wrong, [], west.text)["correct"] is False
+
+
 def test_the_ones_that_missed_are_named_as_left_out_however_it_is_said() -> None:
     """advdata-13 once more: "The four that missed are S40 Shrewsbury (...), S28 Taunton …"."""
     said = "Six beat it: S08, S12, S20, S24, S32, S36.\n\nThe four that missed are S40 Shrewsbury (£15,544.45 short), S28 Taunton and S16 Hereford, with S04 Bristol."

@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed (benchmark): a list answer is not wrong for naming a non-member it sets apart
+
+A list answer was scored wrong for naming a non-member anywhere in it unless the sentence used
+one of a few words of exclusion, and the wordings that failed were the LangChain adapters'
+(Claude Code's "is not in the West's top 3" passed). Now set apart: a list under "The other
+four fell short:" (a table under such a heading already was), an id named as another
+system's ("I matched store-04 to S04", "`S04` to `S40`"), the earlier or wider result's member
+set against this one ("where Dresses was third across all regions"), and a table of every
+candidate whose result column marks the members one way and the rest another ("Beat" and
+"Missed"; the members' own rows say which way it reads, so "Below" marks the members of
+"under my alert line"). A non-member said to be in the result is still wrong. On the stored
+runs it turns 13 answers right (`ReAct` on Deep Agents 3, `ReAct` 3, LangGraph 3, Deep
+Agents 3, the graph 1; each read: right) and changes no other verdict.
+
 ### Fixed (benchmark, and the harness's figure check): a change said as its size is its figure
 
 "Gross margin falls by about £4,880", from a result reading -4880.39, was scored made up for

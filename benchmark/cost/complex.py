@@ -2877,7 +2877,7 @@ _EXCLUDED: Final = re.compile(
     # the rest of the result's candidates, said not to make it ("the other four missed: ...", "would miss: ...")
     r"(?:other|remaining|rest)\b[^.;\n]{0,30}?\b(?:missed|fell short|would miss)|"
     # a list introduced as the ones that did not make it ("Four missed: ...", "Three fell short: ...")
-    r"(?:missed|fell short)(?=\s*:)|(?:that|which|who) (?:missed|fell short))\b|n't\b",
+    r"(?:miss(?:ed)?|f[ae]ll short)(?=\s*:)|(?:that|which|who) (?:missed|fell short))\b|n't\b",
     re.IGNORECASE,
 )
 #: A place said in a clause ("4th place", "the fourth"): past the size of the result, it is
@@ -2895,9 +2895,23 @@ _STATEMENT_END: Final = re.compile(r"\n|\.(?!\S)|;")
 _CLAUSE_END: Final = re.compile(r"\n|\.(?!\S)|;|\b(?:but|while|whereas|however)\b", re.IGNORECASE)
 
 
+#: What names a result other than the one asked for: a wider one ("across all regions",
+#: "company-wide") or the answer before ("in my last answer").
+_ELSEWHERE: Final = re.compile(
+    r"\b(?:across (?:all|every|the whole) \w+|company[- ]wide|"
+    r"(?:in|from) (?:my|the) (?:last|earlier|previous) (?:answer|list|result|reply))\b",
+    re.IGNORECASE,
+)
+_WAS: Final = re.compile(r"\b(?:was|were)\b", re.IGNORECASE)
+
+
 def _left_out(said: str, size: int) -> bool:
-    """Whether a statement says what it names is no part of a result of ``size`` items."""
+    """Whether a statement says what it names is no part of a result of ``size`` items — or
+    was part of another one, set against it ("Activewear is third here, where Dresses was
+    third across all regions")."""
     if _EXCLUDED.search(said) or _NOT_IN.search(said):
+        return True
+    if _WAS.search(said) and _ELSEWHERE.search(said):
         return True
     places = [
         int(m[1]) if m[1] else _ORDINALS.index(m[2].lower()) + 1 for m in _PLACE.finditer(said)
@@ -2905,31 +2919,87 @@ def _left_out(said: str, size: int) -> bool:
     return any(place > size for place in places)
 
 
-#: A heading that says the rows under it missed ("Four stores missed:", "These fell short:").
-_MISSED: Final = re.compile(r"\b(?:missed|fell short)\b[^:\n]*:\s*$", re.IGNORECASE)
+#: A heading that says the rows under it missed ("Four stores missed:", "These fell short:",
+#: "Four miss:").
+_MISSED: Final = re.compile(r"\b(?:miss(?:ed)?|f[ae]ll short)\b[^:\n]*:\s*$", re.IGNORECASE)
+#: An item of a bulleted or numbered list, a line at a time.
+_LIST_ITEM: Final = re.compile(r"[ \t]*(?:[-*\u2022]|\d{1,3}[.)])[ \t]+\S.*")
 
 
 #: A range of ids, each end quoted: the scheme the data names its things by ("the store list
-#: uses "S01" to "S40""), no member of a result.
-_QUOTED_RANGE: Final = re.compile(r'"([A-Za-z]+-?)\d+"\s*(?:to|through|-|\u2013)\s*"\1\d+"')
+#: uses "S01" to "S40"", "`S04` to `S40`"), no member of a result.
+_QUOTED_RANGE: Final = re.compile(
+    r'(["`])([A-Za-z]+-?)\d+\1\s*(?:to|through|-|\u2013)\s*\1\2\d+\1'
+)
+#: An id said as its counterpart in another scheme, the same number ("store-04 to S04",
+#: "store-04 = S04", "store-08 is S08"): how two systems' ids were matched, no member.
+_ID_MAPPED: Final = re.compile(
+    r"\b([A-Za-z]+)[-_]?(\d+)\b\s*(?:=|\u2192|->|\bto\b|\bis\b)\s*\b([A-Za-z]+)[-_]?(\d+)\b"
+)
+
+
+def _unmapped(text: str) -> str:
+    """``text`` without each id said only as another scheme's counterpart (:data:`_ID_MAPPED`)."""
+
+    def other(m: re.Match[str]) -> str:
+        mapped = m[1].lower() != m[3].lower() and int(m[2]) == int(m[4])
+        return m[0][: m.start(3) - m.start(0)] + " " if mapped else m[0]
+
+    return _ID_MAPPED.sub(other, text)
 
 
 def _unlisted(answer: str, size: int) -> str:
     """``answer`` without the rows of each table whose heading — the line before it, ending
     in a colon — says they are left out of a result of ``size`` items ("Four stores missed:"),
-    and without a quoted range of ids (:data:`_QUOTED_RANGE`): a table under any other heading,
-    or with none, is kept as it is."""
-    out, left_out = [], False
+    and the items of a list under a heading that says they missed; without a quoted range of
+    ids (:data:`_QUOTED_RANGE`) and an id said as another scheme's (:data:`_ID_MAPPED`): a
+    table or a list under any other heading, or with none, is kept as it is."""
+    out, left_out, missed = [], False, False
     for line in answer.split("\n"):
         if _TABLE_ROW.fullmatch(line):
             out.append(" " if left_out else line)
+        elif missed and _LIST_ITEM.fullmatch(line):  # a list under "Four missed:", as a table
+            out.append(" ")
         elif line.strip():
             heading = line.rstrip().endswith(":")
-            left_out = heading and bool(_MISSED.search(line) or _left_out(line, size))
+            missed = heading and bool(_MISSED.search(line))
+            left_out = missed or (heading and _left_out(line, size))
             out.append(line)
         else:
             out.append(line)
-    return _QUOTED_RANGE.sub(" ", "\n".join(out))
+    return _unmapped(_QUOTED_RANGE.sub(" ", "\n".join(out)))
+
+
+#: The words a table's result column gives a row's verdict in ("Beat", "Missed", "Below").
+_VERDICT: Final = re.compile(
+    r"\b(?:beat|beats|met|miss|misses|missed|above|below|under|over|short|yes|no|"
+    r"pass|passes|passed|fail|fails|failed)\b",
+    re.IGNORECASE,
+)
+
+
+def _marked_apart(answer: str, expect: Expect) -> str:
+    """``answer`` without each table row of a forbidden item that the table marks apart from
+    the result's members: its verdict word is in no member's row, and the members' rows share
+    one it lacks ("Beat" for the six, "Missed" for the four). The members' own rows say which
+    way the column reads ("Below" marks the members of "under my alert line"); a table whose
+    rows differ in nothing but other words (a category) marks nothing apart."""
+    rows = _TABLE_ROW.findall(answer)
+    said = [{w.lower() for w in _VERDICT.findall(r)} for r in rows]
+    of_members = [v for r, v in zip(rows, said, strict=True)
+                  if any(_has_text(r, options) for options in expect.value)]  # fmt: skip
+    if not of_members:
+        return answer
+    shared, seen = set.intersection(*of_members), set.union(*of_members)
+    apart = {
+        r
+        for r, v in zip(rows, said, strict=True)
+        if any(f and _forbidden_in(r, f) for f in expect.forbidden)
+        and not any(_has_text(r, options) for options in expect.value)
+        and shared - v
+        and v - seen
+    }
+    return "\n".join(" " if line in apart else line for line in answer.split("\n"))
 
 
 def _presented(answer: str, item: str, size: int) -> bool:
@@ -3543,7 +3613,7 @@ def score(
     if k in ("number", "record") and not missing:  # the figure said, the others for contrast
         said = _blanked(_CONTRAST, _blanked(_EARLIER, said))
     if k == "set":  # a wrong member named only as left out of the result is no member
-        said = _unlisted(said, len(expect.value))
+        said = _marked_apart(_unlisted(said, len(expect.value)), expect)
         hit = [f for f in expect.forbidden if f and _presented(said, f, len(expect.value))]
     else:
         hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
