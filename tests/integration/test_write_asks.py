@@ -298,8 +298,11 @@ async def _nothing(runtime: Runtime) -> None:
 
 
 def _shapes(calls: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
-    """Each run-store call by what it asks (its run ids, new each turn, left out)."""
-    return [tuple(sorted((k, str(v)) for k, v in c.items() if k != "parent_run_id")) for c in calls]
+    """Each run-store call by what it asks (its run ids, new each turn, left out), in an order
+    of their own: a turn's reads run side by side, and which lands first is the loop's."""
+    return sorted(
+        tuple(sorted((k, str(v)) for k, v in c.items() if k != "parent_run_id")) for c in calls
+    )
 
 
 # --------------------------------------------------------------------------- this conversation
