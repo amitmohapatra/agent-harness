@@ -138,3 +138,15 @@ def test_the_note_sends_the_model_back_only_for_what_the_question_needs() -> Non
     assert "for a value the question needs, call its tool again" in said
     assert "never answer with an earlier one" in said
     assert "again for the current values;" not in said
+
+
+def test_the_note_is_parted_from_the_context_it_is_said_in() -> None:
+    """``parted``: the context without its freshness note, and the note, whatever tools it
+    names; a context with none is as it was."""
+    note = str(snapshots.note(["stock_level", "open_file"]))
+    context = f"## Tools\n- stock_level\n\n{note}\n\n## Asking the user\nMost turns ask nothing."
+    rest, found = snapshots.parted(context)
+    assert found == note
+    assert rest == "## Tools\n- stock_level\n\n## Asking the user\nMost turns ask nothing."
+    assert snapshots.parted(f"## Tools\n- a\n\n{note}") == ("## Tools\n- a", note)
+    assert snapshots.parted("## Tools\n- a") == ("## Tools\n- a", None)

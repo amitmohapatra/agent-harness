@@ -22,6 +22,7 @@ conversation that replays it in a later turn says so.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -135,6 +136,23 @@ def note(tools: Iterable[str]) -> str | None:
     return NOTE.format(tools=named) if named else None
 
 
+#: The note as a context holds it, whatever tools it names.
+_NOTED: Final = re.compile(re.escape(NOTE).replace(re.escape("{tools}"), ".+?"))
+
+
+def parted(context: str) -> tuple[str, str | None]:
+    """``context`` without its freshness note (:func:`note`), and the note (``None``: it has
+    none) — said after the question where the harness assembles the question
+    (``middleware.with_question``, the OpenAI Agents adapter's input), as a thread the
+    framework keeps is told it (``middleware._stale_noted``): told it in the context, before
+    the question, a model answered follow-ups from earlier values five times as often."""
+    found = _NOTED.search(context)
+    if found is None:
+        return context, None
+    rest = f"{context[: found.start()].rstrip()}\n\n{context[found.end() :].lstrip()}".strip()
+    return rest, found.group(0)
+
+
 def _parsed(text: object) -> datetime | None:
     if not isinstance(text, str):
         return None
@@ -155,6 +173,7 @@ __all__ = [
     "note",
     "now",
     "out_of_date",
+    "parted",
     "said",
     "today",
     "zone",

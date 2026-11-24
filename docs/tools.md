@@ -397,8 +397,10 @@ Where memory owns the conversation, when each tool result was fetched is kept in
 the run record of its call (`custom_metadata["run_record"]["fetched"]`, UTC, with its tool's
 `max_age`), which the memory service's steps list shows on the call's line — the model can say
 where a number came from and when, and the result's own text is never stamped. A replayed result past its
-tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
-same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
+tool's age (0 unless declared) is marked out of date in the replay, one line after the question
+says the same (as a thread the framework keeps is told it: in the context before the question, a
+model answered follow-ups from earlier values five times as often), and the tool stays offered
+even when the tool hints narrow the rest: the model
 fetches the value again instead of answering from the old one, and the fresh result, with the
 older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). Only a call
 that returned a value is marked: one that failed, or was stopped before it came back, has no

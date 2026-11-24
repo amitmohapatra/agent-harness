@@ -5,6 +5,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: `ReAct` and OpenAI Agents are told earlier values are out of date after the question
+
+A conversation's earlier live results past their tool's age come with one line saying so
+("call its tool again; never answer with an earlier one"). A framework that keeps its own
+thread is told it after the question; `ReAct` and an OpenAI Agents run, whose earlier turns
+memory replays, were told it inside the memory context, before the question, under the run
+record. Same model, same Deep Agents framework, six follow-up-heavy chats, three runs each:
+fed memory's replay, a run answered 52-53% of follow-ups with no tool call; on its own thread,
+9%; `ReAct` on Deep Agents with the line after the question, 9%. The line is now said after
+the question for both; the rest of the context is where it was, and a context that held only
+the line is not sent.
+
 ### Fixed: a schedule that has not run yet says so, and whose schedules are is said
 
 "When did my sales summary last run?" of a schedule that never had: `list_schedules` said

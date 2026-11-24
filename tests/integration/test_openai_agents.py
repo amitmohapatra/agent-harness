@@ -15,7 +15,7 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus, ToolCall
-from trellis.harness import budget
+from trellis.harness import budget, snapshots
 from trellis.harness.bridges.resumed import RESUMED_ASKED
 from trellis.harness.events import WARNING
 from trellis.harness.governance import ApprovalRuleError, Governance
@@ -374,6 +374,25 @@ async def test_the_context_is_marked_off_in_the_question_and_memory_tools_are_ad
     ]
     assert not any(i.get("role") == "system" for i in model.inputs[0])
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
+
+
+async def test_the_freshness_note_is_said_after_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The context's line that earlier values are out of date (``snapshots.note``) is said
+    after the question, as a thread the framework keeps is told it
+    (``middleware._stale_noted``): told it in the context before the question, a model
+    answered follow-ups from earlier values five times as often."""
+    note = snapshots.note(["stock"])
+    memory_service.context_text = f"## Facts\n- prefers email\n\n{note}"
+    model = ScriptedModel(["email"])
+    agent = memory_harness.wrap(Agent(name="m", model=model), id="m")
+    assert (await agent.run("how to reach me?", user="u1")).answer == "email"
+    asked = model.inputs[0][-1]
+    context, question = (p["text"] for p in asked["content"])
+    assert note not in context and context.startswith(ASKED_WITH.split("{", 1)[0])
+    assert "## Facts\n- prefers email" in context
+    assert question == f"how to reach me?\n\n{note}"
 
 
 async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(

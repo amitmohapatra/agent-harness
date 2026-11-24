@@ -139,9 +139,11 @@ async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_w
         firsts.append(model.script.requests[before]["messages"])
     # a ReAct is told what the harness keeps of a large result; a graph of its own is not
     said = kept_dated("s") if kept == "window" else dated("s")
-    # a graph keeping its own thread is told, after the question, that the earlier live result
-    # is out of date (a window's replay marks it on the result itself): the request's copy only
-    stale = f"\n\n{snapshots.note(['stock'])}" if kept == "checkpointer" else ""
+    # each is told, after the question, that the earlier live result is out of date — a graph
+    # keeping its own thread and a ReAct whose window's replay marked the result itself alike:
+    # told it in the context before the question, a ReAct answered follow-ups from earlier
+    # values five times as often (53% of them with no tool call, against 9%)
+    stale = f"\n\n{snapshots.note(['stock'])}"
     for n, (messages, text) in enumerate(zip(firsts, questions, strict=True)):
         assert [m["role"] for m in messages].count("system") == 1  # the instructions alone
         assert messages[0] == {"role": "system", "content": said}
@@ -149,6 +151,7 @@ async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_w
         asked = text + (stale if n else "")
         assert messages[-1]["role"] == "user" and question == {"type": "text", "text": asked}
         assert context["text"].startswith(OPENED + f"Facts for: {text}")
+        assert snapshots.note(["stock"]) not in context["text"]  # said once, after the question
     for earlier, later in itertools.pairwise(firsts):
         assert later[: len(earlier) - 1] == earlier[:-1]  # the history, as it was sent
 

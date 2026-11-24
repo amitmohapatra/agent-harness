@@ -1072,13 +1072,16 @@ def _stale_noted(messages: list[AnyMessage], stale: Collection[str]) -> list[Any
     if asked < 0 or note is None:
         return messages
     said = messages[asked]
-    content = said.content
-    more: str | list[Any] = (
-        [*content, {"type": "text", "text": note}]
-        if isinstance(content, list)
-        else f"{content}\n\n{note}"
-    )
+    more = noted_after(said.content, note)
     return [*messages[:asked], said.model_copy(update={"content": more}), *messages[asked + 1 :]]
+
+
+def noted_after(content: str | list[Any], note: str) -> str | list[Any]:
+    """A question's ``content`` with the freshness ``note`` after its text: a part of its own
+    after its parts, or after its text."""
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": note}]
+    return f"{content}\n\n{note}"
 
 
 async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
@@ -2233,7 +2236,9 @@ def _asked_again(messages: Sequence[BaseMessage], runtime: Runtime | None) -> Hu
     if any(isinstance(m, HumanMessage) and runtime.task in m.text for m in messages):
         return None
     said: list[str | dict[str, Any]] = [{"type": "text", "text": runtime.task}]
-    context = runtime.pushed_context
+    context, note = snapshots.parted(runtime.pushed_context or "")
+    if note is not None:  # after the question, as a thread the framework keeps is told it
+        said = [{"type": "text", "text": noted_after(runtime.task, note)}]
     if context:
         told = ASKED_WITH.format(context=screened(runtime.agent.target, context))
         said.insert(0, {"type": "text", "text": told})
@@ -2275,12 +2280,15 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     if asked is None:
         return request
     question = messages[asked]
-    said = (
-        question.content
-        if isinstance(question.content, list)
-        else [{"type": "text", "text": question.content}]
-    )
-    told = [{"type": "text", "text": ASKED_WITH.format(context=messages[at].text)}, *said]
+    # the freshness note of a replayed window after the question, as a thread the framework
+    # keeps is told it (:func:`_stale_noted`), not in the context before it
+    context, note = snapshots.parted(messages[at].text)
+    content = question.content if note is None else noted_after(question.content, note)
+    said = content if isinstance(content, list) else [{"type": "text", "text": content}]
+    told = [
+        *([{"type": "text", "text": ASKED_WITH.format(context=context)}] if context else []),
+        *said,
+    ]
     messages[asked] = question.model_copy(update={"content": told})
     del messages[at]
     return request.override(messages=messages)

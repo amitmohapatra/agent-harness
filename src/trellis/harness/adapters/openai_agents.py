@@ -1320,9 +1320,18 @@ def _asked_with(runtime: Runtime, options: dict[str, Any], question: Any = None)
         if at is None or found is None:
             return given
         said = items[found].get("content")
+        # the freshness note after the question, as a thread the framework keeps is told it
+        # (``middleware._stale_noted``), not in the context before it
+        told, note = snapshots.parted(context)
+        if note is not None:
+            said = (
+                [*said, {"type": "input_text", "text": note}]
+                if isinstance(said, list)
+                else f"{said}\n\n{note}"
+            )
         parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
-        marked = {"type": "input_text", "text": ASKED_WITH.format(context=context)}
-        items[found] = {**items[found], "content": [marked, *parts]}
+        marked = [{"type": "input_text", "text": ASKED_WITH.format(context=told)}] if told else []
+        items[found] = {**items[found], "content": [*marked, *parts]}
         del items[at]
         return ModelInputData(input=items, instructions=given.instructions)
 

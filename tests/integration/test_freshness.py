@@ -63,6 +63,13 @@ def context(request: dict[str, Any]) -> str:
     return asked[0]["text"] if isinstance(asked, list) else ""
 
 
+def question(request: dict[str, Any]) -> str:
+    """The latest question as sent: its last part, after the memory context — where the
+    freshness note is said (``snapshots.parted``)."""
+    asked = [m for m in request["messages"] if m["role"] == "user"][-1]["content"]
+    return asked[-1]["text"] if isinstance(asked, list) else str(asked)
+
+
 # --------------------------------------------------------------------------- declared
 def test_a_tool_declares_how_long_its_values_stay_current() -> None:
     live = tool(lambda sku: 1, name="live_stock", freshness="live", side_effects="read")
@@ -128,7 +135,7 @@ async def test_a_replayed_result_says_which_tool_fetched_it_and_when(
     facts = stored[0]["custom_metadata"]["run_record"]
     assert facts["fetched"] == "2026-10-30T09:00:00Z" and facts["max_age"] == 0.0
     assert told == snapshots.STALE.format(tool="get_stock") + "\n40"
-    assert "out of date" in context(model.requests[-1])  # live by default: call it again
+    assert "out of date" in question(model.requests[-1])  # live by default: call it again
 
 
 #: (what the tool declares, how much later the second turn is, whether the first value is stale)
@@ -168,7 +175,9 @@ async def test_a_live_value_past_its_max_age_is_fetched_again(
     [told] = replayed(asked)
     assert told.endswith("40") and "2026-10-30" not in told  # the fetch time: the run record's
     assert ("out of date" in told) is stale
-    assert ("get_stock" in context(asked) and "out of date" in context(asked)) is stale
+    # said after the question, not in the context before it (``snapshots.parted``)
+    assert (str(snapshots.note(["get_stock"])) in question(asked)) is stale
+    assert snapshots.NOTE.split("{", 1)[0] not in context(asked)
     assert "get_stock" in [t["function"]["name"] for t in asked["tools"]]  # still offered
     assert get_stock.calls == ["SKU-00123", "SKU-00123"]
     # the run record says how long the value stays current; a static tool's never goes stale
