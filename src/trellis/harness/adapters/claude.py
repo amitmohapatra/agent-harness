@@ -875,6 +875,8 @@ class ClaudeAdapter(Keeps):
                 why = "this turn's options are not the ones it was started with"
             elif found.session_id != session:
                 why = "this turn does not continue the session it holds"
+            elif _went_on_elsewhere(found, runtime.replay.journal.transcripts, session):
+                why = "the session went on elsewhere since this process served it"
             elif not await found.settled():
                 why = "an earlier turn's result never came"
             if why is not None:
@@ -1332,6 +1334,18 @@ def _spent(
         cost=cost,
         **({} if calls == 1 else {"calls": calls}),
     )
+
+
+def _went_on_elsewhere(
+    found: LiveSession, transcripts: Mapping[str, list[dict[str, Any]]], session: str | None
+) -> bool:
+    """Whether the turn's journal holds entries of ``session``'s transcript its live process
+    never mirrored: another worker served a turn of the session since (the turn resumes it as
+    the run store keeps it: ``pipeline._last_turns_session``), which this process never saw."""
+    if session is None or found.mirror is None:
+        return False
+    seen = {e.get("uuid") for e in found.mirror.transcripts.get(session, ())}
+    return any(e.get("uuid") not in seen for e in transcripts.get(session, ()) if e.get("uuid"))
 
 
 async def _with_earlier(native_input: ClaudeInput, runtime: Runtime) -> ClaudeInput:

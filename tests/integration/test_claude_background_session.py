@@ -1094,10 +1094,10 @@ async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_sta
     tmp_path: Path,
 ) -> None:
     """Worker 2 served turn 1 and keeps its process; worker 1 served turn 2 (worker 2's
-    process never saw it). Turn 3 on worker 2 is not answered by that stale process, which
-    holds the conversation as it was after turn 1: the process is ended and the turn runs as
-    any turn another worker served the last of — a new session, the conversation's turns
-    given as context (the run store's)."""
+    process never saw it), resuming the session from the run store. Turn 3 on worker 2 is not
+    answered by that stale process, which holds the session as it was after turn 1: the
+    process is ended and the turn resumes the session as the run store keeps it — turn 2 in
+    its transcript (``pipeline._last_turns_session``, ``claude._went_on_elsewhere``)."""
     scripts = [[{"text": "turn {heard}"}]]
     store = LocalRuns()
     one, two = Harness(config=HOST_ALLOWED, runs=store), Harness(config=HOST_ALLOWED, runs=store)
@@ -1111,11 +1111,11 @@ async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_sta
         third = await second.run("what is the code?", user="u1", thread="t1")
         assert third.status is RunStatus.SUCCESS, third.error
         held, _, fresh = served(tmp_path)
-        assert fresh["pid"] != held["pid"] and fresh["resume"] is None  # not the stale one
-        assert fresh["session"] != held["session"]
+        assert fresh["pid"] != held["pid"]  # not the stale process
+        assert fresh["resume"] == held["session"]  # the session, from the run store
         await until(lambda: not alive(held["pid"]))
         assert stale.closed and live_of(second) is not stale
-        assert "the code is now 9999" in fresh["context"]  # turn 2, from the run store
+        assert "the code is now 9999" in fresh["earlier"]  # turn 2, in its transcript
     finally:
         await one.aclose()
         await two.aclose()
