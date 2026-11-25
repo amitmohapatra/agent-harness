@@ -2145,12 +2145,19 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
     # Kimi's turn ended at loop_control.max_steps_per_turn: warned as Claude's is
     "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, "the step limit (1) was reached"),
 }
-#: The adapters whose run ends ``PARTIAL`` at the framework's limit with what the agent said,
-#: asking the model nothing more (decision D1(b), docs/research/handoff/DECISIONS.md: "return
-#: what the library produced as PARTIAL, no extra call"): Claude Code ends the query at
-#: ``max_turns``, the OpenAI SDK raises ``MaxTurnsExceeded``, Kimi ends the turn at its step
-#: limit. The others' limit is an error the run fails with.
+#: The adapters whose run ends ``PARTIAL`` at the framework's limit with what the agent said
+#: (decision D1(b), docs/research/handoff/DECISIONS.md: "return what the library produced as
+#: PARTIAL, no extra call"): Claude Code ends the query at ``max_turns``, the OpenAI SDK raises
+#: ``MaxTurnsExceeded``, Kimi ends the turn at its step limit. The others' limit is an error the
+#: run fails with.
 PARTIAL_AT_LIMIT: Final = frozenset({"claude", "openai_agents", "kimi"})
+#: Of those, the ones whose run answers when the agent said nothing before the limit (the plan's
+#: one step is a call with no text). The OpenAI SDK's run ends there, no model call past it
+#: (openai-agents.md, Limits). Claude's and Kimi's are asked once more, in the same session, to
+#: answer without tools, so a run does not end with no answer (claude-agent-sdk.md, kimi.md):
+#: the planned Kimi answers ("Done. " and the last result it read); the scripted Claude CLI
+#: calls again and meets the limit, so it says nothing.
+ANSWERED_AT_LIMIT: Final = frozenset({"kimi"})
 #: Of those, the ones that also say a ``step_limit`` warning (docs/frameworks/claude-agent-sdk.md,
 #: kimi.md); the OpenAI SDK's limit is said as the budget's warning alone
 #: (docs/frameworks/openai-agents.md, "Limits").
@@ -2180,9 +2187,10 @@ async def framework_options(w: World) -> None:
         o = await w.go([d.lookup()], plan, framework_options=tight)
     if w.adapter in PARTIAL_AT_LIMIT:  # what it said up to the limit, and why it stopped
         assert o.status is RunStatus.PARTIAL, (o.status, o.answer)
-        # the plan's one step is a call with no text: the agent said nothing (D1(b): no last
-        # answer is asked for)
-        assert o.answer is None, o.answer
+        if w.adapter in ANSWERED_AT_LIMIT:
+            assert o.answer is not None and o.answer.startswith("Done. "), o.answer
+        else:
+            assert o.answer is None, o.answer
         codes = ("budget", "step_limit") if w.adapter in STEP_LIMIT_WARNED else ("budget",)
         for code in codes:
             warned = [m.get("message", "") for m in o.custom(WARNING) if m.get("code") == code]
