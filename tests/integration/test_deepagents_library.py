@@ -423,6 +423,43 @@ async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
     assert "not found" in read(7)[-1]  # another conversation's files are its own
 
 
+@pytest.mark.parametrize("kept", ["no thread", "the run"])
+async def test_files_and_todos_reach_a_turn_on_a_worker_that_kept_none(
+    memory_harness: Harness, kept: str
+) -> None:
+    """CONV: memory keeps the conversation, and the file store the files and todos its last turn
+    ended with (``pipeline._keep_carried``): a turn served by another worker — this process's
+    own copy gone, as after a restart — reads the file the earlier turn wrote and has its
+    todos, as a thread of the graph's own would give them. Another conversation has none."""
+    from trellis.harness.tools.results import Conversations
+
+    turns: list[Any] = [
+        [
+            ("write_file", {"file_path": "/notes.md", "content": "tides at six"}),
+            ("write_todos", {"todos": [{"content": "check tides", "status": "pending"}]}),
+        ],
+        "noted",
+        [("read_file", {"file_path": "/notes.md"}), ("todo_count", {})],
+        "read",
+        ("read_file", {"file_path": "/notes.md"}),
+        "elsewhere",
+    ]
+    model = ScriptedChatModel(turns=turns)
+    saver = RunCheckpointer() if kept == "the run" else None
+    graph = create_deep_agent(
+        model=model, tools=[todo_count], middleware=[TodoListMiddleware()], checkpointer=saver
+    )
+    agent = memory_harness.wrap(graph, id="deep-moved")
+    assert (await agent.run("note it", user="u", thread="t")).status is RunStatus.SUCCESS
+    agent.results = Conversations()  # another worker: nothing of the conversation in memory
+    assert (await agent.run("read it", user="u", thread="t")).status is RunStatus.SUCCESS
+    read = [str(m.content) for m in model.seen[3] if isinstance(m, ToolMessage)]
+    assert "tides at six" in read[-2] and read[-1] == "1 todos"
+    agent.results = Conversations()
+    assert (await agent.run("read it", user="u", thread="other")).answer == "elsewhere"
+    assert "not found" in [str(m.content) for m in model.seen[5] if isinstance(m, ToolMessage)][-1]
+
+
 #: Window sizes from small to the model's whole, and unknown (``None``).
 WINDOWS = [8_000, 16_000, 32_000, 128_000, None]
 
