@@ -5,6 +5,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a graph of your own built with `middleware(context_window=)` says its window
+
+The harness read a model's context window from `ReAct`'s graph, a target or its model, but not
+from a LangGraph or Deep Agents graph built with `middleware(context_window=...)`: such a graph
+was taken to have no known window. Memory then replayed its conversation within the service's
+default of 2,000 tokens, its earlier turns' questions and answers without the calls and results
+behind them (measured: a memory-fed Deep Agents graph answered 46% of follow-ups with no tool
+call, against 11% with a thread of its own), and with memory off its earlier turns were their
+text alone. The middleware's `HarnessTools` now keeps the window and the harness reads it off
+the graph, as of `ReAct`'s: the replay is sized to the model, and the memory context to a
+window under 32k tokens.
+
 ### Fixed: a Deep Agents file past 256 KiB reaches the next turn on another server
 
 A graph with no thread of its own keeps its files and todos in the file store for the

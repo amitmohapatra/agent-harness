@@ -452,14 +452,36 @@ def model_name(target: Any) -> str | None:
 
 def context_window(target: Any) -> int | None:
     """The context window of the target's model, in tokens, when the target or its model
-    says, or the graph's metadata (``ReAct``) does (``None`` otherwise: a compiled graph of
-    your own, a model named by a string)."""
+    says, or the graph's metadata (``ReAct``) does, or the harness's middleware a graph of your
+    own was built with (``middleware(context_window=)``: :func:`_middleware_window`) — ``None``
+    otherwise (a compiled graph given no window, a model named by a string)."""
     for holder in (target, getattr(target, "model", None)):
         profile = getattr(holder, "profile", None)
         found = [getattr(holder, name, None) for name in WINDOW_ATTRIBUTES]
         found.append(profile.get("max_input_tokens") if isinstance(profile, dict) else None)
         found.append(metadata_of(holder).get(WINDOW_METADATA))
         for value in found:
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            if _window(value):
                 return value
+    return _middleware_window(target)
+
+
+#: The attribute of the harness's middleware (``middleware.HarnessTools``) that keeps the window
+#: its stack was given: read off a compiled graph's node (no LangChain import here).
+WINDOW_KEPT: Final = "trellis_context_window"
+
+
+def _window(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _middleware_window(target: Any) -> int | None:
+    """The window the harness's middleware in a compiled graph keeps (:data:`WINDOW_KEPT`):
+    LangChain runs each middleware hook as a node of the graph, bound to its middleware."""
+    nodes = getattr(target, "nodes", None)
+    for node in nodes.values() if isinstance(nodes, dict) else ():
+        owner = getattr(getattr(getattr(node, "bound", None), "func", None), "__self__", None)
+        value = getattr(owner, WINDOW_KEPT, None)
+        if _window(value):
+            return value
     return None

@@ -1668,8 +1668,11 @@ class HarnessTools(AgentMiddleware):
 
     state_schema = _HarnessToolsState
 
-    def __init__(self) -> None:
+    def __init__(self, *, context_window: int | None = None) -> None:
         super().__init__()
+        #: the model's context window the stack was given (``middleware(context_window=)``):
+        #: what the harness reads of a graph of your own, as of ``ReAct``'s (``base.WINDOW_KEPT``)
+        self.trellis_context_window = context_window
         self._tools: weakref.WeakKeyDictionary[Runtime, dict[str, BaseTool]] = (
             weakref.WeakKeyDictionary()
         )

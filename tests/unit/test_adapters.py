@@ -568,6 +568,29 @@ def test_the_context_window_is_read_where_a_target_says_it() -> None:
     assert context_budget(8_000) == context_budget(4_000) == 2000  # never less than this
 
 
+@pytest.mark.parametrize("build", ["create_agent", "create_deep_agent"])
+def test_a_graph_built_with_the_harness_middleware_says_its_window(build: str) -> None:
+    """A graph of your own given ``middleware(context_window=...)`` says that window, as
+    ``ReAct`` does (its ``HarnessTools`` keeps it): the conversation memory replays is sized to
+    it, and with memory off its earlier turns are replayed whole — without it the service's
+    default of a few turns' text was all a memory-fed graph saw of its earlier calls."""
+    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis import middleware
+    from trellis.harness.adapters.base import context_window
+
+    def built(window: int | None) -> Any:
+        stack = middleware(context_window=window)
+        if build == "create_agent":
+            return create_agent(ScriptedChatModel(turns=[]), tools=[], middleware=stack)
+        return create_deep_agent(model=ScriptedChatModel(turns=[]), tools=[], middleware=stack)
+
+    assert context_window(built(32_000)) == 32_000
+    assert context_window(built(None)) is None
+
+
 def test_mcp_servers_given_as_text_or_a_file_are_read() -> None:
     assert configured_servers({"a": {"type": "stdio"}}) == {"a": {"type": "stdio"}}
     assert configured_servers(None) == {} and configured_servers("") == {}

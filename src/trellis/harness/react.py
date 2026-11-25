@@ -242,7 +242,7 @@ def _middleware(
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window, always=planned, yields=yields),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
-        ours.HarnessTools(),
+        ours.HarnessTools(context_window=window),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps, scoped=scoped),
