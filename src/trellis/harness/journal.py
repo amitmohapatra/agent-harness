@@ -364,6 +364,11 @@ class Journal(BaseModel):
     #: ``bridges.helpers.Helpers.detached``): whoever keeps each going ends it, never a later
     #: attempt — on any worker
     handed_on: list[str] = Field(default_factory=list)
+    #: the runs the conversation's earlier turns handed on (their ``handed_on``) whose end the
+    #: session this turn continues was not told yet: carried with the session from turn to
+    #: turn, on any worker (``pipeline._session_only``), so a turn the session's process did
+    #: not serve tells what each that ended came to (``adapters.claude``), once
+    in_background: list[str] = Field(default_factory=list)
     #: the tool records queued for the memory service and not known to have landed yet, by
     #: call, as the write spool keeps them (``Agent.record_tool``): saved with the call, so
     #: the attempt after a crash sends them again (``Agent.resent_records``) — the service

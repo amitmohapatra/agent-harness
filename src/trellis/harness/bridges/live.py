@@ -48,6 +48,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Collection,
     Coroutine,
     Hashable,
     Iterator,
@@ -62,6 +63,7 @@ from trellis.harness.bounded import LRU
 from trellis.harness.bridges.helpers import ended
 
 if TYPE_CHECKING:
+    from trellis.contracts import RunRecord
     from trellis.harness.journal import Pending
     from trellis.harness.runtime import Runtime
 
@@ -164,21 +166,48 @@ def background_answer(
     return (str(named["run_id"]), str(named["interrupt_id"]), resolution)
 
 
-async def held_elsewhere(runtime: Runtime, sessions: LiveSessions) -> bool:
+async def held_elsewhere(
+    runtime: Runtime, sessions: LiveSessions, *, carried: bool = False
+) -> bool:
     """Whether the run's session is held by another process's live session: a background
-    subagent's run it handed on there (``Journal.handed_on``) is not one this process keeps,
+    subagent's run it handed on there (``Journal.handed_on``; ``carried``: or one of the
+    conversation's earlier turns, ``Journal.in_background``) is not one this process keeps,
     and has not ended (its keeper ends it; a keeper that stopped leaves it to the run store —
     its deadline, and a run store that ends a run whose holder stopped heartbeating ends it
     then: the seam where that hold is read). Two processes do not hold one session: a turn
     that resumes it forks it, and the subagent works on in the session it has."""
-    runs = runtime.agent.harness.runs
-    for run_id in runtime.replay.journal.handed_on:
+    runs, journal = runtime.agent.harness.runs, runtime.replay.journal
+    for run_id in [*journal.handed_on, *(journal.in_background if carried else ())]:
         if run_id in sessions.attended:
             continue
         record = await runs.get(run_id, tenant=runtime.tenant)
         if record is not None and not record.status.final:
             return True
     return False
+
+
+async def ended_untold(
+    runtime: Runtime, sessions: LiveSessions, told: Collection[str]
+) -> list[RunRecord]:
+    """The background runs of the conversation's earlier turns (``Journal.in_background``)
+    that ended and whose end the session the turn continues was not told — not one its own
+    process told it of (``told``) — oldest first: each is no longer the journal's, so it is
+    told once. Those at work (here, or in another process's session) stay; a run the store
+    no longer has is dropped."""
+    runs, journal = runtime.agent.harness.runs, runtime.replay.journal
+    still: list[str] = []
+    untold: list[RunRecord] = []
+    for run_id in journal.in_background:
+        if run_id in sessions.attended:  # at work in a live session here
+            still.append(run_id)
+            continue
+        record = await runs.get(run_id, tenant=runtime.tenant)
+        if record is not None and not record.status.final:
+            still.append(run_id)
+        elif record is not None and run_id not in told:
+            untold.append(record)
+    journal.in_background = still
+    return untold
 
 
 def converses(runtime: Runtime) -> bool:

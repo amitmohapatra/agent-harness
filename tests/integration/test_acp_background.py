@@ -394,9 +394,9 @@ async def test_a_lapsing_session_leaves_a_newer_session_of_its_conversation_kept
     session = kept(agent)
     assert session is not None
     key = conversation_key("default", USER, THREAD)
-    agent.sessions[key] = ("session_newer", {})
+    agent.sessions[key] = ("session_newer", {}, [])
     await until(lambda: session.closed and not _session_left(agent, session))
-    assert agent.sessions.get(key) == ("session_newer", {})
+    assert agent.sessions.get(key) == ("session_newer", {}, [])
 
 
 async def test_a_session_kept_when_the_harness_closes_leaves_no_process_and_no_files(
@@ -641,7 +641,7 @@ async def test_a_turn_that_continues_another_session_is_not_served_by_the_kept_p
     first = await say(agent, "look")
     [child] = await children(harness, first.run_id)
     key = conversation_key("default", USER, THREAD)
-    agent.sessions[key] = ("session_gone", {})  # what this process kept for the conversation
+    agent.sessions[key] = ("session_gone", {}, [])  # what this process kept for the conversation
     second = await say(agent, "and?")
     assert second.status is RunStatus.SUCCESS, second.error
     done = await ended(harness, child.run_id)

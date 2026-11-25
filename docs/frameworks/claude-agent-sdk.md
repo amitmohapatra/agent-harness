@@ -485,6 +485,16 @@ turn the session runs by itself (a finished task's notification) is never a user
   worker's process still holds the session, and the subagent works on in it, its run open —
   the second worker does not end it as one the earlier attempt left open (the run's journal
   says it was handed on).
+* The conversation's next turns may land on another worker while the subagent works on the
+  first one's process. Each knows of the background runs the session's earlier turns handed
+  on, as the session is carried from turn to turn, in this process or in the run store
+  (`Journal.in_background`). While one works there, a turn forks the session, as a resumed
+  attempt does. Once one ended, the next turn whose process never ran it — another worker's,
+  or a process started after the one that ran it closed — is told what it came to, once, at
+  the head of its prompt: the session it continues never had Claude Code's own notification.
+  It reads as a Deep Agents notification does (that it is not the user's message, the
+  subagent, its status, its result or its error, what to do next). A turn the process that
+  ran it serves is not told: Claude Code told that session itself.
 * A process kept for a conversation another worker has since served a turn of (the run
   store has a later turn than the last one this server served) never answers its next turn:
   it holds the conversation as it was. It is ended, and the turn resumes the session the

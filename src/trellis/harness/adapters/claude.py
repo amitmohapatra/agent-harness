@@ -143,6 +143,7 @@ from trellis.harness.bridges.claude_live import (
     Background,
     LiveSession,
     opened,
+    told_of,
 )
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind, helping, naming
 from trellis.harness.bridges.live import LiveSessions, Turn
@@ -475,6 +476,9 @@ class ClaudeAdapter(Keeps):
         #: what each session cost so far, as its last result charged here carried it (the
         #: most recent): a process that resumes one reports the session's cost, not its own
         self.costs: LRU[str, SessionCost] = LRU()
+        #: what a turn told of the background runs that ended untold (:meth:`_with_ended`),
+        #: by run: an attempt that sends its prompt again tells it again
+        self.told: LRU[str, str] = LRU()
 
     async def aclose(self) -> None:
         """The agent is closing: every conversation's live session ends."""
@@ -792,7 +796,7 @@ class ClaudeAdapter(Keeps):
         key = runtime.conversation if shared.converses(runtime) else None
         # a session another worker's live session still holds (a background subagent of the
         # run at work there) is forked: the turn goes on here, in a process of its own
-        held = session is not None and await shared.held_elsewhere(runtime, self.live)
+        held = session is not None and await shared.held_elsewhere(runtime, self.live, carried=True)
         kept = key is not None and not written and not _own_process(target) and not held
         context = _dated(native_input.context, run, kept=kept)
         options = _options(_limited(target, turns, kept), context, run, session, steps, kept=kept)
@@ -815,7 +819,7 @@ class ClaudeAdapter(Keeps):
                 shared.said(self.live, runtime, CODE)
             # closed as it is left (``aclosing``): a process of its own ends here, in this
             # loop; a live session's turn is interrupted when left before its result
-            source = _queried(prompt, options) if live is None else live.served(turn, prompt)
+            source = await self._source(prompt, options, run, live, turn, first=first)
             async with contextlib.aclosing(source) as messages:
                 async for message in messages:
                     runtime.raise_stopped()  # a call the process's end stopped ends it here
@@ -840,6 +844,39 @@ class ClaudeAdapter(Keeps):
             runtime.model_ended(STEP)
             skills.removed(written)
             await spending.closed(live, turn)
+
+    async def _source(
+        self,
+        prompt: Any,
+        options: Any,
+        run: Invocation,
+        live: LiveSession | None,
+        turn: Turn,
+        *,
+        first: bool,
+    ) -> AsyncGenerator[Any, None]:
+        """The query's messages: its prompt sent to the live session serving it, or to a
+        process of its own — the first attempt's after what the session was never told of its
+        background runs that ended (:meth:`_with_ended`)."""
+        if first:
+            prompt = await self._with_ended(prompt, run.runtime, live)
+        return _queried(prompt, options) if live is None else live.served(turn, prompt)
+
+    async def _with_ended(self, prompt: Any, runtime: Runtime, live: LiveSession | None) -> Any:
+        """``prompt`` after what each background run of the conversation's earlier turns came
+        to that ended untold (``live.ended_untold``): the session the turn continues never had
+        Claude Code's own notification of it — its process was another worker's, or one
+        closed before it ended — so the turn says it, once (:func:`_ended_note`). One the
+        live session serving the turn ran is not told again (``LiveSession.told``)."""
+        said = self.told.get(runtime.run_id)
+        if said is None:
+            if not runtime.replay.journal.in_background:
+                return prompt
+            told = live.told if live is not None else ()
+            ended = await shared.ended_untold(runtime, self.live, told)
+            said = told_of(ended)
+            self.told[runtime.run_id] = said
+        return f"{said}{prompt}" if said and isinstance(prompt, str) else prompt
 
     async def _gone(self, runtime: Runtime, native_input: Any) -> None:
         """The answer this turn brings to a background subagent's question

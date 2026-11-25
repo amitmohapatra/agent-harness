@@ -552,8 +552,9 @@ async def _continued_session(
         kept = None
     if kept is None:
         return await _last_turns_session(agent, identity, record.created_at, journal)
-    journal.session, transcripts = kept
+    journal.session, transcripts, in_background = kept
     journal.transcripts = {name: list(entries) for name, entries in transcripts.items()}
+    journal.in_background = list(in_background)
     return True
 
 
@@ -589,6 +590,7 @@ async def _last_turns_session(
             if kept.session is None or not kept.transcripts.get(kept.session):
                 return False
             journal.session, journal.transcripts = kept.session, kept.transcripts
+            journal.in_background = _in_background(kept)  # a whole journal: its own too
             return True
     except Exception as exc:
         log.warning("run %s: the last turn's session: %s", identity.run_id, exc)
@@ -689,7 +691,11 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
     if runtime.session_refused:
         agent.sessions.discard(runtime.conversation)
     elif journal.session:
-        agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
+        agent.sessions[runtime.conversation] = (
+            journal.session,
+            dict(journal.transcripts),
+            _in_background(journal),
+        )
 
 
 async def _earlier_results(agent: Agent, runtime: Runtime, *, crashed: bool) -> None:
@@ -1815,7 +1821,9 @@ def _resumable(agent: Agent, identity: Identity, journal: Journal) -> bool:
 
 def _session_only(journal: Journal) -> Journal:
     """``journal``'s session and the transcripts a resume restores with it (its own and its
-    subagents', ``JournalSessions``): nothing of the run's calls, which are its own."""
+    subagents', ``JournalSessions``), and the background runs at work in it the session was
+    not told the end of (:func:`_in_background`): nothing of the run's calls, which are its
+    own."""
     session = journal.session
     assert session is not None
     return Journal(
@@ -1825,7 +1833,14 @@ def _session_only(journal: Journal) -> Journal:
             for name, entries in journal.transcripts.items()
             if name == session or name.startswith(f"{session}/")
         },
+        in_background=_in_background(journal),
     )
+
+
+def _in_background(journal: Journal) -> list[str]:
+    """The background runs a conversation's next turn is to know of: those its earlier turns
+    handed on, and this turn's."""
+    return list(dict.fromkeys([*journal.in_background, *journal.handed_on]))
 
 
 async def _recorded(

@@ -238,10 +238,11 @@ def event_of(task: Mapping[str, Any], record: RunRecord) -> dict[str, Any]:
     }
 
 
-def content(update: Mapping[str, Any]) -> list[dict[str, Any]]:
+def content(update: Mapping[str, Any], steps: Mapping[str, str] = NEXT) -> list[dict[str, Any]]:
     """A task update as the model reads it, block by block, in Deep Agents' notification's
-    shape: the note, the task's header, its result or details, and what to do next — the
-    sub-agent's words escaped, so they cannot close the tags and pose as the system."""
+    shape: the note, the task's header, its result or details, and what to do next (``steps``,
+    by status) — the sub-agent's words escaped, so they cannot close the tags and pose as the
+    system."""
     header = (
         f"<task-notification>\n<task-id>{_escape(update['task_id'])}</task-id>\n"
         f"<agent-name>{_escape(update['agent_name'])}</agent-name>\n"
@@ -255,7 +256,7 @@ def content(update: Mapping[str, Any]) -> list[dict[str, Any]]:
     if details:
         said = _escape(_clip(json.dumps(details, default=str)))
         blocks.append(_block(f"<details>{said}</details>\n"))
-    blocks.append(_block(f"</task-notification>\n{NEXT[update['status']]}"))
+    blocks.append(_block(f"</task-notification>\n{steps[update['status']]}"))
     return blocks
 
 

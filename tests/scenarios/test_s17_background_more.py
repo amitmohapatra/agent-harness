@@ -143,11 +143,6 @@ async def test_a_budget_stops_the_background_run_and_not_the_chat(
 
 
 @pytest.mark.plan("BG-11", "BG-07")
-@pytest.mark.xfail(
-    strict=True,
-    reason="BG-11: bg-claude-da (a background task's outcome, on the server that keeps its live "
-    "session, is not told to the conversation's next turn on another server)",
-)
 async def test_the_next_turn_lands_on_another_server_while_a_task_runs_on_the_first(
     uid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

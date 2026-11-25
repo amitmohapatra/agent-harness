@@ -386,7 +386,7 @@ async def test_the_conversations_session_is_continued_only_where_it_is_kept(
     agent = arm(harness.wrap(target, id=f"sess-{framework}"), tools)
     await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
     key = conversation_key("default", "ada", THREAD)
-    session, _ = agent.sessions[key]
+    session, *_ = agent.sessions[key]
     forget(seen)
     await agent.run("What is the locker code?", user="ada", thread=THREAD)
     assert agent.sessions[key][0] == session  # the same session, one turn on
@@ -435,8 +435,8 @@ async def test_a_session_whose_turn_failed_is_not_the_next_turns(
     agent = arm(harness.wrap(target, id="sess-failed", hooks=[Refused()]), tools)
     await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
     key = conversation_key("default", "ada", THREAD)
-    session, _ = agent.sessions[key]
-    journal = SimpleNamespace(session=session, transcripts={})
+    session, *_ = agent.sessions[key]
+    journal = SimpleNamespace(session=session, transcripts={}, in_background=[], handed_on=[])
     failed = SimpleNamespace(status=RunStatus.ERROR)
     other = SimpleNamespace(
         parent=None, conversation=key, run_id="run_failed", session_refused=False
@@ -881,8 +881,8 @@ async def test_a_turn_another_worker_served_is_resumed_from_the_run_store(
     agent = arm(harness.wrap(target, id="sess-elsewhere"), tools)
     first = await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
     key = conversation_key("default", "ada", THREAD)
-    session, transcripts = agent.sessions[key]
-    stale = (session, {name: list(entries) for name, entries in transcripts.items()})
+    session, transcripts, _ = agent.sessions[key]
+    stale = (session, {name: list(entries) for name, entries in transcripts.items()}, [])
     await agent.run("The gate code is 1717.", user="ada", thread=THREAD)
     # as on the worker that served only the first turn: its session, its last turn
     agent.sessions[key], agent.turned[key] = stale, first.run_id

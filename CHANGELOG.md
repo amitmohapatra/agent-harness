@@ -5,6 +5,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a Claude background task's end reaches the next turn on another server (BG-11)
+
+A subagent Claude Code runs in the background works on in the process of the server whose
+turn started it, and only that process's session hears it end. The conversation's next turns
+on another server continued the session without knowing the subagent was there: the turn did
+not fork a session the first server still held, and once the subagent ended, no turn was told
+what it came to. The background runs a session's turns hand on are now carried with the
+session from turn to turn, in the process and in the run store (`Journal.in_background`): a
+turn forks the session while one works elsewhere, and the first turn whose process never ran
+one that ended is told what it came to, once, at the head of its prompt. A turn served by the
+process that ran it is not told again: Claude Code told that session itself. The scenario's
+strict expected failure is gone.
+
 ### Fixed: an answer holding a number too large for a float no longer fails its run
 
 The check of an answer's figures against what its model was sent read a run of digits past

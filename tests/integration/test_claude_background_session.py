@@ -1121,6 +1121,50 @@ async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_sta
         await two.aclose()
 
 
+@pytest.mark.parametrize(
+    ("ends", "status", "said"),
+    [
+        ("done", RunStatus.SUCCESS, "<status>success</status>"),
+        ("failed", RunStatus.ERROR, "<status>error</status>"),
+    ],
+)
+async def test_a_background_task_that_ends_on_one_worker_is_told_to_the_next_turn_on_another(
+    tmp_path: Path, ends: str, status: RunStatus, said: str
+) -> None:
+    """Worker 1's turn starts a subagent in the background, which works on in its process; the
+    conversation's next turns land on worker 2. While the task works, worker 2's turn forks the
+    session (two processes do not hold one: ``live.held_elsewhere``) and is told nothing of it;
+    once it ended on worker 1, worker 2's next turn is told its outcome — the session it
+    continues never saw Claude Code's own notification — and the turn after is not told it
+    again (``Journal.in_background``, carried with the session from turn to turn)."""
+    store = LocalRuns()
+    one, two = Harness(config=HOST_ALLOWED, runs=store), Harness(config=HOST_ALLOWED, runs=store)
+    answer = [{"text": "you asked: {heard}"}]
+    try:
+        first = one.wrap(options(tmp_path, [[BACKGROUND, {"text": "started it"}], answer]), id="c")
+        second = two.wrap(options(tmp_path, [answer]), id="c")
+        started = await first.run("research the market", user="u1", thread="t1")
+        child = await child_of(one, started.run_id)
+        meanwhile = await second.run("meanwhile, hello", user="u1", thread="t1")
+        assert meanwhile.status is RunStatus.SUCCESS, meanwhile.error
+        assert "--fork-session" in served(tmp_path)[1]["argv"]  # held on worker 1: forked
+        assert "the market is growing" not in meanwhile.answer
+
+        (tmp_path / "tasks" / f"t1.{ends}").write_text("the market is growing")
+        await when(one, child.run_id, status)
+        later = await second.run("what did it find?", user="u1", thread="t1")
+        assert later.status is RunStatus.SUCCESS, later.error
+        assert later.answer.count("the market is growing") == 1, later.answer
+        assert "<agent-name>researcher</agent-name>" in later.answer and said in later.answer
+        assert "check_async_task" not in later.answer
+        again = await second.run("and the rest?", user="u1", thread="t1")
+        # in the session's history once (the turn it was told in), never told again
+        assert again.answer.count("the market is growing") == 1, again.answer
+    finally:
+        await one.aclose()
+        await two.aclose()
+
+
 async def test_a_kept_session_whose_last_turn_the_run_store_no_longer_has_is_served(
     harness: Harness, tmp_path: Path
 ) -> None:

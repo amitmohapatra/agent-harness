@@ -447,10 +447,11 @@ class Agent:
         #: forgets one where none of them waits any more
         self.waiting_in: LRUSet[str] = LRUSet()
         #: the session its framework kept for each conversation's last turn in this process
-        #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
-        #: turn continues it (``pipeline``, ADR 0005), the most recent kept; one let go of is
-        #: the framework's to forget (:meth:`_session_gone`)
-        self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(
+        #: (a Claude Agent SDK session and its transcripts, an ACP agent's session; and the
+        #: background runs at work in it it was not told the end of: ``Journal.in_background``):
+        #: the next turn continues it (``pipeline``, ADR 0005), the most recent kept; one let go
+        #: of is the framework's to forget (:meth:`_session_gone`)
+        self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]], list[str]]] = LRU(
             SESSIONS_KEPT, gone=self._session_gone
         )
         #: the latest turn of each conversation this process served: a session kept here is
@@ -479,7 +480,7 @@ class Agent:
         files of the sessions kept for a conversation's next turn), where it keeps any."""
         await self.adapter.aclose()
 
-    def _session_gone(self, _conversation: str, kept: tuple[str, Any]) -> None:
+    def _session_gone(self, _conversation: str, kept: tuple[str, Any, Any]) -> None:
         """The session ``kept`` for a conversation's next turn is kept no more (its place
         given to another conversation's, or dropped): the framework lets go of what it keeps
         of it, where it keeps any (an ACP agent's files: ``ACPAdapter.session_gone``)."""

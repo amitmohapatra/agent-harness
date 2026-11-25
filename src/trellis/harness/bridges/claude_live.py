@@ -78,7 +78,7 @@ from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
-from trellis.harness import budget
+from trellis.harness import background, budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bridges import live
 from trellis.harness.bridges.claude import (
@@ -90,7 +90,7 @@ from trellis.harness.bridges.claude import (
     ours,
     task_said,
 )
-from trellis.harness.bridges.helpers import Kind
+from trellis.harness.bridges.helpers import HELPER, Kind
 from trellis.harness.bridges.live import (
     COMPLETED,
     FAILED,
@@ -106,6 +106,7 @@ from trellis.harness.bridges.live import (
 from trellis.harness.journal import Journal
 
 if TYPE_CHECKING:
+    from trellis.contracts import RunRecord
     from trellis.harness.runtime import Runtime
 
 log = logging.getLogger("trellis.harness")
@@ -283,6 +284,39 @@ class Background(Kept):
         return answer.get("stopReason") == WAITING or (bool(answer.get("is_error")) and said)
 
 
+#: What a background run's failure, told by a turn (:func:`told_of`), says to do next: Deep
+#: Agents' step (``background.NEXT``) names ``check_async_task``, which Claude has not.
+ENDED_FAILED: Final = (
+    "Decide from its error whether to retry, try another approach, or tell the user."
+)
+
+
+def told_of(ended: Sequence[RunRecord]) -> str:
+    """What a turn says, at the head of its prompt, of the background runs of its
+    conversation's earlier turns that ended untold (``live.ended_untold``): each as Deep
+    Agents' notification reads (:func:`_ended_note`). The run the workflows at work together
+    shared (:data:`SHARED`) is no task: it is not told."""
+    return "".join(f"{_ended_note(r)}\n\n" for r in ended if _helper_of(r) != SHARED)
+
+
+def _ended_note(record: RunRecord) -> str:
+    """A background subagent's run that ended, told to a session that never was: that it is
+    not the user's message, the subagent, its status, its result or its error, and what to do
+    next (``background.content``)."""
+    task = {"task_id": record.run_id, "agent_name": _helper_of(record)}
+    update = background.update_of(task, record)
+    assert update is not None  # it ended
+    if "error" in update and record.error is not None:
+        update["error"] = record.error.message
+    steps = {**background.NEXT, "error": ENDED_FAILED}
+    return "".join(block["text"] for block in background.content(update, steps))
+
+
+def _helper_of(record: RunRecord) -> str:
+    """The name of the helper whose run ``record`` is (its ``bridges.helpers.HELPER``)."""
+    return str((record.metadata.get(HELPER) or {}).get("name", ""))
+
+
 class Mirror:
     """The session's ``SessionStore``: every entry the CLI mirrors, kept for the session's
     life, and in the journal of the turn being served — whose run a pause or a crash resumes
@@ -345,6 +379,9 @@ class LiveSession(Keeper[Background]):
         self._calling: dict[str, Background] = {}
         #: the prompts sent whose result has not come (one at most)
         self.owed = 0
+        #: the background runs whose task's end Claude Code told this session (its own
+        #: notification): a later turn of it is not told them again (``Journal.in_background``)
+        self.told: set[str] = set()
         #: why the process ended, when it ended of itself with an error
         self.error: BaseException | None = None
         #: the session's running cost as the last charged result carried it, shared with
@@ -651,6 +688,9 @@ class LiveSession(Keeper[Background]):
             self._task_ended(said.task_id, said.status, said.summary)
 
     def _task_ended(self, task_id: str, status: str, summary: str) -> None:
+        found = self.background.get(task_id)
+        if found is not None:  # the CLI tells its session itself (a turn of its own)
+            self.told.add(found.run_id)
         super()._task_ended(task_id, status, summary)
         self._unshared()
 
@@ -815,7 +855,9 @@ class LiveSession(Keeper[Background]):
         kept = None if self.kept_in is None else self.kept_in.get(self.key)
         if self.mirror is not None and kept is not None and kept[0] == self.session_id:
             assert self.kept_in is not None
-            self.kept_in[self.key] = (kept[0], dict(self.mirror.transcripts))
+            # what it mirrored holds the ends Claude Code told it: not told the next turn again
+            told = [run_id for run_id in kept[2] if run_id not in self.told]
+            self.kept_in[self.key] = (kept[0], dict(self.mirror.transcripts), told)
         if self._reader is not None and self._reader is not asyncio.current_task():
             self._reader.cancel()
         if self.client is not None:
