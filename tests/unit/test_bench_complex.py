@@ -906,9 +906,12 @@ async def test_a_later_turn_finds_the_file_and_todos_an_earlier_turn_made(
     assert report["summary"]["by_category"]["carry"]["strict"]["mean"] == 1.0
 
 
-def test_an_unthreaded_deep_agent_has_no_checkpointer_of_its_own() -> None:
-    own, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents")
-    bare, _ = cx.target_of("m", "thread", None, 6, adapter="deepagents", variant=cx.UNTHREADED)
+@pytest.mark.parametrize("adapter", ["deepagents", "langgraph"])
+def test_an_unthreaded_graph_has_no_checkpointer_of_its_own(adapter: str) -> None:
+    """``unthreaded``: the graph built with no checkpointer, so its conversation is memory's
+    (the harness replays memory's window as its messages), as ``ReAct``'s is."""
+    own, _ = cx.target_of("m", "thread", None, 6, adapter=adapter)
+    bare, _ = cx.target_of("m", "thread", None, 6, adapter=adapter, variant=cx.UNTHREADED)
     assert own.checkpointer is not None and bare.checkpointer is None
 
 
