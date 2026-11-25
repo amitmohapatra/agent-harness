@@ -59,7 +59,7 @@ from trellis.harness.tools.convert import text_of
 
 CLI: Final = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 TOKEN: Final = re.compile(r"tok_[a-z0-9]+_[0-9]+")
-COMMAND: Final = re.compile(r"do:([a-z_]+):(?=\{)")
+COMMAND: Final = re.compile(r"do:([A-Za-z_]+):(?=\{)")  # a framework's own tools too (Bash)
 SLOW: Final = re.compile(r"slow:([0-9.]+)")
 #: ``loop:<n>:<tool>``: that many calls of a tool, each with ``{"key": "k<i>"}`` (a long task)
 LOOP: Final = re.compile(r"loop:([0-9]+):([a-z_]+)")

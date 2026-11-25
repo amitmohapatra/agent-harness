@@ -8,10 +8,9 @@
   server (``tests/integration/test_react_async_subagent.py``'s), on ``ReAct`` and on
   ``create_deep_agent``: the turn replies at once, the next turn is answered while the task
   runs, a later turn checks it and reads its result.
-* What is still on an unmerged branch is ``xfail(strict=True)``: Kimi's background work across
-  turns (bg-kimi), ``ReAct``'s own sub-agents in the background with no server
-  (react-background), and Claude Workflows (bg-claude-da). Each flips to a failure — and must be
-  unmarked — the day its branch lands.
+* Kimi: a command started in the background (``Bash`` with ``run_in_background``) works on past
+  the turn that started it, in the process the conversation keeps, and its end reaches a later
+  turn: Kimi's notification, naming the file its output is in.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import pytest
 from deepagents import create_deep_agent
@@ -131,26 +130,39 @@ async def test_deep_agents_async_task_while_the_user_chats(
         server.stop()
 
 
-@plan("BG-07", "BG-10")
-@pytest.mark.xfail(
-    strict=True, reason="pending branch bg-kimi: Kimi's background work ends with its process"
+#: Kimi's notification of a background task that completed, and the file its output is in.
+KIMI_TASK_ENDED: Final = re.compile(
+    r'<notification[^>]*type="task\.completed".*?<output-file path="([^"]+)"', re.DOTALL
 )
+
+
+@plan("BG-07", "BG-10")
 async def test_kimi_background_shell_result_reaches_a_later_turn(
     h: Harness, uid: str, tmp_path: Path
 ) -> None:
     agent, built = await wrapped(h, "kimi", TOOLS, tmp_path, id=f"s5k-{uid}")
     user, thread = f"ada-{uid}", f"chat-{uid}"
-    shell = command("Bash", command=f"sleep 8; echo BGDONE-$((40+2))-{uid}", run_in_background=True)
+    shell = command(
+        "Bash",
+        command=f"sleep 8; echo BGDONE-$((40+2))-{uid}",
+        run_in_background=True,
+        description="a slow job",  # Kimi's Bash asks for one with run_in_background
+    )
     first = await agent.run(f"{token(uid, 1)} {shell}", user=user, thread=thread)
     assert first.status is RunStatus.SUCCESS, first.error
     meanwhile = await agent.run(
         f"{token(uid, 2)} meanwhile", user=user, thread=thread
     )  # still working
     assert meanwhile.status is RunStatus.SUCCESS, meanwhile.error
-    await asyncio.sleep(10)  # the job ends after the turn that started it, and its process, ended
+    await asyncio.sleep(10)  # the job ends after the turn that started it ended
     later = await agent.run(f"{token(uid, 3)} is it done?", user=user, thread=thread)
     assert later.status is RunStatus.SUCCESS, later.error
-    assert f"BGDONE-42-{uid}" in built.model.said(), "the background output never reached Kimi"
+    # Kimi tells its model the job's end in a later turn: that it completed, and the file its
+    # output is in (Kimi 2.6.2: "Read the output file to retrieve the result")
+    ended = KIMI_TASK_ENDED.search(built.model.said())
+    assert ended is not None, "the job's end never reached Kimi"
+    output = await asyncio.to_thread(Path(ended[1]).read_text)
+    assert f"BGDONE-42-{uid}" in output  # it ran to its end
 
 
 @plan("BG-01")
