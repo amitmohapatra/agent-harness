@@ -16,6 +16,7 @@ from benchmark.cost.__main__ import arguments, main
 from tests.support.memory import FakeMemoryService
 from tests.support.models import Script, ScriptedChat
 from trellis import Harness, Settings
+from trellis.harness import snapshots
 
 FIRST_CALLS: dict[str, Any] = {
     explain.FIRSTS[0].question: ("stock_quote", {"symbol": "ACME"}),
@@ -42,6 +43,7 @@ class Reader(Script):
         asked = [m["content"] for m in messages if m["role"] == "user"][-1]
         if isinstance(asked, list):  # the memory context comes first, then the question
             asked = asked[-1]["text"]
+        asked = snapshots.parted(asked)[0]  # and the freshness note after it, when there is one
         if messages[-1]["role"] == "tool":
             return "ACME closed at 123.45 USD."
         return FIRST_CALLS.get(asked) or ANSWERS.get(asked, "I do not know.")

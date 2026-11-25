@@ -182,8 +182,16 @@ def test_the_freshness_note_comes_after_the_question_not_in_the_context() -> Non
         HumanMessage("b?", id="q2"),
     ]
     told, question = with_question(request(given)).messages[2].content
-    assert told["text"] == ASKED_WITH.format(context="## Facts\n- prefers email")
+    assert told == {"type": "text", "text": ASKED_WITH.format(context="## Facts\n- prefers email")}
     assert question == {"type": "text", "text": f"b?\n\n{note}"}
+    # a question of parts: the note a part of its own after them
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+    parts = [*given[:3], HumanMessage([{"type": "text", "text": "b?"}, image], id="q2")]
+    assert with_question(request(parts)).messages[2].content[1:] == [
+        {"type": "text", "text": "b?"},
+        image,
+        {"type": "text", "text": note},
+    ]
     runtime: Any = SimpleNamespace(
         task="b?", pushed_context=context.text, agent=SimpleNamespace(target=None)
     )

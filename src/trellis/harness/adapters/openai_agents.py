@@ -1319,23 +1319,28 @@ def _asked_with(runtime: Runtime, options: dict[str, Any], question: Any = None)
         found = said_it[0] if said_it else users[-1] if users else None
         if at is None or found is None:
             return given
-        said = items[found].get("content")
-        # the freshness note after the question, as a thread the framework keeps is told it
-        # (``middleware._stale_noted``), not in the context before it
-        told, note = snapshots.parted(context)
-        if note is not None:
-            said = (
-                [*said, {"type": "input_text", "text": note}]
-                if isinstance(said, list)
-                else f"{said}\n\n{note}"
-            )
-        parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
-        marked = [{"type": "input_text", "text": ASKED_WITH.format(context=told)}] if told else []
-        items[found] = {**items[found], "content": [*marked, *parts]}
+        items[found] = {**items[found], "content": _told_with(items[found].get("content"), context)}
         del items[at]
         return ModelInputData(input=items, instructions=given.instructions)
 
     return _filtered(options, asked)
+
+
+def _told_with(said: Any, context: str) -> list[Any]:
+    """The user's turn's content ``said``, as its parts, after the pushed ``context`` marked
+    off (``ASKED_WITH``) — and the freshness note the context carries after it, as a thread
+    the framework keeps is told it (``middleware._stale_noted``), not in the context before
+    it (``snapshots.parted``)."""
+    told, note = snapshots.parted(context)
+    if note is not None:
+        said = (
+            [*said, {"type": "input_text", "text": note}]
+            if isinstance(said, list)
+            else f"{said}\n\n{note}"
+        )
+    parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
+    marked = [{"type": "input_text", "text": ASKED_WITH.format(context=told)}] if told else []
+    return [*marked, *parts]
 
 
 def _dated(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
