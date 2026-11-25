@@ -5,6 +5,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Benchmark: three schedule checks that failed right answers, and answers kept whole
+
+The schedules suite failed right answers on three checks, on every adapter that put them in
+other words: a pause whose reason the record does not hold ("the record doesn't include a
+reason", "my tools don't record why", "I can't tell why"); the schedule limit ("the
+scheduler allows only two", "you can have only 2 scheduled tasks"); and a made-up claim said
+negated or as a condition ("no rule to skip holidays", "nothing in the schedule skips public
+holidays", "if you want it to skip holidays"), which an explanation no longer counts as made
+(`schedules.NOT_CLAIMED`). Rescored, of 140: LangGraph 132, Claude 131, `ReAct` on Deep Agents
+131, OpenAI Agents 130, `ReAct` 130, the hand-built graph 128, Deep Agents 127, Kimi 113. A run
+now keeps each answer whole (it kept the first 400 characters), so a later fix rescores it
+exactly.
+
 ### Fixed: a graph of your own built with `middleware(context_window=)` says its window
 
 The harness read a model's context window from `ReAct`'s graph, a target or its model, but not

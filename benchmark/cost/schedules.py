@@ -707,7 +707,12 @@ NOT_RECORDED: Final = (
     r"by hand|manually|you paused|someone paused|was paused by|turned (it )?off|"
     r"no (failures|errors|failed runs)|(hasn't|has not|didn't|did not|never) fail|"
     r"not (because of|due to) (a |any )?(failure|error)|(don't|do not) know|not (known|recorded)|"
-    r"no record|doesn't say|does not say"
+    r"no record|doesn't say|does not say|"
+    # the reason not said, in any of the words a record that keeps none is told in
+    r"(can't|cannot|couldn't|could not) (tell|see|say|know|find)( you)? (why|who|the reason)|"
+    r"(don't|do not|doesn't|does not|didn't|did not) (record|include|keep|store|show|give|say|"
+    r"list)( you)? (why|who|(a |the |any )?reason)|but not (the reason|why|who)|"
+    r"nothing (in [^.]{0,30})?(says|shows|records|gives|explains) (why|who|the reason)"
 )
 #: Said of a condition reported already: quiet until it stops holding.
 REPORTED_ONCE: Final = (
@@ -789,16 +794,33 @@ def _flat(text: str) -> str:
     return re.sub(r"(?<=\d)[,\s](?=\d{3}\b)", "", text).lower()
 
 
+#: What makes a phrase no claim of the answer's: a negation or a condition before it in its
+#: clause ("no rule to skip holidays", "nothing in it skips them", "if you want it to skip
+#: them", "whether it skips them"). Not a contracted one ("it hasn't run since it failed
+#: twice" still claims the failures).
+NOT_CLAIMED: Final = r"\b(no|not|nothing|never|none|without|if|whether|unless)\b"
+
+
+def _claimed(pattern: str, text: str) -> re.Match[str] | None:
+    """The first of ``pattern`` in ``text`` the answer claims (:data:`NOT_CLAIMED`)."""
+    for found in re.finditer(pattern, text):
+        clause = re.split(r"[.;:!?]", text[: found.start()])[-1]
+        if not re.search(NOT_CLAIMED, clause):
+            return found
+    return None
+
+
 def explains(*facts: str, wrong: Sequence[str] = MADE_UP_CAUSES) -> Check:
-    """Nothing written; the last answer says each of ``facts`` (patterns) and none of
-    ``wrong`` (a claim no record or doc holds: made up)."""
+    """Nothing written; the last answer says each of ``facts`` (patterns) and claims none of
+    ``wrong`` (a claim no record or doc holds: made up; said negated or as a condition, it is
+    not claimed: :func:`_claimed`)."""
 
     def check(chat: Chat) -> list[str]:
         text = _flat(chat.answers[-1])
         problems = [f"wrote {n}" for n in chat.written()]
         problems += [f"answer lacks /{f}/" for f in facts if not re.search(f, text)]
         for w in wrong:
-            if found := re.search(w, text):
+            if found := _claimed(w, text):
                 problems.append(f"a made-up claim: {found.group(0)!r}")
         return problems
 
@@ -1574,8 +1596,9 @@ def more_cases(stock: int) -> list[Case]:
              no_end(0), seeds=(ending,)),
         # --- limits: which, the number, what the user can do, plainly
         Case("at-cap", L, ("Every Friday at 5pm send me the top 5 SKUs by revenue.",),
-             plain_limit("2", which=r"(limit|maximum|most|max|allowed|up to)[^.]{0,60}schedule"
-                         r"|schedules?[^.]{0,60}(limit|maximum|most|max|allowed)",
+             plain_limit("2", which=r"(limit|maximum|most|max|allow(s|ed)?|up to|only)[^.]{0,60}"
+                         r"schedul|schedul[^.]{0,60}(limit|maximum|most|max|allow(s|ed)?|only|"
+                         r"slots?)",
                          action=r"cancel|delete|remove"),
              seeds=(stock_seed, summary_seed), limits=ScheduleLimits(max_per_user=2)),
         Case("org-cap", L, (f"Every day at 9am send me the stock of {SKU}.",),
@@ -1896,9 +1919,10 @@ async def run_case(
         "category": case.category,
         "passed": not problems,
         "problems": problems,
-        "answers": [a[:400] for a in chat.answers],
+        # whole, so a scorer fixed later rescores what was said, not its start
+        "answers": list(chat.answers),
         "calls": [[(n, a) for n, a, _ in turn] for turn in chat.calls],
-        "fired": [f[:300] for f in chat.fired],
+        "fired": list(chat.fired),
         "fired_calls": chat.fired_calls,
         "confirmed": chat.confirmed,
         "made": [(s.cadence, s.timezone, s.metadata[TASK]) for s in chat.made()],
