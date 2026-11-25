@@ -24,11 +24,12 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import hashlib
 import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -751,10 +752,17 @@ async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result
 #: (:func:`_kept_name`). And the most bytes one turn keeps there.
 CARRIED_FOLDER: Final = ".carried"
 CARRIED_BYTES: Final = 256 * 1024
-#: What gives way when a conversation's state is past :data:`CARRIED_BYTES`: its files (Deep
-#: Agents' ``files`` channel), the largest first, as far as needed — the task list and the
-#: todos are kept whole (:func:`_fitted`).
+#: What moves out of a turn's file when a conversation's state is past :data:`CARRIED_BYTES`: its
+#: files (Deep Agents' ``files`` channel), the largest first, as far as needed, each kept whole
+#: as an object of its own — the task list and the todos stay in the turn's file
+#: (:func:`_fitted`).
 CARRIED_CUT: Final = "files"
+#: The folder, in a conversation's (:func:`_carried_at`), of the files moved out of its turns'
+#: files: each an object named by its content (:func:`_moved_out`), so a file no turn changed is
+#: the object it was, never sent again, and two turns that kept the same file name one object.
+CARRIED_OBJECTS: Final = "files"
+#: How a turn's file names a file moved out: ``{CARRIED_REF: <its object's name>}``.
+CARRIED_REF: Final = "$carried"
 #: The suffix of a turn's file in that folder.
 CARRIED_SUFFIX: Final = ".json"
 
@@ -781,12 +789,14 @@ async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
 
 async def _read_carried(
     agent: Agent, runtime: Runtime
-) -> tuple[dict[str, Any], list[str], set[tuple[str, str]]]:
+) -> tuple[dict[str, Any], list[str], set[tuple[str, str]], set[str]]:
     """:func:`_carried`, and the files it merged — and those that hold no state (a write cut
     off, another program's file): the files a turn that keeps its own over them supersedes. A
     file that could not be read at all (the store out of reach) is neither. And the entries
     (channel, key) any file it read holds (not deleted: ``None``) — what a deletion marker
-    keeps from coming back (:func:`_unmarked`)."""
+    keeps from coming back (:func:`_unmarked`). A file moved out of a turn's file
+    (:data:`CARRIED_REF`) is read back from its object (:func:`_moved_back`). And the objects
+    the store holds (:data:`CARRIED_OBJECTS`): what a turn need not send again."""
     folder = _carried_at(agent, runtime)
     files = agent.harness.files
     merged: dict[str, Any] = {}
@@ -796,7 +806,8 @@ async def _read_carried(
         listed = await files.files(folder)
     except Exception as exc:
         _not_read(runtime, f"{type(exc).__name__}: {exc}")
-        return merged, read, live
+        return merged, read, live, set()
+    objects = _objects_in(listed, folder)
     names = sorted(n for where, n, size in listed if where == folder and size is not None)
     for name in names:
         try:
@@ -815,6 +826,7 @@ async def _read_carried(
         if not isinstance(found, dict):
             _not_read(runtime, f"{name}: it is not a graph state by channel")
             continue
+        found = await _moved_back(files, folder, found, runtime)
         merged = merged_state(merged, found)
         live |= {
             (channel, key)
@@ -823,7 +835,46 @@ async def _read_carried(
             for key, entry in value.items()
             if entry is not None
         }
-    return merged, read, live
+    return merged, read, live, objects
+
+
+def _objects_in(listed: Sequence[tuple[str, str, int | None]], folder: str) -> set[str]:
+    """The objects of files moved out (:data:`CARRIED_OBJECTS`) a listing of ``folder`` holds."""
+    return {n for where, n, size in listed if where == f"{folder}/{CARRIED_OBJECTS}" and size}
+
+
+def _named(state: dict[str, Any]) -> set[str]:
+    """The objects a turn's file names (:data:`CARRIED_REF`)."""
+    cut = state.get(CARRIED_CUT)
+    entries = cut.values() if isinstance(cut, dict) else ()
+    return {e[CARRIED_REF] for e in entries if isinstance(e, dict) and set(e) == {CARRIED_REF}}
+
+
+async def _moved_back(
+    files: Any, folder: str, found: dict[str, Any], runtime: Runtime
+) -> dict[str, Any]:
+    """``found`` (a turn's file) with each file moved out read back whole from its object; one
+    that cannot be read is said in the log and left out, as a file lost."""
+    named = _named(found)
+    if not named:
+        return found
+    whole: dict[str, Any] = {}
+    for name in sorted(named):
+        try:
+            data = await files.read(f"{folder}/{CARRIED_OBJECTS}", name)
+            if data is None:
+                raise FileNotFoundError(name)
+            whole[name] = json.loads(data)
+        except Exception as exc:
+            _not_read(runtime, f"the file kept as {name}: {type(exc).__name__}: {exc}")
+    cut: dict[str, Any] = {}
+    for path, entry in found[CARRIED_CUT].items():
+        ref = entry.get(CARRIED_REF) if isinstance(entry, dict) and len(entry) == 1 else None
+        if ref is None:
+            cut[path] = entry
+        elif ref in whole:
+            cut[path] = whole[ref]
+    return {**found, CARRIED_CUT: cut}
 
 
 def _not_read(runtime: Runtime, problem: str) -> None:
@@ -845,19 +896,15 @@ async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
     merges both: no task is lost whatever the order of their reads, writes and removals."""
     folder = _carried_at(agent, runtime)
     files = agent.harness.files
-    kept, read, live = await _read_carried(agent, runtime)
+    kept, read, live, objects = await _read_carried(agent, runtime)
     state = _unmarked(merged_state(kept, runtime.carried), live)
     if state == kept:
         return  # what is kept holds this turn's state already
     try:
-        data, dropped = _fitted(state)
-        if dropped:
-            runtime.events.warning(
-                "carried_files_dropped",
-                f"past the {CARRIED_BYTES} bytes a conversation carries to its next turn on "
-                f"another server, these files were left out (this process keeps them): "
-                f"{', '.join(dropped)}",
-            )
+        data, moved = _fitted(state)
+        for name, blob in moved.items():  # before the turn's file names them
+            if name not in objects:
+                await files.put(f"{folder}/{CARRIED_OBJECTS}", name, blob, source=CARRIED_FOLDER)
         await files.put(folder, _kept_name(runtime), data, source=CARRIED_FOLDER)
     except Exception as exc:
         problem = f"{type(exc).__name__}: {exc}"
@@ -876,6 +923,35 @@ async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
                 type(exc).__name__,
                 exc,
             )
+    if objects or moved:
+        await _swept(files, folder, runtime)
+
+
+async def _swept(files: Any, folder: str, runtime: Runtime) -> None:
+    """The objects of files moved out (:data:`CARRIED_OBJECTS`) that no turn's file in
+    ``folder`` names any more removed — a file a turn deleted or changed, an object a turn
+    sent and then failed to keep its file for. Read after the turn's file is kept and those it
+    supersedes removed, and none removed when a turn's file cannot be read, or is gone by the
+    time it is read (a newer one, not listed, may name any of them): a conversation's turns
+    run one at a time (``identity.queued_with``), so no other turn keeps a file meanwhile."""
+    try:
+        listed = await files.files(folder)
+        named: set[str] = set()
+        for name in sorted(n for where, n, size in listed if where == folder and size):
+            data = await files.read(folder, name)
+            if data is None:
+                return  # superseded meanwhile: what names what is not known
+            found = json.loads(data)
+            named |= _named(found) if isinstance(found, dict) else set()
+        for name in sorted(_objects_in(listed, folder) - named):
+            await files.remove(f"{folder}/{CARRIED_OBJECTS}", name)
+    except Exception as exc:  # left for the next turn's sweep
+        log.warning(
+            "run %s: the files a conversation no longer carries were not removed: %s: %s",
+            runtime.run_id,
+            type(exc).__name__,
+            exc,
+        )
 
 
 def _unmarked(state: dict[str, Any], live: set[tuple[str, str]]) -> dict[str, Any]:
@@ -890,27 +966,38 @@ def _unmarked(state: dict[str, Any], live: set[tuple[str, str]]) -> dict[str, An
     }
 
 
-def _fitted(state: dict[str, Any]) -> tuple[bytes, list[str]]:
-    """``state`` as the JSON kept in the file store, within :data:`CARRIED_BYTES`: its files
-    (:data:`CARRIED_CUT`) left out, the largest first, as far as needed, the rest whole — and
-    the paths left out. A state past the bound without its files is refused (``ValueError``)."""
+def _fitted(state: dict[str, Any]) -> tuple[bytes, dict[str, bytes]]:
+    """``state`` as the JSON of a turn's file in the store, within :data:`CARRIED_BYTES`: its
+    files (:data:`CARRIED_CUT`) moved out, the largest first, as far as needed — each named in
+    the turn's file (:data:`CARRIED_REF`) and kept whole as an object of its own — the rest
+    inline; and the objects to keep, by name (:func:`_moved_out`). A state past the bound with
+    every file moved out is refused (``ValueError``)."""
     data = json.dumps(state).encode()
     cut = state.get(CARRIED_CUT)
-    dropped: list[str] = []
+    moved: dict[str, bytes] = {}
     if len(data) > CARRIED_BYTES and isinstance(cut, dict):
         sizes = {path: len(json.dumps([path, entry]).encode()) for path, entry in cut.items()}
         over = len(data) - CARRIED_BYTES
+        refs: dict[str, Any] = {}
         for path in sorted(sizes, key=lambda p: (-sizes[p], p)):
-            dropped.append(path)
-            over -= sizes[path]
+            if cut[path] is None:
+                continue  # a deletion marker: nothing to move
+            name, blob = _moved_out(cut[path])
+            moved[name], refs[path] = blob, {CARRIED_REF: name}
+            over -= sizes[path] - len(json.dumps([path, refs[path]]).encode())
             if over <= 0:
                 break
-        gone = set(dropped)
-        data = json.dumps({**state, CARRIED_CUT: {p: e for p, e in cut.items() if p not in gone}})
-        data = data.encode()
+        data = json.dumps({**state, CARRIED_CUT: {**cut, **refs}}).encode()
     if len(data) > CARRIED_BYTES:
         raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
-    return data, dropped
+    return data, moved
+
+
+def _moved_out(entry: Any) -> tuple[str, bytes]:
+    """A file moved out of a turn's file: its object's name — its content's SHA-256, so the
+    same file is the same object — and its bytes (the entry as JSON)."""
+    blob = json.dumps(entry, sort_keys=True).encode()
+    return f"{hashlib.sha256(blob).hexdigest()}.json", blob
 
 
 async def _worked(

@@ -185,9 +185,12 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
   checkpoint keeps what they did; gate them with `interrupt_on`.
 * A graph with no thread of its own — `ReAct`, a graph compiled without a checkpointer or
   with `RunCheckpointer()` — keeps its state files and todos from one turn of a conversation
-  to the next (with its background tasks), as a checkpointer of its own would: at most
-  256 KiB of them are kept for other servers; past that a turn elsewhere starts without
-  them (said in the log). The conversation's messages are never carried this way. Measured
+  to the next (with its background tasks), as a checkpointer of its own would, kept in the
+  file store (`TRELLIS_FILES_URL`: a bucket for several servers) so a turn on any server has
+  them: up to 256 KiB in one file per turn, and past that its largest files each kept whole
+  as an object of its own beside it, named by its content (a file no turn changed is not sent
+  again; one a turn deleted or replaced is removed). The conversation's messages are never
+  carried this way. Measured
   on Haiku (the complex suite's `carry` set, three runs each): `ReAct` with a backend and
   `create_deep_agent` with and without a checkpointer of its own answered every later turn
   that needs an earlier file or todo list, and no later turn's file tool lost a file.

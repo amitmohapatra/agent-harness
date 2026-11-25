@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a Deep Agents file past 256 KiB reaches the next turn on another server
+
+A graph with no thread of its own keeps its files and todos in the file store for the
+conversation's next turn on any server, in one file per turn of at most 256 KiB. Past it, the
+largest files were left out (a `carried_files_dropped` warning) and a turn elsewhere started
+without them. They are now moved out, each kept whole as an object of its own beside the
+turn's file, named by its content: a file no turn changed is not sent again, and one a turn
+deleted or replaced is removed once no turn's file names it. Nothing is left out, and the
+warning is gone.
+
 ### Changed: memory keeps LangGraph's and Deep Agents' conversations
 
 With memory on, the benchmark now builds LangGraph and Deep Agents with no checkpointer of

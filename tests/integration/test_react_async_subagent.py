@@ -1507,13 +1507,13 @@ def carrying(run_id: str, carried: dict[str, Any]) -> Any:
 
 
 @pytest.mark.parametrize("over", [0, 1], ids=["at_the_bound", "one_byte_over"])
-async def test_g_past_the_bound_the_largest_files_give_way_never_the_task_list(
+async def test_g_past_the_bound_the_largest_files_move_out_whole_never_lost(
     harness: Harness, over: int
 ) -> None:
-    """What a conversation carries to its next turn is kept in the file store up to 256 KiB.
-    Past it, the task list and the todos are kept whole and the files give way, the largest
-    first, as far as needed — each left out named in one warning on the run's events. At the
-    bound, all of it is kept and nothing is said."""
+    """What a conversation carries to its next turn is kept in one file of the store up to
+    256 KiB. Past it, the task list and the todos stay in it and the files move out, the
+    largest first, as far as needed — each kept whole as an object of its own: the next turn
+    on any server has all of it, and nothing is left out or said. At the bound, it is one file."""
     agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
     state = {
         "async_tasks": {"task_1": {"task_id": "task_1", "status": "running"}},
@@ -1525,23 +1525,16 @@ async def test_g_past_the_bound_the_largest_files_give_way_never_the_task_list(
     turn = carrying("run_x", state)
     await pipeline._keep_carried(agent, turn)
     kept = await pipeline._carried(agent, carrying("run_z", {}))
-    assert kept["async_tasks"] == state["async_tasks"] and kept["todos"] == state["todos"]
-    if over:
-        assert set(kept["files"]) == {"mid.txt", "small.txt"}
-        ((code, said),) = turn.events.said
-        assert code == "carried_files_dropped" and said.endswith(": big.txt"), said
-    else:
-        assert kept == state and turn.events.said == []
+    assert kept == state and turn.events.said == []
+    moved = [f for f in kept_files(harness) if f"/{pipeline.CARRIED_OBJECTS}/" in f]
+    assert len(moved) == over  # one byte over: the largest file, big.txt, moved out
 
 
 @pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
-async def test_g_a_turn_says_the_files_it_left_out_and_keeps_its_state_before_it_ends(
-    harness: Harness,
-) -> None:
-    """The warning naming the files left out of what the conversation carries is one of the
-    turn's events, before its ``RUN_FINISHED`` — where a stream ends and a client stops
-    reading — and the state is in the file store by then: a next turn the client sends as
-    the turn ends, on any server, starts with it."""
+async def test_g_a_turn_keeps_a_large_file_whole_before_it_ends(harness: Harness) -> None:
+    """A file past the bound of a turn's file is in the file store, whole, by the turn's
+    ``RUN_FINISHED`` — where a stream ends and a client stops reading: a next turn the client
+    sends as the turn ends, on any server, starts with it. Nothing is left out or said."""
     big = ("write_file", {"file_path": "/big.txt", "content": "b" * 300_000})
     agent = harness.wrap(create_deep_agent(model=Model(turns=[big, "Written."])), id="desk")
     events, kept_at_the_end = [], []
@@ -1550,9 +1543,76 @@ async def test_g_a_turn_says_the_files_it_left_out_and_keeps_its_state_before_it
             kept_at_the_end = kept_files(harness)
         events.append(event)
     assert events[-1].type is RunEventType.RUN_FINISHED, events[-3:]
-    warned = [e.data["message"] for e in events if e.data.get("code") == "carried_files_dropped"]
-    assert len(warned) == 1 and warned[0].endswith(": /big.txt"), warned
-    assert [f for f in kept_at_the_end if f.startswith(pipeline.CARRIED_FOLDER)], kept_at_the_end
+    assert not [e for e in events if e.data.get("code") == "carried_files_dropped"]
+    carried = [f for f in kept_at_the_end if f.startswith(pipeline.CARRIED_FOLDER)]
+    assert [f for f in carried if f"/{pipeline.CARRIED_OBJECTS}/" in f], kept_at_the_end
+
+
+async def test_g_a_large_file_no_turn_changed_is_not_sent_again(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file moved out is an object named by its content: a later turn that leaves it as it
+    was sends only its own small file, and the object stays the one."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    big = {"big.txt": "b" * 300_000}
+    await pipeline._keep_carried(agent, carrying("run_a", {"files": big, "todos": ["one"]}))
+    sent: list[str] = []
+    put = harness.files.put
+
+    async def counted(folder: str, name: str, data: bytes, **kw: Any) -> Any:
+        sent.append(folder)
+        return await put(folder, name, data, **kw)
+
+    monkeypatch.setattr(harness.files, "put", counted)
+    await pipeline._keep_carried(agent, carrying("run_b", {"files": big, "todos": ["two"]}))
+    assert sent and not [f for f in sent if f.endswith(f"/{pipeline.CARRIED_OBJECTS}")]
+    assert len([f for f in kept_files(harness) if f"/{pipeline.CARRIED_OBJECTS}/" in f]) == 1
+    kept = await pipeline._carried(agent, carrying("run_z", {}))
+    assert kept["files"] == big and kept["todos"] == ["two"]
+
+
+async def test_g_a_moved_file_whose_object_is_gone_is_left_out_and_said(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An object that cannot be read back (removed outside the harness) is a file lost: the
+    rest of the state is the next turn's, and the log says which."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    state = {"files": {"big.txt": "b" * 300_000, "small.txt": "s"}, "todos": ["one"]}
+    await pipeline._keep_carried(agent, carrying("run_a", state))
+    for path in kept_files(harness):
+        if f"/{pipeline.CARRIED_OBJECTS}/" in path:
+            harness.files.fs.rm_file(f"{harness.files.root}/{path}")
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        kept = await pipeline._carried(agent, carrying("run_z", {}))
+    assert kept == {"files": {"small.txt": "s"}, "todos": ["one"]}
+    assert "the file kept as" in caplog.text
+
+
+@pytest.mark.parametrize("trouble", ["superseded meanwhile", "store down"])
+async def test_g_the_sweep_removes_nothing_it_cannot_be_sure_of(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, trouble: str
+) -> None:
+    """A turn's file gone by the time the sweep reads it (a newer one may name any object), or
+    a store out of reach: no object is removed; the next turn's sweep tries again."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    big = {"files": {"big.txt": "b" * 300_000}}
+    await pipeline._keep_carried(agent, carrying("run_a", big))
+
+    async def gone(folder: str, name: str) -> bytes | None:
+        return None
+
+    async def down(folder: str) -> Any:
+        raise OSError("the store is out of reach")
+
+    if trouble == "store down":
+        monkeypatch.setattr(harness.files, "files", down)
+    else:
+        monkeypatch.setattr(harness.files, "read", gone)
+    await pipeline._swept(
+        harness.files, pipeline._carried_at(agent, carrying("x", {})), carrying("x", {})
+    )
+    monkeypatch.undo()
+    assert len([f for f in kept_files(harness) if f"/{pipeline.CARRIED_OBJECTS}/" in f]) == 1
 
 
 async def test_g_a_task_list_alone_past_the_bound_is_not_kept_and_said(

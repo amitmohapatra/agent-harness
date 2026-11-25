@@ -460,6 +460,51 @@ async def test_files_and_todos_reach_a_turn_on_a_worker_that_kept_none(
     assert "not found" in [str(m.content) for m in model.seen[5] if isinstance(m, ToolMessage)][-1]
 
 
+async def test_a_file_past_the_bound_reaches_another_worker_whole_and_goes_when_deleted(
+    memory_harness: Harness,
+) -> None:
+    """CONV: a file larger than one turn's file in the store holds (``CARRIED_BYTES``) is kept
+    whole, as an object of its own (``pipeline._fitted``): a turn on a worker that kept none
+    reads its last line; once a turn deletes it, its object leaves the store."""
+    from trellis.harness.pipeline import CARRIED_BYTES, CARRIED_FOLDER, CARRIED_OBJECTS
+    from trellis.harness.tools.results import Conversations
+
+    lines = [f"row {n:05d}: " + "x" * 40 for n in range(7_000)] + ["END-OF-BIG"]
+    big = "\n".join(lines)
+    assert len(big) > CARRIED_BYTES
+    turns: list[Any] = [
+        [
+            ("write_file", {"file_path": "/big.csv", "content": big}),
+            ("write_todos", {"todos": [{"content": "check rows", "status": "pending"}]}),
+        ],
+        "kept",
+        [
+            ("read_file", {"file_path": "/big.csv", "offset": 6_995, "limit": 10}),
+            ("todo_count", {}),
+        ],
+        "read",
+        ("delete", {"file_path": "/big.csv"}),
+        "deleted",
+    ]
+    model = ScriptedChatModel(turns=turns)
+    graph = create_deep_agent(model=model, tools=[todo_count], middleware=[TodoListMiddleware()])
+    agent = memory_harness.wrap(graph, id="deep-big")
+
+    async def objects() -> list[str]:
+        listed = await memory_harness.files.files(CARRIED_FOLDER)
+        return [n for where, n, size in listed if where.endswith(f"/{CARRIED_OBJECTS}") and size]
+
+    assert (await agent.run("keep it", user="u", thread="t")).status is RunStatus.SUCCESS
+    assert len(await objects()) == 1  # the file, whole, as an object of its own
+    agent.results = Conversations()  # another worker: nothing of the conversation in memory
+    assert (await agent.run("read it", user="u", thread="t")).status is RunStatus.SUCCESS
+    read = [str(m.content) for m in model.seen[3] if isinstance(m, ToolMessage)]
+    assert "END-OF-BIG" in read[-2] and read[-1] == "1 todos"
+    agent.results = Conversations()
+    assert (await agent.run("delete it", user="u", thread="t")).status is RunStatus.SUCCESS
+    assert await objects() == []  # deleted: nothing names its object any more
+
+
 #: Window sizes from small to the model's whole, and unknown (``None``).
 WINDOWS = [8_000, 16_000, 32_000, 128_000, None]
 
