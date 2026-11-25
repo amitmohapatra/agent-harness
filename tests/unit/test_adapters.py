@@ -576,20 +576,21 @@ def test_a_graph_built_with_the_harness_middleware_says_its_window(build: str) -
     default of a few turns' text was all a memory-fed graph saw of its earlier calls."""
     from deepagents import create_deep_agent
     from langchain.agents import create_agent
+    from langchain_core.language_models import ModelProfile
 
     from tests.support.chat_model import ScriptedChatModel
     from trellis import middleware
     from trellis.harness.adapters.base import context_window
 
-    def built(window: int | None, profile: dict[str, Any] | None = None) -> Any:
-        model = ScriptedChatModel(turns=[])
-        model.profile = profile  # LangChain's model profile: the model's own window
+    def built(window: int | None, profile: ModelProfile | None = None) -> Any:
+        # LangChain's model profile: the model's own window
+        model = ScriptedChatModel(turns=[], profile=profile)
         stack = middleware(context_window=window)
         if build == "create_agent":
             return create_agent(model, tools=[], middleware=stack)
         return create_deep_agent(model=model, tools=[], middleware=stack)
 
-    own = {"max_input_tokens": 200_000}
+    own: ModelProfile = {"max_input_tokens": 200_000}
     assert context_window(built(32_000)) == 32_000  # given to the middleware
     assert context_window(built(None, own)) == 200_000  # the model's own, as ReAct reads it
     assert context_window(built(32_000, own)) == 32_000  # given wins, as ReAct's does
