@@ -10,9 +10,10 @@ was not found (``Probe("lacks", ...)``): an answer the model gave from the conve
 messages while the file itself was lost is right, and still a failed check.
 
 The cases are for an agent with Deep Agents' tools from its first call: ``create_deep_agent``
-(``--adapter deepagents``; with ``--variant unthreaded``, built with no checkpointer, so the
-harness carries its files and todos) or ``ReAct`` with a backend (``--adapter react --variant
-deep``). ``ReAct`` as built (``main``) offers the file tools only for a long task.
+(``--adapter deepagents``: built with no checkpointer, so the harness carries its files and
+todos; with ``--variant threaded``, an ``InMemorySaver`` keeps them on its thread) or ``ReAct``
+with a backend (``--adapter react --variant deep``). ``ReAct`` as built (``main``) offers the
+file tools only for a long task.
 """
 
 from __future__ import annotations

@@ -568,9 +568,9 @@ back, edited, overwritten, or kept through a turn that does not touch it; a todo
 through over three turns. Each later answer is exact, and each turn that uses an earlier file
 checks that no file tool said it was not found (an answer given from the conversation's
 messages while the file was lost is still a failed check). For an agent with Deep Agents'
-tools from its first call: `--adapter react --variant deep`, `--adapter deepagents` (its own
-checkpointer) and `--adapter deepagents --variant unthreaded` (built with no checkpointer, so
-the harness carries its files and todos).
+tools from its first call: `--adapter react --variant deep`, `--adapter deepagents` (built with
+no checkpointer, so memory keeps the conversation and the harness carries its files and todos)
+and `--adapter deepagents --variant threaded` (an `InMemorySaver` of its own keeps them).
 
 Every run has a shell by default, as the harness gives every agent (`variants.codes`: ReAct's
 `execute`, `sandbox_exec` on `langgraph`, `deepagents`, `graph` and `openai`; Claude Code and

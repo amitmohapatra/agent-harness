@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: memory keeps LangGraph's and Deep Agents' conversations
+
+With memory on, the benchmark now builds LangGraph and Deep Agents with no checkpointer of
+their own, as `ReAct` is: memory is the one durable record of the conversation (any worker
+serves the next turn, and no thread grows in a worker's memory), and the graph's checkpoint is
+the run's (`RunCheckpointer`, which `middleware()` brings), so a pause still resumes in place on
+any worker. The docs and the LangGraph and Deep Agents examples recommend the same, and two
+examples keep a checkpointer of their own because they show reading a graph's state from its
+thread. With memory off, the benchmark still gives each graph its own thread, since nothing
+else keeps the turns whole. The benchmark's `--variant` names follow: `threaded` gives a graph
+an `InMemorySaver` (it was the default), `todos` is Deep Agents' planning with memory keeping
+the conversation (it was `todos-unthreaded`), and `todos-threaded` is planning with a saver (it
+was `todos`); `unthreaded` is the default now and is gone as a name.
+
 ### Changed: a worker keeps its copies of Claude transcripts a week
 
 Claude Code keeps each session's transcript in the user's folder on the worker, 30 days by

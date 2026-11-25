@@ -877,22 +877,33 @@ def test_the_carry_set_picks_its_own_conversations_of_more_than_one_turn() -> No
     [
         ("react", "deep"),
         ("deepagents", "main"),
-        ("deepagents", cx.UNTHREADED),
+        ("deepagents", cx.THREADED),
         ("deepagents", cx.PLANNED),
-        ("deepagents", cx.PLANNED_UNTHREADED),
+        ("deepagents", cx.PLANNED_THREADED),
     ],
 )
 async def test_a_later_turn_finds_the_file_and_todos_an_earlier_turn_made(
     tmp_path: Path, offline: None, adapter: str, variant: str
 ) -> None:
     """Each conversation's gold calls, run on an agent with Deep Agents' tools from the first
-    call — ReAct with a backend, ``create_deep_agent`` with a checkpointer of its own, and one
-    without (the harness carries its files and todos): no later turn's file tool says the file
-    an earlier turn wrote is not found, and every answer is right."""
+    call — ReAct with a backend, ``create_deep_agent`` as built (no checkpointer of its own:
+    the harness carries its files and todos), and one with a checkpointer of its own: no later
+    turn's file tool says the file an earlier turn wrote is not found, and every answer is
+    right. Deep Agents runs with memory on, as a deployment does: as built, memory keeps its
+    conversation and the harness its files and todos."""
+    from tests.support.memory import FakeMemoryService
+
     out = tmp_path / f"{adapter}-{variant}"
-    report = await cx.bench(
-        _args(out, cases="carry", adapter=adapter, variant=variant), progress=lambda _: None
-    )
+    history = "memory" if adapter == "deepagents" else "thread"
+    async with Harness(config=Settings(), memory=FakeMemoryService().client()) as h:
+        report = await cx.bench(
+            _args(out, cases="carry", adapter=adapter, variant=variant, history=history),
+            harness=h,
+            progress=lambda _: None,
+        )
+    built, _ = cx.target_of("m", history, None, 6, adapter=adapter, variant=variant)
+    if adapter == "deepagents":  # as built and todos: memory's; threaded: its own saver's
+        assert (built.checkpointer is not None) is (variant in (cx.THREADED, cx.PLANNED_THREADED))
     rows = [json.loads(x) for x in _read(out.with_suffix(".jsonl"))]
     assert len(rows) == 6 and {x["variant"] for x in rows} == {variant}
     failed = [
@@ -907,20 +918,25 @@ async def test_a_later_turn_finds_the_file_and_todos_an_earlier_turn_made(
 
 
 @pytest.mark.parametrize("adapter", ["deepagents", "langgraph"])
-def test_an_unthreaded_graph_has_no_checkpointer_of_its_own(adapter: str) -> None:
-    """``unthreaded``: the graph built with no checkpointer, so its conversation is memory's
-    (the harness replays memory's window as its messages), as ``ReAct``'s is."""
-    own, _ = cx.target_of("m", "thread", None, 6, adapter=adapter)
-    bare, _ = cx.target_of("m", "thread", None, 6, adapter=adapter, variant=cx.UNTHREADED)
-    assert own.checkpointer is not None and bare.checkpointer is None
+def test_a_graph_keeps_no_thread_of_its_own_unless_asked(adapter: str) -> None:
+    """With memory on, as built: no checkpointer of its own, so its conversation is memory's
+    (the harness replays memory's window as its messages, as ``ReAct``'s) and its checkpoint
+    the run's (``RunCheckpointer``, which ``middleware()`` brings). ``threaded``: an
+    ``InMemorySaver`` keeps the thread, as a team that brings its own checkpointer does — and
+    with memory off, where nothing else keeps the turns whole."""
+    memory, _ = cx.target_of("m", "memory", None, 6, adapter=adapter)
+    own, _ = cx.target_of("m", "memory", None, 6, adapter=adapter, variant=cx.THREADED)
+    off, _ = cx.target_of("m", "thread", None, 6, adapter=adapter)
+    assert memory.checkpointer is None
+    assert own.checkpointer is not None and off.checkpointer is not None
 
 
 @pytest.mark.parametrize("window", [8_000, None])
 def test_a_planned_deep_agent_has_deep_agents_planning(window: int | None) -> None:
     """``todos``: Deep Agents given LangChain's ``TodoListMiddleware`` beside ``middleware()``,
     at a window known or not; ``main`` has none, as Deep Agents alone."""
-    for variant, saver in ((cx.PLANNED, True), (cx.PLANNED_UNTHREADED, False)):
-        graph, _ = cx.target_of("m", "thread", window, 6, adapter="deepagents", variant=variant)
+    for variant, saver in ((cx.PLANNED, False), (cx.PLANNED_THREADED, True)):
+        graph, _ = cx.target_of("m", "memory", window, 6, adapter="deepagents", variant=variant)
         assert "write_todos" in {t.name for t in graph_tools(graph)}
         assert (graph.checkpointer is not None) is saver
     plain, _ = cx.target_of("m", "thread", window, 6, adapter="deepagents")

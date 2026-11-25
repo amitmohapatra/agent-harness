@@ -27,12 +27,12 @@ from examples._support.memory import ScriptedMemory
 from examples._support.offline import langchain_model, offline_blocks
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 
 from trellis import Harness
+from trellis.harness.middleware import RunCheckpointer
 
 
 @tool
@@ -71,7 +71,9 @@ def build(model: Any, tools: list[Any]) -> Any:
     graph.add_conditional_edges("model", route)
     graph.add_edge("tools", "model")
     graph.add_edge("confirm", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    # the interrupt's checkpoint kept in the run (any worker resumes it); the conversation is
+    # memory's
+    return graph.compile(checkpointer=RunCheckpointer())
 
 
 async def main() -> None:

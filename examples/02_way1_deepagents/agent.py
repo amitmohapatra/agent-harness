@@ -4,9 +4,11 @@ and a person (resumed in place), a hook, ``without=``, a time limit and the grap
 ``create_deep_agent`` returns a compiled LangGraph graph, so it is wrapped like any graph: its
 own tools are governed as it runs them (the tool catalog says ``refund`` is irreversible;
 offline: a scripted memory service's), and ``HarnessTools`` adds the harness's — the gateway's
-MCP tools and memory's. With a checkpointer the approval *is* a LangGraph interrupt: the resume
-continues the graph where it stopped and the model is not asked again. Planning
-(``write_todos``) is opt-in in Deep Agents: ``TodoListMiddleware`` adds it.
+MCP tools and memory's. It has no checkpointer of its own: memory keeps the conversation, and
+the harness keeps the graph's checkpoint in the run, so the approval *is* a LangGraph
+interrupt — the resume continues the graph where it stopped, on any worker, and the model is
+not asked again. Planning (``write_todos``) is opt-in in Deep Agents: ``TodoListMiddleware``
+adds it.
 
     python -m examples.02_way1_deepagents.agent
 """
@@ -22,7 +24,6 @@ from examples._support.memory import ScriptedMemory
 from examples._support.offline import langchain_model, offline_blocks
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
 from langchain_core.tools import tool
-from langgraph.checkpoint.memory import InMemorySaver
 
 from trellis import Deny, Harness, Hooks
 from trellis.contracts import ToolCall
@@ -64,7 +65,8 @@ async def main() -> None:
             tools=[refund],
             system_prompt="You process refund requests. Plan, look the order up, then refund.",
             middleware=stack,
-            checkpointer=InMemorySaver(),
+            # no checkpointer of its own: memory keeps the conversation, and the harness keeps
+            # the graph's checkpoint in the run (a pause resumes in place on any worker)
         )
         agent = h.wrap(
             graph,
@@ -80,9 +82,6 @@ async def main() -> None:
             print("asks:", result.interrupt.question)
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="lead")
         print(result.status.value, result.answer)
-        thread = await h.conversation(user="ada", thread="ticket-7")  # ada's ticket-7
-        state = await graph.aget_state({"configurable": {"thread_id": thread}})
-        print("plan:", [todo["content"] for todo in state.values.get("todos", [])])
 
 
 if __name__ == "__main__":

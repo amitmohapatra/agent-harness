@@ -23,7 +23,7 @@ harness's tools:
 ```python
 from langchain_core.tools import tool
 from trellis import Harness
-from trellis.harness.middleware import HarnessTools
+from trellis.harness.middleware import HarnessTools, RunCheckpointer
 
 h = Harness()  # the deployment is the environment
 
@@ -40,7 +40,11 @@ reorder.metadata = {"side_effects": "irreversible"}
 
 # 1. your graph, with HarnessTools for the gateway's MCP tools and the memory tools
 #    (or middleware=trellis.middleware(): all of ReAct's harness part, below)
-graph = create_agent(model, tools=[stock, reorder], middleware=[HarnessTools()], checkpointer=saver)
+#    its checkpoint in the run (a pause resumes in place on any worker); memory keeps the
+#    conversation (a checkpointer of your own would keep it on its thread instead)
+graph = create_agent(
+    model, tools=[stock, reorder], middleware=[HarnessTools()], checkpointer=RunCheckpointer()
+)
 #    ...or your own StateGraph: ToolNode([stock, reorder]), model.bind_tools(...)
 
 # 2. wrap it
@@ -102,7 +106,7 @@ graph.add_node("tools", ToolNode(tools))
 graph.add_edge(START, "model")
 graph.add_conditional_edges("model", tools_condition)
 graph.add_edge("tools", "model")
-agent = h.wrap(graph.compile(checkpointer=InMemorySaver()), id="desk")
+agent = h.wrap(graph.compile(checkpointer=RunCheckpointer()), id="desk")
 ```
 
 Each is the harness's own tool, called as the run that makes the call: governed, journaled and
@@ -341,7 +345,11 @@ take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders ([skills.md](../skil
 
 A graph with its own checkpointer keeps the conversation on its thread (the conversation's key,
 `h.conversation`). Without one — and `ReAct`, whose checkpoint is the run's — memory's window
-keeps it, or with memory off the run store's earlier turns, as messages before the question
+keeps it. That is the recommended setup, and what the benchmark builds: memory is the one
+durable record of the conversation, any worker serves the next turn, and no thread grows in a
+worker's memory; give the graph `RunCheckpointer()` (or build it with `middleware()`, which
+brings it) so a pause still resumes in place. With memory off, the run store's earlier turns
+are given instead, as messages before the question
 ([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` reaches a graph with the harness's middleware (`ReAct`,
 `middleware()`: `HarnessTools.before_model` adds the message before the next model call, kept in
 the graph's messages and in the run's transcript); any other graph waits as `"queue"`, said once

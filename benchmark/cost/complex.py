@@ -126,15 +126,19 @@ CATEGORIES: Final = (
     "carry",
 )
 ADVERSARIAL: Final = "adversarial"
-#: The ``--variant`` of ``--adapter deepagents`` or ``langgraph`` built with no checkpointer of
-#: its own: its conversation is memory's (replayed as its messages, as ``ReAct``'s), and a Deep
-#: Agent's files and todos are the harness's to carry from turn to turn.
-UNTHREADED: Final = "unthreaded"
+#: With memory on, ``--adapter deepagents`` and ``langgraph`` are built with no checkpointer of
+#: their own: the conversation is memory's (replayed as their messages, as ``ReAct``'s), their
+#: checkpoint the run's (``RunCheckpointer``, which ``middleware()`` brings: a pause resumes in
+#: place on any worker), and a Deep Agent's files and todos the harness's to carry from turn to
+#: turn. This ``--variant`` gives them an ``InMemorySaver`` instead, as a team that brings its
+#: own checkpointer does: the thread is the framework's, in the process's memory — as it is
+#: with memory off, where nothing else keeps the turns whole.
+THREADED: Final = "threaded"
 #: The ``--variant``s of ``--adapter deepagents`` given Deep Agents' planning, LangChain's
-#: ``TodoListMiddleware`` (``write_todos``), as a team adds it beside ``middleware()``: with a
-#: checkpointer of its own, and with none.
+#: ``TodoListMiddleware`` (``write_todos``), as a team adds it beside ``middleware()``: with no
+#: checkpointer of its own, and with an ``InMemorySaver`` (:data:`THREADED`).
 PLANNED: Final = "todos"
-PLANNED_UNTHREADED: Final = "todos-unthreaded"
+PLANNED_THREADED: Final = "todos-threaded"
 TIERS: Final = (1, 2, 3)
 STRICT_KINDS: Final = (
     "number", "record", "set", "abstain", "clarify", "flags", "tools", "steps", "cannot",
@@ -4106,7 +4110,9 @@ def target_of(
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
     ``langgraph`` / ``deepagents`` — ``create_agent`` / ``create_deep_agent`` with the
-    harness's middleware and an in-process checkpointer (the framework keeps the conversation);
+    harness's middleware: with memory on (``history="memory"``), no checkpointer of its own
+    (memory keeps the conversation, the run its checkpoint); with memory off, or
+    :data:`THREADED`, an in-process checkpointer (the framework keeps the conversation);
     ``graph`` — ``create_agent`` with the retail tools and ``bound`` (the harness's own tools
     as LangChain tools: :func:`bound_of`) bound when it is built — one of ``bound`` named as one
     of the tools left out —, the checkpointer and no harness middleware,
@@ -4115,8 +4121,9 @@ def target_of(
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter. ``variant``: the
     ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents), or
-    ``deepagents`` or ``langgraph`` built with no checkpointer of its own (:data:`UNTHREADED`),
-    or ``deepagents`` given ``TodoListMiddleware`` (:data:`PLANNED`, :data:`PLANNED_UNTHREADED`).
+    ``deepagents`` or ``langgraph`` given a checkpointer of its own (:data:`THREADED`; as built,
+    none: memory keeps the conversation), or ``deepagents`` given ``TodoListMiddleware``
+    (:data:`PLANNED`, :data:`PLANNED_THREADED`).
     ``skills``: a skill set (``trellis.skills``) given to each framework in its own skills
     slot, as docs/skills.md says — ``ReAct(skills=)``, ``create_deep_agent(**deep_agent())``,
     ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
@@ -4142,22 +4149,26 @@ def target_of(
 
         chat = routed_chat_model(model) if isinstance(model, str) else model
         stack = middleware(max_steps=max_steps, context_window=window)
+        # memory keeps the conversation where it is on; with it off, nothing but the framework
+        # keeps the turns whole (the run store's are their questions and answers)
+        threaded = variant in (THREADED, PLANNED_THREADED) or history != "memory"
         if kind == "langgraph":
             from langchain.agents import create_agent
 
-            # unthreaded: no checkpointer of its own, so its conversation is memory's
+            # with memory on, no checkpointer of its own unless threaded: memory keeps its turns
             graph = create_agent(
                 chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
-                checkpointer=None if variant == UNTHREADED else InMemorySaver(), name="complex",
+                checkpointer=InMemorySaver() if threaded else None, name="complex",
             )  # fmt: skip
             tools = [*tools, *([skills.tools()] if skills is not None else [])]
         else:
             from deepagents import create_deep_agent
             from langchain.agents.middleware import TodoListMiddleware
 
-            # unthreaded: no checkpointer of its own, so the harness carries its files and todos
-            saver = None if variant in (UNTHREADED, PLANNED_UNTHREADED) else InMemorySaver()
-            if variant in (PLANNED, PLANNED_UNTHREADED):
+            # with memory on, no checkpointer of its own unless threaded: memory keeps its turns,
+            # and the harness carries its files and todos
+            saver = InMemorySaver() if threaded else None
+            if variant in (PLANNED, PLANNED_THREADED):
                 stack = [TodoListMiddleware(), *stack]  # Deep Agents' planning, as a team adds it
             graph = create_deep_agent(
                 model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
@@ -5054,18 +5065,18 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "main",
             "main-nocode",
             "deep",
-            UNTHREADED,
+            THREADED,
             PLANNED,
-            PLANNED_UNTHREADED,
+            PLANNED_THREADED,
             *variants.CAPABILITIES,
         ),
         default="main",
         help="with --adapter react: ReAct as built (main: a shell in the run's working folder, "
         "as every adapter has by default; main-nocode without it), on Deep Agents (deep: a "
         "backend), or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES); with "
-        f"--adapter deepagents or langgraph: {UNTHREADED}, built with no checkpointer of its "
-        f"own; --adapter deepagents: {PLANNED} ({PLANNED_UNTHREADED}), given TodoListMiddleware "
-        "(and no checkpointer)",
+        f"--adapter deepagents or langgraph: {THREADED}, given an InMemorySaver (as built, no "
+        f"checkpointer of its own: memory keeps the conversation); --adapter deepagents: "
+        f"{PLANNED} ({PLANNED_THREADED}), given TodoListMiddleware (and an InMemorySaver)",
     )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(

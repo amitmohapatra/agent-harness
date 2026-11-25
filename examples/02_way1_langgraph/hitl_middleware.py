@@ -16,9 +16,9 @@ from examples._support.offline import langchain_model
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.tools import tool
-from langgraph.checkpoint.memory import InMemorySaver
 
 from trellis import Harness
+from trellis.harness.middleware import RunCheckpointer
 
 outbox: list[str] = []
 
@@ -40,7 +40,9 @@ async def main() -> None:
             tools=[send_email],
             system_prompt="You email suppliers with send_email. Send what you are asked to.",
             middleware=[HumanInTheLoopMiddleware(interrupt_on={"send_email": True})],
-            checkpointer=InMemorySaver(),  # a middleware pause resumes from the checkpoint
+            # a middleware pause resumes from the checkpoint, kept in the run (on any worker);
+            # the conversation is memory's
+            checkpointer=RunCheckpointer(),
         )
         agent = h.wrap(graph, id="mailer")
 
