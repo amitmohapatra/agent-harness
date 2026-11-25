@@ -581,13 +581,18 @@ def test_a_graph_built_with_the_harness_middleware_says_its_window(build: str) -
     from trellis import middleware
     from trellis.harness.adapters.base import context_window
 
-    def built(window: int | None) -> Any:
+    def built(window: int | None, profile: dict[str, Any] | None = None) -> Any:
+        model = ScriptedChatModel(turns=[])
+        model.profile = profile  # LangChain's model profile: the model's own window
         stack = middleware(context_window=window)
         if build == "create_agent":
-            return create_agent(ScriptedChatModel(turns=[]), tools=[], middleware=stack)
-        return create_deep_agent(model=ScriptedChatModel(turns=[]), tools=[], middleware=stack)
+            return create_agent(model, tools=[], middleware=stack)
+        return create_deep_agent(model=model, tools=[], middleware=stack)
 
-    assert context_window(built(32_000)) == 32_000
+    own = {"max_input_tokens": 200_000}
+    assert context_window(built(32_000)) == 32_000  # given to the middleware
+    assert context_window(built(None, own)) == 200_000  # the model's own, as ReAct reads it
+    assert context_window(built(32_000, own)) == 32_000  # given wins, as ReAct's does
     assert context_window(built(None)) is None
 
 

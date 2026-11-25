@@ -36,6 +36,7 @@ tools in its own code (a hand-written LangGraph graph) or has no model (a functi
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -452,18 +453,43 @@ def model_name(target: Any) -> str | None:
 
 def context_window(target: Any) -> int | None:
     """The context window of the target's model, in tokens, when the target or its model
-    says, or the graph's metadata (``ReAct``) does, or the harness's middleware a graph of your
-    own was built with (``middleware(context_window=)``: :func:`_middleware_window`) — ``None``
-    otherwise (a compiled graph given no window, a model named by a string)."""
+    says, or the graph's metadata (``ReAct``) does; for a graph of your own, the window its
+    harness middleware was given (``middleware(context_window=)``: :func:`_middleware_window`),
+    else its chat model's own, as ``ReAct`` reads it (:func:`_graph_models`) — ``None``
+    otherwise (a model that says none, a model named by a string)."""
     for holder in (target, getattr(target, "model", None)):
-        profile = getattr(holder, "profile", None)
-        found = [getattr(holder, name, None) for name in WINDOW_ATTRIBUTES]
-        found.append(profile.get("max_input_tokens") if isinstance(profile, dict) else None)
-        found.append(metadata_of(holder).get(WINDOW_METADATA))
-        for value in found:
-            if _window(value):
-                return value
-    return _middleware_window(target)
+        if (found := _said(holder)) is not None:
+            return found
+    if (found := _middleware_window(target)) is not None:
+        return found
+    return next((w for w in map(_said, _graph_models(target)) if w is not None), None)
+
+
+def _said(holder: Any) -> int | None:
+    """The window ``holder`` says: an attribute of its own, its profile (LangChain's
+    ``max_input_tokens``) or its metadata (``ReAct``'s graph)."""
+    profile = getattr(holder, "profile", None)
+    found = [getattr(holder, name, None) for name in WINDOW_ATTRIBUTES]
+    found.append(profile.get("max_input_tokens") if isinstance(profile, dict) else None)
+    found.append(metadata_of(holder).get(WINDOW_METADATA))
+    return next((value for value in found if _window(value)), None)
+
+
+def _graph_models(target: Any) -> list[Any]:
+    """The chat model a compiled ``create_agent`` graph (Deep Agents' too) calls: LangChain
+    builds its ``model`` node as a function over it. None found (another graph, or a LangChain
+    that builds it otherwise): no window from it, as before."""
+    nodes = getattr(target, "nodes", None)
+    node = nodes.get("model") if isinstance(nodes, dict) else None
+    found: list[Any] = []
+    for name in ("func", "afunc"):
+        for cell in (
+            getattr(getattr(getattr(node, "bound", None), name, None), "__closure__", None) or ()
+        ):
+            with contextlib.suppress(ValueError):  # a cell not filled yet
+                if isinstance(getattr(cell.cell_contents, "profile", None), dict):
+                    found.append(cell.cell_contents)
+    return found
 
 
 #: The attribute of the harness's middleware (``middleware.HarnessTools``) that keeps the window

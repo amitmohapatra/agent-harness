@@ -14,8 +14,9 @@ default of 2,000 tokens, its earlier turns' questions and answers without the ca
 behind them (measured: a memory-fed Deep Agents graph answered 46% of follow-ups with no tool
 call, against 11% with a thread of its own), and with memory off its earlier turns were their
 text alone. The middleware's `HarnessTools` now keeps the window and the harness reads it off
-the graph, as of `ReAct`'s: the replay is sized to the model, and the memory context to a
-window under 32k tokens.
+the graph, as of `ReAct`'s, and given none, the harness reads the window of the chat model the
+graph calls (its LangChain profile, as `ReAct` reads it): the replay is sized to the model, and
+the memory context to a window under 32k tokens.
 
 ### Fixed: a Deep Agents file past 256 KiB reaches the next turn on another server
 
