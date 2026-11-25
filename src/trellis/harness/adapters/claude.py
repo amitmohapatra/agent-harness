@@ -399,6 +399,12 @@ AUTO_MEMORY_ENV: Final = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 #: same OS user sends it, and the value that refuses them: every run on a worker is that one
 #: user's, other tenants' among them.
 INBOUND: Final = {"crossSessionInbound": "refuse"}
+#: The days Claude Code keeps a session's transcript on the worker's disk after its last write
+#: (its ``cleanupPeriodDays`` setting: the CLI deletes older ones of the user's folder as it
+#: starts; its own default is 30): the run store keeps the session (``JournalSessions``, and a
+#: conversation's last turn past its end), so the worker's copy is never read back — it seeds
+#: a resumed session's folder (:func:`config_folder`), and a large one slows every resume.
+TRANSCRIPT_DAYS: Final = 7
 #: What Claude Code says on its stream beside the model's replies that explains a slow, a
 #: shortened or a rerouted turn — the system frame's ``subtype`` — and the code of the run's
 #: warning that says it: a model call tried again, the session's context compacted, another
@@ -1526,18 +1532,25 @@ def _options(
 
 def _settings(options: Any) -> str:
     """The options' ``settings`` with other Claude sessions' messages refused
-    (:data:`INBOUND`), as inline JSON: theirs as given — inline, or a file read as the CLI
-    reads it (relative to its ``cwd``, with or without a BOM). Settings that cannot be read
-    start no query: sent without them, the team's rules would be gone."""
+    (:data:`INBOUND`), and the worker's copies of transcripts kept :data:`TRANSCRIPT_DAYS`
+    where they name no period of their own, as inline JSON: theirs as given — inline, or a
+    file read as the CLI reads it (relative to its ``cwd``, with or without a BOM). Settings
+    that cannot be read start no query: sent without them, the team's rules would be gone."""
     given = (options.settings or "").strip()
     try:
         if given and not (given.startswith("{") and given.endswith("}")):
             given = (Path(options.cwd or "") / given).read_text(encoding="utf-8-sig")
-        return json.dumps({**json.loads(given or "{}"), **INBOUND})
+        theirs = json.loads(given or "{}")
+        return json.dumps({**theirs, **INBOUND} | _kept_for(theirs))
     except (OSError, ValueError, TypeError) as exc:
         raise ConfigurationError(
             f"the options' settings ({options.settings!r}) could not be read: {exc}"
         ) from exc
+
+
+def _kept_for(settings: dict[str, Any]) -> dict[str, int]:
+    """:data:`TRANSCRIPT_DAYS`, unless the team's ``settings`` name a period of their own."""
+    return {} if "cleanupPeriodDays" in settings else {"cleanupPeriodDays": TRANSCRIPT_DAYS}
 
 
 def config_folder(tenant: str, user: str) -> str:

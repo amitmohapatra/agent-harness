@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a worker keeps its copies of Claude transcripts a week
+
+Claude Code keeps each session's transcript in the user's folder on the worker, 30 days by
+default. The run store keeps every session, so those copies are never read back; a large
+folder only slows the resumes it seeds. Claude Code's own `cleanupPeriodDays` is now sent as
+7 (the CLI deletes older transcripts as it starts), unless the team's settings name a period.
+
 ### Changed: a Claude conversation's turn on another worker resumes its session
 
 A turn of a Claude Agent SDK conversation continued the session its last turn ran in only on

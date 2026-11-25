@@ -34,6 +34,7 @@ from trellis.contracts import (
 from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
+    TRANSCRIPT_DAYS,
     native_spec,
 )
 from trellis.harness.agent import ASKING, NARROW_FROM
@@ -1626,7 +1627,21 @@ async def test_messages_from_other_claude_sessions_are_refused(
     argv = started_with(tmp_path)["argv"]
     sent = json.loads(argv[argv.index("--settings") + 1])
     assert sent.pop("crossSessionInbound") == "refuse"
+    assert sent.pop("cleanupPeriodDays") == TRANSCRIPT_DAYS
     assert sent == ({} if given is None else {"permissions": own["permissions"]})
+
+
+async def test_the_workers_copy_of_a_transcript_is_kept_a_week_unless_the_team_says(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The run store keeps each session, so the worker's copy of its transcript is never read
+    back: Claude Code's own ``cleanupPeriodDays`` deletes it a week after its last write, as
+    the CLI starts — unless the team's settings name a period of their own."""
+    for settings, days in ((None, TRANSCRIPT_DAYS), ('{"cleanupPeriodDays": 90}', 90)):
+        target = options(tmp_path, [{"text": "ok"}], settings=settings)
+        assert (await harness.wrap(target, id=f"kept-{days}").run("hi", user="u1")).answer == "ok"
+        argv = started_with(tmp_path)["argv"]
+        assert json.loads(argv[argv.index("--settings") + 1])["cleanupPeriodDays"] == days
 
 
 async def test_settings_that_cannot_be_read_start_no_query(

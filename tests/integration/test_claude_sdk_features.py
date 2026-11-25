@@ -180,7 +180,8 @@ async def test_the_options_reach_the_cli_as_the_sdk_sends_them(
         "--allowedTools": "Read",
         "--add-dir": str(tmp_path / "shared"),
         # the team's, and other Claude sessions' messages refused
-        "--settings": '{"includeCoAuthoredBy": false, "crossSessionInbound": "refuse"}',
+        "--settings": '{"includeCoAuthoredBy": false, "crossSessionInbound": "refuse", '
+        '"cleanupPeriodDays": 7}',
         "--setting-sources": "user,project",
         "--team-flag": "on",
         "--max-thinking-tokens": "2048",
@@ -281,6 +282,7 @@ async def test_a_sandbox_of_the_options_is_merged_into_the_settings_the_cli_gets
     assert settings == {
         "includeCoAuthoredBy": False,
         "crossSessionInbound": "refuse",
+        "cleanupPeriodDays": 7,
         "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False},
     }
 

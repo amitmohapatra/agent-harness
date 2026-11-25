@@ -220,6 +220,10 @@ the user Claude Code would ask:
   `settings`, `skills`, `plugins`, `agents` — still reaches the CLI; a `CLAUDE_CONFIG_DIR`
   (or the switch) in your `env` stands. The folder holds no login: the CLI authenticates with
   the gateway's key (or your own `ANTHROPIC_API_KEY`), not a `claude login` of the worker.
+  The transcripts Claude Code writes there are copies — the run store keeps each session —
+  so they are kept a week after their last write (Claude Code's `cleanupPeriodDays`, sent as
+  7: the CLI deletes older ones as it starts; its own default is 30), unless your
+  `settings` name a period of their own.
 * **One call, one question.** A call whose approval a person answered before it ran
   (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
   about again when Claude Code asks too: it runs. Another question answered while the call
