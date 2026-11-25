@@ -390,8 +390,10 @@ A conversation's turn leaves its CLI process running, and the conversation's nex
 this process is sent into it (the SDK's `ClaudeSDKClient`), with the turn's own prompt. With
 no such process (it closed, or the server restarted) the turn starts one that resumes the
 session the last turn ran in (`resume=`, through the journal's session store:
-[runs.md](../runs.md#a-claude-or-acp-session-across-turns)); in another process, or the first turn, a new session — with memory off given
-the run store's earlier turns in its context. Memory on or off, a turn whose earlier turns in this process hold
+[runs.md](../runs.md#a-claude-or-acp-session-across-turns)); in another process (a restart, another
+worker) the same, read from the run store, where the last turn left its session; the first
+turn, a turn after one that kept no session, or one whose session the CLI cannot continue, a new
+session — with memory off given the run store's earlier turns in its context. Memory on or off, a turn whose earlier turns in this process hold
 a live tool's result past its age is told which tools in its context, once (`snapshots.note`).
 
 **Background work.** What Claude starts in the background — a subagent with `background`, a
@@ -481,8 +483,8 @@ turn the session runs by itself (a finished task's notification) is never a user
   says it was handed on).
 * A process kept for a conversation another worker has since served a turn of (the run
   store has a later turn than the last one this server served) never answers its next turn:
-  it holds the conversation as it was. It is ended, and the turn starts a new session with
-  the conversation's turns as context, as on a server that kept none.
+  it holds the conversation as it was. It is ended, and the turn resumes the session the
+  other worker's turn ended in, from the run store, as on a server that kept none.
 * A later turn is served by the process when it brings the same options, hooks and tools
   with the same schemas — not the same wording: a tool's description may change between
   turns (`schedule_task` says the hour it is), and the process keeps the wording it listed

@@ -372,8 +372,14 @@ process ran, or one with no window known, is its question and answer.
 A conversation's turn on the Claude Agent SDK or an ACP agent (Kimi) continues the session its
 framework kept for the conversation's last turn in this process (`agent.sessions`, the most
 recent 128 conversations): the journal's session path a resume after a pause takes, sent the
-turn's own prompt. A turn another process runs starts a new session, with the earlier turns as
-above (memory off) or memory's window (memory on).
+turn's own prompt. A turn another process runs (a restart, another worker) resumes the Claude
+session the conversation's last turn ended in: that turn keeps its session and transcripts in
+the run store past its end (the run's checkpoint, `keep_checkpoint`), and the next turn reads
+them from there (`pipeline._last_turns_session`). Only the last turn's: one that kept none (it
+paused, its provider refused the session for good, or an older server ran it) leaves the turn to
+start a new session, with the earlier turns as above (memory off) or memory's window (memory
+on), as does a session the CLI then cannot continue. An ACP agent's session lives on its own
+machine: a turn another process runs starts a new one.
 
 ## Child runs at once, and the task tree
 

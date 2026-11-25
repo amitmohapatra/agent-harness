@@ -391,14 +391,19 @@ async def test_the_conversations_session_is_continued_only_where_it_is_kept(
     await agent.run("What is the locker code?", user="ada", thread=THREAD)
     assert agent.sessions[key][0] == session  # the same session, one turn on
     assert "4242" in told(seen)
-    # another process holds no session (its agent kept none): the run store's turns instead
+    # another process holds no session (its agent kept none). Claude's is in the run store,
+    # where the last turn ended (``_history_kept``): resumed from there, its transcript and all.
+    # An ACP agent keeps its own on its machine: the run store's turns instead
     agent.sessions = LRU()
+    await agent.aclose()  # nor any live process of the conversation's
     forget(seen)
     await agent.run("And again?", user="ada", thread=THREAD)
     assert "4242" in told(seen)
-    if framework == "claude_agent_sdk":
-        record = json.loads(seen[-1].read_text())
-        assert record["resume"] is None and "Earlier in this conversation" in record["context"]
+    record = json.loads(seen[-1].read_text()) if framework == "claude_agent_sdk" else None
+    if record is not None:
+        assert record["resume"] == session, record
+        assert "Earlier in this conversation" not in record["context"]
+        assert agent.sessions[key][0] == session  # and kept here for the turn after
     await agent.run("no thread", user="ada")  # a run of its own keeps no session for later
     assert list(agent.sessions) == [key]
 
@@ -409,31 +414,40 @@ async def test_a_session_whose_turn_failed_is_not_the_next_turns(
     """A session its framework can no longer send — its provider refused the session's own
     request and said a retry will not help — is refused again at every turn that continues it
     (Kimi Code's, whose reloaded log held a tool call its provider refuses: one such turn,
-    then every later turn of the conversation, 21 of them in one suite). That turn's session
-    is dropped: the next turn starts a new one, and is given the conversation as a worker
-    that kept none is (the run store's turns). A turn that failed any other way keeps it."""
+    then every later turn of the conversation, 21 of them in one suite). That turn keeps no
+    session, here or in the run store: the next turn starts a new one, and is given the
+    conversation as a worker that kept none is (the run store's turns). A turn that failed any
+    other way keeps it."""
     from types import SimpleNamespace
 
+    from trellis import Hooks
     from trellis.harness.pipeline import _kept_session
+
+    class Refused(Hooks):
+        """A turn whose session its provider refused for good, as an ACP agent's adapter marks
+        it (``Runtime.session_refused``)."""
+
+        async def on_run_start(self, run: Runtime) -> None:
+            run.session_refused = run.task == "Never mind."
 
     seen: list[Any] = []
     target, tools = await BUILDERS["claude_agent_sdk"](harness, [], tmp_path, [], seen=seen)
-    agent = arm(harness.wrap(target, id="sess-failed"), tools)
+    agent = arm(harness.wrap(target, id="sess-failed", hooks=[Refused()]), tools)
     await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
     key = conversation_key("default", "ada", THREAD)
     session, _ = agent.sessions[key]
     journal = SimpleNamespace(session=session, transcripts={})
     failed = SimpleNamespace(status=RunStatus.ERROR)
-
-    def turn(refused: bool) -> Any:
-        return SimpleNamespace(
-            parent=None, conversation=key, run_id="run_failed", session_refused=refused
-        )
-
-    _kept_session(agent, turn(False), journal, failed)  # type: ignore[arg-type]
+    other = SimpleNamespace(
+        parent=None, conversation=key, run_id="run_failed", session_refused=False
+    )
+    _kept_session(agent, other, journal, failed)  # type: ignore[arg-type]
     assert agent.sessions[key][0] == session  # failed another way (its process died): resumed
-    _kept_session(agent, turn(True), journal, failed)  # type: ignore[arg-type]
+
+    refused = await agent.run("Never mind.", user="ada", thread=THREAD)
     assert key not in agent.sessions
+    record = await harness.runs.get(refused.run_id)
+    assert record is not None and not record.checkpoint  # nor kept past its end
     forget(seen)
     again = await agent.run("What is the locker code?", user="ada", thread=THREAD)
     assert again.status is RunStatus.SUCCESS, again.error
@@ -810,3 +824,72 @@ async def test_the_runs_own_model_input_filter_goes_first(harness: Harness, awai
     result = await agent.run("hi", user="ada", framework_options={"run_config": config})
     assert result.status is RunStatus.SUCCESS
     assert model.system == [dated("Answer briefly.")]  # theirs ran, ours after it
+
+
+async def test_a_last_turns_session_the_cli_cannot_continue_gives_the_turns_instead(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session read from the run store for a worker that kept none is one the CLI could
+    not continue (a transcript it refuses): the turn runs again from its prompt, given the
+    conversation's turns, as a turn with no session is — never without them."""
+    from trellis.harness import pipeline
+
+    seen: list[Any] = []
+    target, tools = await BUILDERS["claude_agent_sdk"](harness, [], tmp_path, [], seen=seen)
+    agent = arm(harness.wrap(target, id="sess-unresumable"), tools)
+    await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
+
+    async def unloadable(agent: Any, identity: Any, asked: Any, journal: Any) -> bool:
+        journal.session, journal.transcripts = "a-session-no-cli-holds", {}
+        return True
+
+    monkeypatch.setattr(pipeline, "_last_turns_session", unloadable)
+    agent.sessions = LRU()
+    await agent.aclose()
+    forget(seen)
+    events: list[Any] = []
+    async for event in agent.stream("What is the locker code?", user="ada", thread=THREAD):
+        events.append(event)
+    assert events[-1].type is RunEventType.RUN_FINISHED
+    warned = [e.data["message"] for e in events if e.data.get("code") == "claude_session"]
+    assert warned and "a-session-no-cli-holds" in warned[0]
+    record = json.loads(seen[-1].read_text())
+    assert record["resume"] is None and "Earlier in this conversation" in record["context"]
+    assert "4242" in record["context"]
+
+
+async def test_a_turn_another_worker_served_is_resumed_from_the_run_store(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session kept here never saw the turn another worker served since (the second): it
+    is dropped (``_served_elsewhere``), and the session that worker's turn ended in, kept in
+    the run store, is resumed — its transcript holds both turns."""
+    from trellis.harness import pipeline
+
+    read: list[tuple[bool, str | None, list[str]]] = []
+    real = pipeline._last_turns_session
+
+    async def reading(agent: Any, identity: Any, asked: Any, journal: Any) -> bool:
+        found = await real(agent, identity, asked, journal)
+        kept = journal.transcripts.get(journal.session) or []
+        read.append((found, journal.session, [e["prompt"] for e in kept if "prompt" in e]))
+        return found
+
+    monkeypatch.setattr(pipeline, "_last_turns_session", reading)
+    seen: list[Any] = []
+    target, tools = await BUILDERS["claude_agent_sdk"](harness, [], tmp_path, [], seen=seen)
+    agent = arm(harness.wrap(target, id="sess-elsewhere"), tools)
+    first = await agent.run("The locker code is 4242.", user="ada", thread=THREAD)
+    key = conversation_key("default", "ada", THREAD)
+    session, transcripts = agent.sessions[key]
+    stale = (session, {name: list(entries) for name, entries in transcripts.items()})
+    await agent.run("The gate code is 1717.", user="ada", thread=THREAD)
+    # as on the worker that served only the first turn: its session, its last turn
+    agent.sessions[key], agent.turned[key] = stale, first.run_id
+    await agent.aclose()
+    forget(seen)
+    read.clear()
+    await agent.run("What are the codes?", user="ada", thread=THREAD)
+    assert json.loads(seen[-1].read_text())["resume"] == session
+    # the session read from the run store: the other worker's turn in its transcript
+    assert read == [(True, session, ["The locker code is 4242.", "The gate code is 1717."])]

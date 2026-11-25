@@ -542,14 +542,56 @@ async def _continued_session(
     if record.attempt != 1 or journal.session:
         return False
     kept = agent.sessions.get(conversation)
-    if kept is None:
-        return False
-    if mine is not None and await _served_elsewhere(agent, identity, mine, record.created_at):
+    if (
+        kept is not None
+        and mine is not None
+        and await _served_elsewhere(agent, identity, mine, record.created_at)
+    ):
         agent.sessions.discard(conversation)
-        return False
+        kept = None
+    if kept is None:
+        return await _last_turns_session(agent, identity, record.created_at, journal)
     journal.session, transcripts = kept
     journal.transcripts = {name: list(entries) for name, entries in transcripts.items()}
     return True
+
+
+async def _last_turns_session(
+    agent: Agent, identity: Identity, asked: datetime, journal: Journal
+) -> bool:
+    """The session the conversation's last turn before this one (asked at ``asked``) ended
+    in, as the run store keeps it past that turn's end (:func:`_history_kept`), put in
+    ``journal`` for this turn to resume — on a worker that kept no session of the
+    conversation (a restart, another worker's turn). Only the last turn's: an older one never
+    saw the turns after it, so a last turn that kept none (one that paused, failed for good, or
+    ran on an older server) leaves this one to start a new session, given the conversation's
+    turns (``Agent.window``). The listing is newest first: its first page is read, and the
+    turns on it until the last one. A read that fails is a warning. Whether it does."""
+    runs, tenant = agent.harness.runs, identity.tenant
+    try:
+        async for summary in runs.iterate(
+            thread_id=identity.thread, agent_id=identity.agent_id, tenant=tenant, max_pages=1
+        ):
+            if summary.run_id == identity.run_id or summary.status is RunStatus.QUEUED:
+                continue
+            turn = await runs.get(summary.run_id, tenant=tenant)
+            if (
+                turn is None
+                or turn.parent_run_id is not None
+                or turn.user_id != identity.user
+                or turn.created_at >= asked
+            ):
+                continue
+            if not turn.status.final or not turn.checkpoint:
+                return False
+            kept = await Journal.read(turn.checkpoint, runs.artifacts, tenant=tenant)
+            if kept.session is None or not kept.transcripts.get(kept.session):
+                return False
+            journal.session, journal.transcripts = kept.session, kept.transcripts
+            return True
+    except Exception as exc:
+        log.warning("run %s: the last turn's session: %s", identity.run_id, exc)
+    return False
 
 
 async def _served_elsewhere(agent: Agent, identity: Identity, mine: str, asked: datetime) -> bool:
@@ -1618,7 +1660,12 @@ async def _partial(agent: Agent, runtime: Runtime, extracted: Extracted) -> Resu
 
 async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: Any) -> None:
     kept = await _history_kept(
-        agent, runtime.identity, runtime.worker_id, runtime.replay.journal, runtime.parent
+        agent,
+        runtime.identity,
+        runtime.worker_id,
+        runtime.replay.journal,
+        runtime.parent,
+        refused=runtime.session_refused,
     )
     await _recorded(
         agent,
@@ -1642,16 +1689,56 @@ async def _history_kept(
     worker_id: str | None,
     journal: Journal | None,
     parent: Runtime | None,
+    *,
+    refused: bool = False,
 ) -> dict[str, Any]:
-    """What an ending sends to keep the run's checkpoint history past its end — the journal
-    as it ends, saved — for an agent whose ended runs are rewound (``h.wrap(rewindable=)``;
-    a sub-agent's run has no history of its own); nothing for any other."""
-    if not agent.rewindable or parent is not None or journal is None:
+    """What an ending sends to keep the run's checkpoint past its end: for an agent whose
+    ended runs are rewound (``h.wrap(rewindable=)``), the journal as it ends, saved; for a
+    conversation's turn whose session lives in its journal (:func:`_resumable`: Claude's,
+    kept as the SDK's session store), that session and its transcripts alone, which the
+    conversation's next turn on a worker that kept none resumes (:func:`_last_turns_session`)
+    — not one its provider refused for good (``refused``: ``Runtime.session_refused``). A
+    sub-agent's run has no history of its own; nothing for any other."""
+    if parent is not None or journal is None:
         return {}
-    checkpoint = await journal.checkpoint(
+    if agent.rewindable:
+        kept = journal
+    elif not refused and _resumable(agent, identity, journal):
+        kept = _session_only(journal)
+    else:
+        return {}
+    checkpoint = await kept.checkpoint(
         agent.harness.runs.artifacts, identity.run_id, worker_id=worker_id, tenant=identity.tenant
     )
     return {"keep_checkpoint": True, "checkpoint": checkpoint}
+
+
+def _resumable(agent: Agent, identity: Identity, journal: Journal) -> bool:
+    """Whether a conversation's turn ``journal`` holds a session any worker can resume: the
+    framework keeps one (``Adapter.sessions``) and its transcript is in the journal (the
+    Claude Agent SDK's, whose session store is the journal: ``JournalSessions``; an ACP
+    agent's lives on its own machine, and options that keep their own store keep it there)."""
+    return (
+        agent.adapter.sessions
+        and identity.conversation != identity.run_id
+        and journal.session is not None
+        and bool(journal.transcripts.get(journal.session))
+    )
+
+
+def _session_only(journal: Journal) -> Journal:
+    """``journal``'s session and the transcripts a resume restores with it (its own and its
+    subagents', ``JournalSessions``): nothing of the run's calls, which are its own."""
+    session = journal.session
+    assert session is not None
+    return Journal(
+        session=session,
+        transcripts={
+            name: list(entries)
+            for name, entries in journal.transcripts.items()
+            if name == session or name.startswith(f"{session}/")
+        },
+    )
 
 
 async def _recorded(

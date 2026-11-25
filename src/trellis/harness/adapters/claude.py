@@ -48,7 +48,10 @@
   background keeps its child run open until its task ends, its calls decided and recorded
   for that run (``claude_live.Background``). A run with no conversation, a sub-agent's
   run, and a turn with no live session (another server, a restart, one closed) run as below:
-  one process for the query, resuming the conversation's session;
+  one process for the query, resuming the conversation's session — on a server that kept
+  none, the one the conversation's last turn left in the run store
+  (``pipeline._last_turns_session``); one the CLI cannot continue gives the turn the
+  conversation's turns instead (:func:`_with_earlier`);
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
   ends, once read to its turn's result, which the run is charged: the model's billed reply
   to the pause's placeholder is in it — a conversation's live one stays, its turn ended, and
@@ -102,7 +105,7 @@ from trellis.contracts import (
     ToolStatus,
     stable_id,
 )
-from trellis.harness import budget, children, skills
+from trellis.harness import budget, children, conversation, skills
 from trellis.harness.adapters.base import (
     HELPER,
     Extracted,
@@ -719,7 +722,9 @@ class ClaudeAdapter(Keeps):
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
         """The query's messages — the session an earlier attempt kept resumed, when there is
-        one the CLI still holds; else from the prompt."""
+        one the CLI still holds; else from the prompt: a turn that was to continue its
+        conversation's session (``Runtime.continued``) given the conversation's turns, as
+        a turn with no session is (:func:`_with_earlier`)."""
         from claude_agent_sdk import AssistantMessage, ResultMessage
 
         runtime = run.runtime
@@ -745,6 +750,8 @@ class ClaudeAdapter(Keeps):
                 yield message
             else:
                 return
+        if runtime.continued:
+            native_input = await _with_earlier(native_input, runtime)
         async with contextlib.aclosing(self._query(target, native_input, run, None)) as again:
             async for message in again:
                 yield message
@@ -1319,6 +1326,25 @@ def _spent(
         cost=cost,
         **({} if calls == 1 else {"calls": calls}),
     )
+
+
+async def _with_earlier(native_input: ClaudeInput, runtime: Runtime) -> ClaudeInput:
+    """``native_input`` with the conversation's earlier turns before its context (the run
+    store's: ``conversation.earlier``), for a turn whose conversation's session the CLI could
+    not continue: the session held them, and nothing else gave them (``Agent.window`` gives
+    none beside a session); the turn no longer continues one. A read that fails is a
+    warning, and the turn goes on without them."""
+    runtime.continued = False
+    try:
+        earlier = await conversation.earlier(runtime)
+    except Exception as exc:
+        runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+        return native_input
+    if not earlier:
+        return native_input
+    told = conversation.rendered(earlier)
+    context = f"{told}\n\n{native_input.context}" if native_input.context else told
+    return dataclasses.replace(native_input, context=context)
 
 
 def _resumed(native_input: ClaudeInput, run: Invocation) -> str:

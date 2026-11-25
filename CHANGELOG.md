@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a Claude conversation's turn on another worker resumes its session
+
+A turn of a Claude Agent SDK conversation continued the session its last turn ran in only on
+the server that ran it (`agent.sessions`, in memory); after a restart, or on another worker,
+it started a new session given the earlier turns as text. The last turn now keeps its session
+and transcripts in the run store past its end (the run's checkpoint), and a worker that kept
+none resumes it from there: Claude goes on in its own session, its tool calls and results
+and all. Only the last turn's (one that kept none leaves the turn to start a new session, as
+before), and a session the CLI cannot continue gives the turn the earlier turns instead of
+going on without them — which a continued turn did before, on any server. Kimi is unchanged.
+
 ### Fixed: `ReAct` and OpenAI Agents are told earlier values are out of date after the question
 
 A conversation's earlier live results past their tool's age come with one line saying so

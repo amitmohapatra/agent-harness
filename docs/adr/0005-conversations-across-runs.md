@@ -92,8 +92,11 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
   (`test_a_continued_session_with_memory_on_gets_no_memory_window_beside_it`); every other
   run receives what it did.
 * The kept session is in-process, as `Turns` is. A turn that a different worker or process
-  runs starts a new session with the run store's turns (memory off) or memory's window
-  (memory on). The durable owner remains the framework's own durable store.
+  runs resumes a Claude session from the run store, where the conversation's last turn kept
+  it past its end (2026-11-25: the session and its transcripts, the run's checkpoint); with
+  none kept there, or an ACP agent's, it starts a new session with the run store's turns
+  (memory off) or memory's window (memory on). The durable owner remains the framework's own
+  durable store.
 * `steer` adds one graph node, `HarnessTools.before_model`, which counts as one LangGraph step
   per model call. It does nothing when nothing was steered.
 * Tests: `tests/integration/test_conversation.py` covers every adapter × mode, follow-up
