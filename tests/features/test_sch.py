@@ -280,21 +280,25 @@ async def test_a_schedule_untouched_for_90_days_asks_still_need_this(
         )
         assert patched.status_code == 200, patched.text
     run_id = await fire(sid)
-    await work(tmp_path, agent_id, [("lookup", {"sku": "A-1"})])
-    paused = await record(run_id)
-    assert paused.status is RunStatus.PAUSED, paused
-    assert paused.awaiting and "Still need this?" in paused.awaiting.question
-    assert "lookup:A-1" not in ledger()  # nothing done before the answer
-    assert (
-        runs_sql("select enabled from agent_schedules where schedule_id = :1", sid)[0]["enabled"]
-        is False
+    told: list[str] = []
+
+    async def audit(input: Any, agent: Runtime) -> str:
+        # a function: a planned model would count the chat's earlier turn as one of its steps
+        told.append(str(input))
+        return str(await agent.tools.call("lookup", sku="A-1"))
+
+    await work(tmp_path, agent_id, [], target=audit)
+    # the run does its task, then its model asks, in the user's words (handoff 2.6), whether
+    # they still need it: the schedule waits paused until they keep it in chat
+    assert told and told[0].endswith(chat_schedules.EXPIRING)
+    done = await record(run_id)
+    assert done.status is RunStatus.SUCCESS, done
+    assert "lookup:A-1" in ledger()
+    [row] = runs_sql(
+        "select enabled, schedule_metadata from agent_schedules where schedule_id = :1", sid
     )
-    async with harness() as h:
-        agent, _ = await armed("react", h, tmp_path, [], id=agent_id)
-        await agent.resume(paused.awaiting.interrupt_id, "answer", answer="none", reviewer=user)
-    await work(tmp_path, agent_id, [])
-    assert (await record(run_id)).status is RunStatus.SUCCESS
-    assert not runs_sql("select 1 from agent_schedules where schedule_id = :1", sid)  # cancelled
+    assert row["enabled"] is False
+    assert row["schedule_metadata"][chat_schedules.PAUSED_BY] == chat_schedules.KEEP_IT
 
 
 class Left(Hooks):

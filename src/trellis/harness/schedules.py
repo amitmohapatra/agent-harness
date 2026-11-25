@@ -28,10 +28,11 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
 * Unattended safety: after ``TRELLIS_SCHEDULE_PAUSE_AFTER_FAILURES`` failed runs in a row
   (``ERROR``, ``TIMEOUT``) the schedule is paused and the last run's error says so (the reply in
   the thread, the run's record and its ``run.finished`` webhook); a schedule the user has not
-  touched for ``TRELLIS_SCHEDULE_EXPIRE_DAYS`` asks at its next run "Still need this?" (Keep,
-  recommended, or Cancel), paused until answered. The count and the touch are in the
-  schedule's metadata (:data:`FAILURES`, :data:`TOUCHED`). agent-runs runs one fire of a
-  schedule at a time and spreads the fires over the minute.
+  touched for ``TRELLIS_SCHEDULE_EXPIRE_DAYS`` is paused at its next run, which does its task
+  and then asks, in its model's words and the user's language, whether they still need it
+  (:data:`EXPIRING`): they keep it in chat, which resumes it, or cancel it. The count and the
+  touch are in the schedule's metadata (:data:`FAILURES`, :data:`TOUCHED`). agent-runs runs one
+  fire of a schedule at a time and spreads the fires over the minute.
 * Limits: ``TRELLIS_SCHEDULE_*`` (``Settings``: the least time between runs, schedules per
   user, each fired run's time and tool calls, failures before a pause, days before asking),
   per user ``Harness(schedule_limits=)``, the same names; agent-runs' own floor, rate limits and

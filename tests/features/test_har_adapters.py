@@ -228,9 +228,11 @@ async def test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_ro
 
 
 @pytest.mark.plan("HAR-ASK", "F36u")
-async def test_a_date_question_refuses_an_answer_that_is_not_a_date(
+async def test_a_date_question_takes_words_and_refuses_what_is_no_text(
     tmp_path: Path, uid: str
 ) -> None:
+    """A date question takes a date or the words a person answers it with in chat ("next
+    week": ``ask.EXPECTS``), and refuses an answer that is neither (a number)."""
     user = f"amy-{uid}"
     plan = [("ask_user", {"question": "Which day?", "kind": "date"})]
     async with harness() as h:
@@ -240,8 +242,11 @@ async def test_a_date_question_refuses_an_answer_that_is_not_a_date(
         try:
             with pytest.raises(ConfigurationError):
                 await agent.resume(
-                    paused.interrupt.interrupt_id, "answer", answer="next week", reviewer=user
+                    paused.interrupt.interrupt_id, "answer", answer=42, reviewer=user
                 )
+            await agent.resume(
+                paused.interrupt.interrupt_id, "answer", answer="next week", reviewer=user
+            )
         finally:
             with contextlib.suppress(Exception):  # ended already when the answer was taken
                 await agent.cancel(paused.run_id, reason="test over")
