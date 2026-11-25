@@ -93,3 +93,14 @@ def test_a_change_said_as_its_size_is_the_signed_figure_it_was_given() -> None:
     assert unbacked(said, given) == []
     assert unbacked(said.replace("4,880", "4,980"), given) == ["4980"]
     assert unbacked("A rise of 12.5 points.", "change: -12.5") == []
+
+
+def test_a_number_too_large_for_a_float_is_no_figure_and_breaks_nothing() -> None:
+    """A run of digits past what a float holds (an id, a hash, a large result's padding) is
+    read as infinity: it is no figure the answer states or a tool returned, and checking an
+    answer that holds one ran into ``int(inf)`` and failed the run (the matrix's large-result
+    cells)."""
+    huge = "9" * 400
+    assert numbers(f"rows: {huge} and 12") == [12.0, 12.0]
+    assert unbacked(f"It is {huge}, and 12 units.", "12 units") == []
+    assert unbacked(f"It is {huge}, and £13.47.", "£12.50") == ["13.47"]  # still checked

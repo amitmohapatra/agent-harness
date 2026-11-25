@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: an answer holding a number too large for a float no longer fails its run
+
+The check of an answer's figures against what its model was sent read a run of digits past
+what a float holds (an id, a hash, a large result's padding) as infinity, and failed the run
+on `int(inf)` (`OverflowError`: the matrix's large-result cells, on every `ReAct` and
+`middleware()` graph). Such a run of digits is no figure, and is read as none.
+
 ### Benchmark: three schedule checks that failed right answers, and answers kept whole
 
 The schedules suite failed right answers on three checks, on every adapter that put them in

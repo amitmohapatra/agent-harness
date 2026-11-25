@@ -14,6 +14,7 @@ not checked). A date, a clock time and an id's digits ("SKU-00012", "AL-13") are
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Final
 
@@ -44,11 +45,13 @@ RUN: Final = 40
 
 
 def _read(text: str) -> list[tuple[float, int]]:
-    """Each number ``text`` states, with the decimal places it is written to."""
+    """Each number ``text`` states, with the decimal places it is written to — not a run of
+    digits past what a float holds (an id, a hash, padding: read as infinity, no figure)."""
     found = []
     for m in _NUMBER.finditer(_NOT_FIGURES.sub(" ", text)):
         said = m.group(0).replace(",", "")
-        found.append((float(said), len(said.partition(".")[2])))
+        if math.isfinite(value := float(said)):
+            found.append((value, len(said.partition(".")[2])))
     return found
 
 
