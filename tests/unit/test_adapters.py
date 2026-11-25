@@ -257,7 +257,8 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         AUTO_MEMORY_ENV: "1",
     }
     assert sent.verbatim_prompts  # the user's text, as written
-    assert sent.settings == '{"crossSessionInbound": "refuse"}'  # no peer's messages
+    # no peer's messages; the worker's copies of transcripts kept a week (``TRANSCRIPT_DAYS``)
+    assert sent.settings == '{"crossSessionInbound": "refuse", "cleanupPeriodDays": 7}'
     unchanged = {
         "settings": None,
         "hooks": None,
