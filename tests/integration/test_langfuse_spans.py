@@ -458,7 +458,9 @@ async def test_a_command_in_the_runs_sandbox_is_its_audit_record_on_the_span(
     spans.clear()  # past the run's time: the time limit stopped it
     model = ScriptedChat([("sandbox_exec", {"command": "sleep 30"}), "done"])
     slow = arm(harness.wrap(ReAct("s", model), id="slow-box"), [sandbox(provider).tools()])
-    await slow.run("go", user="u1", run_timeout=1)
+    # time enough to reach the command on a slow runner (at 1 s a CI run timed out before it
+    # started, so it had no span), far short of the command's own 30 s
+    await slow.run("go", user="u1", run_timeout=5)
     stopped = commanded(Tree(spans), "sandbox_exec", "sleep 30", "sandbox")
     assert stopped["trellis.command.limit"] == "time"
     assert "trellis.command.exit_code" not in stopped
