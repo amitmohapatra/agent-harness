@@ -154,7 +154,7 @@ async def test_claude_codes_built_ins_are_tool_spans_with_governances_action(
 ) -> None:
     script = [
         {"builtin": "Read", "args": {"file_path": "orders.csv"}},
-        {"builtin": "Write", "args": {"file_path": "notes.txt", "content": f"--token {SECRET}"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/n.txt", "content": f"--token {SECRET}"}},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {"text": "done"},
     ]
@@ -193,7 +193,7 @@ async def test_kimis_tools_and_its_sub_agent_are_spans(
     script = [
         {"builtin": "Read", "args": {"path": "orders.csv"}, "output": "o1,o2"},
         {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""},
-        {"builtin": "Write", "args": {"path": "a.txt", "content": "x"}, "ask": True, "output": ""},
+        {"builtin": "Write", "args": {"path": "/srv/a", "content": "x"}, "ask": True, "output": ""},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {
             "agent": {"description": "look", "prompt": "find tea", "subagent_type": "explore"},

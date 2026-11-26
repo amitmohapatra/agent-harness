@@ -1922,7 +1922,9 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
     command the CLI's ``shell`` reads as read-only (``Shell.read_only``: from every folder it
     may be in, none known while another call that may move it is under way) —, so does the
     shell (:data:`CLAUDE_SHELLS`: in its sandbox, or on a host the deployment allows it on —
-    the deployment's decision, announced in the hook) and the network the catalog let through
+    the deployment's decision, announced in the hook), a file tool's write inside the folder
+    the CLI works in (``Shell.keeps``: the run's own work, as its shell's there) and the
+    network the catalog let through
     (:data:`CLAUDE_NETWORK`), and a harness tool (its hook decided it, and the bridge governs
     its call: Claude Code asks about one in plan mode all the same), and any other asks a
     person (``bridge.asked``, in the CLI's own words: :func:`_prompt`); Claude's
@@ -1958,9 +1960,11 @@ def _asked(own: Any, steps: Steps, shell: Shell, deployed: bool) -> Any:
             # a harness tool: the hook decided it (in plan mode too, where the CLI still
             # asks), and the bridge governs its call as ever
             or bare(name) is not None
-            # the shell in its sandbox, or on a host the deployment allows it on, and the
-            # network as the catalog let it through: the deployment's, never the user's
+            # the shell in its sandbox, or on a host the deployment allows it on, a file
+            # written in the folder it works in, and the network as the catalog let it
+            # through: the deployment's, never the user's
             or name in CLAUDE_SHELLS
+            or shell.keeps(name, args)
             or name in CLAUDE_NETWORK
             or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())

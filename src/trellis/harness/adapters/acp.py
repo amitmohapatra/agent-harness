@@ -2284,15 +2284,18 @@ async def _permitted(
     (``asks_as``: what the agent is called in the question), once for the call: not again when
     governance or a hook just asked about it. Not asked for the agent's sake when it only
     reads (a read tool, or a shell command ``shell`` reads as read-only: placed from the
-    agent's working folder, or the call's own ``cwd``, and reading only what the run may read)
+    agent's working folder, or the call's own ``cwd``, and reading only what the run may read),
+    when it writes a file inside the folder the agent works in (``Shell.keeps``)
     or when the run changed its arguments (the agent is told to call it again so: that call is
     the one let through). ``request``: the agent's permission request — its call's id, and
     whether it offers to keep an approval for its session (:func:`_keeps`: the person may then
     allow the tool for the conversation). A pause propagates."""
     # a read; the shell (its sandbox, or the host the deployment allows it on:
-    # ``trellis.harness.host``) and the network the catalog let through (``bridge.outbound``)
-    # are the deployment's: announced, never the user's to answer
-    deployed = spec.name in SHELLS or spec.name in KIMI_NETWORK
+    # ``trellis.harness.host``), a file written in the folder the agent works in
+    # (``Shell.keeps``: the run's own work, as its shell's there) and the network the catalog
+    # let through (``bridge.outbound``) are the deployment's: announced, never the user's to
+    # answer
+    deployed = spec.name in SHELLS or spec.name in KIMI_NETWORK or shell.keeps(spec.name, args)
     reads = deployed or spec.side_effects == "read" or shell.read_only(spec.name, args)
     framework = None if reads else asks_as
     call_id, options = request

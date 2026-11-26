@@ -5,7 +5,8 @@ administrator's (``docs/governance.md#who-decides-what``).
 | Tool | Decided by |
 |---|---|
 | ``Read``, ``Grep``, ``Glob`` (Kimi's reads) in the user's workspace | nobody: they run unasked |
-| ``Write``, ``Edit`` of the user's own files | the user, under the one rule: once, for this conversation, always |
+| ``Write``, ``Edit`` of a file in the folder the run works in (its workspace, its sandbox) | nobody: they run unasked, announced and recorded |
+| ``Write``, ``Edit`` of any other file | the user, under the one rule: once, for this conversation, always |
 | the shell in the sandbox | nobody: it runs unasked, announced and recorded |
 | the shell on the host | runs as the framework runs it, unasked and announced, unless the administrator says ``TRELLIS_HOST_EXECUTION=deny`` |
 | the network out (``WebFetch``, ``WebSearch``; Kimi's ``FetchURL``, ``WebSearch``) | the administrator, in the tool catalog: refused until it gives the tool a risk or an ``approve_when`` |
@@ -94,11 +95,26 @@ async def test_claude_writes_are_the_users_to_decide_under_the_one_rule(
     memory_harness: Harness, tmp_path: Path
 ) -> None:
     for n, name in enumerate(("Write", "Edit")):
-        step = {"builtin": name, "args": {"file_path": f"notes-{n}.md"}}
+        step = {"builtin": name, "args": {"file_path": f"/srv/notes-{n}.md"}}
         paused = await memory_harness.wrap(claude(tmp_path, step), id=name).run("w", user="ada")
         assert paused.interrupt is not None, paused
         assert list(paused.interrupt.options) == [ONCE, CONVERSATION, ALWAYS, DENY]
     assert ran(tmp_path) == []
+
+
+async def test_claude_writes_in_the_folder_it_works_in_run_unasked_announced_and_recorded(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """A file in the folder Claude Code works in is the run's own work, as a command of its
+    shell there is: nobody is asked; the call is announced and recorded."""
+    steps = [{"builtin": n, "args": {"file_path": "notes.md"}} for n in ("Write", "Edit")]
+    agent = memory_harness.wrap(claude(tmp_path, *steps, cwd=str(tmp_path)), id="here")
+    events = [e async for e in agent.stream("w", user="ada")]
+    assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
+    assert notices(events) == ["Write", "Edit"] and ran(tmp_path) == ["Write", "Edit"]
+    await memory_harness.writes.drain()
+    recorded = [c.body["tool"] for c in memory_service.calls if c.name == "record_tool"]
+    assert recorded == ["Write", "Edit"]
 
 
 async def test_claude_shell_in_its_sandbox_runs_unasked_announced_and_recorded(
@@ -201,7 +217,7 @@ async def test_claudes_permissions_are_loosened_by_no_other_run_option(
     permission rules — is the deployment's as its permission mode is: a run's own
     ``framework_options`` saying it is refused, and the user decides the write under the one
     rule."""
-    step = {"builtin": "Write", "args": {"file_path": "notes.md"}}
+    step = {"builtin": "Write", "args": {"file_path": "/srv/notes.md"}}
     agent = memory_harness.wrap(claude(tmp_path, step), id="loosened")
     with pytest.raises(ConfigurationError, match=r"h\.wrap"):
         await agent.run("w", user="ada", framework_options=given)
@@ -215,7 +231,7 @@ async def test_a_runs_own_permission_check_never_approves_for_the_user(
     """A run's own ``can_use_tool`` is asked when Claude Code would ask its user, and may
     refuse the call; one that lets it through does not answer for the user, who is asked as
     without it. (The deployment's own, on the options it wraps, answers as it is.)"""
-    step = {"builtin": "Write", "args": {"file_path": "notes.md"}}
+    step = {"builtin": "Write", "args": {"file_path": "/srv/notes.md"}}
     agent = memory_harness.wrap(claude(tmp_path, step), id="checked")
     given = {"can_use_tool": allow_everything}
     paused = await agent.run("w", user="ada", framework_options=given)
@@ -238,11 +254,26 @@ async def test_kimi_reads_run_unasked(tmp_path: Path) -> None:
 async def test_kimi_writes_are_the_users_to_decide_under_the_one_rule(
     memory_harness: Harness, tmp_path: Path
 ) -> None:
-    step = {"builtin": "Write", "args": {"path": "notes.md", "content": "x"}, "ask": True}
+    step = {"builtin": "Write", "args": {"path": "/srv/notes.md", "content": "x"}, "ask": True}
     agent = memory_harness.wrap(kimi_fake(tmp_path, step, sandbox=sandbox(FakeSandboxes())), id="w")
     paused = await agent.run("write", user="ada")
     assert paused.interrupt is not None, paused
     assert list(paused.interrupt.options) == [ONCE, CONVERSATION, ALWAYS, DENY]
+
+
+@pytest.mark.parametrize("boxed", [True, False], ids=["sandbox", "folder"])
+async def test_kimi_writes_in_the_folder_it_works_in_run_unasked_and_announced(
+    harness: Harness, tmp_path: Path, boxed: bool
+) -> None:
+    """Kimi asks before it writes a file: one in the folder it works in (its sandbox's, or
+    the deployment's ``cwd``) is the run's own work, and the harness answers — nobody is
+    asked; the call is announced."""
+    step = {"builtin": "Write", "args": {"path": "notes.md", "content": "x"}, "ask": True}
+    fields = {"sandbox": sandbox(FakeSandboxes())} if boxed else {}
+    agent = harness.wrap(kimi_fake(tmp_path, step, **fields), id="here")
+    events = [e async for e in agent.stream("write", user="ada")]
+    assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
+    assert notices(events) == ["Write"]
 
 
 async def test_kimi_shell_in_its_sandbox_runs_unasked_and_announced(

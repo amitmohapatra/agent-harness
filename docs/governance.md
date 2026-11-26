@@ -31,7 +31,8 @@ tool records, and traced.
 | Tool | Decided by | What happens |
 |---|---|---|
 | `Read`, `Grep`, `Glob` (Kimi's reads) in the workspace | nobody | run unasked, recorded |
-| `Write`, `Edit` of the user's own files | the user | the one rule: allow once, for this conversation, always (with memory), deny |
+| `Write`, `Edit` of a file in the folder the run works in (its sandbox, or the agent's `cwd`) | the deployment | runs unasked, announced and recorded, as a command of its shell there does: the framework's own permission question is not the user's. The catalog can have it asked (`irreversible`, an `approve_when`) |
+| `Write`, `Edit` of any other file | the user | the one rule: allow once, for this conversation, always (with memory), deny |
 | the shell (`Bash`) in the sandbox | the deployment | runs unasked, announced and recorded: the framework's own permission question is not the user's |
 | the shell on the host | the administrator | runs as Claude Code or Kimi runs it — as the service's user, without the harness's isolation — unasked and announced; `TRELLIS_HOST_EXECUTION=deny` switches it off ([below](#commands-on-the-host)) |
 | the network out: Claude's `WebFetch`, `WebSearch`; Kimi's `FetchURL`, `WebSearch` | the administrator, in the catalog | **refused by default**: until the catalog gives the tool a risk (`read`: runs unasked) or an `approve_when` (asks when it holds); with memory off there is no catalog, and they are refused |
@@ -457,9 +458,12 @@ Claude Code's built-ins go through the CLI's `PreToolUse` hook, where the harnes
 by risk (`Read` runs; `Write` and `Bash` are announced), then Claude Code's own permission check;
 what it would ask its user, a person is asked — with the rule's choices — unless the call only
 reads, or is its shell (in its sandbox, or on the host unless the deployment says `deny`:
-announced, never the user's), or reaches the network as the catalog allows (`WebFetch`, `WebSearch`: refused
-until the catalog gives them a risk or an `approve_when`). In its default permission mode
-Claude Code asks before `Write` and `Edit`, so they ask as any write; a team that sets
+announced, never the user's), or writes a file inside the folder it works in (its `Write`,
+`Edit`, `MultiEdit` there: the run's own work, as its shell's — a path that leaves the folder,
+its `..` and links followed, is a person's), or reaches the network as the catalog allows
+(`WebFetch`, `WebSearch`: refused until the catalog gives them a risk or an `approve_when`).
+In its default permission mode Claude Code asks before `Write` and `Edit`, so outside that
+folder they ask as any write; a team that sets
 `acceptEdits` or `bypassPermissions` has chosen to let them through, as Kimi lets its own
 writes inside a git working tree through (ACP gives the harness no hook before them): those
 are the frameworks' own permission settings, and the catalog's risk (`irreversible`, an

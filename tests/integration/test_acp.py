@@ -391,7 +391,7 @@ async def test_its_own_tools_are_governed_and_recorded(
     script = [
         {"builtin": "Read", "args": {"path": "orders.csv"}, "output": "o1,o2"},
         {"builtin": "Bash", "args": {"command": "ls"}, "ask": True, "output": "a.txt"},
-        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": ""},
+        {"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True, "output": ""},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {"text": "done: {last}"},
     ]
@@ -399,7 +399,7 @@ async def test_its_own_tools_are_governed_and_recorded(
     asked = await agent.run("tidy up", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.tool == "Edit"
-    assert asked.interrupt.tool_call.args == {"path": "a.txt"}
+    assert asked.interrupt.tool_call.args == {"path": "/srv/a.txt"}
     assert asked.interrupt.question == (
         "Approve Edit? Kimi Code asks before it runs this call. "
         "Allow once, allow for this conversation, always allow, or deny."
@@ -414,6 +414,29 @@ async def test_its_own_tools_are_governed_and_recorded(
     assert records == [("Read", "ok"), ("Bash", "ok"), ("Edit", "ok"), ("Grep", "error")]
 
 
+async def test_a_file_written_in_the_folder_the_agent_works_in_is_not_the_users_question(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The agent asks before it writes a file (its ``Edit``): inside the folder it works in
+    that is the run's own work, as a command of its shell there is — the harness answers,
+    the call is announced, nobody is asked. A path that leaves the folder (its ``..``
+    followed) is a person's to approve."""
+    script = [
+        {"builtin": "Edit", "args": {"path": "notes/a.txt"}, "ask": True, "output": "a made"},
+        {"builtin": "Edit", "args": {"path": "../b.txt"}, "ask": True, "output": "b made"},
+        {"text": "done: {last}"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script), id="writes-here")
+    events = [e async for e in agent.stream("write them", user="u1")]
+    [asked] = [e for e in events if e.type is RunEventType.INTERRUPT]
+    assert asked.data["tool_call"]["args"] == {"path": "../b.txt"}
+    # both writes are announced; only the one that leaves the folder waits for a person
+    notices = [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"]
+    assert notices == ["Edit", "Edit"]
+    ended = [e.data for e in events if e.type is RunEventType.TOOL_CALL_END]
+    assert len(ended) == 1, ended
+
+
 async def test_a_call_allowed_for_the_conversation_is_kimis_approval_for_its_session(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -424,12 +447,12 @@ async def test_a_call_allowed_for_the_conversation_is_kimis_approval_for_its_ses
     in Kimi's session (its own rule for the same command) and in the conversation's next
     run. One question for the chat."""
     script = [
-        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "a gone"},
-        {"builtin": "Edit", "args": {"path": "b.txt"}, "ask": True, "output": "b gone"},
+        {"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True, "output": "a gone"},
+        {"builtin": "Edit", "args": {"path": "/srv/b.txt"}, "ask": True, "output": "b gone"},
         {"text": "done: {last}"},
         {"stop": "end_turn"},
-        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "a gone again"},
-        {"builtin": "Edit", "args": {"path": "c.txt"}, "ask": True, "output": "c gone"},
+        {"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True, "output": "a gone again"},
+        {"builtin": "Edit", "args": {"path": "/srv/c.txt"}, "ask": True, "output": "c gone"},
         {"text": "then: {last}"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="keeps")
@@ -459,8 +482,8 @@ async def test_a_call_allowed_once_is_kimis_approval_once(harness: Harness, tmp_
     """APR-01 (DECISIONS B4). Allowed once, the call is approved once in Kimi: the tool's
     next call asks again."""
     script = [
-        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "a gone"},
-        {"builtin": "Edit", "args": {"path": "b.txt"}, "ask": True, "output": "b gone"},
+        {"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True, "output": "a gone"},
+        {"builtin": "Edit", "args": {"path": "/srv/b.txt"}, "ask": True, "output": "b gone"},
         {"text": "done: {last}"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="once")
@@ -469,7 +492,7 @@ async def test_a_call_allowed_once_is_kimis_approval_once(harness: Harness, tmp_
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert again.status is RunStatus.PAUSED and again.interrupt is not None
     assert again.interrupt.tool_call is not None
-    assert again.interrupt.tool_call.args == {"path": "b.txt"}
+    assert again.interrupt.tool_call.args == {"path": "/srv/b.txt"}
     assert [p["answer"] for p in recorded(tmp_path)["permissions"]][:2] == [
         "cancelled",
         "approve_once",
@@ -500,16 +523,16 @@ async def test_an_edited_call_is_made_again_with_its_arguments_and_runs(
 ) -> None:
     class Narrow(Hooks):
         async def before_tool(self, call: ToolCall) -> Deny | Rewrite | None:
-            if call.tool == "Edit" and call.args["path"] != "b.txt":
-                return Rewrite({"path": "b.txt"})
+            if call.tool == "Edit" and call.args["path"] != "/srv/b.txt":
+                return Rewrite({"path": "/srv/b.txt"})
             return None
 
-    script = [{"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True}, {"text": "{last}"}]
+    script = [{"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True}, {"text": "{last}"}]
     agent = harness.wrap(fake(tmp_path, script), id="narrowed", hooks=[Narrow()])
     result = await agent.run("fix", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "Edit ran"
     record = recorded(tmp_path)
-    assert record["prompts"][-1] == EDITED.format(tool="Edit", args='{"path": "b.txt"}')
+    assert record["prompts"][-1] == EDITED.format(tool="Edit", args='{"path": "/srv/b.txt"}')
     assert [p["answer"] for p in record["permissions"]] == ["reject", "approve_once"]
 
 
@@ -1165,8 +1188,8 @@ async def test_a_session_asks_whatever_the_agents_config_starts_it_in(
     that asks on every session it opens — a new one, and the one a resume continues — so the
     call still asks a person and runs once, approved."""
     script = [
-        {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "gone"},
-        {"builtin": "Edit", "args": {"path": "b.txt"}, "ask": True, "output": "gone too"},
+        {"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True, "output": "gone"},
+        {"builtin": "Edit", "args": {"path": "/srv/b.txt"}, "ask": True, "output": "gone too"},
         {"text": "done: {last}"},
     ]
     config = {"FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": starts_in})}
@@ -1174,11 +1197,11 @@ async def test_a_session_asks_whatever_the_agents_config_starts_it_in(
     asked = await agent.run("tidy up", user="u1")
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
     assert asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"path": "a.txt"}
+    assert asked.interrupt.tool_call.args == {"path": "/srv/a.txt"}
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert again.status is RunStatus.PAUSED and again.interrupt is not None
     assert again.interrupt.tool_call is not None
-    assert again.interrupt.tool_call.args == {"path": "b.txt"}
+    assert again.interrupt.tool_call.args == {"path": "/srv/b.txt"}
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: gone too"
     record = recorded(tmp_path)
@@ -1191,7 +1214,7 @@ async def test_a_session_the_agent_leaves_in_a_mode_that_asks_nothing_fails_the_
 ) -> None:
     """APR-01, L46. Fails closed: the agent answered ``session/set_mode`` but its log says the
     session still approves on its own, so no prompt is sent and the run fails saying so."""
-    script = [{"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True}, {"text": "done"}]
+    script = [{"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True}, {"text": "done"}]
     env = {
         "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
         "FAKE_ACP_MODE_STUCK": "1",
@@ -1212,7 +1235,7 @@ async def test_a_mode_kimis_log_confirms_late_still_runs_and_no_prompt_goes_befo
     seconds a request's line is waited for), sends no prompt meanwhile, and goes on once the
     log confirms the mode."""
     gate = tmp_path / "the-log-is-written"
-    script = [{"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True}, {"text": "done"}]
+    script = [{"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True}, {"text": "done"}]
     env = {
         "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
         "FAKE_ACP_LOG_GATE": str(gate),
@@ -1237,7 +1260,7 @@ async def test_a_session_keeps_the_plan_mode_it_is_in(harness: Harness, tmp_path
     own leaves plan mode to be made to ask, and enters it again; one that plans and asks
     already — its config's, or the session a resume continues (``mode="plan"`` began it) — is
     set nothing, its plan as it was."""
-    asks = {"builtin": "Edit", "args": {"path": "a.txt"}, "ask": True, "output": "gone"}
+    asks = {"builtin": "Edit", "args": {"path": "/srv/a.txt"}, "ask": True, "output": "gone"}
     for name in "abc":
         (tmp_path / name).mkdir()
     config = {"default_plan_mode": True, "default_permission_mode": "auto"}

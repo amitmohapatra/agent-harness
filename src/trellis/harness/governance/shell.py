@@ -631,6 +631,14 @@ class Shell:
         followed, is in one of the folders the run may read."""
         return _Folders(self.cwd, None, self.reads, self.env).readable(path)
 
+    def keeps(self, tool: str, args: Mapping[str, Any]) -> bool:
+        """Whether the call is a file tool's (:data:`EDITORS`) write of a file inside the folder
+        the run works in (relative: to it; its ``..`` and links followed): the run's own work
+        there, as a command of its shell is — the deployment's, never a person's question.
+        With no folder known, none is."""
+        inside = _Folders(self.cwd, self.cwd, self.reads, self.env).inside
+        return tool in EDITORS and inside(file_of(args))
+
     def ran(self, args: Mapping[str, Any]) -> None:
         """A command of this shell ran (``args``: the call's): the folders it may have left it
         in, besides those it was in (whether it ended well is not known: its ``cd`` holds only

@@ -455,11 +455,14 @@ async def test_the_teams_permission_answer_reaches_claude_code_as_given(
 
     script = [
         {"builtin": "Bash", "args": {"command": "make build"}},
-        {"builtin": "Write", "args": {"file_path": "a.txt", "content": "x"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/a.txt", "content": "x"}},
         {
             "agent": "checker",
             "prompt": "check o1",
-            "steps": [{"builtin": "Edit", "args": {"file_path": "o1"}}, {"text": "o1 is fine"}],
+            "steps": [
+                {"builtin": "Edit", "args": {"file_path": "/srv/o1"}},
+                {"text": "o1 is fine"},
+            ],
         },
         {"text": "done"},
     ]
@@ -497,7 +500,7 @@ async def test_the_teams_permission_answer_reaches_claude_code_as_given(
     ran = lines(tmp_path / "builtins.jsonl")
     assert [(call["tool"], call["args"]) for call in ran] == [
         ("Bash", {"command": "make build --dry-run"}),  # as the team rewrote it
-        ("Edit", {"file_path": "o1"}),
+        ("Edit", {"file_path": "/srv/o1"}),
     ]
     assert tool_results(events) == ["Bash", "Edit", "Agent"]  # what ran is recorded
 
@@ -787,7 +790,7 @@ async def test_a_write_claude_code_asks_about_is_one_question_and_the_same_call_
 ) -> None:
     """A write governance lets run is asked about when Claude Code asks (its question): once
     a call. The same command made again is another call, asked about again."""
-    again = {"builtin": "Edit", "args": {"file_path": "deploy.txt"}}
+    again = {"builtin": "Edit", "args": {"file_path": "/srv/deploy.txt"}}
     agent = harness.wrap(options(tmp_path, [again, again, {"text": "{last}"}]), id="twice")
     paused = await agent.run("deploy twice", user="u1", thread=conversation(path))
     for _ in range(2):
@@ -847,7 +850,7 @@ async def test_an_approval_is_carried_for_the_call_it_answered_and_no_other(
     the call's id. From a CLI (or a relay) that names no id, nothing is carried: an approved
     edit of ``deploy.txt`` is no approval of the edit of ``build.txt`` that follows, which a person is
     asked about before it runs (the call it could not name is asked about again)."""
-    deploy, wipe = {"file_path": "deploy.txt"}, {"file_path": "build.txt"}
+    deploy, wipe = {"file_path": "/srv/deploy.txt"}, {"file_path": "/srv/build.txt"}
     script = [{"builtin": "Edit", "args": deploy}, {"builtin": "Edit", "args": wipe}]
 
     class Asking(Hooks):
@@ -885,7 +888,7 @@ async def test_a_question_a_hook_asks_while_a_call_is_decided_is_no_approval_of_
             if call.tool == "Edit" and runtime is not None:
                 await runtime.ask("Which ticket is this change for?")
 
-    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "/srv/notes.txt"}}
     agent = harness.wrap(options(tmp_path, [touch, {"text": "{last}"}]), id="ticketed",
                          hooks=[Ticket()])  # fmt: skip
     asked = await agent.run("touch it", user="u1", thread=conversation(path))

@@ -636,7 +636,7 @@ async def test_claudes_permission_prompt_is_the_clis_own_title_and_description(
     its prompt's title and description, then the choices."""
     edit = {
         "builtin": "Edit",
-        "args": {"file_path": "build.txt"},
+        "args": {"file_path": "/srv/build.txt"},
         "title": "Claude wants to edit build.txt",
         "description": "Bumps the build number",
     }
@@ -685,14 +685,14 @@ async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     script = [
         {"builtin": "Read", "args": {"file_path": "orders.csv"}},
         {"builtin": "Bash", "args": {"command": "ls"}},
-        {"builtin": "Edit", "args": {"file_path": "build.txt"}},
+        {"builtin": "Edit", "args": {"file_path": "/srv/build.txt"}},
         {"tool": "refund", "args": {"order": "o3"}},
         {"text": "done: {last}"},
     ]
     agent = arm(harness.wrap(options(tmp_path, script), id="ops"), [refund])
     asked = await agent.run("tidy up, then refund o3", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.args == {"file_path": "build.txt"}
+    assert asked.interrupt.tool_call.args == {"file_path": "/srv/build.txt"}
     assert asked.interrupt.question == (
         "Approve Edit? Claude Code asks before it runs this call. "
         "Allow once, allow for this conversation, or deny."
@@ -706,7 +706,7 @@ async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     assert done.status is RunStatus.SUCCESS and done.answer == "done: refunded o3"
     assert [b["args"] for b in built_ins(tmp_path)][1:] == [
         {"command": "ls"},
-        {"file_path": "build.txt"},
+        {"file_path": "/srv/build.txt"},
     ]  # each once
     assert refunds == ["o3"]
 
@@ -741,7 +741,7 @@ async def test_a_command_claudes_own_rules_allow_runs_without_asking_a_person(
 async def test_a_command_a_person_rejected_is_not_run_and_claude_reads_why(
     harness: Harness, tmp_path: Path
 ) -> None:
-    script = [{"builtin": "Edit", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    script = [{"builtin": "Edit", "args": {"file_path": "/srv/a.txt"}}, {"text": "said: {last}"}]
     agent = harness.wrap(options(tmp_path, script), id="careful")
     asked = await agent.run("clean", user="u1")
     assert asked.interrupt is not None
@@ -781,7 +781,7 @@ async def test_the_teams_own_callback_is_asked_only_what_claude_code_asks(
         return PermissionResultAllow()
 
     script = [
-        {"builtin": "Write", "args": {"file_path": "a.txt"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/a.txt"}},
         {"builtin": "Bash", "args": {"command": "touch b.txt"}},
         {"text": "said: {last}"},
     ]
@@ -875,7 +875,7 @@ async def test_a_built_in_tool_goes_through_the_hooks_then_the_teams_own_callbac
     script = [
         {"builtin": "Grep", "args": {"pattern": "x"}},
         {"builtin": "Edit", "args": {"file_path": "/etc/hosts"}},
-        {"builtin": "Write", "args": {"file_path": "a.txt"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/a.txt"}},
         {"text": "said: {last}"},
     ]
     target = options(tmp_path, script, can_use_tool=own)
@@ -883,9 +883,40 @@ async def test_a_built_in_tool_goes_through_the_hooks_then_the_teams_own_callbac
     events = [e async for e in agent.stream("work", user="u1")]
     assert events[-1].data["result"] == "said: no writes on Fridays"
     assert built_ins(tmp_path) == [{"tool": "Edit", "args": {"file_path": "safe.txt"}}]
-    assert asked == [("Edit", {"file_path": "safe.txt"}), ("Write", {"file_path": "a.txt"})]
+    assert asked == [("Edit", {"file_path": "safe.txt"}), ("Write", {"file_path": "/srv/a.txt"})]
     notices = [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"]
     assert notices == ["Edit", "Write"]  # writes are announced, as harness writes are
+
+
+async def test_a_file_written_in_claudes_working_folder_is_not_the_users_question(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """``Write`` and ``Edit`` of a file inside the folder Claude works in are the run's own
+    work, as a command of its shell there is: announced and recorded, never a person's
+    question (Claude Code's own asks its user: that is not the run's user). A file anywhere
+    else — a path outside, ``..``, a link that leads out — is asked as before."""
+    work, elsewhere = tmp_path / "work", tmp_path / "elsewhere"
+    (work / "notes").mkdir(parents=True)
+    elsewhere.mkdir()
+    (work / "out").symlink_to(elsewhere)
+    script = [
+        {"builtin": "Write", "args": {"file_path": "report.md", "content": "x"}},
+        {"builtin": "Edit", "args": {"file_path": str(work / "notes" / "a.md")}},
+        {"text": "said: {last}"},
+    ]
+    agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="ws")
+    events = [e async for e in agent.stream("save it", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS, events[-1].data
+    assert events[-1].data["result"] == "said: Edit ran"
+    assert [b["tool"] for b in built_ins(tmp_path)] == ["Write", "Edit"]
+    notices = [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"]
+    assert notices == ["Write", "Edit"]  # announced, as the shell's commands are
+
+    for n, path in enumerate([str(elsewhere / "b.md"), "../elsewhere/b.md", "out/b.md"]):
+        script = [{"builtin": "Write", "args": {"file_path": path}}, {"text": "done"}]
+        outside = harness.wrap(options(tmp_path, script, cwd=str(work)), id=f"ws-out-{n}")
+        paused = await outside.run("save it there", user="u1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, (path, paused)
 
 
 async def test_a_session_the_cli_no_longer_holds_is_run_again_from_its_prompt(
@@ -945,8 +976,8 @@ async def test_a_read_is_not_replayed_across_a_write_of_the_run(
     what it read may be what the write changed, so it runs again — the write itself, approved
     once, still runs exactly once."""
     read = {"builtin": "Read", "args": {"file_path": "notes.txt"}}
-    write = {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "new"}}
-    deploy = {"builtin": "Edit", "args": {"file_path": "deploy.txt"}}
+    write = {"builtin": "Write", "args": {"file_path": "/srv/notes.txt", "content": "new"}}
+    deploy = {"builtin": "Edit", "args": {"file_path": "/srv/deploy.txt"}}
     ran = await _rerun_from_its_prompt(harness, tmp_path, [read, write, deploy, {"text": "ok"}])
     # the first attempts: Read, Write; the query again: Read anew (Write ran since), then Edit
     assert ran == ["Read", "Write", "Read", "Edit"]
@@ -958,7 +989,7 @@ async def test_a_read_no_write_followed_is_answered_from_the_journal(
     """The neighbour: with no write since, a read made again is answered with what it
     returned (it is not run twice), and so is a second, different read."""
     reads = [{"builtin": "Read", "args": {"file_path": name}} for name in ("a.txt", "b.txt")]
-    deploy = {"builtin": "Edit", "args": {"file_path": "deploy.txt"}}
+    deploy = {"builtin": "Edit", "args": {"file_path": "/srv/deploy.txt"}}
     ran = await _rerun_from_its_prompt(harness, tmp_path, [*reads, deploy, {"text": "ok"}])
     assert ran == ["Read", "Read", "Edit"]
 
@@ -1437,7 +1468,7 @@ async def test_built_in_tools_are_governed_in_every_permission_mode(
     """The CLI skips ``can_use_tool`` for allowed tools and under ``acceptEdits`` and
     ``bypassPermissions``: the harness's ``PreToolUse`` hook governs every call regardless."""
     script = [
-        {"builtin": "Write", "args": {"file_path": "a.txt"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/a.txt"}},
         {"builtin": "Bash", "args": {"command": "rm -rf /"}},
         {"text": "said: {last}"},
     ]
@@ -1477,7 +1508,7 @@ async def test_in_plan_mode_nothing_that_changes_anything_runs_until_a_plan_is_a
     script = [
         {"tool": "look_up", "args": {"account": "a1"}},
         {"tool": "close_account", "args": {"account": "a1"}},
-        {"builtin": "Write", "args": {"file_path": "notes.txt"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/notes.txt"}},
         {"builtin": "Bash", "args": {"command": "touch made.txt"}},
         {"builtin": "Bash", "args": {"command": "ls"}},
         {"builtin": "Write", "args": {"file_path": str(plans)}},  # its plan, where Claude keeps it
@@ -1602,7 +1633,7 @@ async def test_a_call_governance_cannot_decide_is_refused_never_let_through(
         raise RuntimeError("the catalog is out of reach")
 
     monkeypatch.setattr(claude_adapter.bridge, "permitted", broken)
-    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    script = [{"builtin": "Write", "args": {"file_path": "/srv/a.txt"}}, {"text": "said: {last}"}]
     target = options(tmp_path, script, permission_mode="bypassPermissions")
     result = await harness.wrap(target, id="fails-closed").run("work", user="u1")
     assert result.answer.startswith("said: The harness could not decide this call")
@@ -1677,7 +1708,7 @@ async def test_a_governance_hook_that_fails_blocks_the_call_in_claude_code_itsel
 
     monkeypatch.setattr(claude_adapter.bridge, "permitted", broken)
     monkeypatch.setattr(claude_adapter, "UNDECIDED", Unsayable())
-    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    script = [{"builtin": "Write", "args": {"file_path": "/srv/a.txt"}}, {"text": "said: {last}"}]
     own = {"PreToolUse": [HookMatcher(hooks=[theirs])]}
     target = options(tmp_path, script, permission_mode="bypassPermissions", hooks=own)
     result = await harness.wrap(target, id="blocks").run("work", user="u1")
@@ -1693,7 +1724,7 @@ async def test_a_claude_code_that_cannot_block_on_a_failed_hook_is_not_run(
     """SEC: a Claude Code that predates ``onFailure`` would run a call whose governance hook
     failed. The SDK refuses to start a query on one (its ``initialize`` answer says whether
     it honors the option): the run ends ``ERROR`` saying so, and nothing ran."""
-    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "done"}]
+    script = [{"builtin": "Write", "args": {"file_path": "/srv/a.txt"}}, {"text": "done"}]
     target = options(tmp_path, script, permission_mode="bypassPermissions")
     target.env["FAKE_CLAUDE_HOOKS_FAIL_OPEN"] = "1"
     result = await harness.wrap(target, id="old-cli").run("work", user="u1")

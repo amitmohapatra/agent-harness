@@ -70,7 +70,7 @@ def built_ins(tmp_path: Path) -> list[dict[str, Any]]:
 
 
 SCRIPT = [
-    {"builtin": "Write", "args": {"file_path": "a.txt"}},
+    {"builtin": "Write", "args": {"file_path": "/srv/a.txt"}},
     {"tool": "refund", "args": {"order": "o1"}},
     {"text": "done: {last}"},
 ]
@@ -97,7 +97,7 @@ async def test_a_paused_session_continues_on_another_machine(tmp_path: Path) -> 
     assert done.status is RunStatus.SUCCESS and done.answer == "done: refunded o1", done.error
     started = started_with(tmp_path)
     assert started["resume"] == journal.session and started["materialised"] is True
-    assert built_ins(tmp_path) == [{"tool": "Write", "args": {"file_path": "a.txt"}}]  # once
+    assert built_ins(tmp_path) == [{"tool": "Write", "args": {"file_path": "/srv/a.txt"}}]  # once
     assert refunds == ["o1"]
 
 
@@ -117,7 +117,7 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
         return "fine"
 
     script = [
-        {"builtin": "Write", "args": {"file_path": "a.txt"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/a.txt"}},
         {"tool": "boom", "args": {}},
         {"text": "done: {last}"},
     ]
@@ -144,7 +144,7 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
         await first.aclose()
         await second.aclose()
     assert result.status is RunStatus.SUCCESS and result.answer == "done: fine", result.error
-    assert built_ins(tmp_path) == [{"tool": "Write", "args": {"file_path": "a.txt"}}]
+    assert built_ins(tmp_path) == [{"tool": "Write", "args": {"file_path": "/srv/a.txt"}}]
 
 
 class DurableStore:

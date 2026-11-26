@@ -995,6 +995,26 @@ def test_a_frameworks_own_file_tool_is_approved_inside_the_folder_only(tmp_path)
     assert not approvable("Write", {"file_path": str(tmp_path / "report.md")})
 
 
+def test_a_file_tools_write_inside_the_folder_the_shell_works_in_is_the_runs_own(run: Path) -> None:
+    here = shell.Shell(run)
+    assert here.keeps("Write", {"file_path": "report.md"})  # Claude Code's, relative
+    assert here.keeps("Write", {"path": str(run / "exports" / "report.md")})  # Kimi's, absolute
+    assert here.keeps("Edit", {"file_path": "report.md"})
+    assert here.keeps("MultiEdit", {"file_path": "a/../b.md"})
+    assert not here.keeps("Write", {"file_path": "../kept/report.md"})  # its ``..`` followed
+    assert not here.keeps("Write", {"file_path": str(run.parent / "kept" / "report.md")})
+    (run / "out").symlink_to(run.parent / "kept")
+    assert not here.keeps("Write", {"file_path": "out/report.md"})  # a link that leads out
+    assert not here.keeps("Write", {"file_path": "~/report.md"})  # the shell's own ``~``
+    assert not here.keeps("Write", {})  # no file named
+    assert not here.keeps("Bash", {"command": "touch report.md"})  # a command: the shell's
+    assert not here.keeps("Read", {"file_path": "report.md"})
+    # a folder the run may read is not one it works in; with no folder known, none is
+    kept = shell.Shell(run, [run.parent / "kept"])
+    assert not kept.keeps("Write", {"file_path": str(run.parent / "kept" / "report.md")})
+    assert not shell.Shell(None).keeps("Write", {"file_path": "report.md"})
+
+
 # --------------------------------------------------------------------------- what the lists promise
 #: The names main refused wherever they were called (its ``PY_WRITES``).
 REFUSED = {

@@ -581,7 +581,7 @@ async def test_a_session_another_worker_still_holds_is_forked_not_resumed_twice(
     worker (here, another agent on the same run store: its process keeps nothing of the
     first's). The sub-agent's run, handed on to the first worker's session, has not ended:
     two processes do not hold one session, so the resumed turn forks it, and goes on there."""
-    ask = {"builtin": "Edit", "args": {"path": "made.txt"}, "ask": True}  # the user's
+    ask = {"builtin": "Edit", "args": {"path": "/srv/made.txt"}, "ask": True}  # the user's
     script = [
         {"agent": LOOK, "background": {"after": 30, "result": "never"}},
         ask,

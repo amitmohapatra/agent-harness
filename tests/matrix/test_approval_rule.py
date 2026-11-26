@@ -340,6 +340,14 @@ class Way:
     reads_ran: bool = True
     #: whether the catalog reaches its calls (the graph's scratch is no call of the run)
     catalogued: bool = True
+    #: whether its file is written beside the folder the agent works in (a person's to
+    #: approve), not inside it (the run's own work there, as a command of its shell is)
+    beside: bool = False
+
+    def call(self, d: Deployment, kind: str, n: int) -> dict[str, Any]:
+        """The arguments of its ``n``-th call of ``kind`` in the deployment ``d``."""
+        args = self.args(kind, n)
+        return {**args, "path": str(d.tmp / args["path"])} if self.beside else args
 
 
 def _claude_builtins_ran(d: Deployment) -> list[str]:
@@ -349,11 +357,14 @@ def _claude_builtins_ran(d: Deployment) -> list[str]:
 
 
 def _kimi_builtins_ran(d: Deployment) -> list[str]:
-    work = d.tmp / "kimi-work"
-    written = sorted(work.glob("w*.txt"), key=lambda p: p.stat().st_mtime_ns)
+    made = [*d.tmp.glob("w*.txt"), *(d.tmp / "kimi-work").glob("w*.txt")]  # beside it, in it
+    written = sorted(made, key=lambda p: p.stat().st_mtime_ns)
     return [f"Write {p.stem.removeprefix('w')}" for p in written]
 
 
+#: A file written in the folder the agent works in is the run's own work there: run unasked
+#: (and announced) as a read is, until the catalog says the tool is more.
+HERE: Final = {"write": "read"}
 WAYS: Final[dict[str, Way]] = {
     # the harness's own, on every adapter
     "harness_mcp": Way(named=lambda kind: f"ledger-{TOOLS[kind]}"),
@@ -373,6 +384,15 @@ WAYS: Final[dict[str, Way]] = {
         ran=_claude_builtins_ran,
         asker=CLAUDE_CODE,
     ),
+    # a file its ``Write`` makes in the folder the CLI works in: the run's own work there
+    "claude_builtin_here": Way(
+        kinds=("write",),
+        named=lambda kind: "Write",
+        args=lambda kind, n: {"n": n, "file_path": f"w{n}.txt"},
+        ran=_claude_builtins_ran,
+        asker=CLAUDE_CODE,
+        risks=HERE,
+    ),
     # Kimi Code's own: ACP tells nothing of an MCP tool's annotations, so its servers' tools
     # say nothing to the harness (the catalog can say it)
     "kimi_mcp_server": Way(
@@ -384,6 +404,15 @@ WAYS: Final[dict[str, Way]] = {
         args=lambda kind, n: {"path": f"w{n}.txt", "content": f"entry {n}"},
         ran=_kimi_builtins_ran,
         asker=KIMI_CODE,
+        beside=True,
+    ),
+    "kimi_builtin_here": Way(
+        kinds=("write",),
+        named=lambda kind: "Write",
+        args=lambda kind, n: {"path": f"w{n}.txt", "content": f"entry {n}"},
+        ran=_kimi_builtins_ran,
+        asker=KIMI_CODE,
+        risks=HERE,
     ),
 }
 
@@ -428,6 +457,7 @@ WAYS.update(
 )
 FILES: Final = ("files_disk", "files_store", "files_routed", "files_state")
 HARNESS_WAYS: Final = ("harness_mcp", "tool_function", "gateway_mcp")
+CLAUDE_BUILTINS: Final = ("claude_builtin", "claude_builtin_here")
 LANGCHAIN: Final = ("react", "langgraph", "middleware", "graph", "deepagents", "swarm")
 ADAPTERS: Final[dict[str, tuple[str, ...]]] = {
     "function": HARNESS_WAYS,
@@ -435,9 +465,9 @@ ADAPTERS: Final[dict[str, tuple[str, ...]]] = {
     "react": (*HARNESS_WAYS, "langchain_tool", "langchain_mcp", "files_disk", "files_routed"),
     "deepagents": (*HARNESS_WAYS, "langchain_tool", "langchain_mcp", *FILES),
     "openai_agents": (*HARNESS_WAYS, "openai_mcp_server", "openai_function_tool"),
-    "claude_query": (*HARNESS_WAYS, "claude_mcp_server", "claude_builtin"),
-    "claude_live": (*HARNESS_WAYS, "claude_mcp_server", "claude_builtin"),
-    "kimi": (*HARNESS_WAYS, "kimi_mcp_server", "kimi_builtin"),
+    "claude_query": (*HARNESS_WAYS, "claude_mcp_server", *CLAUDE_BUILTINS),
+    "claude_live": (*HARNESS_WAYS, "claude_mcp_server", *CLAUDE_BUILTINS),
+    "kimi": (*HARNESS_WAYS, "kimi_mcp_server", "kimi_builtin", "kimi_builtin_here"),
 }
 
 
@@ -754,7 +784,7 @@ async def walked(
         said: dict[str, list[Call]] = {}
         for number, conversation, scope, steps in _runs(row, script):
             thread = conversation if row.conversations else None
-            calls = [(way.named(kind), way.args(kind, n)) for kind, n, _ in steps]
+            calls = [(way.named(kind), way.call(d, kind, n)) for kind, n, _ in steps]
             earlier = [] if row.turn_by_turn or thread is None else said.get(thread, [])
             if thread is not None:
                 said[thread] = [*earlier, *calls]
@@ -793,7 +823,7 @@ async def _ran(
         offered, runs = rule.call(kind, scope, answer)
         name = way.named(kind)
         if offered:
-            _asked(result, name, rule.risks[kind], way.args(kind, n), offered, asker=way.asker)
+            _asked(result, name, rule.risks[kind], way.call(d, kind, n), offered, asker=way.asker)
             assert result.interrupt is not None
             result = await agent.resume(
                 result.interrupt.interrupt_id, "answer", answer=answer, reviewer="ada"

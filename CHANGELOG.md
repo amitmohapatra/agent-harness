@@ -24,6 +24,19 @@ the next model call.
 a name followed by a full stop or a colon ("Call fetch_consent_message."): the punctuation
 was read as part of the name.
 
+### Changed: a file written in the folder the run works in is not the user's question
+
+Claude Code and Kimi Code ask before their file tools write (`Write`, `Edit`, Claude's
+`MultiEdit`), and the harness passed each question to the run's user. A command of their
+shell in the same folder already ran unasked: the folder the run works in (its sandbox, or
+the agent's `cwd`) is the deployment's, and the work a run does there is its own. A file
+tool's write inside that folder now runs the same way — announced (`tool_notice`) and
+recorded, nobody asked. A path that leaves the folder (its `..` and links followed) still
+asks its user under the one rule, and the catalog still has the last word: a `Write` it
+calls `irreversible`, or gives an `approve_when`, asks wherever the file is (Kimi's own
+approval inside a git working tree aside, as before). What may be written where is the
+isolation's to say, not a question for every file.
+
 ### Fixed: a Claude background task's end reaches the next turn on another server (BG-11)
 
 A subagent Claude Code runs in the background works on in the process of the server whose

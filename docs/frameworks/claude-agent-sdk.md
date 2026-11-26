@@ -251,7 +251,8 @@ The run's user decides only the actions taken in their name; the rest is the dep
 | Claude Code's | Decided by | What happens |
 |---|---|---|
 | `Read`, `Grep`, `Glob` in the workspace | nobody | they run, recorded |
-| `Write`, `Edit` of the user's files | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny |
+| `Write`, `Edit`, `MultiEdit` of a file in the folder Claude Code works in (`cwd`, else the service's own) | the deployment | runs unasked, announced (`tool_notice`) and recorded, as a command of its shell there does; the catalog can have it asked (`irreversible`, an `approve_when`) |
+| `Write`, `Edit` of any other file (a path that leaves the folder, its `..` and links followed) | the user, under the one rule | asked: allow once, for this conversation, always (with memory), deny |
 | its shell in its sandbox | the deployment | runs unasked, announced (`tool_notice`) and recorded |
 | its shell on the host (no sandbox, or one that lets a command out) | the deployment | runs as the service's user, **without the harness's isolation**, unasked and announced; `TRELLIS_HOST_EXECUTION=deny` refuses it at `h.wrap`. To isolate it, give Claude Code its own sandbox (below) |
 | `WebFetch`, `WebSearch` | the administrator, in the tool catalog | refused until the catalog gives the tool a risk or an `approve_when` |

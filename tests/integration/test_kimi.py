@@ -58,9 +58,17 @@ HOST_ALLOWED = Settings(host_execution="allow")
 lookups: list[str] = []
 #: A command that writes (a file in Kimi's working directory): Kimi asks, and so a person.
 WRITES = "touch made.txt && echo resumed"
+
+
 #: A write of the user's own file, which Kimi asks about outside a git working tree: the
 #: user's to decide (the one rule), where a command is the deployment's.
-WRITE = ("Write", {"path": "made.txt", "content": "resumed"})
+def beside(
+    tmp: Path, name: str = "made.txt", content: str = "resumed"
+) -> tuple[str, dict[str, str]]:
+    """A write beside the folder Kimi works in (``tmp/kimi-work``: Kimi takes a path outside it
+    whole): one a person is asked about; a file written inside it is the run's own work,
+    never asked (``Shell.keeps``)."""
+    return ("Write", {"path": str(tmp / name), "content": content})
 
 
 @tool(side_effects="read")
@@ -221,22 +229,22 @@ async def test_kimis_tower_mode_is_off_however_kimi_is_told_to_turn_it_on(
 async def test_a_write_asks_a_person_and_the_resume_continues_kimis_session(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    endpoint.plan = [WRITE]
+    endpoint.plan = [beside(tmp_path)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-write")
     paused = await agent.run("say it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None
     assert paused.interrupt.tool_call.tool == "Write"
-    assert paused.interrupt.tool_call.args == WRITE[1]
+    assert paused.interrupt.tool_call.args == beside(tmp_path)[1]
     assert paused.interrupt.question == (
         "Approve Write? Kimi Code asks before it runs this call. "
         "Allow once, allow for this conversation, or deny."
     )
-    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert not (tmp_path / "made.txt").exists()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     assert done.answer is not None and done.answer.startswith("Done.")
-    assert (tmp_path / "kimi-work" / "made.txt").read_text() == "resumed"
+    assert (tmp_path / "made.txt").read_text() == "resumed"
     # the same session, told to call again: what came before is in it
     last = endpoint.requests[-1]["messages"]
     assert any(RESUMED_CALL.format(tool="Write") in text_of(m.get("content")) for m in last)
@@ -282,16 +290,16 @@ async def test_a_pause_kimi_stops_before_it_reads_the_answer_resumes_the_same_ca
                 await asyncio.sleep(0.01)
 
     monkeypatch.setattr(acp.Attempt, "_stop", cancelled_first)
-    endpoint.plan = [WRITE]
+    endpoint.plan = [beside(tmp_path)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-write-cancelled-first")
     paused = await agent.run("say it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert not (tmp_path / "made.txt").exists()
     monkeypatch.setattr(acp.Attempt, "_stop", stop)
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     assert done.answer is not None and done.answer.startswith("Done.")
-    assert (tmp_path / "kimi-work" / "made.txt").read_text() == "resumed"
+    assert (tmp_path / "made.txt").read_text() == "resumed"
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
@@ -327,16 +335,16 @@ async def test_a_call_kimis_own_config_allows_is_still_asked_about_once(
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
     (home / "config.toml").write_text("default_thinking = false\n" + rules)
-    endpoint.plan = [WRITE]
+    endpoint.plan = [beside(tmp_path)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed")
     paused = await agent.run("make it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None
-    assert paused.interrupt.tool_call.args == WRITE[1]
-    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert paused.interrupt.tool_call.args == beside(tmp_path)[1]
+    assert not (tmp_path / "made.txt").exists()
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
-    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    assert (tmp_path / "made.txt").exists()
     # the team's config is as it was; the user's has it whole, and the rule that asks
     assert (home / "config.toml").read_text() == "default_thinking = false\n" + rules
     own = (kimi_home_of("u1") / "config.toml").read_text()
@@ -354,13 +362,13 @@ async def test_a_config_whose_rules_are_inline_is_still_asked_about(
     home.mkdir(parents=True)
     inline = '[permission]\nrules = [{ decision = "allow", pattern = "Write" }]\n'
     (home / "config.toml").write_text(inline)
-    endpoint.plan = [WRITE]
+    endpoint.plan = [beside(tmp_path)]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline")
     paused = await agent.run("make it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
     call = paused.interrupt.tool_call
-    assert call is not None and call.args == WRITE[1]
-    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert call is not None and call.args == beside(tmp_path)[1]
+    assert not (tmp_path / "made.txt").exists()
     own = (kimi_home_of("u1") / "config.toml").read_text()
     assert own.startswith(inline) and '[[permission.ask]]\npattern = "Write"' in own
 
@@ -441,13 +449,14 @@ async def test_two_users_never_share_a_kimi_home(
     assert ada.stat().st_mode & 0o777 == 0o700
 
 
-async def test_a_write_inside_a_git_working_tree_is_kimis_own_to_approve(
+async def test_a_write_in_the_folder_kimi_works_in_is_never_the_users_question(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    """L47. Kimi approves ``Write`` and ``Edit`` inside a git working tree itself (its
-    ``git-cwd-write-approve`` policy: no setting turns it off, and ACP has no hook before a
-    call), so the file is written with nobody asked and the call is recorded after; the same
-    write outside a git tree asks. Pinned: a Kimi that asks here pauses the first run."""
+    """A file written inside the folder Kimi works in is the run's own work, as a command of
+    its shell there is: announced and recorded, nobody asked — whether Kimi approves it itself
+    (L47: inside a git working tree its ``git-cwd-write-approve`` policy does, and ACP has no
+    hook before the call) or asks first (a plain folder: the harness answers, not a person).
+    The same write beside the folder asks a person."""
     work = tmp_path / "kimi-work"
     endpoint.plan = [("Write", {"path": "new.txt", "content": "hi"})]
     target = kimi_target(endpoint, tmp_path)
@@ -455,9 +464,13 @@ async def test_a_write_inside_a_git_working_tree_is_kimis_own_to_approve(
     assert await made.wait() == 0
     inside = await harness.wrap(target, id="kimi-git").run("write it", user="u1")
     assert inside.status is RunStatus.SUCCESS and (work / "new.txt").read_text() == "hi"
-    outside = await harness.wrap(kimi_target(endpoint, tmp_path / "plain"), id="kimi-plain").run(
-        "write it", user="u1"
-    )
+    plain = harness.wrap(kimi_target(endpoint, tmp_path / "plain"), id="kimi-plain")
+    events = [e async for e in plain.stream("write it", user="u1")]
+    assert events[-1].error is None and not any(e.type is RunEventType.INTERRUPT for e in events)
+    assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["Write"]
+    assert (tmp_path / "plain" / "kimi-work" / "new.txt").read_text() == "hi"
+    endpoint.plan = [beside(tmp_path / "plain", "new.txt", "hi")]
+    outside = await plain.run("write it beside", user="u1")
     assert outside.status is RunStatus.PAUSED and outside.interrupt is not None
     assert outside.interrupt.tool_call is not None and outside.interrupt.tool_call.tool == "Write"
 
@@ -487,7 +500,7 @@ async def test_a_write_allowed_for_the_conversation_is_approved_for_kimis_sessio
     """APR-01 (DECISIONS B4). "Allow for this conversation" on a write Kimi asks about is
     Kimi's own "Approve for this session" (its log says so), and the tool's next write asks
     nobody: one question."""
-    endpoint.plan = [WRITE, ("Write", {"path": "too.txt", "content": "too"})]
+    endpoint.plan = [beside(tmp_path), beside(tmp_path, "too.txt", "too")]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-keeps")
     paused = await agent.run("make them", user="u1", thread="chat")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -500,8 +513,7 @@ async def test_a_write_allowed_for_the_conversation_is_approved_for_kimis_sessio
         paused.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
     )
     assert done.status is RunStatus.SUCCESS, done.error
-    work = tmp_path / "kimi-work"
-    assert (work / "made.txt").exists() and (work / "too.txt").exists()
+    assert (tmp_path / "made.txt").exists() and (tmp_path / "too.txt").exists()
     [log] = kimi_home_of("u1").glob("sessions/*/*/agents/main/wire.jsonl")
     resolved = [
         json.loads(line) for line in log.read_text().splitlines() if "interaction.resolved" in line
@@ -529,18 +541,17 @@ async def test_a_config_that_approves_on_its_own_does_not_turn_the_approvals_off
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
     (home / "config.toml").write_text(f'default_permission_mode = "{starts_in}"\n')
-    endpoint.plan = [WRITE, ("Write", {"path": "too.txt", "content": "too"})]
+    endpoint.plan = [beside(tmp_path), beside(tmp_path, "too.txt", "too")]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-config-mode")
-    work = tmp_path / "kimi-work"
     paused = await agent.run("make them", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert not (work / "made.txt").exists()
+    assert not (tmp_path / "made.txt").exists()
     again = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert again.status is RunStatus.PAUSED and again.interrupt is not None
-    assert (work / "made.txt").exists() and not (work / "too.txt").exists()
+    assert (tmp_path / "made.txt").exists() and not (tmp_path / "too.txt").exists()
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
-    assert (work / "too.txt").exists()
+    assert (tmp_path / "too.txt").exists()
 
 
 def _asks_two(body: dict[str, Any]) -> Any:
@@ -719,13 +730,13 @@ async def test_a_write_whose_arguments_stream_pauses_with_them(
     """A provider streams a call's arguments after its name (Anthropic's, OpenAI's): Kimi asks
     permission before it starts the call, so the arguments are only in the call's updates."""
     async with PlannedEndpoint(streamed=True).serving() as endpoint:
-        endpoint.plan = [WRITE]
+        endpoint.plan = [beside(tmp_path)]
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-write-streamed")
         paused = await agent.run("say it", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert paused.interrupt.tool_call is not None
         assert paused.interrupt.tool_call.tool == "Write"
-        assert paused.interrupt.tool_call.args == WRITE[1]
+        assert paused.interrupt.tool_call.args == beside(tmp_path)[1]
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer is not None and done.answer.startswith("Done.")
@@ -734,7 +745,7 @@ async def test_a_write_whose_arguments_stream_pauses_with_them(
 async def test_a_rejected_write_is_not_run_and_kimi_reads_why(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    endpoint.plan = [("Write", {"path": "build", "content": "x"})]
+    endpoint.plan = [beside(tmp_path, "build", "x")]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-reject")
     paused = await agent.run("clean", user="u1")
     assert paused.interrupt is not None
@@ -1133,11 +1144,16 @@ async def _paused(harness: Harness, run_id: str) -> bool:
     return record is not None and record.status is RunStatus.PAUSED
 
 
-def _makes_it(body: dict[str, Any]) -> Any:
-    """A sub-agent whose work writes a file (its ``Write``: Kimi asks first)."""
-    if body["messages"][-1].get("role") == "tool":
-        return "made it"
-    return WRITE
+def _makes_it(tmp: Path) -> Any:
+    """A sub-agent whose work writes a file beside the folder Kimi works in (its ``Write``:
+    Kimi asks first, and a file outside that folder is a person's to approve)."""
+
+    def turn(body: dict[str, Any]) -> Any:
+        if body["messages"][-1].get("role") == "tool":
+            return "made it"
+        return beside(tmp)
+
+    return turn
 
 
 async def test_a_background_sub_agents_call_kimi_asks_about_is_governed_in_its_own_run(
@@ -1148,13 +1164,14 @@ async def test_a_background_sub_agents_call_kimi_asks_about_is_governed_in_its_o
     — a person is asked, so that run pauses, and the conversation's next turn asks it. Approved,
     the write runs, the task ends and its run with it; then the turn's own prompt goes."""
     stall = lambda body: 1.0 * _member(body)  # noqa: E731 - the sub-agent takes a while
-    async with PlannedEndpoint(turns=_backgrounded(_makes_it), stall=stall).serving() as endpoint:
+    turns = _backgrounded(_makes_it(tmp_path))
+    async with PlannedEndpoint(turns=turns, stall=stall).serving() as endpoint:
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background-asks")
         first = await agent.run("look for tea in the background", user="u1", thread="t1")
         assert first.status is RunStatus.SUCCESS, first.error
         [summary] = [s async for s in harness.runs.iterate(parent_run_id=first.run_id)]
         await _until(lambda: _paused(harness, summary.run_id))
-        assert not (tmp_path / "kimi-work" / "made.txt").exists()
+        assert not (tmp_path / "made.txt").exists()
         second = await agent.run("how is it going?", user="u1", thread="t1")
         assert second.status is RunStatus.PAUSED and second.interrupt is not None
         call = second.interrupt.tool_call
@@ -1163,7 +1180,7 @@ async def test_a_background_sub_agents_call_kimi_asks_about_is_governed_in_its_o
         assert done.status is RunStatus.SUCCESS, done.error
         child = await _until(lambda: _ended(harness, summary.run_id))
     assert child.status is RunStatus.SUCCESS and child.output == "made it"
-    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    assert (tmp_path / "made.txt").exists()
 
 
 def _looks_up(body: dict[str, Any]) -> Any:

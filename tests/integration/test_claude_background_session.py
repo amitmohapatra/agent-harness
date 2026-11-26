@@ -204,7 +204,10 @@ def results(events: list[RunEvent]) -> list[str]:
 
 
 READS: dict[str, Any] = {"builtin": "Read", "args": {"file_path": "notes.txt"}}
-WRITES: dict[str, Any] = {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "x"}}
+WRITES: dict[str, Any] = {
+    "builtin": "Write",
+    "args": {"file_path": "/srv/notes.txt", "content": "x"},
+}
 
 
 # --------------------------------------------------------------------------- one chat
@@ -1531,7 +1534,7 @@ async def test_a_rejected_call_of_a_background_subagent_is_told_to_it(
     agent = harness.wrap(options(tmp_path, scripts), id="rejects")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "/srv/notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     turn = await agent.run("how is it going?", user="u1", thread="t1")
@@ -1663,7 +1666,7 @@ async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_t
     agent = harness.wrap(options(tmp_path, scripts), id="unanswered")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "/srv/notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     await when(harness, child.run_id, RunStatus.CANCELLED)
@@ -1750,7 +1753,7 @@ async def test_cancelling_a_background_run_that_waits_for_a_person_stops_its_tas
     agent = harness.wrap(options(tmp_path, scripts), id="cancel-paused")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "/srv/notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     assert (await agent.cancel(child.run_id)).status is RunStatus.CANCELLED
@@ -2029,7 +2032,7 @@ async def test_another_users_thread_of_the_same_name_sees_nothing_of_a_backgroun
     agent = harness.wrap(options(tmp_path, scripts), id="two-users-bg")
     hers = await agent.run("research the market", user="ada", thread="t1")
     child = await child_of(harness, hers.run_id)
-    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "/srv/notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)
     his = await agent.run("research the market", user="bob", thread="t1")
@@ -2134,7 +2137,7 @@ async def test_closing_the_harness_ends_every_process_and_part_even_when_the_run
     agent = harness.wrap(options(tmp_path, scripts), id="closing")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    touch = {"builtin": "Edit", "args": {"file_path": "notes.txt"}}
+    touch = {"builtin": "Edit", "args": {"file_path": "/srv/notes.txt"}}
     (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
     await when(harness, child.run_id, RunStatus.PAUSED)  # its call waits for a person
     [one] = served(tmp_path)
