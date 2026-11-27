@@ -4,7 +4,9 @@ its answer, memory, A2A and the journal carry values as they are, and a team mas
 users see with an ``on_output`` hook (``trellis.harness.hooks``).
 
 The rules are deliberately boring: drop anything whose *name* looks like a secret, drop
-anything whose value looks like a credential, and cut long values. Text
+anything whose value looks like a credential, mask a credential inside longer text where it
+stands (a token by its provider's documented shape, a private key block, a URL's password,
+the value of a name that is a secret's), and cut long values. Text
 that is a JSON object or array (a model's tool-call arguments, a tool result as the model
 reads it) is redacted as what it holds, and stays JSON text. A redactor never raises — a
 redaction bug must not break a run — and unknown types are stringified before truncation.
@@ -93,6 +95,70 @@ _EMBEDDED = re.compile(
 )
 
 
+#: Tokens whose provider documents their shape, wherever they stand. Case matters here (an
+#: AWS key id is upper case; "asiapacific..." is a word), so these are matched apart from
+#: the patterns above.
+#:
+#: * GitHub: ``ghp_`` (personal), ``gho_`` (OAuth), ``ghu_`` / ``ghs_`` (app user / server),
+#:   ``ghr_`` (refresh), then at least 36 letters and digits; a fine-grained personal token is
+#:   ``github_pat_`` and letters, digits and underscores (GitHub Docs, "About authentication
+#:   to GitHub: GitHub's token formats").
+#: * AWS: an access key id is ``AKIA`` (long-term) or ``ASIA`` (temporary) and 16 upper-case
+#:   letters and digits (IAM User Guide, "IAM identifiers: unique identifiers"). The secret
+#:   key has no shape of its own: it is masked by its label (``_LABELLED``).
+#: * Slack: ``xoxb-`` (bot), ``xoxp-`` (user), ``xoxa-`` / ``xoxr-`` (configuration and
+#:   refresh), ``xoxs-``, and ``xapp-`` (app level) (Slack API, "Token types").
+#: * Google: an API key is ``AIza`` and 35 letters, digits, ``-`` or ``_`` (39 in all).
+#: * Stripe: ``sk_live_`` / ``sk_test_`` (secret) and ``rk_live_`` / ``rk_test_``
+#:   (restricted); ``pk_`` is publishable, and stays (Stripe Docs, "API keys").
+_SHAPED = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"gh[pousr]_[A-Za-z0-9]{36,255}"
+    r"|github_pat_[A-Za-z0-9_]{22,255}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])"
+    r"|xox[abprs]-[A-Za-z0-9\-]{10,255}"
+    r"|xapp-[A-Za-z0-9\-]{10,255}"
+    r"|AIza[0-9A-Za-z_\-]{35}(?![0-9A-Za-z_\-])"
+    r"|[sr]k_(?:live|test)_[A-Za-z0-9]{10,255}"
+    r")"
+)
+
+#: A private key as files hold it (RFC 7468): the whole block, and one cut off before its end
+#: to the end of the text - never shown in part. A certificate or a public key is not one.
+_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:[A-Z]{2,12} ){0,2}PRIVATE KEY(?: BLOCK)?-----"
+    r"[\s\S]*?(?:-----END (?:[A-Z]{2,12} ){0,2}PRIVATE KEY(?: BLOCK)?-----|\Z)"
+)
+
+#: The password of a URL's user (RFC 3986, userinfo): ``scheme://user:password@host``.
+_URL_PASSWORD = re.compile(r"(?<=://)([^\s/:@]{1,128}):([^\s/@]{1,512})@(?=[^\s/@])")
+
+#: ``Authorization: Basic <credentials>`` and its kin: the scheme stays, what follows goes
+#: (``Bearer`` is masked above, with its word).
+_AUTHORIZATION = re.compile(
+    r"(?i)(\bauthorization\s{0,3}[:=]\s{0,3}(?:basic|digest|negotiate|token)\s{1,3})[^\s'\",;]{4,2048}"
+)
+
+#: ``name=value`` and ``name: value`` inside text - a command line, a query string, a log
+#: line, a fragment of JSON. Whether the name is a secret's is the same question as for an
+#: attribute's name (``_sensitive``); ``_labelled`` decides what a value must look like.
+_LABELLED = re.compile(
+    r"(?<![A-Za-z0-9_.\-])(?P<quoted>[\"']?)(?P<name>[A-Za-z][A-Za-z0-9_.\-]{1,63})(?P=quoted)"
+    r"(?P<sep>\s{0,3}[=:]\s{0,3})"
+    # a quoted value runs to its closing quote; a bare one to the next space or separator
+    r"(?:(?P<open>[\"'])(?P<said>[^\"'\n]{1,2048})(?P=open)|(?P<bare>[^\s\"',;&]{1,2048}))"
+)
+#: A value after a colon is masked only when it reads as a credential, not as a word of a
+#: sentence ("Password: must not be empty"): it has a digit or a symbol, or is this long.
+_COLON_VALUE_CHARS = 16
+#: What may close a sentence, a call or a list right after a bare value.
+_CLOSING = ")]}>.,:;!?"
+#: A bare value holding one of these is an expression (``settings().key``, ``env["K"]``).
+_BRACKETS = frozenset("()[]{}<>")
+#: Values that say there is no secret: what a trace is read for when a key was not set.
+_NOTHING = frozenset({"none", "null", "nil", "true", "false", "undefined", "unset", "missing"})
+
+
 class Redactor:
     """The contracts ``TelemetryRedactor`` every span attribute goes through."""
 
@@ -139,7 +205,7 @@ class Redactor:
         elif any(p.match(text) for p in _VALUE_PATTERNS):
             return REDACTED
         else:
-            text = _EMBEDDED.sub(REDACTED, text)
+            text = _masked(text)
         return _truncate(text, MAX_VALUE_CHARS)
 
     def _payload(self, value: Any, depth: int = 0) -> Any:
@@ -155,6 +221,53 @@ class Redactor:
         if isinstance(value, list | tuple):
             return [self._payload(v, depth + 1) for v in value]
         return self._scalar(value, depth)
+
+
+def _masked(text: str) -> str:
+    """``text`` with every credential in it masked where it stands, the rest kept: a private
+    key block, a token by its shape, a URL's password, an ``Authorization`` header's
+    credentials, and the value of a name that is a secret's."""
+    if "PRIVATE KEY" in text:
+        text = _PRIVATE_KEY.sub(REDACTED, text)
+    text = _SHAPED.sub(REDACTED, _EMBEDDED.sub(REDACTED, text))
+    if "://" in text:
+        text = _URL_PASSWORD.sub(rf"\1:{REDACTED}@", text)
+    text = _AUTHORIZATION.sub(rf"\1{REDACTED}", text)
+    if "=" in text or ":" in text:
+        text = _LABELLED.sub(_labelled, text)
+    return text
+
+
+def _labelled(found: re.Match[str]) -> str:
+    """``name=value`` with the value masked when the name is a secret's and the value could
+    be one: not a bare number (a count is no credential), not already masked, and after a
+    colon not a plain word (``_COLON_VALUE_CHARS``)."""
+    if not _sensitive(found["name"]):
+        return found[0]
+    if found["said"] is not None:
+        which, value, after = "said", found["said"], found["open"]
+    else:
+        # what closes a sentence or a call around the value is not part of it
+        which, value = "bare", found["bare"].rstrip(_CLOSING)
+        after = found["bare"][len(value) :]
+        if _BRACKETS & set(value):  # an expression in code, not a credential
+            return found[0]
+    if not value or _number(value) or value.lower() in _NOTHING or value.startswith(REDACTED):
+        return found[0]
+    if value[0] == "=":  # ``secret == other``: a comparison, not an assignment
+        return found[0]
+    worded = not value[0].isalnum() or (value.isalpha() and len(value) < _COLON_VALUE_CHARS)
+    if ":" in found["sep"] and worded:
+        return found[0]
+    return found[0][: found.start(which) - found.start()] + REDACTED + after
+
+
+def _number(value: str) -> bool:
+    try:
+        float(value)
+    except ValueError:
+        return False
+    return True
 
 
 _SEGMENT = re.compile(r"[^a-z0-9]+")

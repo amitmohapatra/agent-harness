@@ -186,9 +186,18 @@ Whether the *harness* got slower is `make bench` (`tests/performance`, against t
 Traces mask credentials, and only traces: every span attribute passes
 `trellis.harness.redaction` once, where it is set. Names that look like secrets (`api_key`,
 `password`, `token`...) and values that look like credentials (bearer tokens, JWTs, `sk-...`,
-long key-like blobs) become `[redacted]`, and the same credentials inside longer text (a
-command line, an error message) are masked where they stand; long values are cut at 2000
-characters. An error raised out of a span is recorded by the harness with its message
+long key-like blobs) become `[redacted]`, and credentials inside longer text (a command
+line, an error message, a log line) are masked where they stand, the text around them kept:
+
+| In the text | Masked | Kept |
+|---|---|---|
+| a token by the shape its provider documents: GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), an AWS access key id (`AKIA`/`ASIA` and 16), Slack (`xoxb-`..., `xapp-`), a Google API key (`AIza` and 35), Stripe (`sk_live_`, `rk_test_`...) | the token | a publishable `pk_` key, a prefix on its own |
+| a private key block (`-----BEGIN ... PRIVATE KEY-----`), also one cut off before its end | the whole block | a certificate, a public key |
+| a URL with a password (`postgresql://ada:s3cr3t@db/app`) | the password | the user, the host |
+| `Authorization: Basic ...` (and `Digest`, `Negotiate`, `Token`) | the credentials | the scheme |
+| a value after a name that is a secret's (`password=hunter2`, `?api_key=...&`, `CLIENT_SECRET='...'`, `"passwd": "..."`, `aws_secret_access_key = ...`) | the value | the name; a number (`token_count=512`); `None`/`null`/`false`; an expression in code (`api_key=os.environ[...]`); after a colon, a plain word (`Password: must not be empty`) |
+
+Long values are cut at 2000 characters. An error raised out of a span is recorded by the harness with its message
 redacted (the OTel SDK's own `record_exception` keeps it as it is). Names are
 matched by their words, not substrings (`gen_ai.usage.input_tokens` and `tokenizer` stay;
 `refresh-token` and `X-Api-Key` go), and a number is never treated as a credential. Mappings

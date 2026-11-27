@@ -195,3 +195,124 @@ def test_a_credential_inside_longer_text_is_masked_where_it_stands() -> None:
         key not in out["args"] and json.loads(out["args"])["command"] == "deploy --token=[redacted]"
     )
     assert out["prose"] == "a task-management board, Bearer authentication, the ask-for-help desk"
+
+
+def _masked(text: str) -> str:
+    return redact_attributes({"note": text})["note"]
+
+
+def test_a_providers_token_is_masked_by_its_documented_shape() -> None:
+    """Tokens whose format their provider documents, inside longer text and alone: the
+    text around them stays, so the trace still says what happened."""
+    secrets = [
+        "ghp_" + "a1B2c3D4e5F6g7H8i9J0" * 2,  # GitHub personal access token (classic)
+        "gho_" + "Z9y8X7w6V5u4T3s2R1q0" * 2,  # GitHub OAuth
+        "ghs_" + "0123456789abcdefghijABCDEFGHIJ012345",  # GitHub server-to-server
+        "github_pat_" + "11ABCDEFG0aBcDeFgHiJkL_" + "mNoPqRsTuVwXyZ0123456789" * 2,
+        "AKIAIOSFODNN7EXAMPLE",  # AWS access key id (AWS's own documentation example)
+        "ASIAY34FZKBOKMUTVV7A",  # AWS temporary access key id
+        "xoxb-2048-3520-AbCdEfGhIjKlMnOpQrStUvWx",  # Slack bot token
+        "xapp-1-A0123BCDEF-456-abcdef0123456789",  # Slack app-level token
+        "AIzaSyA-1234567890abcdefghijklmnopqrstu",  # Google API key (39 characters)
+        "sk_live_51H8abcDEFghiJKLmnoPQR",  # Stripe secret key
+        "rk_test_51H8abcDEFghiJKLmnoPQR",  # Stripe restricted key
+    ]
+    for secret in secrets:
+        assert _masked(secret) == REDACTED, secret
+        said = _masked(f"the call failed with {secret} in its header, retrying")
+        assert secret not in said and said.startswith("the call failed with [redacted] in")
+
+
+def test_a_labelled_secret_inside_text_is_masked_and_its_label_kept() -> None:
+    """``password=...`` in a command line, a query string, a log line or a header: the value
+    goes, the name stays (it says what was there)."""
+    cases = {
+        "psql --host db password=hunter2 --port 5432": "psql --host db password=[redacted] --port 5432",
+        "GET /v1/items?api_key=abc123def&limit=10": "GET /v1/items?api_key=[redacted]&limit=10",
+        "export CLIENT_SECRET='s3cr3t-value'": "export CLIENT_SECRET='[redacted]'",
+        "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": (
+            "aws_secret_access_key = [redacted]"
+        ),
+        'config: {"passwd": "tr0ub4dor&3", "user": "ada"} loaded': (
+            'config: {"passwd": "[redacted]", "user": "ada"} loaded'
+        ),
+        "password: hunter2": "password: [redacted]",
+        "it failed (password=hunter2).": "it failed (password=[redacted]).",
+        "token=abc123, then retried": "token=[redacted], then retried",
+        "secret: correcthorsebatterystaple": "secret: [redacted]",
+        "Authorization: Basic dXNlcjpwYXNzd29yZA==": "Authorization: Basic [redacted]",
+        "postgresql://ada:s3cr3t@db.internal:5432/app": (
+            "postgresql://ada:[redacted]@db.internal:5432/app"
+        ),
+        "clone https://x-access-token:abcDEF123456@github.com/acme/app.git": (
+            "clone https://x-access-token:[redacted]@github.com/acme/app.git"
+        ),
+    }
+    for text, expected in cases.items():
+        assert _masked(text) == expected, text
+
+
+def test_a_private_key_block_is_masked_whole() -> None:
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n" * 3
+    for kind in ("", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "):
+        block = f"-----BEGIN {kind}PRIVATE KEY-----\n{body}-----END {kind}PRIVATE KEY-----"
+        assert _masked(f"key file:\n{block}\nloaded") == "key file:\n[redacted]\nloaded"
+    # cut off before its end (a truncated log): masked to the end, never shown in part
+    cut = f"-----BEGIN PRIVATE KEY-----\n{body}"
+    assert _masked(f"read {cut}") == "read [redacted]"
+
+
+def test_what_is_no_secret_is_left_as_it_is() -> None:
+    """Traces are read to debug runs: a count, an identifier, a hash or a sentence about
+    secrets is not a secret, and a public certificate is not a private key."""
+    kept = [
+        "token_count=512 max_tokens=256 input_tokens: 12",
+        "the password policy is: at least twelve characters",
+        "Password: must not be empty",
+        "token: the unit a model reads text in",
+        "password=",
+        "password=''",
+        "run_id=run_68dc948dd8a84a0ba7e9ca920837962b thread=thr_01M8FHPFHM580TAQJADANY8R7S",
+        "commit 39c26a88f0a5dc114f97e51c855dffae1bc29958 on main",
+        "id 123e4567-e89b-12d3-a456-426614174000",
+        "the region is asiapacificregional1 and the stage is akiaproductionstage1",
+        "https://docs.example.com/guide:intro@section",
+        "mailto:ada@example.com and http://example.com:8080/path",
+        "-----BEGIN CERTIFICATE-----\nMIIDdzCCAl+gAwIBAgIE\n-----END CERTIFICATE-----",
+        "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----",
+        "ghp_short and gho_ and github_pat_ are prefixes GitHub documents",
+        "key=value pairs: retries=3, timeout=30s, mode=fast",
+        # code and its debugging output: an expression, a count, a format, "it was not set"
+        "await ctx.context(question, token_budget=8000)",
+        '"input_token_details": {"cache_read": 70, "cache_creation": 20},',
+        'token = value.split(" ", 1)[-1].strip()',
+        'new_secret = rotated.json()["secret"]',
+        "llm_api_key=None, api_key=null, password=false",
+        'f"input tokens {tokens:,.0f} + {token_margin:.0%}"',
+        "api_key=os.environ[provider.key_variable]",
+        "assert secret == expected and token != other",
+        "sk_live_ is Stripe's prefix; pk_live_51H8abcDEFghiJKLmnoPQR is publishable",
+    ]
+    for text in kept:
+        assert _masked(text) == text, text
+
+
+def test_a_secret_that_is_a_number_is_still_a_count_and_one_already_masked_stays_once() -> None:
+    assert _masked("token=1234") == "token=1234", "a credential is never a bare number"
+    assert _masked("password=[redacted]") == "password=[redacted]"
+    assert _masked("Authorization: Bearer abcdefghij1234567890") == "Authorization: [redacted]"
+
+
+def test_masking_stays_linear_on_text_built_to_slow_it() -> None:
+    hostile = [
+        "password=" + "a" * 50_000,
+        "a=" * 30_000,
+        "-----BEGIN PRIVATE KEY-----" + "A" * 60_000,
+        "://" + "u:" * 20_000 + "@",
+        ("ghp_" + "a" * 30 + " ") * 2_000,
+        "x" * 100_000,
+    ]
+    started = time.perf_counter()
+    for text in hostile:
+        redact_attributes({"note": text})
+    assert time.perf_counter() - started < 2.0

@@ -5,6 +5,23 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a GitHub token, an AWS key, a private key and a labelled password inside a traced value are masked
+
+A trace masked a credential inside longer text only when it was an `sk-`/`pk-`/`rk-` key, a
+bearer token or a JWT. A command line with `password=hunter2`, an error quoting a `ghp_...`
+token, a database URL with its password and a pasted private key went to the tracing backend
+as they were. Masked now, where they stand and with the text around them kept: tokens by the
+shape their provider documents (GitHub, AWS access key ids, Slack, Google API keys, Stripe
+secret and restricted keys), private key blocks (also one cut off before its end), the
+password of a URL, the credentials of an `Authorization` header, and the value after a name
+that is a secret's (`password=`, `api_key=`, `client_secret:`...; the same reading of a name
+as for an attribute's). What is no secret stays: a count (`token_count=512`), `None`, an
+expression in code, a plain word after a colon, a certificate, a publishable key
+([observability.md](docs/observability.md#redaction)). Measured on this repository's own
+166,477 lines of code, docs and fixtures: 204 change, each a value after a secret's name;
+100 KB of text with no secret takes 5 ms (2.4 ms before). Only traces are masked, as before:
+a tool's arguments and result, the run's events and its answer are not touched.
+
 ### Added: `without=["recall"]`, an agent that searches memory on demand
 
 Memory was all or nothing for an agent: everything the memory service ranked near the request
