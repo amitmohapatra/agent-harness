@@ -14,9 +14,10 @@ import copy
 import functools
 import json
 import logging
+import re
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Hashable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1246,6 +1247,16 @@ def _joined(toolbox: dict[str, Tool], found: Tool) -> None:
     held = toolbox.get(found.spec.name)
     if held is None or held.feature == "code":
         toolbox[found.spec.name] = found
+
+
+def named_in(text: str, names: Collection[str]) -> set[str]:
+    """The tool ``names`` that ``text`` names, as whole words (a learned skill's steps in the
+    memory context, a hint's line, a skill's instructions): one pass over the text, whatever
+    the number of tools. A name may hold a dot, a colon or a hyphen, and so does the
+    punctuation after it: "Call fetch_consent_message." names the tool."""
+    found = set(re.findall(r"[A-Za-z0-9_.:-]+", text or ""))
+    found |= {word.rstrip(".:-") for word in found}
+    return {name for name in names if name in found}
 
 
 def _built_in(tool: Tool) -> bool:

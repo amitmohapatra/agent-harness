@@ -7,7 +7,6 @@ import contextlib
 import functools
 import json
 import logging
-import re
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -114,7 +113,14 @@ from trellis.harness.journal import Journal, content_key
 from trellis.harness.line import INTERRUPTS, Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
-from trellis.harness.runtime import Runtime, current, principal, reason_of, run_of
+from trellis.harness.runtime import (
+    Runtime,
+    current,
+    named_in,
+    principal,
+    reason_of,
+    run_of,
+)
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
@@ -2147,16 +2153,6 @@ def graded(answer: Any) -> str:
     if answer is None or isinstance(answer, str):
         return answer or ""
     return json.dumps(pipeline.jsonable(answer), default=str)
-
-
-def named_in(text: str, names: Collection[str]) -> set[str]:
-    """The tool ``names`` that ``text`` names, as whole words (a learned skill's steps in the
-    memory context, a hint's line, a skill's instructions): one pass over the text, whatever
-    the number of tools. A name may hold a dot, a colon or a hyphen, and so does the
-    punctuation after it: "Call fetch_consent_message." names the tool."""
-    found = set(re.findall(r"[A-Za-z0-9_.:-]+", text or ""))
-    found |= {word.rstrip(".:-") for word in found}
-    return {name for name in names if name in found}
 
 
 def gated_tools(target: Any) -> set[str]:

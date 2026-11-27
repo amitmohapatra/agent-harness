@@ -70,7 +70,7 @@ from trellis.harness.repository import (
     inside,
     journaled,
 )
-from trellis.harness.runtime import Runtime, current
+from trellis.harness.runtime import Runtime, current, named_in
 from trellis.harness.sandbox import SandboxSource
 from trellis.harness.tools.base import Tool
 
@@ -802,8 +802,6 @@ def offer_named(runtime: Runtime | None, text: str) -> set[str]:
     narrowed, or outside a run."""
     if runtime is None or runtime.offered is None:
         return set()
-    from trellis.harness.agent import named_in  # noqa: PLC0415 - the agent module reads this one
-
     named = named_in(text, runtime.tool_set()) - runtime.offered
     runtime.offered |= named
     return named
