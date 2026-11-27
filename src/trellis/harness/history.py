@@ -43,7 +43,7 @@ import functools
 import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Final
 
@@ -170,6 +170,10 @@ class Said:
     #: of the agent above it). The memory service keeps it as an agent's message
     #: (:data:`DELEGATED`), never the person's words, and no window replays it
     delegated: bool = False
+    #: a user-role message the person did not type, by who put it together (the memory
+    #: service's ``origin``): ``"schedule"`` (a scheduled run's task, with nobody present) or
+    #: ``"app"``; ``None``: the person's own. Only the person's own becomes their memory
+    origin: str | None = None
 
 
 #: The memory service's role of each speaker, and the reverse.
@@ -195,6 +199,10 @@ MESSAGE_ID: Final = "message_id"
 #: service's ``custom_metadata`` nests two levels at most, and ``{"source", "data": {...}}``
 #: under the run record is four.
 NOTIFICATION: Final = "notification"
+#: The memory service's origin of a user-role message an application put together.
+APP: Final = "app"
+#: ... and of a scheduled run's task.
+SCHEDULE: Final = "schedule"
 
 
 def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
@@ -323,6 +331,12 @@ def recorded(said: Said) -> dict[str, Any]:
         ]
     if said.tool_call_id is not None:
         message["tool_call_id"] = said.tool_call_id
+    if said.role is Speaker.USER and not delegated:
+        # a notification the harness added is no one's words; a schedule's task is said again
+        # each time it fires: neither is what the person tells their memory
+        origin = said.origin or (APP if said.notified else None)
+        if origin is not None:
+            message["origin"] = origin
     metadata: dict[str, Any] = {}
     facts = dict(said.facts or {})
     if said.id is not None and said.role is not Speaker.TOOL:
@@ -356,8 +370,11 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
         tool_call_id=stored.get("tool_call_id"),
         id=(stored.get("custom_metadata") or {}).get(MESSAGE_ID),
         delegated=delegated,
+        origin=stored.get("origin"),
     )
-    return _noted(said, _named((stored.get("custom_metadata") or {}).get(RUN_RECORD))[0])
+    said = _noted(said, _named((stored.get("custom_metadata") or {}).get(RUN_RECORD))[0])
+    # a notification's origin is its being one (:func:`recorded` says it): not kept twice
+    return replace(said, origin=None) if said.notified and said.origin == APP else said
 
 
 __all__ = [

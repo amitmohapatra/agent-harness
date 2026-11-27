@@ -108,7 +108,7 @@ from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
 from trellis.harness.files import part
 from trellis.harness.frontend import Frontend
-from trellis.harness.history import Said, Speaker, notification_in
+from trellis.harness.history import SCHEDULE, Said, Speaker, notification_in
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay, call_key, governance_held
 from trellis.harness.line import Line
@@ -1885,7 +1885,12 @@ def _transcript(
     ident = None if first is None else question_id(runtime.conversation, first)
     # a child run's question is the hand-off of the agent above it, not the person's words
     handed = runtime.identity.parent_run is not None
-    asked = [Said(Speaker.USER, task, id=ident, delegated=handed)] if runtime.task else []
+    origin = SCHEDULE if runtime.scheduled is not None else None
+    asked = (
+        [Said(Speaker.USER, task, id=ident, delegated=handed, origin=origin)]
+        if runtime.task
+        else []
+    )
     if not asked and runtime.notification is not None:  # a notification it was given to say
         asked = [runtime.notification]
     # a message steered into the run that its framework does not report: after the question

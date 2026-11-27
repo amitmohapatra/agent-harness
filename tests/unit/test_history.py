@@ -266,3 +266,18 @@ def test_a_durable_store_owns_the_history(tmp_path: pytest.TempPathFactory) -> N
     assert not in_ram(on_disk) and owner(on_disk, agent_id="a") is Owner.FRAMEWORK
     assert owner(object(), agent_id="a") is Owner.FRAMEWORK  # unknown: taken as durable
     on_disk.close()
+
+
+def test_a_user_message_the_person_did_not_type_says_who_put_it_together() -> None:
+    """The memory service reads only the person's own words for their memory: a scheduled
+    run's task and a notification the harness added say so (``origin``); a sub-agent's
+    question is an agent's message already; the person's own says nothing."""
+    from trellis.harness.history import APP, SCHEDULE, Said, Speaker, recorded, said_of
+
+    assert "origin" not in recorded(Said(Speaker.USER, "hello"))
+    scheduled = recorded(Said(Speaker.USER, "send the stock report", origin=SCHEDULE))
+    assert scheduled["origin"] == "schedule" and said_of(scheduled).origin == SCHEDULE
+    told = recorded(Said(Speaker.USER, "your export is ready", notified={"source": "task"}))
+    assert told["origin"] == APP
+    assert "origin" not in recorded(Said(Speaker.USER, "check stock", delegated=True))
+    assert "origin" not in recorded(Said(Speaker.ASSISTANT, "done", origin=SCHEDULE))

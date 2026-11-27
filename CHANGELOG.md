@@ -22,6 +22,14 @@ expression in code, a plain word after a colon, a certificate, a publishable key
 100 KB of text with no secret takes 5 ms (2.4 ms before). Only traces are masked, as before:
 a tool's arguments and result, the run's events and its answer are not touched.
 
+### Fixed: a scheduled run's task and a harness notification are not the person's words to memory
+
+A scheduled run's task, said again each time it fires with nobody present, and a notification
+the harness adds to a conversation were recorded as the person's messages, and the memory
+service read each as something the person told it. They now go out with their origin
+(`schedule`, `app`; trellis-memory 0.6.11), which the service keeps in the conversation and
+does not read for the person's memory. A sub-agent's question was already an agent's.
+
 ### Added: `without=["recall"]`, an agent that searches memory on demand
 
 Memory was all or nothing for an agent: everything the memory service ranked near the request
