@@ -102,6 +102,36 @@ the last listing stands, and a run when they were never listed goes without them
 your own gets them with `HarnessTools` (or `await h.memory_tools()`). Inside a tool or a node, `trellis.current().memory` is the memory SDK's
 context bound to the run, with all its verbs.
 
+## An agent that searches on demand
+
+By default the push carries everything memory ranks for the request. That is right for an
+agent that answers from uploaded documents, and it is how the accuracy sets were measured. It
+is also where a long-lived user's prompt fills with things that are near the request and not
+about it.
+
+`without=["recall"]` makes the other choice, per agent or per run:
+
+```python
+agent = h.wrap(graph, id="inventory", without=["recall"])
+```
+
+| | default | `without=["recall"]` |
+|---|---|---|
+| the user's profile, the rules and preferences that apply | pushed | pushed |
+| the conversation (or its replay), the thread's summary | pushed | pushed |
+| learned skills, tool hints | pushed | pushed |
+| memories, document passages, graph facts, earlier conversations' answers | pushed | searched for by the model: `memory_search` |
+| what the model is told beside the context | nothing, or that memory holds nothing / only part | that memory holds more to search for, or that it holds nothing |
+
+The memory service still says whether it holds something for the request
+(`evidence_status`), so the note is only there when a search is worth making, and it is left
+out when a confidently hinted tool answers the question. `memory_search` is never narrowed
+away. A run whose memory service offers no `memory_search` gets the default push whatever it
+left out: recall is left to the model only where the model can search. Sub-agents' and
+helpers' own contexts are pushed as before. The cost of this choice is that an old memory
+reaches the answer only if the model decides to search; what must hold on every request
+belongs in the profile.
+
 ## What is recorded
 
 After each attempt — whether it succeeded, paused or failed — in the background except where

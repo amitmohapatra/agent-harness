@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: `without=["recall"]`, an agent that searches memory on demand
+
+Memory was all or nothing for an agent: everything the memory service ranked near the request
+was attached to its prompt, or (`without=["memory"]`) the profile, the rules, the records and
+the memory tools went with it. `recall` is a tenth name of the one switch. Without it the
+context memory gives carries what stands for the user whatever is asked - their profile, the
+rules and preferences that apply, the conversation, the learned skills, the tool hints - and
+what is ranked for the one request (memories, document passages, graph facts, earlier
+conversations' answers) is left for the model to search for with `memory_search`, when the
+request needs it. The model is told when memory holds something for the request that is not
+attached, and exactly what it was always told when memory holds nothing. Where the run has
+no `memory_search`, what is ranked is attached as always. On `h.wrap` for an agent, on
+`run`/`stream`/`start` for one run. Needs trellis-memory 0.6.9 (`context(recall=...)`) and a
+memory service that takes the field.
+
 ### Fixed: a run whose `load_skill` wraps the harness's is told its skills, and a loaded skill's tools are offered
 
 A run with no skills slot is told its skills with its context, because a model seldom thinks

@@ -1251,6 +1251,84 @@ async def test_the_note_names_no_search_the_run_does_not_offer(
     assert "memory_search" not in pushed(model.requests[0])
 
 
+@pytest.mark.parametrize(
+    ("status", "note"),
+    [
+        ("COMPLETE", "Memory holds more that bears on this request"),
+        ("INCOMPLETE", "Memory holds more that bears on this request"),
+        ("INSUFFICIENT", "Memory holds nothing about this question"),
+    ],
+)
+async def test_without_recall_memory_is_asked_for_what_stands_and_the_model_searches(
+    memory_harness: Harness, memory_service: FakeMemoryService, status: str, note: str
+) -> None:
+    """``without=["recall"]``: what memory ranks for the request is not attached. Memory is
+    asked for the context that stands (``recall: false``) and the model is told there is
+    something to search for - or, when memory holds nothing, exactly what it is told then."""
+    memory_service.evidence_status = status
+    model = ScriptedChat(["Let me look that up."])
+    agent = memory_harness.wrap(
+        ReAct(system_prompt="You help.", model=model), id="d", without=["recall"]
+    )
+    await agent.run("Which stores are short of the tote?", user="u1")
+    [asked] = memory_service.named("context")
+    assert asked.body["recall"] is False
+    system = pushed(model.requests[0])
+    assert note in system and system.count("## Memory") == 1
+    if status == "INSUFFICIENT":
+        assert "search them first (memory_search" in system
+    else:
+        assert "memory_search" in system and "Do not guess what a search can tell you" in system
+
+
+async def test_recall_is_attached_unless_a_run_or_its_agent_says_otherwise(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The default sends no ``recall`` (the context as it always was) and says nothing of a
+    search; one run can leave it out for itself."""
+    model = ScriptedChat(["Stores 12 and 40.", "Let me look."])
+    agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="r")
+    await agent.run("Which stores are short of the tote?", user="u1")
+    assert "recall" not in memory_service.named("context")[-1].body
+    assert "## Memory" not in pushed(model.requests[0])
+    await agent.run("And of the cardigan?", user="u1", without=["recall"])
+    assert memory_service.named("context")[-1].body["recall"] is False
+    assert "Memory holds more" in pushed(model.requests[-1])
+
+
+async def test_recall_is_attached_where_the_run_has_no_search_of_its_own(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """Left to the model only where it can search: a memory service that offers no
+    ``memory_search`` attaches what it ranks, as always, whatever the agent left out."""
+    memory_service.agent_tools = [
+        t for t in memory_service.agent_tools if t["name"] != "memory_search"
+    ]
+    model = ScriptedChat(["Stores 12 and 40."])
+    agent = memory_harness.wrap(
+        ReAct(system_prompt="You help.", model=model), id="n", without=["recall"]
+    )
+    await agent.run("Which stores are short of the tote?", user="u1")
+    assert "recall" not in memory_service.named("context")[-1].body
+    assert "Memory holds more" not in pushed(model.requests[0])
+
+
+async def test_no_search_note_when_a_hinted_tool_answers_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """As for the abstain note: a question a confidently hinted tool answers is not one to
+    search memory for."""
+    memory_service.candidates = ["t3"]
+    model = ScriptedChat(["done"])
+    agent = arm(
+        memory_harness.wrap(ReAct(system_prompt="s", model=model), id="h", without=["recall"]),
+        many(6),
+    )
+    await agent.run("what is the daily meal allowance", user="u")
+    assert memory_service.named("context")[-1].body["recall"] is False
+    assert "## Memory" not in pushed(model.requests[0])
+
+
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:

@@ -258,6 +258,7 @@ class RunMemory:
         budget: int = CONTEXT_TOKEN_MAX,
         conversation_budget: int | None = None,
         document_ids: Sequence[str] | None = None,
+        recall: bool = True,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
@@ -266,7 +267,9 @@ class RunMemory:
         ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own,
         within ``conversation_budget`` tokens (``None``: the service's default).
         ``document_ids`` narrows the documents its passages come from to those (``None``:
-        every one the scope may read)."""
+        every one the scope may read). ``recall`` false: what memory ranks for the query is
+        left for the model to search for; the context carries what stands (the profile, the
+        rules and preferences that apply, the conversation, the skills and the hints)."""
         return await self.ctx.context(
             fitted(query),
             token_budget=budget,
@@ -276,6 +279,7 @@ class RunMemory:
             window_format="messages" if window is Window.MESSAGES else "rendered",
             document_ids=document_ids,
             conversation_token_budget=conversation_budget,
+            recall=recall,
         )
 
     # ------------------------------------------------------------------ pull

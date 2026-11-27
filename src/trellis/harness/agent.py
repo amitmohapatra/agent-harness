@@ -224,6 +224,36 @@ EARLIER_CHATS: Final = (
     "It may be in one of the user's earlier conversations: search them first (memory_search "
     'with kinds ["message"]) before you say a detail is missing.'
 )
+#: What the model is told when memory holds something for the question and none of it is
+#: attached (``without=["recall"]``: the model searches memory itself): that there is
+#: something to find, and how. Not when memory holds nothing (the note above says so), and
+#: not when a hinted tool answers the question.
+ON_DEMAND: Final = (
+    "## Memory\nMemory holds more that bears on this request, and none of it is attached "
+    "here. When the answer depends on something the user said, decided or uploaded before, "
+    "search for it first (memory_search: by default what was learned and document passages; "
+    'kinds ["message"] for earlier conversations, ["fact"] for relations) and answer from '
+    "what it returns. Do not guess what a search can tell you."
+)
+
+
+def memory_note(status: str, *, answered: bool, search: bool, recall: bool) -> str | None:
+    """What the model is told of memory beside its context, by the context's
+    ``evidence_status``: nothing when a hinted tool answers the question (``answered``) or
+    memory covers it and is attached; that memory holds nothing or only part
+    (:data:`ABSTAIN_NOTES`), with where else to look when the run offers the ``search`` tool
+    (:data:`EARLIER_CHATS`); and, where what memory ranks is left to the model (``recall``
+    false), that memory holds something to search for (:data:`ON_DEMAND`)."""
+    if answered:
+        return None
+    if not recall and status != "INSUFFICIENT":
+        return ON_DEMAND
+    note = ABSTAIN_NOTES.get(status)
+    if note is not None and search:
+        return f"{note}\n{EARLIER_CHATS}"
+    return note
+
+
 #: When and how the model asks its user, for every adapter and every topic, sent with every
 #: memory context (as the notes above) and, memory on or off, to every run whose model has a
 #: question tool (``Agent.push``), said once: a "which one" is asked, never guessed or answered for
@@ -1419,6 +1449,8 @@ class Agent:
         # taken before memory is asked: a turn that lands while it answers is in its window
         # or in these, never in neither
         on_its_way = self.on_its_way(runtime, window)
+        # left to the model's own search only where the run offers it one
+        recall = runtime.uses("memory_recall") or SEARCH_TOOL not in runtime.toolbox
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
@@ -1429,6 +1461,7 @@ class Agent:
                     budget=self.context_budget if budget is None else budget,
                     conversation_budget=replayed,
                     document_ids=runtime.document_ids,
+                    recall=recall,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
@@ -1472,10 +1505,13 @@ class Agent:
             "bundle_id": pushed.bundle_id,
             "memory_ids": pushed.memory_ids[:CITED_MAX],
         }
-        # a question a hinted tool answers is no question memory must answer
-        note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
-        if note is not None and SEARCH_TOOL in runtime.toolbox:
-            note = f"{note}\n{EARLIER_CHATS}"
+        note = memory_note(
+            status,
+            # a question a hinted tool answers is no question memory must answer
+            answered=hints and best >= NARROW_FLOOR,
+            search=SEARCH_TOOL in runtime.toolbox,
+            recall=recall,
+        )
         parts = (
             pushed.rendered,
             self.unwritten_said(runtime, pushed.rendered, on_its_way),

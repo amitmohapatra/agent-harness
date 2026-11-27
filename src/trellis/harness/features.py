@@ -1,9 +1,15 @@
 """What a wrapped agent does around every run, and the one switch that turns parts of it off:
 ``without=`` — on ``h.wrap`` for every run of the agent, on ``agent.run``/``stream``/``start``
 for one run (added to the agent's). Everything configured is on unless named here; nothing
-else is a setting. Nine names, each one part (:data:`NAMES`):
+else is a setting. Ten names, each one part (:data:`NAMES`):
 
 * ``memory`` — the memory context pushed, the memory tools, the records, the tool narrowing;
+* ``recall`` — what memory ranks for the request (memories, document passages, graph facts,
+  earlier conversations' answers), attached to the prompt: without it the context carries
+  what stands for the user whatever is asked (their profile, the rules and preferences
+  that apply, the conversation, the learned skills, the tool hints) and the model searches
+  memory itself, when the request needs it (``memory_search``) — the choice for an agent
+  that should read memory the way it reads a file, on demand;
 * ``tool_search`` — the tool narrowing and the memory service's ``tool_search`` tool;
 * ``mcp`` — the gateway's MCP tools, and Code Mode, whose scripts reach them;
 * ``code_mode`` — Code Mode alone;
@@ -31,11 +37,21 @@ from trellis.contracts import ConfigurationError, RunRecord
 
 #: What ``without=`` names.
 Name = Literal[
-    "memory", "tool_search", "mcp", "code_mode", "grounding", "judges", "schedules", "ask", "code"
+    "memory",
+    "recall",
+    "tool_search",
+    "mcp",
+    "code_mode",
+    "grounding",
+    "judges",
+    "schedules",
+    "ask",
+    "code",
 ]
 #: The parts of the harness's work a run asks about (``Runtime.uses``): what the names cover.
 Feature = Literal[
     "memory_push",
+    "memory_recall",
     "memory_pull",
     "records",
     "hints",
@@ -52,7 +68,8 @@ Feature = Literal[
 NAMES: Final[tuple[str, ...]] = get_args(Name)
 #: The parts each name turns off.
 COVERS: Final[dict[str, tuple[Feature, ...]]] = {
-    "memory": ("memory_push", "memory_pull", "records", "hints", "tool_search"),
+    "memory": ("memory_push", "memory_recall", "memory_pull", "records", "hints", "tool_search"),
+    "recall": ("memory_recall",),
     "tool_search": ("hints", "tool_search"),
     "mcp": ("mcp", "code_mode"),
     "code_mode": ("code_mode",),
