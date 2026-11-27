@@ -5,6 +5,25 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a run whose `load_skill` wraps the harness's is told its skills, and a loaded skill's tools are offered
+
+A run with no skills slot is told its skills with its context, because a model seldom thinks
+of calling `list_skills` first (13 of 30 chats without the listing, 30 of 30 with it:
+`docs/skills.md`). The listing was found only when the run's `load_skill` *was* the harness's
+tool. An application that wrapped it in a tool of its own - to log the load, to add a line -
+lost the listing without a word. The skills are now found behind either skill tool, through a
+decorator's `__wrapped__`, a `partial` or the wrapper's closure; a `load_skill` with nothing
+of the harness's behind it is still told nothing, and the log says so (`skills.not_told`).
+
+Where a run's tools are narrowed for the request, the narrowing was chosen before any skill
+was read: a skill's steps named tools the model was not offered. Loading a skill with the
+harness's `load_skill` now offers the run's tools its text names (`skills.offer_named`), from
+the next model call.
+
+`named_in`, which reads tool names out of a text (the memory context's, now a skill's), missed
+a name followed by a full stop or a colon ("Call fetch_consent_message."): the punctuation
+was read as part of the name.
+
 ### Fixed: a Claude background task's end reaches the next turn on another server (BG-11)
 
 A subagent Claude Code runs in the background works on in the process of the server whose

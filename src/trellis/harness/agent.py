@@ -2115,8 +2115,11 @@ def graded(answer: Any) -> str:
 
 def named_in(text: str, names: Collection[str]) -> set[str]:
     """The tool ``names`` that ``text`` names, as whole words (a learned skill's steps in the
-    memory context, a hint's line): one pass over the text, whatever the number of tools."""
+    memory context, a hint's line, a skill's instructions): one pass over the text, whatever
+    the number of tools. A name may hold a dot, a colon or a hyphen, and so does the
+    punctuation after it: "Call fetch_consent_message." names the tool."""
     found = set(re.findall(r"[A-Za-z0-9_.:-]+", text or ""))
+    found |= {word.rstrip(".:-") for word in found}
     return {name for name in names if name in found}
 
 

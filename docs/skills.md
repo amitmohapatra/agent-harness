@@ -67,6 +67,21 @@ them (then `- and N more: list_skills() lists them all`); both tools stay offere
 run's tools are narrowed. A function that adds the tools in its own code
 (`agent.tools.use(src.tools())`) reads the listing with `list_skills`, as before.
 
+**A `load_skill` of your own around the harness's.** An application that wraps `load_skill`
+in a tool of its own (to log the load, to add a line of its own) keeps the listing: the
+harness finds its skills behind either tool, through a decorator's `__wrapped__`, a
+`partial`, or what the wrapper's closure holds. The listing used to go missing without a word
+for such a run, which leaves the model to think of `list_skills` by itself (the 13 of 30
+above). A `load_skill` with nothing of the harness's behind it is not the harness's to list:
+the run is told nothing, and the `trellis.skills` log says so (`skills.not_told`).
+
+**The tools a skill names.** Where a run's tools are narrowed for the request (the tool
+hints, a memory context), the narrowing was chosen before any skill was read: a skill whose
+steps say "call `fetch_consent_message`, then `create_allocation`" told the model to call
+tools it was not offered. Loading a skill with the harness's `load_skill` now offers the
+run's tools its text names, from the next model call. Nothing is added where the tools are
+not narrowed, and a name the run does not have is never offered.
+
 ### The OpenAI Agents SDK's `SandboxAgent`
 
 The OpenAI Agents SDK has a skills slot only on a `SandboxAgent`; a plain `Agent` has none.

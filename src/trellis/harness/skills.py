@@ -789,7 +789,63 @@ class SkillTools:
         doc = await self.skills.document(name, self.scope)
         listed = "".join(f"\n- {f}" for f in doc.files)
         files = f"\n\nFiles ({LOAD_SKILL}(name, path)):{listed}" if listed else ""
-        return f"{await self.skills.full_text(name, self.scope)}{files}"
+        text = await self.skills.full_text(name, self.scope)
+        offer_named(current(), text)
+        return f"{text}{files}"
+
+
+def offer_named(runtime: Runtime | None, text: str) -> set[str]:
+    """Offer the run's tools a loaded skill names, where its tools are narrowed: a skill's
+    steps call tools by name, and a narrowing chosen for the request before the skill was
+    read (the tool hints', a memory context's) does not know them - the model was told to
+    call a tool it was not offered. Those it adds; none where the run's tools are not
+    narrowed, or outside a run."""
+    if runtime is None or runtime.offered is None:
+        return set()
+    from trellis.harness.agent import named_in  # noqa: PLC0415 - the agent module reads this one
+
+    named = named_in(text, runtime.tool_set()) - runtime.offered
+    runtime.offered |= named
+    return named
+
+
+def _behind(run: Any) -> SkillTools | None:
+    """The harness's skill tools a tool's function is, wraps or closes over: the function
+    itself (a bound method of :class:`SkillTools`), one a decorator kept (``__wrapped__``), a
+    ``partial``'s or one it binds, or one its closure holds (as itself, a bound method or a
+    :class:`Tool`) -
+    an application that wraps ``load_skill`` to add something of its own still reads the
+    harness's skills."""
+    for _ in range(8):  # a few layers of wrapping: never a loop
+        if run is None:
+            return None
+        held = [run, *_closed_over(run), *_bound_with(run)]
+        for value in held:
+            for candidate in (value, getattr(value, "run", None)):
+                owner = candidate if isinstance(candidate, SkillTools) else None
+                owner = owner or getattr(candidate, "__self__", None)
+                if isinstance(owner, SkillTools):
+                    return owner
+        run = getattr(run, "__wrapped__", None) or getattr(run, "func", None)
+    return None
+
+
+def _bound_with(run: Any) -> list[Any]:
+    """What a ``partial`` binds: its positional and keyword arguments."""
+    args, keywords = getattr(run, "args", None), getattr(run, "keywords", None)
+    bound = list(args) if isinstance(args, tuple) else []
+    return [*bound, *(keywords.values() if isinstance(keywords, dict) else ())]
+
+
+def _closed_over(run: Any) -> list[Any]:
+    """What ``run``'s closure holds (an empty cell is skipped)."""
+    out: list[Any] = []
+    for cell in getattr(run, "__closure__", None) or ():
+        try:
+            out.append(cell.cell_contents)
+        except ValueError:
+            continue
+    return out
 
 
 async def told(runtime: Runtime) -> None:
@@ -798,11 +854,18 @@ async def told(runtime: Runtime) -> None:
     framework's own slot puts in the model's instructions itself (Deep Agents, Claude, Kimi,
     the OpenAI sandbox agent), so a task a skill covers finds it without a listing call
     first. At most :data:`NOTE_CHARS` of lines, then how many more :data:`LIST_SKILLS` lists;
-    the two tools stay offered where the run's tools are narrowed. A run with no skill, or
-    whose ``load_skill`` is a tool of its own, is told nothing."""
-    tool = runtime.toolbox.get(LOAD_SKILL)
-    source = getattr(tool.run, "__self__", None) if tool is not None else None
-    lines = await source.lines() if isinstance(source, SkillTools) else []
+    the two tools stay offered where the run's tools are narrowed.
+
+    The skills are those behind either tool (:func:`_behind`): an application that keeps the
+    harness's ``list_skills`` and wraps ``load_skill`` in a tool of its own - to log the
+    load, to add a line - is told as one that wraps neither. A run with no skill is told
+    nothing; so is one whose ``load_skill`` has nothing of the harness's behind it (the name,
+    not the tool), and that is logged: its skills are listed only when the model asks."""
+    tools = [t for name in (LOAD_SKILL, LIST_SKILLS) if (t := runtime.toolbox.get(name))]
+    source = next((s for t in tools if (s := _behind(t.run)) is not None), None)
+    if source is None and tools:
+        log.info("skills.not_told: %s is the agent's own tool", tools[0].name)
+    lines = await source.lines() if source is not None else []
     if not lines:
         return
     shown: list[str] = []

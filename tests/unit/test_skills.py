@@ -567,3 +567,142 @@ async def test_the_openai_source_lists_once_pinned_and_says_a_skill_it_cannot_lo
         "path": ".agents/nope",
         "error": "no skill 'nope' for this run",
     }
+
+
+async def test_a_run_whose_load_skill_wraps_the_harnesses_is_told_its_skills() -> None:
+    """An application that wraps ``load_skill`` in a tool of its own - to log the load, to add
+    a line - still reads the harness's skills: the listing found behind either skill tool, by
+    a decorator's ``__wrapped__``, a ``partial`` or what a closure holds. It was told nothing,
+    silently, so a task a skill covered never found it."""
+    import functools
+
+    store = SkillStore()
+    store.put("allocate", "Call create_allocation.", description="Creates an allocation.")
+    own = {t.name: t for t in await combine(store).tools(ADA).resolve()}
+    listing, loading = own["list_skills"], own["load_skill"]
+    spec = module.ToolSpec(name="load_skill", description="The team's own, around the harness's.")
+
+    async def closes_over(args: dict[str, Any]) -> str:
+        return "loaded: " + await loading.run(args)
+
+    @functools.wraps(loading.run)
+    async def decorated(args: dict[str, Any]) -> str:
+        return await loading.run(args)
+
+    async def through(inner: Any, args: dict[str, Any]) -> str:
+        return await inner(args)
+
+    wrappers = (closes_over, decorated, functools.partial(through, loading.run))
+    for wrapper in wrappers:
+        for toolbox in (
+            {"list_skills": listing, "load_skill": module.Tool(spec, wrapper)},
+            {"load_skill": module.Tool(spec, wrapper)},  # and no listing tool at all
+        ):
+            run = SimpleNamespace(toolbox=toolbox, offered={"other"}, pushed_context=None)
+            await module.told(run)  # type: ignore[arg-type]
+            assert run.context == f"{module.NOTE}\n- allocate: Creates an allocation."
+            assert run.offered == {"other", "list_skills", "load_skill"}
+
+    # the harness's listing beside a load_skill that is wholly the team's: still told
+    async def theirs(args: dict[str, Any]) -> str:
+        return "theirs"
+
+    run = SimpleNamespace(
+        toolbox={"list_skills": listing, "load_skill": module.Tool(spec, theirs)},
+        offered=None,
+        pushed_context=None,
+    )
+    await module.told(run)  # type: ignore[arg-type]
+    assert run.context.endswith("- allocate: Creates an allocation.")
+
+
+async def test_a_load_skill_with_nothing_of_the_harnesses_behind_it_is_said_in_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def load_skill(args: dict[str, Any]) -> str:
+        return "theirs"
+
+    spec = module.ToolSpec(name="load_skill", description="A tool of the team's own.")
+    run = SimpleNamespace(toolbox={"load_skill": module.Tool(spec, load_skill)}, offered=None)
+    with caplog.at_level("INFO", logger="trellis.skills"):
+        await module.told(run)  # type: ignore[arg-type]
+    assert not hasattr(run, "context")
+    assert "skills.not_told" in caplog.text and "load_skill" in caplog.text
+
+
+async def test_loading_a_skill_offers_the_tools_it_names_where_the_tools_are_narrowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A narrowing chosen for the request before the skill was read does not know the skill's
+    steps: the model was told to call a tool it was not offered."""
+    store = SkillStore()
+    body = (
+        "1. Call fetch_consent_message.\n2. Then create_allocation with the store.\n"
+        "Never call drop_table."
+    )
+    store.put("allocate", body, description="Creates an allocation.")
+    tools = {t.name: t for t in await combine(store).tools(ADA).resolve()}
+
+    class Run:  # what the offer reads of a run
+        def __init__(self, offered: set[str] | None) -> None:
+            self.offered = offered
+
+        def tool_set(self) -> list[str]:
+            return ["get_stock", "create_allocation", "fetch_consent_message"]
+
+    # the load hands the skill's text and the run it is called in to the offer
+    offered: list[tuple[Any, str]] = []
+    monkeypatch.setattr(module, "offer_named", lambda run, text: offered.append((run, text)))
+    text = await tools["load_skill"].run({"name": "allocate"})
+    [(run, loaded)] = offered
+    assert run is None and body in loaded and body in text  # outside a run: none to offer in
+    monkeypatch.undo()
+
+    # the run's tools the skill names, and only those: not a name the run does not have
+    narrowed = Run({"get_stock", "load_skill"})
+    assert module.offer_named(narrowed, body) == {  # type: ignore[arg-type]
+        "create_allocation",
+        "fetch_consent_message",
+    }
+    assert narrowed.offered == {
+        "get_stock",
+        "load_skill",
+        "create_allocation",
+        "fetch_consent_message",
+    }
+    assert module.offer_named(narrowed, body) == set()  # type: ignore[arg-type]
+    # not narrowed: nothing to add; outside a run: nothing at all
+    whole = Run(None)
+    assert module.offer_named(whole, body) == set() and whole.offered is None  # type: ignore[arg-type]
+    assert module.offer_named(None, body) == set()
+
+
+def test_what_is_behind_a_tool_is_looked_for_a_few_layers_deep_and_no_further() -> None:
+    """A wrapper whose closure holds a name not yet bound, and a chain of wrappers longer
+    than any application builds: neither is the harness's, and neither loops or raises."""
+    import functools
+
+    def unbound() -> Any:
+        async def tool(args: dict[str, Any]) -> str:
+            return later  # a cell of the closure that nothing ever filled
+
+        if tool is None:  # pragma: no cover - only makes ``later`` a closure variable
+            later = "never"
+        return tool
+
+    assert module._behind(unbound()) is None
+
+    async def theirs(args: dict[str, Any]) -> str:
+        return "theirs"
+
+    wrapped: Any = theirs
+    for _ in range(12):
+        inner = wrapped
+
+        @functools.wraps(inner)
+        async def layer(args: dict[str, Any], inner: Any = inner) -> str:
+            return await inner(args)
+
+        wrapped = layer
+    assert module._behind(wrapped) is None
+    assert module._behind(None) is None
