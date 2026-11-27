@@ -4106,6 +4106,7 @@ def target_of(
     bound: Sequence[Any] = (),
     variant: str = "main",
     skills: Any = None,
+    system: str = r.SYSTEM,
 ) -> tuple[Any, dict[str, Any]]:
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
@@ -4129,7 +4130,8 @@ def target_of(
     ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
     the SDK's ``Skills`` capability on a local sandbox, and its ``tools()`` declared where
     there is no slot (``langgraph``; ``graph`` binds its tools itself: among ``bound``, and
-    declared too, so the harness knows the run has them)."""
+    declared too, so the harness knows the run has them). ``system``: the agent's instructions
+    (the retail suite's unless another benchmark gives its own: ``benchmark.locomo``)."""
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
     kind = adapter_of(history, adapter)
@@ -4137,7 +4139,7 @@ def target_of(
         from benchmark.cost.variants import VARIANTS, Setup
 
         setup = Setup(
-            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools),
+            system=system, model=model, window=window, max_steps=max_steps, tools=tuple(tools),
             skills=skills,
         )  # fmt: skip
         return VARIANTS[variant].build(setup)
@@ -4157,7 +4159,7 @@ def target_of(
 
             # with memory on, no checkpointer of its own unless threaded: memory keeps its turns
             graph = create_agent(
-                chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
+                chat, tools=[], system_prompt=system, middleware=stack,
                 checkpointer=InMemorySaver() if threaded else None, name="complex",
             )  # fmt: skip
             tools = [*tools, *([skills.tools()] if skills is not None else [])]
@@ -4171,7 +4173,7 @@ def target_of(
             if variant in (PLANNED, PLANNED_THREADED):
                 stack = [TodoListMiddleware(), *stack]  # Deep Agents' planning, as a team adds it
             graph = create_deep_agent(
-                model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
+                model=chat, tools=[], system_prompt=system, middleware=stack,
                 checkpointer=saver, name="complex",
                 **(skills.deep_agent() if skills is not None else {}),
             )  # fmt: skip
@@ -4188,7 +4190,7 @@ def target_of(
         own = convert("langchain", [t.tool for t in tools]) or []
         named = {t.name for t in own}
         graph = create_agent(
-            chat, tools=[*own, *(t for t in bound if t.name not in named)], system_prompt=r.SYSTEM,
+            chat, tools=[*own, *(t for t in bound if t.name not in named)], system_prompt=system,
             checkpointer=InMemorySaver(), name="complex",
         )  # fmt: skip
         if skills is not None:  # bound by the caller, and declared: the harness knows of them
@@ -4217,7 +4219,7 @@ def target_of(
         served = OpenAIChatCompletionsModel(model=str(model), openai_client=client)
         given: dict[str, Any] = {"max_turns": 2 * max_steps}
         if skills is None:
-            agent = Agent(name="complex", instructions=r.SYSTEM, model=served)
+            agent = Agent(name="complex", instructions=system, model=served)
         else:
             agent, given["run_config"] = _sandbox_agent(served, skills)
         setattr(agent, TOOLS_ATTRIBUTE, list(tools))
@@ -4228,14 +4230,14 @@ def target_of(
         # no filesystem settings (the SDK's isolation mode): by default the CLI loads the
         # CLAUDE.md of the directory it runs in, which is this checkout
         options = ClaudeAgentOptions(
-            model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps,
+            model=str(model), system_prompt=system, max_turns=2 * max_steps,
             setting_sources=[], cwd=str(work_folder("claude")),
             **(skills.claude() if skills is not None else {}),
         )  # fmt: skip
         setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
     if kind == "kimi":
-        return kimi_target(model, tools, skills, max_steps=max_steps), {}
+        return kimi_target(model, tools, skills, max_steps=max_steps, system=system), {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
 
 
@@ -4271,7 +4273,12 @@ def _working(variable: str, default: str) -> Path:
 
 
 def kimi_target(
-    model: Any, tools: Sequence[Any], skills: Any = None, *, max_steps: int | None = None
+    model: Any,
+    tools: Sequence[Any],
+    skills: Any = None,
+    *,
+    max_steps: int | None = None,
+    system: str = r.SYSTEM,
 ) -> Any:
     """Kimi Code (``kimi()``) on the ``LLM_*`` endpoint's model: Anthropic's own API through
     Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one; or the scripted
@@ -4279,7 +4286,8 @@ def kimi_target(
     prompt crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its
     own. ``skills``: a skill set, in Kimi's own skills folder (``kimi(**skills.kimi())``).
     ``max_steps``: Kimi's own step limit per turn (``KIMI_LOOP_MAX_STEPS_PER_TURN``), the
-    suite's step limit as every other adapter is given it in its own slot."""
+    suite's step limit as every other adapter is given it in its own slot. ``system``: the
+    instructions that AGENTS.md holds (the retail suite's unless given)."""
     import os
     from urllib.parse import urlsplit
 
@@ -4288,7 +4296,7 @@ def kimi_target(
 
     root = Path(os.environ.get("KIMI_RUN_ROOT") or KIMI_ROOT).resolve()
     cwd = _working("KIMI_RUN_ROOT", KIMI_ROOT)
-    (cwd / "AGENTS.md").write_text(r.SYSTEM)
+    (cwd / "AGENTS.md").write_text(system)
     scripted = not isinstance(model, str)
     base = model.url if scripted else os.environ.get("LLM_BASE_URL", "")
     anthropic = urlsplit(base).hostname == "api.anthropic.com"

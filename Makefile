@@ -59,6 +59,10 @@ bench-cost:  ## Cost and accuracy of ReAct over 10-500 tools per variant (LLM_BA
 bench-gate:  ## The cost benchmark's report (build/bench-cost.json) against the stored baseline: fails a cell worse past its margin
 	$(PY) -m benchmark.cost.gate build/bench-cost.json benchmark/cost/results/baseline-local.json $(GATE_ARGS)
 
+.PHONY: bench-locomo
+bench-locomo:  ## LoCoMo answered by a harness agent, in the memory repository's scorer's shape (LOCOMO_ARGS: --dry-run prints the cost, --yes spends it; benchmark/locomo/README.md)
+	$(PY) -m benchmark.locomo $(LOCOMO_ARGS)
+
 .PHONY: bench-load
 bench-load:  ## Many runs at once on 1 and 2 worker processes: throughput, p50/p95/p99, errors, CPU and memory (LOAD_ARGS)
 	$(PY) -m benchmark.load $(LOAD_ARGS)

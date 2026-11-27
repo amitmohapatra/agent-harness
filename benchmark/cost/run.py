@@ -177,12 +177,15 @@ class Called(Hooks):
         return outcome
 
 
-def harness(*, memory: bool = False, runs: bool = False) -> Harness:
+def harness(*, memory: bool = False, runs: bool = False, api_key: str | None = None) -> Harness:
     """The environment's harness with nothing but the model: memory, the run store, tracing
     and the gateway's MCP tools off, so no service's data is read or written — ``memory``:
     the environment's memory service on (its context and tool hints); ``runs``: the
-    environment's agent-runs (``RUNS_URL``) the run store."""
+    environment's agent-runs (``RUNS_URL``) the run store; ``api_key``: the Trellis key in
+    ``TRELLIS_API_KEY``'s place (a suite whose runs are in several tenants: a key each)."""
     config = Settings.from_env()
+    if api_key:
+        config = config.model_copy(update={"api_key": api_key})
     # the suite runs Claude Code and Kimi Code in work folders of this machine: its deployment
     # allows commands here (TRELLIS_HOST_EXECUTION=allow)
     off = (
