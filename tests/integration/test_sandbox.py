@@ -529,7 +529,9 @@ async def test_a_queued_run_agent_runs_again_goes_on_in_its_sandbox() -> None:
         assert [call for call, _ in provider.calls] == ["create"]
         assert await h.worker([agent]).run_once()
         assert (await handle.result(wait=5)).answer == "made"
-    assert [call for call, _ in provider.calls] == ["create", "delete"]
+    # the attempt that ended the run ran nothing in the sandbox (its command was replayed): it
+    # attached the run's sandbox all the same, to keep what the run left for its user
+    assert [call for call, _ in provider.calls] == ["create", "attach", "delete"]
     assert provider.commands == ["echo made"]  # replayed in the next attempt
 
 
@@ -834,6 +836,51 @@ async def test_the_card_says_what_it_can_and_a_probe_that_fails_leaves_the_tool_
         tools = await source.tools().resolve()
     assert tools[0].spec.description == source._tools[0].spec.description
     assert "environment card was not read: Docker is not reachable" in caplog.text
+
+
+async def test_outputs_written_before_a_pause_are_kept_by_the_attempt_that_ends_the_run() -> None:
+    """The run's sandbox is the one its journal names, whichever attempt worked in it: a file
+    written in ``outputs/`` before the run paused for a person is kept when the run succeeds,
+    though the attempt that ends it ran nothing in the sandbox. A sandbox that is gone by
+    then is a warning, and the run's success stands."""
+    harness = Harness(config=Settings(files_url=f"memory://paused-outputs-{id(object())}"))
+    provider = FakeSandboxes()
+    box = sandbox(provider)
+    seen: dict[str, Any] = {}
+
+    async def work(input: str, agent: Runtime) -> Any:
+        await agent.tools.use(box.tools())
+        await agent.tools.call("sandbox_write", path="outputs/report.csv", content="n\n1\n")
+        seen["runtime"] = trellis.current()
+        await agent.ask("Go on?")
+        return "done"
+
+    agent = harness.wrap(work, id="paused-outputs")
+    for lost in (False, True):
+        paused = await agent.run("go", user="u")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        if lost:  # deleted behind the run's back, and it left no snapshot
+            provider.boxes.clear()
+        watching: list[Any] = []
+
+        async def watch(run_id: str = paused.run_id, into: list[Any] = watching) -> None:
+            async for event in agent.events(run_id):
+                into.append(event)
+
+        watcher = asyncio.create_task(watch())
+        await asyncio.sleep(0)  # following the run before it goes on
+        interrupt = paused.interrupt.interrupt_id
+        done = await agent.resume(interrupt, "answer", answer="yes", reviewer="u")
+        await watcher
+        assert done.status is RunStatus.SUCCESS, done.error
+        size = await harness.files.size(seen["runtime"].files_folder(), "report.csv")
+        warned = [w["message"] for w in custom(watching, "warning") if w["code"] == "sandbox"]
+        if lost:
+            assert size is None and len(warned) == 1
+            assert warned[0].startswith("the run's sandbox was not read for its files: ")
+        else:
+            assert size == 4 and not warned
+            assert [f["file"] for f in custom(watching, "file")] == ["report.csv"]
 
 
 async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(

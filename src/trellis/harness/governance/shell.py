@@ -639,6 +639,16 @@ class Shell:
         inside = _Folders(self.cwd, self.cwd, self.reads, self.env).inside
         return tool in EDITORS and inside(file_of(args))
 
+    def made(self, tool: str, args: Mapping[str, Any]) -> Path | None:
+        """The file a file tool's call (:data:`EDITORS`) wrote directly in the folder the run
+        works in — a bare name there, what a user names without a place — by its whole path
+        (its ``..`` and links followed); ``None`` for any other call, a file in a folder
+        below or outside it, and with no folder known."""
+        if tool not in EDITORS or self.cwd is None:
+            return None
+        where = _Folders(self.cwd, self.cwd, self.reads, self.env).resolved(file_of(args))
+        return where if where is not None and where.parent == self.cwd else None
+
     def ran(self, args: Mapping[str, Any]) -> None:
         """A command of this shell ran (``args``: the call's): the folders it may have left it
         in, besides those it was in (whether it ended well is not known: its ``cd`` holds only

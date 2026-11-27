@@ -24,6 +24,34 @@ the next model call.
 a name followed by a full stop or a colon ("Call fetch_consent_message."): the punctuation
 was read as part of the name.
 
+### Fixed: a file the user names without a place reaches them, with a bucket or without
+
+"Save it as `report.md`": Claude Code and Kimi Code write that file in the folder they work
+in, as their SDKs do, and only a file in `outputs/` was kept in the file store. So the user
+of a chat never got the file they asked for by name, the conversation's next turn on another
+server could not find it, and in a sandboxed Kimi run it went with the sandbox. Each file the
+framework's own file tools (`Write`, `Edit`, `MultiEdit`) write directly in the folder it
+works in is now kept for the run's user as well, by the delivery `outputs/` already has: in
+the store `TRELLIS_FILES_URL` names (a bucket) or this machine's when it names none,
+announced (`file`), served over AG-UI, and told to the conversation's later turns, which read
+it back with `read_file`. It is kept as a copy — the file stays where the user said — and
+once, however often the run wrote it: when the run succeeds, or, for a file on this machine,
+before the run pauses for a person (the server that resumes it may be another). Only what
+the run's own calls wrote is kept (`Journal.written`), and only as they left it: in a folder
+runs share, a file another run wrote over since is never given as this run's. A file of the
+same name in `outputs/` is the one kept. A file a shell command makes is the user's from
+`outputs/`, as before. What the agents are told did not change.
+
+### Fixed: files a sandboxed run wrote before a pause are kept when it ends
+
+A run's files for its user were read from the sandbox the *attempt* had attached. A run that
+wrote `outputs/report.csv`, paused for a person (an approval, a question) and was resumed
+ended in an attempt that ran nothing in the sandbox: nothing was read, and the sandbox was
+deleted with the file in it. The run's sandbox is the one its journal names, whichever
+attempt worked in it: the attempt that ends the run attaches it to keep its files. One that
+is gone by then (deleted behind the run, no snapshot) is a warning, and the run's success
+stands.
+
 ### Changed: a file written in the folder the run works in is not the user's question
 
 Claude Code and Kimi Code ask before their file tools write (`Write`, `Edit`, Claude's

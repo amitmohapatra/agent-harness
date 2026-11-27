@@ -64,7 +64,7 @@ command="kimi", reads=())`:
 | Argument | What it is |
 |---|---|
 | `model` | the model's name on the gateway: with Bifrost serving the harness, Kimi's model calls go through Bifrost's OpenAI route with the virtual key (below). Without Bifrost, Kimi calls the model it is configured with: its login (`kimi login`) or `KIMI_MODEL_*` in `env` |
-| `cwd` | where Kimi works (this process's working directory by default) |
+| `cwd` | where Kimi works (this process's working directory by default). Files it writes in its `outputs/` are the user's, and so is a file its `Write` or `Edit` leaves there by a bare name — one the user named without a place — kept in the file store as a copy ([sandbox.md](../sandbox.md#files-for-the-user-outputs)) |
 | `env` | over this process's environment, for the `kimi` process (`KIMI_MODEL_BASE_URL`, `KIMI_MODEL_API_KEY`, `KIMI_LOOP_MAX_STEPS_PER_TURN`...) |
 | `mcp_servers` | Kimi's own MCP servers, as ACP takes them: `{"name", "command", "args", "env"}` (stdio) or `{"type": "http", "name", "url", "headers"}`, beside the harness's — over HTTP for Kimi to offer their tools to its model ([below](#models-swarms-and-limits)) |
 | `mode` | Kimi's session mode for a session the run starts: `"default"` or `"plan"`. `"auto"` and `"yolo"` are refused: they approve on their own, and governance would see no call. Whatever is given, every session is set to ask ([below](#the-session-mode)) |

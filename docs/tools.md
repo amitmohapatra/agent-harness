@@ -353,7 +353,8 @@ what it was. Only a graph built by hand, whose model call the harness cannot rea
 
 ### Files kept for the user, read back
 
-A file a run kept for its user (`query_result(save_as=)`, a sandbox's `outputs/`) is read back
+A file a run kept for its user (`query_result(save_as=)`, a sandbox's `outputs/`, a file Claude
+Code or Kimi Code wrote by a bare name: [sandbox.md](sandbox.md#files-for-the-user-outputs)) is read back
 by later runs, always within the run's tenant and user (`tools/stored.py`). Beside each file the
 store keeps its record (`.<name>.json`): the run, when, what made it, `query_result`'s query
 and the results it read with their fetch times, the run's last 20 tool calls. A finished run

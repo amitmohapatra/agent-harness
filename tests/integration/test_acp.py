@@ -1749,6 +1749,54 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     assert [output for name, output in outputs if name == "Bash"] == [" FAKE=1", ""]
 
 
+async def test_a_file_a_sandboxed_agent_writes_by_a_bare_name_is_kept_before_its_sandbox_goes(
+    tmp_path: Path,
+) -> None:
+    """A sandboxed run's files go with its sandbox: one the agent's own ``Write`` left
+    directly in the folder it works in there (a file the user named without a place) is kept
+    in the file store first — once, when the run succeeds: a pause keeps the sandbox, and
+    the file in it. One a folder below is not kept."""
+    from trellis import Settings
+
+    sandboxes = FakeSandboxes()
+    folders: list[str] = []
+
+    class Started(Hooks):
+        async def on_run_start(self, run: Any) -> None:
+            folders.append(run.files_folder())
+
+    script = [
+        {"builtin": "Write", "args": {"path": "report.md", "content": "# Q3\n"}},
+        {"builtin": "Write", "args": {"path": "docs/deep.md", "content": "deep"}},
+        {"builtin": "Edit", "args": {"path": "/srv/elsewhere.md"}, "ask": True},  # a person's
+        {"text": "saved"},
+    ]
+    h = Harness(config=Settings(files_url=f"memory://acp-named-{id(tmp_path)}"))
+    agent = h.wrap(
+        fake(tmp_path, script, sandbox=sandbox(sandboxes)), id="boxed", hooks=[Started()]
+    )
+    events = [e async for e in agent.stream("save the report as report.md", user="u1")]
+    assert [e for e in events if e.type is RunEventType.INTERRUPT]
+    assert not [e for e in events if e.data.get("name") == "file"]  # still in its sandbox
+    later: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.events(events[0].run_id):
+            later.append(event)
+
+    watcher = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # following the run before it goes on
+    done = await agent.resume(events[0].run_id, "approve", reviewer="u1")
+    await watcher
+    assert done.status is RunStatus.SUCCESS, done.error
+    kept = [(e.data["file"], e.data["size"]) for e in later if e.data.get("name") == "file"]
+    assert kept == [("report.md", 5)]  # once
+    assert await h.files.read(folders[0], "report.md") == b"# Q3\n"
+    [made] = sandboxes.made()
+    assert made not in sandboxes.boxes  # deleted with its run, after the file was kept
+    await h.aclose()
+
+
 @pytest.mark.parametrize("boxed", [False, True], ids=["on-this-machine", "sandboxed"])
 async def test_a_users_message_that_starts_with_a_slash_is_words_not_a_command_of_the_agents(
     harness: Harness, tmp_path: Path, boxed: bool

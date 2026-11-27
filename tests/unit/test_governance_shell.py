@@ -1015,6 +1015,20 @@ def test_a_file_tools_write_inside_the_folder_the_shell_works_in_is_the_runs_own
     assert not shell.Shell(None).keeps("Write", {"file_path": "report.md"})
 
 
+def test_a_file_written_by_a_bare_name_is_the_one_directly_in_the_folder(run: Path) -> None:
+    here = shell.Shell(run)
+    assert here.made("Write", {"file_path": "report.md"}) == run / "report.md"
+    assert here.made("Edit", {"path": str(run / "report.md")}) == run / "report.md"
+    assert here.made("MultiEdit", {"file_path": "docs/../report.md"}) == run / "report.md"
+    assert here.made("Write", {"file_path": "docs/report.md"}) is None  # a folder below
+    assert here.made("Write", {"file_path": "../kept/report.md"}) is None  # outside it
+    (run / "link.md").symlink_to(run.parent / "kept" / "report.md")
+    assert here.made("Write", {"file_path": "link.md"}) is None  # a link that leads out
+    assert here.made("Write", {"file_path": "."}) is None and here.made("Write", {}) is None
+    assert here.made("Bash", {"command": "touch report.md"}) is None  # no file tool
+    assert shell.Shell(None).made("Write", {"file_path": "report.md"}) is None
+
+
 # --------------------------------------------------------------------------- what the lists promise
 #: The names main refused wherever they were called (its ``PY_WRITES``).
 REFUSED = {

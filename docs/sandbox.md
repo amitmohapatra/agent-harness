@@ -312,7 +312,9 @@ in the file store (`TRELLIS_FILES_URL`, [configuration.md](configuration.md)) be
 is deleted. The file is named in the run's journal and announced with the `file` event, and
 `serve_chat` serves it to the run's user ([surfaces.md](surfaces.md)). A file the store cannot
 take is left behind and reported in a warning: a name that is not one safe path part, or a file
-over 50 MiB. A run that fails keeps none.
+over 50 MiB. A run that fails keeps none. The sandbox is the run's, whichever attempt worked in
+it: a file written before the run paused for a person is kept when the run succeeds, though the
+attempt that ends it ran nothing there.
 
 A file that is not the user's is known at once, with the call that wrote it, before the answer
 says it was saved:
@@ -355,6 +357,30 @@ directly in that `outputs/` is kept, announced and served as above, then removed
 (so a later run does not give it again); the rest of the folder is left alone. Runs that share a
 working folder share its `outputs/`: give each user's runs a folder of their own. A sandboxed
 Kimi run writes in its sandbox instead.
+
+**A file the user names without a place is theirs too.** "Save it as `report.md`" is written
+in the working folder, and the user of a chat cannot reach that folder — nor can the
+conversation's next turn on another server, and a sandboxed run's folder goes with its
+sandbox. So each file the framework's own file tools (`Write`, `Edit`, Claude's `MultiEdit`)
+write directly in the folder it works in is kept in the file store as well: announced,
+served, and told to the conversation's later turns, which read it back with `read_file`
+([tools.md](tools.md#files-kept-for-the-user-read-back)).
+
+- **A copy, in whichever store there is.** The file stays where the user said. It is kept in
+  the bucket `TRELLIS_FILES_URL` names, or in this machine's store when it names none.
+- **Once.** However often the run writes the file, it is kept and announced once: when the
+  run succeeds. A run that pauses for a person keeps what it named so far before it pauses,
+  by the server that has the file — the server that resumes it may be another — and does not
+  keep it again at its end unless it was written again. A sandboxed run's file stays in its
+  sandbox across a pause and is kept before the sandbox is deleted.
+- **Only what the run's own calls wrote, as they left it.** Never what else the folder holds
+  — a file that was there before, another run's — and not a file in a folder below. A folder
+  on this machine may be one runs share, so the file is kept only if it still is what this
+  run's call wrote: one another run wrote over since, or a link put in its place, is not
+  given as this run's (a warning). A file a shell command makes for the user goes in
+  `outputs/`, as above.
+- **`outputs/` wins.** When `outputs/` holds a file of the same name, that one is kept, and
+  the file beside it is not: one file, announced once.
 
 ## Automatic
 

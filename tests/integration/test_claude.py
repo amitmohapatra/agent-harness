@@ -4,6 +4,7 @@ in-process MCP tool calls included."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -827,6 +828,211 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     # outputs/; a run nobody is known to read gets no note on when to ask)
     started = started_with(tmp_path)
     assert started["system_prompt"] == "" and started["context"] == boxes.DELIVERS_HERE
+    await harness.aclose()
+
+
+def _file_events(events: list[Any]) -> list[tuple[str, int]]:
+    """Each file the stream announced, with its size."""
+    return [(e.data["file"], e.data["size"]) for e in events if e.data.get("name") == "file"]
+
+
+class _Folders(Hooks):
+    """Where each run of the agent keeps its files, in the order they started."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+
+    async def on_run_start(self, run: Any) -> None:
+        self.started.append(run.files_folder())
+
+
+@pytest.mark.parametrize("kept_in", ["a store elsewhere", "this machine's default"])
+async def test_a_file_claude_writes_by_a_bare_name_is_kept_once_for_its_user_and_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kept_in: str
+) -> None:
+    """A file the user names without a place is written in Claude's working folder, as the
+    SDK's own ``Write`` does it: it is the user's too. When the run succeeds a copy is kept
+    in the file store — whichever it is: the one ``TRELLIS_FILES_URL`` names, or this
+    machine's when it names none — named in the journal and announced; the file stays where
+    the user said. Once, however often the run wrote it. Only what the run's own file tools
+    wrote directly there: not a file that was there before, one in a folder below, nor one
+    that was no file when its call ended."""
+    from trellis import Settings
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    url = f"memory://claude-named-{id(tmp_path)}" if kept_in == "a store elsewhere" else None
+    work = tmp_path / "work"
+    (work / "docs").mkdir(parents=True)
+    # as Claude's ``Write`` leaves them (the scripted CLI writes nothing itself)
+    (work / "report.md").write_text("# Q3\n")
+    (work / "docs" / "deep.md").write_text("deep")
+    (work / "notes.txt").write_text("there before the run")
+    script = [
+        {"builtin": "Write", "args": {"file_path": "report.md", "content": "# Q3\n"}},
+        {"builtin": "Edit", "args": {"file_path": str(work / "report.md")}},  # the same file
+        {"builtin": "Write", "args": {"file_path": "docs/deep.md", "content": "deep"}},
+        {"builtin": "Write", "args": {"file_path": "gone.md", "content": "x"}},  # no file there
+        {"text": "saved"},
+    ]
+    folders = _Folders()
+    harness = Harness(config=Settings(host_execution="allow", files_url=url))
+    agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="namer", hooks=[folders])
+    events = [e async for e in agent.stream("save the report as report.md", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS, events[-1].error
+    assert not [e for e in events if e.type is RunEventType.INTERRUPT]
+    assert _file_events(events) == [("report.md", 5)]  # written twice, kept once
+    assert await harness.files.read(folders.started[0], "report.md") == b"# Q3\n"
+    assert (work / "report.md").read_text() == "# Q3\n"  # a copy: it stays where they said
+    if url is None:  # this machine's store: under the XDG data folder
+        assert list((tmp_path / "xdg" / "trellis" / "files").rglob("report.md"))
+    await harness.aclose()
+
+
+async def test_a_bare_named_file_also_in_the_outputs_folder_is_kept_once_as_the_outputs(
+    tmp_path: Path,
+) -> None:
+    """``outputs/`` is where a file for the user goes by itself: one of the same name written
+    in the working folder too is not kept beside it — one file, announced once."""
+    from trellis import Settings
+
+    work = tmp_path / "work"
+    (work / "outputs").mkdir(parents=True)
+    (work / "outputs" / "report.md").write_text("for the user")
+    (work / "report.md").write_text("a draft")
+    script = [{"builtin": "Write", "args": {"file_path": "report.md"}}, {"text": "saved"}]
+    folders = _Folders()
+    config = Settings(host_execution="allow", files_url=f"memory://claude-twice-{id(tmp_path)}")
+    harness = Harness(config=config)
+    agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="twice", hooks=[folders])
+    events = [e async for e in agent.stream("save it", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS, events[-1].error
+    assert _file_events(events) == [("report.md", len("for the user"))]
+    assert await harness.files.read(folders.started[0], "report.md") == b"for the user"
+    assert (work / "report.md").read_text() == "a draft"
+    await harness.aclose()
+
+
+async def test_a_bare_named_file_is_kept_when_its_run_pauses_and_not_again_when_it_ends(
+    tmp_path: Path,
+) -> None:
+    """The server that resumes a run may be another, whose disk has no such file: what the
+    run named is kept when it pauses for a person, by the server that has it. The worker that
+    ends the run (its own harness, the same run store and file store) keeps nothing again."""
+    from trellis import Settings
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "report.md").write_text("# Q3\n")
+    script = [
+        {"builtin": "Write", "args": {"file_path": "report.md"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/elsewhere.md"}},  # a person's to approve
+        {"text": "saved"},
+    ]
+    config = Settings(host_execution="allow", files_url=f"memory://claude-paused-{id(tmp_path)}")
+    first, folders = Harness(config=config), _Folders()
+    target = options(tmp_path, script, cwd=str(work))
+    starting = first.wrap(target, id="pauser", hooks=[folders]).stream("save", user="u1")
+    events = [e async for e in starting]
+    assert [e for e in events if e.type is RunEventType.INTERRUPT]
+    assert _file_events(events) == [("report.md", 5)]
+    run_id, folder = events[0].run_id, folders.started[0]
+    assert await first.files.read(folder, "report.md") == b"# Q3\n"
+    (work / "report.md").unlink()  # the other worker's disk does not have it
+    other = Harness(config=config)
+    other.runs = first.runs
+    agent, later = other.wrap(target, id="pauser"), []
+
+    async def watch() -> None:
+        async for event in agent.events(run_id):
+            later.append(event)
+
+    watcher = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # following the run before it goes on
+    done = await agent.resume(run_id, "approve", reviewer="u1")
+    await watcher
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert _file_events(later) == []  # kept once: not again by the worker that ended it
+    assert await other.files.read(folder, "report.md") == b"# Q3\n"
+    await first.aclose()
+    await other.aclose()
+
+
+async def test_a_bare_named_file_is_kept_only_as_the_runs_own_call_left_it(
+    tmp_path: Path,
+) -> None:
+    """The folder may be one runs share: a file another wrote over since, or a link put in
+    its place, is never given as this run's — said in a warning; one removed since is left
+    out."""
+    from trellis import Settings
+
+    work = tmp_path / "work"
+    work.mkdir()
+    for name in ("report.md", "keys.md", "draft.md", "mine.md"):
+        (work / name).write_text(f"this run's {name}")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not the run's")
+
+    @tool(side_effects="read")
+    def meddle() -> str:
+        """What happens in a shared folder after the run's calls: another run's work."""
+        (work / "report.md").write_text("another run's report")
+        (work / "keys.md").unlink()
+        (work / "keys.md").symlink_to(secret)
+        (work / "draft.md").unlink()
+        return "meddled"
+
+    script = [
+        *({"builtin": "Write", "args": {"file_path": n}} for n in ("report.md", "keys.md")),
+        *({"builtin": "Write", "args": {"file_path": n}} for n in ("draft.md", "mine.md")),
+        {"tool": "meddle", "args": {}},
+        {"text": "saved"},
+    ]
+    config = Settings(host_execution="allow", files_url=f"memory://claude-own-{id(tmp_path)}")
+    harness = Harness(config=config)
+    agent = arm(harness.wrap(options(tmp_path, script, cwd=str(work)), id="own"), [meddle])
+    events = [e async for e in agent.stream("save", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS, events[-1].error
+    assert _file_events(events) == [("mine.md", len("this run's mine.md"))]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "sandbox"]
+    assert warned == [
+        "the output report.md was not kept: it is no longer what the run's own call wrote there",
+        "the output keys.md was not kept: a link, not a file written there",
+    ]
+    await harness.aclose()
+
+
+async def test_named_files_a_pause_could_not_keep_are_kept_when_the_run_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that does not answer as the run pauses is a warning — the run pauses all the
+    same — and the files stay noted: kept when the run succeeds."""
+    from trellis import Settings
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "report.md").write_text("# Q3\n")
+    script = [
+        {"builtin": "Write", "args": {"file_path": "report.md"}},
+        {"builtin": "Write", "args": {"file_path": "/srv/elsewhere.md"}},  # a person's to approve
+        {"text": "saved"},
+    ]
+    config = Settings(host_execution="allow", files_url=f"memory://claude-down-{id(tmp_path)}")
+    harness, folders = Harness(config=config), _Folders()
+    put = harness.files.put
+
+    async def down(*args: Any, **more: Any) -> Any:
+        raise OSError("the bucket did not answer")
+
+    monkeypatch.setattr(harness.files, "put", down)
+    agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="down", hooks=[folders])
+    events = [e async for e in agent.stream("save", user="u1")]
+    assert [e for e in events if e.type is RunEventType.INTERRUPT] and not _file_events(events)
+    warned = [e.data["message"] for e in events if e.data.get("code") == "sandbox"]
+    assert warned == ["the files the run named were not kept: the bucket did not answer"]
+    monkeypatch.setattr(harness.files, "put", put)
+    done = await agent.resume(events[0].run_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert await harness.files.read(folders.started[0], "report.md") == b"# Q3\n"
     await harness.aclose()
 
 

@@ -685,8 +685,10 @@ class FakeAgent:
             await self.progress(session_id, call_id, status="completed")
             return output
         if self.client is not None and self.client.fs.write_text_file and name == "Write":
+            # ACP's paths are absolute: one the model named by a bare name is in its folder
+            path = os.path.join(os.getcwd(), args["path"])
             await self.conn.write_text_file(
-                session_id=session_id, path=args["path"], content=args["content"]
+                session_id=session_id, path=path, content=args["content"]
             )
             output = f"Wrote {len(args['content'])} bytes to {args['path']}"
         if self.client is not None and self.client.fs.read_text_file and name == "Read":

@@ -7,6 +7,7 @@ snapshot and pause."""
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -17,6 +18,7 @@ from trellis.harness.sandbox import (
     OUTPUTS_NOW,
     PROBE,
     PROBE_LABEL,
+    SIZE_OF,
     ExecResult,
     SandboxLost,
     SandboxRef,
@@ -25,6 +27,8 @@ from trellis.harness.sandbox import (
 
 #: The fake sandbox's working directory: a path under it and a relative one name one file.
 WORKDIR = "/workspace"
+#: What the command that sizes the file it names starts and ends with (``SIZE_OF``).
+SIZE_HEAD, SIZE_TAIL = SIZE_OF.split("{path}")
 
 
 @dataclass
@@ -175,6 +179,10 @@ class FakeBox:
                 and not any(part.startswith(".") for part in p.split("/")[:-1])
             )
             return ExecResult(exit_code=0, stdout=f"{WORKDIR}\n{listed}\n{beside}")
+        if command.startswith(SIZE_HEAD) and command.endswith(SIZE_TAIL):  # the file named
+            [asked] = shlex.split(command.removeprefix(SIZE_HEAD).removesuffix(SIZE_TAIL))
+            found = box.files.get(asked.removeprefix(f"{WORKDIR}/"))
+            return ExecResult(exit_code=0, stdout="" if found is None else f"{len(found)}\n")
         self.provider.commands.append(command)
         if command == "crash":
             raise self.provider.crash

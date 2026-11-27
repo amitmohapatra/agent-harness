@@ -44,7 +44,7 @@ from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
 from trellis.harness.files import EVENT as FILE_EVENT
-from trellis.harness.files import StoredFile, scope
+from trellis.harness.files import StoredFile, digest_of, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import (
@@ -59,6 +59,8 @@ from trellis.harness.journal import (
 from trellis.runs import LeaseLostError, ValidationError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from trellis.harness.agent import Agent
     from trellis.harness.bridges.helpers import Helpers
     from trellis.harness.budget import Budget
@@ -1032,6 +1034,20 @@ class Runtime:
         """Where this run's files are kept in the store: its tenant, user, conversation and run
         (``files.scope``)."""
         return scope(self.tenant, self.user, self.conversation, self.run_id)
+
+    async def wrote_file(self, path: Path | None, *, boxed: bool = False) -> None:
+        """A file tool of the run's framework just wrote ``path``, directly in the folder it
+        works in (``governance.shell.Shell.made``: a bare name there, what a user names
+        without a place; ``None``: no such file): noted in the run's journal with what the
+        call left there, to be kept for the run's user — once, however often it is written
+        (``sandbox.delivered``). ``boxed``: the folder is in the run's own sandbox, which no
+        other run writes; else this machine's, which other runs may share, so what is kept
+        later is checked against this."""
+        if path is None:
+            return
+        left = "" if boxed else await asyncio.to_thread(digest_of, path)
+        if left is not None:
+            self.replay.journal.written[str(path)] = left
 
     async def save_file(
         self,

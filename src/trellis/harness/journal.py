@@ -408,6 +408,12 @@ class Journal(BaseModel):
     #: the files the run kept for its user (``Runtime.save_file``): name, size, media type and
     #: what made each — their bytes are in the file store
     files: list[dict[str, Any]] = Field(default_factory=list)
+    #: the files its framework's own file tools wrote directly in the folder it works in (a
+    #: bare name there: what a user names without a place) and that are not kept for its user
+    #: yet: each by its whole path, with the SHA-256 of what the call left there (empty: in
+    #: the run's own sandbox) — kept once, when the attempt pauses or the run succeeds
+    #: (``Runtime.wrote_file``)
+    written: dict[str, str] = Field(default_factory=dict)
     pending: Pending | None = None
     #: the segments the run store holds, and the journal they make: what a save adds to
     #: (a constant default: a default factory costs pydantic a signature look-up per journal)

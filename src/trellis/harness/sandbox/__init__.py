@@ -54,15 +54,17 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import hashlib
 import itertools
 import logging
 import os
 import posixpath
+import shlex
 import socket
 import time
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -164,6 +166,8 @@ LIST_OUTPUTS: Final = (
     f'for f in {OUTPUTS}/* {OUTPUTS}/.[!.]*; do [ -f "$f" ] && '
     'printf "%s %s\\n" "$(wc -c < "$f")" "${f##*/}"; done; true'
 )
+#: The size of the file at ``path``, nothing when it is no file (POSIX sh).
+SIZE_OF: Final = 'f={path}; [ -f "$f" ] && wc -c < "$f"; true'
 #: The most files of the working directory one look lists (a tree of dependencies is cut off
 #: here: what is new past it is not named).
 LISTED_MOST: Final = 5_000
@@ -211,7 +215,9 @@ STARTS: Final = (
 #: What an agent working in a folder of its own on this machine (Claude Code's, Kimi Code's:
 #: ``Adapter.workdir``) is told with its context: the same ``outputs/``, kept the same way —
 #: for a file meant for the user that they named no place for; one they placed goes where
-#: they said (its own ``Write`` as the SDK does it without the harness).
+#: they said (its own ``Write`` as the SDK does it without the harness). A file its file
+#: tools write by a bare name in that folder is kept for the user too, as a copy
+#: (``Runtime.wrote_file``): nothing it need be told to do, so its words are as they were.
 DELIVERS_HERE: Final = (
     f"Files you write in {OUTPUTS}/ of your working directory are given to the user when you "
     "finish. Write a file the user names, or gives a path or folder for, exactly there (a bare "
@@ -735,29 +741,116 @@ def _said_once(said: str) -> None:
 async def delivered(runtime: Runtime) -> None:
     """The run succeeded: each file written directly in :data:`OUTPUTS` kept in the file store
     for its user (``Runtime.save_file``: named in its journal, announced, served over AG-UI) —
-    its sandbox's, before the sandbox is deleted, and that of the folder its framework works in
+    its sandbox's (:func:`_its_box`: whichever attempt worked in it), before the sandbox is
+    deleted, and that of the folder its framework works in
     on this machine (``Adapter.workdir``: Claude Code's, Kimi Code's), moved out of it so a
     later run does not give it again. A file that cannot be kept (its name, its size past
-    :data:`OUTPUT_MAX_BYTES`, a link there: :func:`_written`) is left, said in a warning."""
-    box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
-    if box is not None and source is not None:
-        tool = EXEC if EXEC in runtime.toolbox else "execute"
-        listed = await box.exec(LIST_OUTPUTS, timeout=source.call_timeout)
-        found = [line.strip().partition(" ") for line in listed.stdout.splitlines()]
-        sized = [(int(size), name) for size, _, name in found]
-        await _kept(runtime, sized, lambda name: box.read(f"{OUTPUTS}/{name}"), tool)
+    :data:`OUTPUT_MAX_BYTES`, a link there: :func:`_written`) is left, said in a warning.
+    Then each file the framework's own file tools wrote by a bare name in the folder it works
+    in — a file the user named without a place — that is not kept yet (:func:`_named`)."""
+    source = _source(runtime.agent, runtime.added)
+    box = await _its_box(runtime, source)
+    boxed = (box, source.call_timeout) if box is not None and source is not None else None
+    # the names its outputs/ hold: a file named beside one of them is left to it
+    given = await _box_outputs(runtime, boxed) + await _folder_outputs(runtime)
+    await _named(runtime, boxed, but=given)
+
+
+async def _its_box(runtime: Runtime, source: SandboxSource | None) -> Sandbox | None:
+    """The run's sandbox: the one this attempt attached, else the one its journal names — an
+    attempt that went on from a pause and ran nothing there did not attach it, and what
+    earlier attempts wrote in it is the run's all the same. ``None`` with none, or one that
+    is gone with no snapshot to make it again from (a warning)."""
+    if runtime.sandbox is not None or source is None or runtime.replay.journal.sandbox is None:
+        return runtime.sandbox
+    try:
+        return await source.opened(runtime)
+    except ToolError as exc:
+        runtime.events.warning(EVENT, f"the run's sandbox was not read for its files: {exc}")
+        return None
+
+
+async def _box_outputs(runtime: Runtime, boxed: tuple[Sandbox, float] | None) -> list[str]:
+    """The files directly in the sandbox's :data:`OUTPUTS`, kept; their names."""
+    if boxed is None:
+        return []
+    box, timeout = boxed
+    tool = EXEC if EXEC in runtime.toolbox else "execute"
+    listed = await box.exec(LIST_OUTPUTS, timeout=timeout)
+    found = [line.strip().partition(" ") for line in listed.stdout.splitlines()]
+    sized = [(int(size), name) for size, _, name in found]
+    await _kept(runtime, sized, lambda name: box.read(f"{OUTPUTS}/{name}"), tool)
+    return [name for _, name in sized]
+
+
+async def _folder_outputs(runtime: Runtime) -> list[str]:
+    """The files directly in :data:`OUTPUTS` of the folder the run's framework works in on
+    this machine, kept and moved out of it; their names."""
     agent = runtime.agent
     folder = agent.adapter.workdir(agent.target, runtime.framework_options)
-    outputs = folder / OUTPUTS if folder is not None else None
-    if outputs is not None and outputs.is_dir():
-        here = outputs
-        files = sorted(f for f in here.iterdir() if f.is_file())
+    here = folder / OUTPUTS if folder is not None else None
+    if here is None or not here.is_dir():
+        return []
+    files = sorted(f for f in here.iterdir() if f.is_file())
 
-        async def read(name: str) -> bytes:
-            return await asyncio.to_thread(_written, here / name)
+    async def read(name: str) -> bytes:
+        return await asyncio.to_thread(_written, here / name)
 
-        sized = [(f.lstat().st_size, f.name) for f in files]
-        await _kept(runtime, sized, read, agent.adapter.name, moved=lambda n: (here / n).unlink())
+    sized = [(f.lstat().st_size, f.name) for f in files]
+    await _kept(runtime, sized, read, agent.adapter.name, moved=lambda n: (here / n).unlink())
+    return [name for _, name in sized]
+
+
+async def _named(
+    runtime: Runtime, boxed: tuple[Sandbox, float] | None, *, but: Collection[str] = ()
+) -> None:
+    """The files the run's framework wrote by a bare name in the folder it works in and that
+    are not kept yet (``Journal.written``): each kept for the run's user as :func:`delivered`
+    keeps an output — but as a copy, the user having named it there — and then no longer
+    noted, so it is kept once. One on this machine is kept only as the run's own call left
+    it (a folder runs share: what another wrote there since is never given as this run's),
+    said in a warning otherwise; one no longer there is left out; one named in ``but`` (the
+    run's ``outputs/`` holds a file of that name) is left to that one. ``boxed``: the run's
+    sandbox (and what a command there may take), for the files written in it; without it
+    they stay noted."""
+    written, made = runtime.replay.journal.written, runtime.agent.adapter.name
+    for where, left in list(written.items()):
+        path = Path(where)
+        if left:  # on this machine
+            sized = await asyncio.to_thread(_sized, path)
+            read: Callable[[str], Awaitable[bytes]] = functools.partial(_as_left, path, left)
+        elif boxed is not None:
+            sized, read = await _in_box(boxed, where)
+        else:
+            continue
+        if path.name not in but:
+            await _kept(runtime, sized, read, made)
+        del written[where]
+
+
+async def _in_box(
+    boxed: tuple[Sandbox, float], where: str
+) -> tuple[list[tuple[int, str]], Callable[[str], Awaitable[bytes]]]:
+    """The file at ``where`` in the run's sandbox, with its size (none when no file is
+    there), and what reads it."""
+    box, timeout = boxed
+    found = await box.exec(SIZE_OF.format(path=shlex.quote(where)), timeout=timeout)
+    sized = [(int(size), posixpath.basename(where)) for size in found.stdout.split()]
+    return sized, lambda _: box.read(where)
+
+
+async def _as_left(path: Path, left: str, _: str) -> bytes:
+    """The bytes of the file at ``path``, when they are what the run's own call left there
+    (``left``: their SHA-256)."""
+    data = await asyncio.to_thread(_written, path)
+    if hashlib.sha256(data).hexdigest() != left:
+        raise ToolError("it is no longer what the run's own call wrote there", source="tools")
+    return data
+
+
+def _sized(path: Path) -> list[tuple[int, str]]:
+    """The file at ``path``, with its size; none when no file is there."""
+    return [(path.lstat().st_size, path.name)] if path.is_file() else []
 
 
 def _written(path: Path) -> bytes:
@@ -823,7 +916,14 @@ def ref_of(runtime: Runtime, provider: str) -> SandboxRef:
 async def paused(runtime: Runtime) -> None:
     """The run pauses for a person: the sandbox this attempt worked in snapshotted (the
     snapshot named in its reference, which the pause saves) and paused, as far as its provider
-    can. A failure is a warning: the run pauses all the same."""
+    can. A failure is a warning: the run pauses all the same. Before that, the files its
+    framework wrote by a bare name on this machine are kept for its user (:func:`_named`):
+    the server that resumes the run may be another, whose disk does not have them (those in
+    the sandbox stay with it)."""
+    try:
+        await _named(runtime, None)
+    except Exception as exc:
+        runtime.events.warning(EVENT, f"the files the run named were not kept: {exc}")
     source = _source(runtime.agent, runtime.added)
     if runtime.sandbox is None or source is None:
         return

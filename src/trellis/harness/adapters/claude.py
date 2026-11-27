@@ -2030,13 +2030,24 @@ def _builtin_risk(name: str) -> str:
     return UNDECLARED if name in CLAUDE_NETWORK else BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
 
 
+async def _wrote(
+    runtime: Runtime, shell: Shell, name: str, args: Mapping[str, Any], failed: bool
+) -> None:
+    """A call the CLI ran that wrote a file directly in the folder it works in (``Shell.made``:
+    a file the user named without a place): the user's too, kept once for them
+    (``Runtime.wrote_file``). A call that failed wrote none."""
+    if not failed:
+        await runtime.wrote_file(shell.made(name, args))
+
+
 def _recorded(steps: Steps, shell: Shell) -> Any:
     """The ``PostToolUse`` / ``PostToolUseFailure`` hook: a call Claude ran itself (a built-in,
     its own MCP servers' tools), recorded as the run's (``tools.bridge.observed``) with its
     result or its error and its duration (from its ``PreToolUse``); a harness tool's call is
     the bridge's. Either way the stall watch goes on once no call runs. A shell command of
     Claude's own (not a subagent's: the CLI keeps their folder) is where the shell may have
-    moved (``Shell.ran``)."""
+    moved (``Shell.ran``); a file its file tools wrote directly in the folder it works in is
+    the user's too (:func:`_wrote`)."""
     from trellis.harness.tools.convert.claude import bare
 
     async def post_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
@@ -2052,6 +2063,7 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         failed = given.get("hook_event_name") == FAILED_EVENT
         if name == PLAN_TOOL and not failed:  # the plan was let through: plan mode is over
             steps.runtime.replay.journal.plan_approved = True
+        await _wrote(steps.runtime, shell, name, args, failed)
         # a workflow agent's call says who made it (several workflows at once: the run's own)
         agent = (
             {k: given[k] for k in AGENT_KEYS} if given.get("agent_type") == WORKFLOW_AGENT else {}

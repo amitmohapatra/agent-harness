@@ -24,8 +24,10 @@ import contextlib
 import hashlib
 import json
 import mimetypes
+import os
 import re
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
@@ -80,6 +82,17 @@ def file_name(name: str) -> str:
             source="tools",
         )
     return name
+
+
+def digest_of(path: Path) -> str | None:
+    """The SHA-256 of the file at ``path`` on this machine itself (no link there followed);
+    ``None`` when no file is there."""
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    with os.fdopen(handle, "rb") as opened:
+        return hashlib.file_digest(opened, "sha256").hexdigest()
 
 
 def scope(tenant: str, user: str, conversation: str, run_id: str) -> str:

@@ -697,6 +697,34 @@ async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_cat
         assert call is not None and (call.tool, call.args) == ("Bash", {"command": "ls"})
 
 
+async def test_a_file_kimi_writes_by_a_bare_name_is_kept_for_its_user_and_the_next_turn_is_told(
+    endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A file the user names without a place is written in the folder Kimi works in (its own
+    ``Write``, unasked there): on success a copy is kept in the file store, and the file
+    stays. The conversation's next turn — on any server — is told the file is kept for the
+    user, and where to read it."""
+    endpoint.plan = [("Write", {"path": "report.md", "content": "# Q3\n"})]
+    folders: list[str] = []
+
+    class Ended(Hooks):
+        async def on_run_end(self, run: Any, result: Any) -> None:
+            folders.append(run.files_folder())
+
+    allowed = Settings(host_execution="allow", files_url=f"memory://kimi-named-{id(tmp_path)}")
+    h = Harness(config=allowed)
+    agent = h.wrap(kimi_target(endpoint, tmp_path), id="kimi-namer", hooks=[Ended()])
+    done = await agent.run("save the report as report.md", user="u1", thread="t1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
+    assert await h.files.read(folders[0], "report.md") == b"# Q3\n"
+    assert (tmp_path / "kimi-work" / "report.md").read_text() == "# Q3\n"
+    endpoint.plan = []
+    again = await agent.run("show me the summary", user="u1", thread="t1")
+    assert again.status is RunStatus.SUCCESS, again.error
+    assert f"/files/{done.run_id}/report.md" in endpoint.said()
+    await h.aclose()
+
+
 async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
     endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:

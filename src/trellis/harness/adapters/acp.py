@@ -1732,6 +1732,7 @@ class Attempt:
         if call.refused or call.name.startswith(HARNESS_PREFIX):
             return  # not run; or a harness tool, which the bridge records
         self.adapter.observed(call.name)
+        await self._wrote(call, failed)
         outcome = ToolOutcome(
             tool=call.name,
             status=ToolStatus.ERROR if failed else ToolStatus.OK,
@@ -1742,6 +1743,17 @@ class Attempt:
         await bridge.observed(
             self.runtime, spec, call.args, outcome, ref=update.tool_call_id, started=call.started
         )
+
+    async def _wrote(self, call: _Call, failed: bool) -> None:
+        """A call the agent ran that wrote a file directly in the folder it works in
+        (``Shell.made``: a file the user named without a place): the user's too, kept once
+        for them (``Runtime.wrote_file``) — in the run's sandbox, where that folder is at the
+        path the agent names, or on this machine. A call that failed wrote none."""
+        made, boxed = self.shell.made(call.name, call.args), self.boxed
+        if failed or made is None:
+            return
+        there = made if boxed is None else Path(boxed.work) / made.name
+        await self.runtime.wrote_file(there, boxed=boxed is not None)
 
     async def _helpers_started(self, call_id: str, call: _Call) -> None:
         """A sub-agent the agent starts (its profile's ``helpers``) or goes on with (Kimi's
