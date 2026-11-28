@@ -684,7 +684,7 @@ def test_what_is_behind_a_tool_is_looked_for_a_few_layers_deep_and_no_further() 
 
     def unbound() -> Any:
         async def tool(args: dict[str, Any]) -> str:
-            return later  # a cell of the closure that nothing ever filled
+            return later  # pyright: ignore[reportUnboundVariable] - a cell nothing ever filled
 
         if tool is None:  # pragma: no cover - only makes ``later`` a closure variable
             later = "never"
