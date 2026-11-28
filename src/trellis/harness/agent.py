@@ -260,6 +260,21 @@ def memory_note(status: str, *, answered: bool, search: bool, recall: bool) -> s
     return note
 
 
+#: The memory service's line for what it holds of a question (its ``evidence_status``), last
+#: in its context when it holds nothing or only part.
+STATUS: Final = "\n\n## Evidence status (long-term memory)\n"
+
+
+def told_once(context: str, note: str | None) -> str:
+    """``context`` without the memory service's status line when ``note`` says the same in
+    words (:func:`memory_note`): the status is said once, with what to do about it."""
+    if note is None or STATUS not in context:
+        return context
+    head, _, tail = context.rpartition(STATUS)
+    rest = tail.split("\n\n", 1)
+    return head + ("\n\n" + rest[1] if len(rest) > 1 else "")
+
+
 #: When and how the model asks its user, for every adapter and every topic, sent with every
 #: memory context (as the notes above) and, memory on or off, to every run whose model has a
 #: question tool (``Agent.push``), said once: a "which one" is asked, never guessed or answered for
@@ -1519,7 +1534,7 @@ class Agent:
             recall=recall,
         )
         parts = (
-            pushed.rendered,
+            told_once(pushed.rendered, note),
             self.unwritten_said(runtime, pushed.rendered, on_its_way),
             note,
             snapshots.note(stale),

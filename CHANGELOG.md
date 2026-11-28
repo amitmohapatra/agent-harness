@@ -22,6 +22,13 @@ expression in code, a plain word after a colon, a certificate, a publishable key
 100 KB of text with no secret takes 5 ms (2.4 ms before). Only traces are masked, as before:
 a tool's arguments and result, the run's events and its answer are not touched.
 
+### Fixed: what memory holds of a question is said once
+
+A memory context that holds nothing or part of what a question needs ends with the memory
+service's status line ("Evidence status (long-term memory): INCOMPLETE"), and the harness
+added its own note saying the same in words, with what to do. The note stays; the service's
+line is left out of the prompt when the note says it.
+
 ### Fixed: a scheduled run's task and a harness notification are not the person's words to memory
 
 A scheduled run's task, said again each time it fires with nobody present, and a notification

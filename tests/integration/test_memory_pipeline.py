@@ -1531,3 +1531,19 @@ async def test_a_past_result_an_earlier_chat_names_is_queried_in_a_new_chat(
     assert "query_result" in offered
     said = model.requests[1]["messages"][-1]["content"]
     assert said == "t1 is past result msg_old, said 2026-10-26.\nsku,units\nS6,94"
+
+
+async def test_what_memory_holds_is_said_once_with_what_to_do(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The service's context ends with its status line; the harness's note says it in words
+    with what to do, and the line is not said a second time."""
+    memory_service.evidence_status = "INSUFFICIENT"
+    memory_service.context_text = "## Profile\n- Priya plans Coach bags.\n\n## Evidence status (long-term memory)\nINSUFFICIENT"
+    model = ScriptedChat(["I don't know your sister's name."])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="once")
+    await agent.run("What is my sister's name?", user="u1")
+    system = pushed(model.requests[0])
+    assert "Memory holds nothing about this question" in system
+    assert "Evidence status (long-term memory)" not in system
+    assert "Priya plans Coach bags" in system
