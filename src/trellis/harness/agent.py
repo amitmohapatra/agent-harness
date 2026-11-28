@@ -239,7 +239,11 @@ ON_DEMAND: Final = (
     "here. When the answer depends on something the user said, decided or uploaded before, "
     "search for it first (memory_search: by default what was learned and document passages; "
     'kinds ["message"] for earlier conversations, ["fact"] for relations) and answer from '
-    "what it returns. Do not guess what a search can tell you."
+    "what it returns. A request about several things, or one that joins two facts, is "
+    "answered from pieces said at different times: search with the request's own words "
+    "first, then again in other words for each piece, asking for as many results as the "
+    "tool allows, until a search brings back nothing new. Do not guess what a search can "
+    "tell you."
 )
 
 
