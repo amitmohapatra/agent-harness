@@ -42,7 +42,9 @@ from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.clients.memory import context_budget
 
 #: The arms: memory as the harness has it by default, and memory off.
-ARMS: Final = ("push", "off")
+#: push: memory as the harness has it; off: no memory at all (the floor); full: no memory, the
+#: whole conversation in the instructions instead (the ceiling of reading it)
+ARMS: Final = ("push", "off", "full")
 #: The adapters a question can be asked through (``benchmark.cost.complex.ADAPTERS``; listed
 #: here so the command line does not import seven frameworks to print its help).
 ADAPTERS: Final = ("react", "langgraph", "graph", "deepagents", "openai", "claude", "kimi")
@@ -89,6 +91,8 @@ class Asked:
     gold: Any
     reference: str
     tenant: str
+    #: the whole conversation, as the full arm reads it (``direct.transcript``)
+    transcript: str = ""
 
     @property
     def key(self) -> str:
@@ -125,6 +129,7 @@ def planned(
         conversation = item["conversation"]
         tenant = d.tenant_of(direct, index, environ)
         reference = d.reference_date(conversation)
+        whole = d.transcript(conversation)
         picked = d.questions_of(direct, item, limit)
         for n, question in picked:
             category = int(question.get("category", 0))
@@ -137,6 +142,7 @@ def planned(
                     gold=question.get("answer") or "",  # benchmark/locomo.py 1045
                     reference=reference,
                     tenant=tenant,
+                    transcript=whole,
                 )
             )
         listed.append(
@@ -308,7 +314,7 @@ class Setup:
 
     def off(self) -> tuple[str, ...]:
         """Every feature the runs are without."""
-        named = [*WITHOUT, *(("memory",) if self.arm == "off" else ()), *self.without]
+        named = [*WITHOUT, *(("memory",) if self.arm in ("off", "full") else ()), *self.without]
         return tuple(dict.fromkeys(named))
 
     def described(self) -> dict[str, Any]:
@@ -324,18 +330,21 @@ class Setup:
             "wrap": dict(self.wrap),
             "run": dict(self.run),
             "asker": self.asker,
-            "added": self.added if self.arm != "off" else "",
+            "added": self.added if self.arm == "push" else "",
             "reference": self.reference,
         }
 
 
-def instructions(direct: d.Direct, setup: Setup, reference: str = "") -> str:
+def instructions(direct: d.Direct, setup: Setup, reference: str = "", transcript: str = "") -> str:
     """The agent's instructions: the direct arm's answer prompt, word for word; memory on,
-    what its CONTEXT is here (``setup.added``); and the conversation's ``reference`` date,
-    unless the question carries it (:data:`REFERENCES`)."""
+    what its CONTEXT is here (``setup.added``); the full arm, the whole conversation as that
+    CONTEXT (``transcript``); and the conversation's ``reference`` date, unless the question
+    carries it (:data:`REFERENCES`)."""
     parts = [direct.answer_system]
-    if setup.arm != "off" and setup.added:
+    if setup.arm == "push" and setup.added:
         parts.append(setup.added)
+    if setup.arm == "full" and transcript:
+        parts.append(f"CONTEXT (the whole conversation, every session in order):\n{transcript}")
     if setup.reference == "instructions" and reference:
         parts.append(d.reference_line(reference))
     return "\n\n".join(parts)
@@ -388,7 +397,7 @@ async def built(h: Harness, direct: d.Direct, setup: Setup, seen: Seen, question
         adapter=setup.adapter,
         tools=(),
         bound=bound,
-        system=instructions(direct, setup, question.reference),
+        system=instructions(direct, setup, question.reference, question.transcript),
     )
     given = {"hooks": [seen], "run_timeout": setup.run_seconds, **options, **setup.wrap}
     given["without"] = {*given.get("without", ()), *setup.off()}

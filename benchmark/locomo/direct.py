@@ -187,6 +187,19 @@ def turn_text(turn: Mapping[str, Any]) -> str:
     return body
 
 
+def transcript(conversation: Mapping[str, Any]) -> str:
+    """The whole conversation as a reader of it has it: every session in its order with its
+    date, each turn as it was stored (``turn_text``), its speaker first."""
+    lines: list[str] = []
+    for key, session in sessions(conversation):
+        lines.append(
+            f"Session {key.rsplit('_', 1)[1]} - {conversation.get(f'{key}_date_time', '')}"
+        )
+        lines += [f"{t.get('speaker', '')}: {body}" for t in session if (body := turn_text(t))]
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def turns(conversation: Mapping[str, Any]) -> dict[str, str]:
     """``dia_id`` to the text each stored turn was submitted as (``turn_texts``)."""
     found: dict[str, str] = {}

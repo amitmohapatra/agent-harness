@@ -748,3 +748,25 @@ async def test_the_memory_repositorys_scorer_scores_the_result(repo: Path, tmp_p
     assert scored["judge_failures"] == 1 and scored["judge_ruler"] == "strict"
     assert [r["hit"] for r in scored["records"]] == [True, None, True]
     assert scored["records"][0]["harness"]["searches"] == 1  # what the run kept rides along
+
+
+def test_the_full_arm_reads_the_whole_conversation_and_has_no_memory(repo: Path) -> None:
+    """``--arm full``: the ceiling of reading, the whole conversation in its instructions as
+    the CONTEXT (every session in order, with its date, each turn as it was stored) and no
+    memory service, tool or context at all."""
+    direct = d.read(repo)
+    asked = run.planned(direct, count=None, limit=None, environ={}).questions[0]
+    full = run.Setup(arm="full")
+    assert "memory" in full.off()
+    said = run.instructions(
+        direct, full, asked.reference, d.transcript(CONVERSATION["conversation"])
+    )
+    assert said.startswith(ANSWER_SYSTEM) and run.ADDED not in said
+    assert "CONTEXT (the whole conversation" in said
+    for _, session in d.sessions(CONVERSATION["conversation"]):
+        for turn in session:
+            if d.turn_text(turn):
+                assert d.turn_text(turn) in said
+    assert run.instructions(direct, run.Setup(arm="off"), asked.reference) == run.instructions(
+        direct, run.Setup(arm="off"), asked.reference, d.transcript(CONVERSATION["conversation"])
+    ), "only the full arm reads the conversation"
