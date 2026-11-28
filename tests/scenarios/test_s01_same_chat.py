@@ -16,6 +16,10 @@ from trellis import Harness
 from trellis.contracts import RunStatus
 
 pytestmark = pytest.mark.timeout(900)
+#: the turns the memory service's rendered window holds (its 20 latest messages, a question
+#: and an answer a turn); an older turn, with no model to summarize it, is the memories' to
+#: bring back or the agent's to search for (scenario 7)
+WINDOW_TURNS = 10
 
 
 def _read(path: Path) -> str:
@@ -64,10 +68,12 @@ async def test_a_burst_of_messages(
     assert sorted(order) == sorted(tokens) and len(order) == burst, kept  # each answered once
     assert asked(kept, tokens) == order, kept  # each question before its own answer, once
     assert order == tokens, ("not answered in the order sent", order)
-    # each turn was answered with the turns before it, and only those, in its history
+    # each turn was answered with the turns before it, and only those, in its history (the
+    # latest of them: the window's)
     by_token = {t: parse(r.answer) for t, r in zip(tokens, results, strict=True)}
     for n, tok in enumerate(order):
-        assert set(order[:n]) <= by_token[tok].seen, (adapter, tok, by_token[tok])
+        held = order[max(0, n - WINDOW_TURNS) : n]
+        assert set(held) <= by_token[tok].seen, (adapter, tok, by_token[tok])
         assert not set(order[n + 1 :]) & by_token[tok].seen, ("a later turn seen", tok)
 
 
