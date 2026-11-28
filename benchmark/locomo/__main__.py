@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -190,6 +191,7 @@ def setup_of(args: argparse.Namespace, model: Any = None) -> run.Setup:
         wrap=args.wrap,
         run=args.run,
         asker=args.asker,
+        label=hashlib.sha256(args.out.encode()).hexdigest()[:8],
         added=args.added,
         reference=args.reference,
     )

@@ -299,6 +299,10 @@ class Setup:
     wrap: Mapping[str, Any] = field(default_factory=dict)
     run: Mapping[str, Any] = field(default_factory=dict)
     asker: str = "question"
+    #: the run's own name (from its ``--out``): its questions' users and its agents carry it,
+    #: so what one run records is not another's to read (two arms over one corpus ask the
+    #: same questions); a rerun of the same ``--out`` is the same run, its users the same
+    label: str = ""
     added: str = ADDED
     reference: str = "instructions"
 
@@ -388,22 +392,24 @@ async def built(h: Harness, direct: d.Direct, setup: Setup, seen: Seen, question
     )
     given = {"hooks": [seen], "run_timeout": setup.run_seconds, **options, **setup.wrap}
     given["without"] = {*given.get("without", ()), *setup.off()}
-    return h.wrap(
-        target, id=f"locomo-{setup.adapter}-{setup.arm}-c{question.conversation}", **given
-    )
+    named = f"locomo-{setup.adapter}-{setup.arm}-c{question.conversation}"
+    return h.wrap(target, id=f"{named}-{setup.label}" if setup.label else named, **given)
 
 
-def user_of(question: Asked, asker: str) -> str:
-    """Who asks: the direct arm's user for the conversation, or one of the question's own."""
+def user_of(question: Asked, asker: str, label: str = "") -> str:
+    """Who asks: the direct arm's user for the conversation, or one of the question's own in
+    the run ``label`` names."""
     own = d.asker(question.conversation)
-    return own if asker == "conversation" else f"{own}-q{question.n}"
+    if asker == "conversation":
+        return own
+    return f"{own}-q{question.n}-{label}" if label else f"{own}-q{question.n}"
 
 
 async def ask(h: Harness, agent: Any, seen: Seen, question: Asked, setup: Setup) -> dict[str, Any]:
     """One question, asked in a new thread; its row."""
     from benchmark.cost import complex as cx
 
-    user = user_of(question, setup.asker)
+    user = user_of(question, setup.asker, setup.label)
     thread = f"locomo-{question.key}-{uuid.uuid4().hex[:8]}"
     text = said_to(question, setup)
     # a platform key names the tenant per run; with memory off there is none to name

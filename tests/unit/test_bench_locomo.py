@@ -205,6 +205,23 @@ def test_the_direct_arms_constants_are_read_from_its_source(repo: Path) -> None:
         d.read(repo / "elsewhere")
 
 
+def test_two_runs_never_share_a_user_or_an_agent(repo: Path) -> None:
+    """Two arms over one corpus ask the same questions: what one run records (its turns, under
+    its users and its agents) is not the other's to read; a rerun of the same ``--out`` is the
+    same run, and the direct arm's one user stays that user."""
+    from benchmark.locomo.__main__ import setup_of
+
+    asked = run.planned(d.read(repo), count=None, limit=None, environ={}).questions[0]
+    push = setup_of(arguments(["--memory-repo", str(repo), "--out", "build/push"]))
+    recall = setup_of(arguments(["--memory-repo", str(repo), "--out", "build/on-demand"]))
+    again = setup_of(arguments(["--memory-repo", str(repo), "--out", "build/push"]))
+    assert push.label and push.label != recall.label and push.label == again.label
+    users = {run.user_of(asked, "question", s.label) for s in (push, recall)}
+    assert users == {f"locomo-0-q0-{push.label}", f"locomo-0-q0-{recall.label}"}
+    assert run.user_of(asked, "conversation", push.label) == "locomo-0"
+    assert run.user_of(asked, "question") == "locomo-0-q0"
+
+
 def test_the_plan_is_the_direct_arms_questions_in_its_tenants(repo: Path) -> None:
     direct = d.read(repo)
     plan = run.planned(direct, count=None, limit=None, environ={})
