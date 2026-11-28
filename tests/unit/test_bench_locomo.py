@@ -693,7 +693,7 @@ class Container:
     class llm:
         enabled = True
         @staticmethod
-        def model_for(use):
+        async def resolve_model(use):
             return "stand-in"
     async def close(self):
         pass
