@@ -252,9 +252,14 @@ def _labelled(found: re.Match[str]) -> str:
         after = found["bare"][len(value) :]
         if _BRACKETS & set(value):  # an expression in code, not a credential
             return found[0]
-    if not value or _number(value) or value.lower() in _NOTHING or value.startswith(REDACTED):
-        return found[0]
-    if value[0] == "=":  # ``secret == other``: a comparison, not an assignment
+    # nothing to hide: empty, a count, "None", masked already, or ``secret == other`` (a
+    # comparison, not an assignment)
+    if (
+        not value
+        or _number(value)
+        or value.lower() in _NOTHING
+        or value.startswith((REDACTED, "="))
+    ):
         return found[0]
     worded = not value[0].isalnum() or (value.isalpha() and len(value) < _COLON_VALUE_CHARS)
     if ":" in found["sep"] and worded:

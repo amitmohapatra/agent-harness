@@ -331,12 +331,15 @@ def recorded(said: Said) -> dict[str, Any]:
         ]
     if said.tool_call_id is not None:
         message["tool_call_id"] = said.tool_call_id
-    if said.role is Speaker.USER and not delegated:
-        # a notification the harness added is no one's words; a schedule's task is said again
-        # each time it fires: neither is what the person tells their memory
-        origin = said.origin or (APP if said.notified else None)
-        if origin is not None:
-            message["origin"] = origin
+    if (origin := _origin(said, delegated)) is not None:
+        message["origin"] = origin
+    if metadata := _metadata(said):
+        message["custom_metadata"] = metadata
+    return message
+
+
+def _metadata(said: Said) -> dict[str, Any]:
+    """``said``'s ``custom_metadata``: its run record and its harness id, when it has them."""
     metadata: dict[str, Any] = {}
     facts = dict(said.facts or {})
     if said.id is not None and said.role is not Speaker.TOOL:
@@ -348,9 +351,16 @@ def recorded(said: Said) -> dict[str, Any]:
         metadata[RUN_RECORD] = facts
     if said.id is not None:
         metadata[MESSAGE_ID] = said.id
-    if metadata:
-        message["custom_metadata"] = metadata
-    return message
+    return metadata
+
+
+def _origin(said: Said, delegated: bool) -> str | None:
+    """Who put a user-role message together when it was not the person typing: a
+    notification the harness added is no one's words, and a schedule's task is said again
+    each time it fires - neither is what the person tells their memory."""
+    if said.role is not Speaker.USER or delegated:
+        return None
+    return said.origin or (APP if said.notified else None)
 
 
 def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
