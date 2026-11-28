@@ -342,10 +342,9 @@ MEMORIES: Final = "## Memories\n"
 #: agent's tools where it can have changed since - a stock figure, a status, a price.
 BACKGROUND: Final = (
     "## Memory is background\n"
-    "Memory is background from earlier conversations: what was true when it was said. Use "
-    "only the entries that bear on this request. For anything that can change since (a "
-    "figure, a status, a price, availability), check it with your tools before you rely on "
-    "it, and say which you used."
+    "Memory is background from earlier conversations: what was true when it was said. For "
+    "anything that can change since (a figure, a status, a price, availability), check it "
+    "with your tools before you rely on it, and say which you used."
 )
 #: How to answer from the memory entries, sent only with a context that holds them (the
 #: service's ``## Memories`` heading). Without it a model with no reader prompt of its own
@@ -356,13 +355,16 @@ BACKGROUND: Final = (
 #: questions with a false premise unchanged (363 -> 365 of 446 declined or corrected).
 ANSWERING: Final = (
     "## Answering from memory\n"
-    "Read every memory entry before you answer: the answer is often spread over several, so "
-    "give every item they support, with the names, dates and details they give. Answer from "
-    "what the entries say even when they are indirect or worded differently from the "
-    "question. When they do not state the answer but show enough about the person to choose, "
-    'give the best-supported answer and say it is an inference ("Likely: ..."). Say you do '
-    "not know only when no entry bears on the question, or when the entries give what is "
-    "asked to someone else: then say whose it is. Work dates out from the entries' own dates."
+    "Before you answer, go through every memory entry in your reasoning and note each one "
+    "that bears on the question, with its date and what it says: the answer is often spread "
+    "over several entries, so collect every item they hold. Then answer from what you noted: "
+    "give every item, with the names, dates and details the entries give. Answer from what "
+    "the entries say even when they are indirect or worded differently from the question. "
+    "When they do not state the answer but show enough about the person to choose, give the "
+    'best-supported answer and say it is an inference ("Likely: ..."). Say you do not know '
+    "only when no entry bears on the question, or when the entries give what is asked only "
+    "to someone else: then say you do not know it for the one asked and, in a few words, "
+    "whose it is, without answering for them. Work dates out from the entries' own dates."
 )
 
 
@@ -374,6 +376,15 @@ def background_note(context: str) -> str | None:
 def answering_note(context: str) -> str | None:
     """The note on answering from memory entries, for a context that holds them."""
     return ANSWERING if MEMORIES in context else None
+
+
+def reading_notes(context: str, *, recall: bool, note: str | None) -> tuple[str | None, ...]:
+    """What memory is and how to answer from its entries: for a context that carries them, and
+    for an agent told to search memory itself (``recall`` off, with a note telling it so),
+    which reads what it finds as it would read an attached context."""
+    if not recall and note is not None:
+        return BACKGROUND, ANSWERING
+    return background_note(context), answering_note(context)
 
 
 def asking_notes(context: str) -> str:
@@ -1552,8 +1563,7 @@ class Agent:
             self.unwritten_said(runtime, pushed.rendered, on_its_way),
             note,
             snapshots.note(stale),
-            background_note(pushed.rendered),
-            answering_note(pushed.rendered),
+            *reading_notes(pushed.rendered, recall=recall, note=note),
             asking_notes(pushed.rendered),
         )
         rendered = "\n\n".join(part for part in parts if part)

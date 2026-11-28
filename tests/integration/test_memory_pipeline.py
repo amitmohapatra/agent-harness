@@ -1302,11 +1302,29 @@ async def test_without_recall_memory_is_asked_for_what_stands_and_the_model_sear
     [asked] = memory_service.named("context")
     assert asked.body["recall"] is False
     system = pushed(model.requests[0])
-    assert note in system and system.count("## Memory") == 1
+    assert note in system and system.count("## Memory\n") == 1
     if status == "INSUFFICIENT":
         assert "search them first (memory_search" in system
     else:
         assert "memory_search" in system and "Do not guess what a search can tell you" in system
+
+
+async def test_an_agent_that_searches_on_demand_is_told_how_to_read_what_it_finds(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """What memory is and how to answer from its entries go to an agent that reads them from
+    its own searches as to one they are attached for: an on-demand agent was never told to
+    go through every entry it found first, or to decline a question that gives one person's
+    words to another - its answers gave Melanie's concert to Caroline."""
+    memory_service.evidence_status = "COMPLETE"
+    model = ScriptedChat(["Let me look that up."])
+    agent = memory_harness.wrap(
+        ReAct(system_prompt="You help.", model=model), id="od", without=["recall"]
+    )
+    await agent.run("Which concerts has Caroline been to?", user="u1")
+    system = pushed(model.requests[0])
+    assert "## Memory is background" in system and "## Answering from memory" in system
+    assert "without answering for them" in system
 
 
 async def test_recall_is_attached_unless_a_run_or_its_agent_says_otherwise(

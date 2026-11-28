@@ -5,6 +5,23 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: memory is read entry by entry, a question about the wrong person is declined, and an agent searching on demand is told the same
+
+- **Answering from memory reads first:** the model goes through every entry that bears on
+  the question, with its date and what it says, then answers from what it noted - every
+  item, with names, dates and details; "Likely: ..." when the entries show enough to
+  infer. The background note no longer narrows to "the entries that bear on this request";
+  the answering note does that, entry by entry.
+- **A question that gives one person's words to another is declined:** "I don't know for
+  Caroline; the concert was Melanie's" - and no answer for the other person. Before, the
+  answer named whose it was and then answered for them.
+- **An agent that searches memory itself** (`without=["recall"]`) gets both notes, as an
+  agent with memory attached does - unless a hinted tool answers the question and it is not
+  told to search.
+- LoCoMo conversations 0-1, strict judge, Haiku: push with the model's store went from 86.7%
+  to 89.7% of real questions (81.6% to 86.2% overall); questions about the wrong person
+  from 65% to 75%.
+
 ### Fixed: a GitHub token, an AWS key, a private key and a labelled password inside a traced value are masked
 
 A trace masked a credential inside longer text only when it was an `sk-`/`pk-`/`rk-` key, a
