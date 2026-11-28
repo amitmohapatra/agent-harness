@@ -342,6 +342,16 @@ PROFILE: Final = "## Profile\n"
 
 #: The heading the memory service renders its memory entries under.
 MEMORIES: Final = "## Memories\n"
+#: What memory is, sent with any context that carries it (its entries or the profile): what
+#: was true when it was said, to be used where it bears on the request, and checked with the
+#: agent's tools where it can have changed since - a stock figure, a status, a price.
+BACKGROUND: Final = (
+    "## Memory is background\n"
+    "Memory is background from earlier conversations: what was true when it was said. Use "
+    "only the entries that bear on this request. For anything that can change since (a "
+    "figure, a status, a price, availability), check it with your tools before you rely on "
+    "it, and say which you used."
+)
 #: How to answer from the memory entries, sent only with a context that holds them (the
 #: service's ``## Memories`` heading). Without it a model with no reader prompt of its own
 #: stopped at the first entry, declined when the entries said it indirectly, and answered for
@@ -359,6 +369,11 @@ ANSWERING: Final = (
     "not know only when no entry bears on the question, or when the entries give what is "
     "asked to someone else: then say whose it is. Work dates out from the entries' own dates."
 )
+
+
+def background_note(context: str) -> str | None:
+    """The note on what memory is, for a context that carries memory."""
+    return BACKGROUND if MEMORIES in context or PROFILE in context else None
 
 
 def answering_note(context: str) -> str | None:
@@ -1542,6 +1557,7 @@ class Agent:
             self.unwritten_said(runtime, pushed.rendered, on_its_way),
             note,
             snapshots.note(stale),
+            background_note(pushed.rendered),
             answering_note(pushed.rendered),
             asking_notes(pushed.rendered),
         )

@@ -34,6 +34,7 @@ from trellis.harness import budget, snapshots, telemetry
 from trellis.harness.agent import (
     ANSWERING,
     ASKING,
+    BACKGROUND,
     EARLIER_VALUES,
     REMEMBERED,
 )
@@ -216,6 +217,33 @@ async def test_the_note_on_answering_from_memory_comes_only_with_memories(
     assert (ANSWERING in sent) is memories
     if memories:
         assert sent.index(held) < sent.index(ANSWERING) < sent.index(ASKING)
+    assert with_note(memory_service.context_text) in sent  # the helper the tests share
+
+
+@pytest.mark.parametrize(
+    ("context", "background"),
+    [
+        ("## Memories\n- [m1] 2026-10-15 Thursday ana: I moved to Lisbon in May.", True),
+        ("## Profile\n### about\n- Ana", True),
+        ("## Tools\n- lookup: next step", False),
+    ],
+)
+async def test_memory_is_said_to_be_background_to_check_before_use(
+    memory_harness: Harness, memory_service: FakeMemoryService, context: str, background: bool
+) -> None:
+    """What memory holds was true when it was said: the model is told to use only what bears
+    on the request and to check with its tools what can have changed since, with any
+    context that carries memory (its entries or the profile), before the note on answering
+    from it; a context of tool hints alone carries no memory and gets no tokens for it."""
+    memory_service.context_text = context
+    model = ScriptedChat(["done"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="background")
+    result = await agent.run("where does Ana live?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    sent = pushed(model.requests[0])
+    assert (BACKGROUND in sent) is background
+    if background:
+        assert sent.index(context) < sent.index(BACKGROUND) < sent.index(ASKING)
     assert with_note(memory_service.context_text) in sent  # the helper the tests share
 
 
